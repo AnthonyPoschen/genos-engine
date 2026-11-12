@@ -118,7 +118,7 @@ The 6 ms that remains is the pixel shadow work, plus probes the rings actually w
 
 **Gather, 0.9 ms.** 8,160 workgroups, shared-memory binning (S78P). Each thread reads 8 strata. That is 4.18 M kept-hit loads. Gather hold (S78R3) dropped a still gather from 0.85 ms to 0.09 ms. On the moving scene the lamps change kept light, the hold misses, and every probe bins again.
 
-**Compose, 1.8–3 ms.** Measured while compose still walked probes. `lighting_probe_irradiance` is removed. Live compose reads the world cache. That run was 240 × 135 groups: each pixel read four probes, 9 × 3 SH coefficients, and fell through to a hash find of the surface cache when the probe weight was under 0.05. The SUN note split an older compose into about 2.4 ms of probe walk and about 0.4 ms of full-picture write. A moving sun marks most 8×8 blocks, so the quiet list is nearly the full grid. The write is the small part.
+**Compose, 1.8–3 ms.** 240 × 135 groups. Each pixel reads four probes, 9 × 3 SH coefficients (`lighting_probe_irradiance`), and falls through to a hash find of the surface cache when the probe weight is under 0.05. The SUN note split an older compose into about 2.4 ms of probe walk and about 0.4 ms of full-picture write. A moving sun marks most 8×8 blocks, so the quiet list is nearly the full grid. The write is the small part.
 
 **The 0.9 ms residual.** Compact touches a million keys and is the scheduler. Place, the three filter rounds, and the cache update are thousands of threads. The G-buffer raster of one section, the AA resolve, and the copy sit in the same residual. None of them is the 5 ms problem. The profiling section checks that claim.
 

@@ -64,9 +64,6 @@ fn a_small_sun_step_sets_the_shader_bit() {
         !names.iter().any(|name| name == "lighting sun compose"),
         "startup does not build the sun compose: {names:?}"
     );
-    // Nine names in LIGHTING_PASS_NAMES, plus "lighting gbuffer".
-    // compose-maint and sh-drain are timed, and their names do not start
-    // with "lighting". The frozen count is 10.
     assert_eq!(
         names.len(),
         10,
@@ -204,62 +201,4 @@ fn a_corner_lamp_that_stops_catches_up_for_four_frames() {
         vec![true, true, true, true, false, false],
         "the corner lamp's catch-up is four held frames"
     );
-}
-
-/// Tile rows of a picture. Height 180 uses a 4 px tile, so eight bands are
-/// about one eighth of the pixels, not one probe row.
-fn band_pixels(width: u32, height: u32, bands: u32, slice: u32) -> u32 {
-    let tile = (height / 45).clamp(4, 16);
-    let rows = height.div_ceil(tile);
-    let mut n = 0u32;
-    for row in 0..rows {
-        if row % bands == slice % bands {
-            let y0 = row * tile;
-            let y1 = (y0 + tile).min(height);
-            n += (y1 - y0) * width;
-        }
-    }
-    n
-}
-
-#[test]
-fn a_small_sun_step_recomputes_one_band_and_does_not_pop() {
-    let (_gpu, mut owner) = open();
-    let window = &mut *owner.window;
-    let renderer = &mut *owner.device;
-    let mut world = hall();
-    world.scene.lights.push(sun_at(0.0));
-    let camera = Camera::opening();
-    for _ in 0..3 {
-        draw(window, renderer, &world, &camera);
-    }
-    let mut yaw = 0.4_f32;
-    world.scene.lights.last_mut().unwrap().direction = sun_at(yaw.to_radians()).direction;
-    draw(window, renderer, &world, &camera);
-    let fill = renderer.lighting_sun_stats();
-    let pixels = 320u32 * 180;
-    assert!(
-        fill.gpu_sun && fill.walks > pixels / 2,
-        "the first sun frame stores bounce across the picture: {fill:?}"
-    );
-    for _ in 0..8 {
-        // Direct is rewritten on every pixel. `walks` is the world-cache recompute.
-        yaw += 0.05;
-        world.scene.lights.last_mut().unwrap().direction = sun_at(yaw.to_radians()).direction;
-        draw(window, renderer, &world, &camera);
-        let stats = renderer.lighting_sun_stats();
-        let band = band_pixels(320, 180, 8, stats.slice);
-        let band_frac = band as f32 / pixels as f32;
-        assert!(
-            (0.10..0.16).contains(&band_frac),
-            "slice {} band {band} is not about 1/8 of {pixels}",
-            stats.slice
-        );
-        assert!(
-            stats.walks > 0 && stats.walks <= band,
-            "slice {} walked {} pixels; the band is {band}, the picture is {pixels}",
-            stats.slice,
-            stats.walks
-        );
-    }
 }

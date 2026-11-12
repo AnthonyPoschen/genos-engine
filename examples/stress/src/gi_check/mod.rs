@@ -26,7 +26,6 @@
 //! time), into `<out>/<run>`. `--score-only` rescores an earlier `<out>`.
 
 mod metrics;
-pub(crate) mod room_blotch;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -148,7 +147,7 @@ const TURN_RETURN_LIMIT: f64 = 0.002;
 /// which pixel claims a cache patch first pins where it is lit); lines between.
 const ROOM_SWIM_LIMIT: f64 = 0.0039;
 const ROOM_REDRAW_LIMIT: f64 = 0.0027;
-pub(crate) const ROOM_BLOTCH_LIMIT: f64 = 0.023;
+const ROOM_BLOTCH_LIMIT: f64 = 0.023;
 /// Large-scale swim: the same world swim blurred 48 px (640 wide), the big soft
 /// blobs that slide. The line is GI v1 (0.0003) with 2x room: v1 is the floor for
 /// stability, so v2 must be at least as stable (edffa81 0.0024, a-trous fix 0.0026).

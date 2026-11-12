@@ -13,19 +13,95 @@ layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 #include "lighting_lamp_pick.glsl"
 #include "pbr_brdf.glsl"
-#ifdef GENOS_RESTIR_DI
-layout(std430, set = 0, binding = 19) buffer RestirWords {
-    uint restir_words[];
-};
-// Near point lamps actually added on a ReSTIR pixel. Header word, same slot
-// the history counts use. Compact keeps gstats.diag[13] for an on-screen
-// surface-cache entry when LIGHTING_DIAG is on.
-const uint RESTIR_DIAG_POINT_ADD = 45u;
-#endif
 
+const bool LIGHTING_KEPT_SHOULD = true;
+// S78Q: a kept light that changed marks its probe's gather (lighting_gdirty).
+const bool LIGHTING_KEPT_HYST = false; // S78T: off pending re-test (S78S)
+const float LIGHTING_KEPT_TOL = 0.02;
+// A trusted colour is the same shading point only inside this distance.
+const float LAMP_PICK_COPY_M = 0.005;
+// Lift a history hit off its face before a target evaluation, same as `origin`.
+const float LAMP_PICK_HIST_LIFT = 0.02;
 // A stored depth of 0 is a miss. Exact and ReSTIR records stay positive.
 const float LAMP_PICK_DEPTH_FLOOR = 1.0e-4;
 const float DIRECT_DIR_EPS = 1.0e-6;
+void lighting_put_kept_light_d(uint h, vec3 light, uint src) {
+    uint v = lighting_pack_rgb9e5(light);
+    uint at = lighting_kept_light_at() + h / 4u;
+    uint ov = floatBitsToUint(work.v[at][h % 4u]);
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_PROBES) != 0u) {
+        return;
+    }
+    lighting_chg(CHG_KEPT_WRITE, 1u);
+    lighting_chg(CHG_KB_FINE + lighting_bounce_path, 1u);
+    // S78T: a kept light within LIGHTING_KEPT_TOL of the stored one keeps the
+    // stored value (hysteresis): sub-noise moves of the cache texels under the
+    // hits (still scene: ~740 texel writes a frame, each read by ~9 hits) no
+    // longer change the probes' inputs, so their gathers hold (S78R). The stored
+    // value moves once the light is LIGHTING_KEPT_TOL away from it, so no drift.
+    if (LIGHTING_KEPT_HYST && ov != v) {
+        vec3 o = lighting_unpack_rgb9e5(ov);
+        float lo = dot(o, vec3(0.2126, 0.7152, 0.0722));
+        float ln = dot(light, vec3(0.2126, 0.7152, 0.0722));
+        if (abs(ln - lo) <= LIGHTING_KEPT_TOL * max(max(lo, ln), 1.0e-3)) {
+            lighting_chg(CHG_KEPT_HELD, 1u);
+            return;
+        }
+    }
+    if (ov != v) {
+        lighting_chg(CHG_KC_FINE + lighting_bounce_path, 1u);
+        lighting_chg(CHG_KEPT_CHANGED, 1u);
+        lighting_chg(CHG_KEPT_D0 + lighting_chg_bin(lighting_unpack_rgb9e5(ov), light), 1u);
+        lighting_chg(CHG_KEPT_TDL_REUSE + src, 1u);
+        if (LIGHTING_GATHER_HOLD) {
+            lighting_gdirty_mark(h / lighting_rays() / LIGHTING_STRATA);
+        }
+    }
+    work.v[at][h % 4u] = uintBitsToFloat(v);
+}
+// S78U (root cause from S78S: 100 % of still-scene kept-light changes were
+// the held probe's check ray, relit fresh while its other held hits kept their
+// last light, so the converging surface cache read as a change every frame).
+// The check ray of a held probe whose hit did not move is a test, not a
+// rewrite: its relit light replaces the stored one only when it differs by
+// more than LIGHTING_CHECK_K standard errors of the hit texel's mean (the
+// MSME estimator's per-set variance / sets, lighting_sc_noise), scaled by the
+// hit's reflectance, plus a quantisation floor. Drift of the shared field
+// within its own noise no longer changes a probe (Anthony: probes do not wake
+// from shared-cache convergence). Unknown noise (estimator not running: new
+// texel or light changing) writes as before.
+const bool LIGHTING_CHECK_NOISE = true;
+const float LIGHTING_CHECK_K = 3.0;
+const float LIGHTING_CHECK_FLOOR = 0.01;
+bool lighting_check_within_noise(uint h, vec3 pos, vec3 n, vec3 refl, vec3 light) {
+    if (!LIGHTING_CHECK_NOISE || lighting_world_mode() != 3u) {
+        return false;
+    }
+    uint rays = lighting_rays();
+    uint pk = h / rays / LIGHTING_STRATA;
+    uint s = (h / rays) % LIGHTING_STRATA;
+    if (s != lighting_stratum() || !lighting_stratum_held(pk) || h % rays != lighting_hold_check_k(pk)) {
+        return false;
+    }
+    // The trace's check failed (hit moved): a real change.
+    if (floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) == lighting_frame() + LIGHTING_STRATA) {
+        return false;
+    }
+    uint ts = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos);
+    if (ts == ~0u) {
+        return false;
+    }
+    vec2 nz = lighting_sc_noise(ts);
+    if (nz.x < 0.0) {
+        return false;
+    }
+    vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    uint at = lighting_kept_light_at() + h / 4u;
+    float lo = dot(lighting_unpack_rgb9e5(floatBitsToUint(work.v[at][h % 4u])), lw);
+    float ln = dot(light, lw);
+    float bound = LIGHTING_CHECK_K * nz.y * dot(refl, lw) + LIGHTING_CHECK_FLOOR * max(lo, ln);
+    return abs(ln - lo) <= bound;
+}
 void main() {
     lighting_sun_mark();
     uint idx = gl_GlobalInvocationID.x;
@@ -63,7 +139,7 @@ void main() {
             idx += pixels + kept;
         }
     }
-    // Then (not on the async queue) one point per fill slot.
+    // Then (not on the async queue) one point per fill slot (lighting_fill_ray).
     uint fills = pixels + kept + (mode == 1u ? 0u : cache_rays);
     if (gstats.ctrl_pixel_only == 0u) {
         uint points = fills + (mode == 2u ? 0u : kept);
@@ -71,11 +147,11 @@ void main() {
             return;
         }
     }
-    // Cache rays only. A probe index of 0 would alias this region.
-    uint ray = 0u;
-    if (idx >= pixels + kept) {
-        ray = lighting_probe_rays() + (idx - pixels - kept);
-    }
+    // A kept probe hit (index h), a light cache ray (ray) or a fill (index h).
+    bool fill_hit = idx >= fills;
+    bool probe_hit = (idx >= pixels && idx < pixels + kept) || fill_hit;
+    uint h = fill_hit ? idx - fills : idx - pixels;
+    uint ray = idx < pixels + kept || fill_hit ? 0u : lighting_probe_rays() + (idx - pixels - kept);
     vec3 pos;
     vec3 n;
     float hit_t = 1.0e9;
@@ -93,8 +169,33 @@ void main() {
         vec3 dir;
         vec3 from_n;
         bool live;
-        rec = work.v[lighting_hit_at(ray)];
-        live = lighting_ray(ray, origin, dir, from_n);
+        if (probe_hit) {
+            uint rays = lighting_rays();
+            uint ps = h / rays;
+            if (fill_hit) {
+                live = lighting_fill_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
+                if (!live) {
+                    return;
+                }
+                rec = work.v[lighting_fill_at(h)];
+                if (rec.x < -0.75) {
+                    lighting_put_fill_light(h, has_sky() ? scene.sky.rgb : vec3(0.0));
+                    return;
+                }
+            } else {
+                rec = work.v[lighting_kept_at(h)];
+                live = lighting_stratum_ray(ps / LIGHTING_STRATA, ps % LIGHTING_STRATA, h % rays, origin, dir, from_n);
+                if (live && rec.x < -0.75) {
+                    if (!lighting_sun_hold_kept(h)) {
+                        lighting_put_kept_light_d(h, has_sky() ? scene.sky.rgb : vec3(0.0), 2u);
+                    }
+                    return;
+                }
+            }
+        } else {
+            rec = work.v[lighting_hit_at(ray)];
+            live = lighting_ray(ray, origin, dir, from_n);
+        }
         if (rec.x < 0.0 || !live) {
             return;
         }
@@ -103,6 +204,69 @@ void main() {
         n = lighting_unpack_normal(floatBitsToUint(rec.y));
         reflectance = unpackUnorm4x8(floatBitsToUint(rec.z)).rgb * (1.0 / LIGHTING_PI);
         glow = lighting_unpack_rgb9e5(floatBitsToUint(rec.w));
+    }
+    // S69C (Anthony: build-up starved; GENOS_GPU_TIMES, default stress scene at
+    // 1920x1080: this pass was 70 % of the frame and the kept hits of all
+    // LIGHTING_STRATA strata, relit every frame, ~10 ms of it). A kept hit is relit
+    // the frame its stratum is traced and once more halfway round
+    // (LIGHTING_KEPT_RELIGHT), so its light is at most LIGHTING_STRATA / 2 frames old;
+    // near a change (a mover, re-traced kept rays) every frame as before.
+    // Kept/fill gate counters (GENOS_LIGHTING_LAMP_PICK_DIAG): how many of the
+    // 2 x kept hit threads get past each gate. Words in lighting_gpu.rs.
+    if (lamp_pick_diag() && probe_hit) {
+        atomicAdd(gstats.diag[fill_hit ? 56u : 53u], 1u);
+    }
+    if (LIGHTING_KEPT_RELIGHT && probe_hit && !fill_hit) {
+        uint s = (h / lighting_rays()) % LIGHTING_STRATA;
+        uint cur = lighting_stratum();
+        bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
+        if (lamp_pick_diag() && urgent && s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA) {
+            atomicAdd(gstats.diag[34u], 1u);
+        }
+        if (s != cur && s != (cur + LIGHTING_STRATA / 2u) % LIGHTING_STRATA && !(urgent && lighting_near_change(pos))) {
+            return;
+        }
+        if (lamp_pick_diag()) {
+            atomicAdd(gstats.diag[54u], 1u);
+        }
+        // S78D: the halfway relight only where the light should have moved: a
+        // lamp that moved reaches the hit since its trace, or the sun / sky
+        // changed by more than 1 % (a change near a mover is relit above).
+        // S78K: a held probe's current stratum: only the rays re-traced this
+        // frame (its check, change crossings) are new hits; the rest are lit
+        // as the halfway relight below.
+        uint pk = h / lighting_rays() / LIGHTING_STRATA;
+        bool held_old = s == cur && lighting_stratum_held(pk);
+        if (held_old) {
+            vec3 ho;
+            vec3 hd;
+            vec3 hnn;
+            lighting_stratum_ray(pk, s, h % lighting_rays(), ho, hd, hnn);
+            held_old = !lighting_held_traced(pk, h % lighting_rays(), ho, hd, hit_t);
+            // S78U: the check ray whose trace confirmed its hit is relit like
+            // the other held hits (only when a lamp / the sun moved): a drift
+            // of the shared surface cache is no reason to change the probe.
+            if (!held_old && LIGHTING_CHECK_NOISE && h % lighting_rays() == lighting_hold_check_k(pk)
+                && floatBitsToUint(work.v[lighting_probe_at(pk) + 1u].w) != lighting_frame() + LIGHTING_STRATA
+                && !lighting_held_crosses(ho, hd, hit_t)) {
+                held_old = true;
+            }
+        }
+        // After a point lamp stops, a few frames shade every kept stratum so the
+        // corner is not waiting on the halfway relight. The word is 0 otherwise,
+        // and this is the S69C skip.
+        if (!lighting_catch_up() && LIGHTING_KEPT_SHOULD && (s != cur || held_old) && lighting_pix_cache_ok() && !(urgent && lighting_near_change(pos))) {
+            uint traced = lighting_frame() - LIGHTING_STRATA / 2u;
+            if (!lighting_wrc_lamp_changed(pos, traced) && abs(lighting_ls_ratio(traced) - 1.0) <= 0.01) {
+                return;
+            }
+        }
+    }
+    if (probe_hit && !fill_hit && lighting_sun_hold_kept(h)) {
+        return;
+    }
+    if (fill_hit && lighting_sun_hold_fill(h)) {
+        return;
     }
     vec3 origin = pos + n * 0.02;
     LampList list = lamps_at(origin);
@@ -125,24 +289,19 @@ void main() {
         // leave the sun and its shadow a frame behind.
         if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet() && !lighting_sun_small()) {
             // Mode 4 holds only an exact sum (kind 2) once the view is still.
-            // The record goes into this frame's slot only. Writing the other slot
+            // A trusted copy is not frozen as the truth when the camera stops.
+            // The copy goes into this frame's slot only. Writing the other slot
             // races the pixel that owns it. The next frame reads this slot.
-            // Bit 21 with bits 18-20 clear is the production reservoir, including
-            // mode off and mode hits. A quiet view must not return last frame's
-            // colour and skip that sample. The signature hold is the success
-            // path: bit 19 is clear on a frame whose prepare bound the reservoir,
-            // so the clear below does not run. Bit 19 is a failed prepare, or
-            // restir off on a mode that used to sample. It clears the signature
-            // hold for every mode except 4, so mode hits shades the sum instead
-            // of the previous reservoir colour. Mode 4 keeps a stored exact
-            // record (the quiet labelled-exact hold). A stored exact record
-            // cannot survive into a reservoir frame.
-            bool restir_product = ((pc.lamp.y >> 21u) & 1u) != 0u
-                && ((pc.lamp.y >> 18u) & 7u) == 0u;
-            bool hold = !restir_product && pc.lamp.x != 4u;
+            // The plain variant is the pre-reservoir shade. A matching signature
+            // holds, the same test as before reservoirs. The reservoir variant
+            // holds only an exact sum, and only while the noise gate allows it.
+#ifdef LIGHTING_DIRECT_PLAIN
+            bool hold = true;
+#else
+            bool hold = pc.lamp.x != 4u;
             // Hold off: the noise gate grades the random path on a still view.
             // The exact record would return here with zero shadow rays.
-            if (!restir_product && pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
+            if (pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
                 LampReservoir held = lamp_res_load(idx, lamp_res_slot_prev());
                 uvec4 geo = lamp_geo_load(idx, lamp_res_slot_prev());
                 hold = geo.z == LAMP_GEO_EXACT && lamp_res_frames(held) >= LIGHTING_DIRECT_HOLD;
@@ -151,12 +310,7 @@ void main() {
                     lamp_geo_store(idx, lamp_res_slot_now(), geo);
                 }
             }
-            // Mode 4 is the exact-record hold. Bit 19 must not cancel it: a
-            // restir-off reuse frame sets that bit, and clearing the hold
-            // retraced the full sum on every quiet frame.
-            if (hold && pc.lamp.x != 4u && ((pc.lamp.y >> 19u) & 1u) != 0u) {
-                hold = false;
-            }
+#endif
             if (hold) {
                 uint emitted = gbuf_word(idx, 3u);
                 uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
@@ -175,7 +329,7 @@ void main() {
     uint tdl = ~0u;
     uint tdl_sig = 0u;
     vec3 n_hit = n;
-    if (LIGHTING_TDL && idx >= pixels && lighting_world_mode() == 3u && !lighting_grad_check_ray(ray)) {
+    if (LIGHTING_TDL && idx >= pixels && lighting_world_mode() == 3u) {
         uint ts = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos);
         // A hit off screen has no pixel texel, only the hit patch its bounce
         // lookup claimed (lighting_cache_irradiance). Its direct light is held
@@ -220,41 +374,49 @@ void main() {
             }
         }
     }
-    // Diag: lamp-list entries a pixel walks. Cache rays are not that count.
-    if (lamp_pick_diag() && idx < pixels) {
-        atomicAdd(gstats.diag[38u], count);
+    // Diag: hits past every early return (a held texel walks no lamps), and
+    // the lamp-list entries the shade below walks.
+    if (lamp_pick_diag() && probe_hit) {
+        atomicAdd(gstats.diag[fill_hit ? 60u : 55u], 1u);
+    }
+    if (lamp_pick_diag() && (probe_hit || idx < pixels)) {
+        atomicAdd(gstats.diag[probe_hit ? 39u : 38u], count);
     }
     // Light cache rays (params.z bit 11): at most LIGHTING_CACHE_PICKS shadow rays,
     // lamps picked systematically in proportion to their unshadowed light, each
     // weighted by how often it is expected to be picked (unbiased, as
     // lamps_light_only). The pick offset hangs on the patch and the ray, so a
     // still scene relights to the same value.
-    bool cache_pick = idx >= pixels + kept && ((pc.params.z >> 11u) & 1u) != 0u;
+    // S60: the screen probes' hits (kept strata and fills) pick lamps the same way
+    // (LIGHTING_PROBE_PICKS): every kept hit of all LIGHTING_STRATA strata is relit every
+    // frame, so with every lamp shadow-traced the light pass was ~65 % of the
+    // frame (GENOS_GPU_TIMES). Lumen's final gather never shadow-traces lamps at
+    // probe hits (it reads the surface cache's lit cards); stochastic lamp
+    // selection in proportion to unshadowed light (as MegaLights / ReSTIR DI) is
+    // the step that keeps our per-hit direct light.
+    bool cache_pick = idx >= pixels + kept && !fill_hit && ((pc.params.z >> 11u) & 1u) != 0u;
+    bool probe_pick = LIGHTING_PROBE_PICKS && probe_hit && ((pc.params.z >> 11u) & 1u) != 0u;
     bool tdl_check = tdl != ~0u && (tdl & 0x40000000u) != 0u;
     // TDL-new used to shade every lamp (exact). With hitsize, new is the remaining
     // GI-on excess alongside check; seed it with CACHE_PICKS like check (stable u).
     bool tdl_new = tdl != ~0u && (tdl & 0xC0000000u) == 0u;
-    bool pick = (cache_pick && tdl == ~0u) || tdl_check || tdl_new;
+    bool pick = ((cache_pick || probe_pick) && tdl == ~0u) || tdl_check || tdl_new;
     // Weighted point-lamp picking shares this loop's one trace. The sun stays
     // exact. A texel-direct check keeps the legacy estimator. Mode 0 leaves
     // `pick` as it was, so today's shade is unchanged.
+#ifndef LIGHTING_DIRECT_PLAIN
     uint lamp_mode = pc.lamp.x;
     bool lamp_pix = idx < pixels && lamp_mode >= 2u && lamp_mode <= 4u;
     bool lamp_hit = idx >= pixels && (lamp_mode == 1u || lamp_mode == 3u || lamp_mode == 4u);
     bool lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
-#ifdef GENOS_RESTIR_DI
-    // Product pixels only. The labelled exact sum, the random path, and the
-    // broken picker stay on the shade below. lamp_new off skips both.
-    bool restir_pix = ((pc.lamp.y >> 21u) & 1u) != 0u
-        && ((pc.lamp.y >> 18u) & 7u) == 0u
-        && idx < pixels;
-    if (restir_pix) {
-        lamp_new = false;
-    }
-#endif
     if (lamp_new) {
         pick = false;
     }
+#else
+    // Reservoir code is not in this module. The shade loop below is the
+    // pre-reservoir sum: every lamp, then the signature hold above.
+    const bool lamp_new = false;
+#endif
     float total = 0.0;
     uint lit = 0u;
     float u = 0.0;
@@ -276,6 +438,10 @@ void main() {
             u = lighting_unit(lighting_hash((tdl & 0x3FFFFFFFu) ^ lighting_frame() * 0x9e3779b9u));
         } else if (tdl_new) {
             u = lighting_unit(lighting_hash((tdl & 0x3FFFFFFFu) * 0x85ebca6bu + 0x27d4eb2fu));
+        } else {
+            // A probe hit: the offset hangs on the hit's 25 cm cell and its index,
+            // so a still hit relights to the same value (no crawl).
+            u = lighting_unit(lighting_cell_hash(pos, n) ^ (h * 0x85ebca6bu + 0x27d4eb2fu));
         }
         [[dont_unroll]] for (uint k = 0u; k < count; k++) {
             if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
@@ -292,31 +458,33 @@ void main() {
     bool sun_hold = false;
     bool sun_slice = false;
     if (lighting_sun_small() && idx >= pixels) {
-        uint ent = (ray - lighting_probe_rays()) / LIGHTING_CACHE_RAYS;
-        uint slot = lighting_cache_batch_slot(ent);
-        sun_slice = slot != ~0u && lighting_sun_slot_slice(slot);
-        sun_hold = slot != ~0u && !sun_slice;
+        if (probe_hit) {
+            uint pk = h / lighting_rays() / LIGHTING_STRATA;
+            sun_slice = lighting_sun_probe_slice(pk);
+            sun_hold = !sun_slice;
+        } else {
+            uint ent = (ray - lighting_probe_rays()) / LIGHTING_CACHE_RAYS;
+            uint slot = lighting_cache_batch_slot(ent);
+            sun_slice = slot != ~0u && lighting_sun_slot_slice(slot);
+            sun_hold = slot != ~0u && !sun_slice;
+        }
     }
     // Chosen point lamps for this point. The shade loop below is still the
     // only trace. Suns are not entries: they are traced on their own.
-    // shade_exact walks every point lamp at scale 1 (the labelled sum).
-    // Otherwise chosen_* is one visibility sample for a hit or for the
-    // noise gate. Production pixels do not reach this: ReSTIR clears lamp_new.
+    // shade_exact walks every point lamp at scale 1 (the sum). copied skips
+    // the trace and keeps a reprojected exact colour. Otherwise chosen_* is
+    // one visibility sample.
     uint view_only = LAMP_ALL;
     if ((scene.grid_at.w & 255u) == 6u) {
         view_only = (scene.grid_at.w >> 8u) & 0xFFFFu;
     }
-#ifdef GENOS_RESTIR_DI
-    // light:I shades that one scene lamp. The reservoir is not that view.
-    if (view_only != LAMP_ALL) {
-        restir_pix = false;
-        lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
-    }
-#endif
+#ifndef LIGHTING_DIRECT_PLAIN
     uint chosen_k[4] = uint[4](0u, 0u, 0u, 0u);
     float chosen_s[4] = float[4](0.0, 0.0, 0.0, 0.0);
     uint chosen_n = 0u;
     bool shade_exact = false;
+    bool copied = false;
+    vec3 copied_rgb = vec3(0.0);
     // Samples folded into the displayed colour while the exact-sum hold is off.
     uint mean_count = 0u;
     if (lamp_new) {
@@ -333,84 +501,183 @@ void main() {
         if (reuse_pix && !shade_exact && point_lit > 0u) {
             bool quiet_held = lighting_pix_quiet() && lighting_view_held() && !lamp_pick_hold_off();
             if (quiet_held || point_lit <= LAMP_PICK_EXACT_LIT) {
-                // The labelled sum, and the noise gate's few-lamp row.
-                // A quiet held view writes it once and the next frame holds.
+                // The sum. A quiet held view writes it once and the next frame
+                // holds. Few lamps cost the same as tracing each one, and the
+                // one-sample picture is the overlap noise this gate forbids.
                 shade_exact = true;
-            } else if (lamp_pick_broken()) {
-                // Uniform, then the raw light. A MIS weight would hide the fault.
-                uint mixf = lamp_pick_frame_mix();
-                float ub = lighting_unit(lighting_hash(idx ^ (mixf * 0x9e3779b9u) ^ 0x51u));
-                uint k = lamp_pick_uniform(list, count, origin, n, two_sided, point_lit, ub);
-                uint slot = lamp_res_slot_now();
-                if (k == ~0u) {
-                    lamp_res_store(idx, slot, lamp_res_empty());
-                    lamp_geo_store(idx, slot, uvec4(0u));
-                } else {
-                    LampReservoir cur;
-                    cur.lamp = lamp_list_index(list, k);
-                    cur.m = 1u;
-                    cur.w_sum = 1.0;
-                    cur.target = 1.0;
-                    lamp_res_store(idx, slot, cur);
-                    if (chosen_n < 4u) {
-                        chosen_k[chosen_n] = k;
-                        chosen_s[chosen_n] = 1.0;
-                        chosen_n += 1u;
-                    }
-                }
-            } else if (lamp_pick_hold_off()) {
-                // The gate's running mean is an average of fresh samples.
-                // A temporal merge would lock one lamp. Production does not
-                // set the hold-off bit: those pixels are the ReSTIR sample.
-                uint mixf = lamp_pick_frame_mix();
-                uint cand = lamp_pick_candidates();
-                float w_ris = 0.0;
-                uint win_k = ~0u;
-                float win_phat = 0.0;
-                [[dont_unroll]] for (uint c = 0u; c < cand; c++) {
-                    float uc = lighting_unit(lighting_hash(idx ^ lighting_hash(mixf ^ lighting_hash(2u * c))));
-                    float sample_phat = 0.0;
-                    uint sample_k = lamp_pick_one(list, count, origin, n, two_sided, point_total, point_lit, uc, sample_phat);
-                    float ris = point_total;
-                    w_ris += ris;
-                    float u_chao = lighting_unit(lighting_hash(idx ^ lighting_hash(mixf ^ lighting_hash(2u * c + 1u))));
-                    if (sample_k != ~0u && w_ris > 0.0 && u_chao < ris / w_ris) {
-                        win_k = sample_k;
-                        win_phat = sample_phat;
-                    }
-                }
-                uint slot = lamp_res_slot_now();
-                if (win_k == ~0u || win_phat <= 0.0) {
-                    lamp_res_store(idx, slot, lamp_res_empty());
-                    lamp_geo_store(idx, slot, uvec4(0u));
-                } else {
-                    LampReservoir canonical;
-                    canonical.lamp = lamp_list_index(list, win_k);
-                    canonical.m = cand;
-                    canonical.w_sum = point_total * float(cand);
-                    canonical.target = win_phat;
-                    lamp_res_store(idx, slot, canonical);
-                    if (canonical.target > 0.0 && chosen_n < 4u) {
-                        chosen_k[chosen_n] = win_k;
-                        float shade_w = point_total / canonical.target;
-                        if (lamp_pick_unbiased()) {
-                            shade_w = lamp_res_w(canonical);
-                        }
-                        chosen_s[chosen_n] = shade_w;
-                        chosen_n += 1u;
-                    }
-                }
             } else {
-                // The pairwise sample is not a product fallback.
-                shade_exact = true;
+                uint hist_px = 0u;
+                float z_now = 0.0;
+                bool reproj = lamp_pick_reproject(pos, n, hist_px, z_now);
+                uint prev_slot = lamp_res_slot_prev();
+                uvec4 geo_h = reproj ? lamp_geo_load(hist_px, prev_slot) : uvec4(0u);
+                bool trusted = reproj && geo_h.z >= LAMP_GEO_COPY && geo_h.z <= LAMP_GEO_EXACT;
+                if (trusted && pix_sig != 0u) {
+                    vec3 hpos;
+                    vec3 hn;
+                    vec3 halb;
+                    bool htwo;
+                    uvec2 hp = uvec2(hist_px % pc.dims.x, hist_px / pc.dims.x);
+                    LampReservoir history = lamp_res_load(hist_px, prev_slot);
+                    // A real pan moves the shading point. Copying that colour
+                    // would drag the old integral across the picture. A sub-pixel
+                    // hold (under 5 mm) is the same point, and only while the
+                    // lamps still match the record (w_sum holds that signature).
+                    // The gate's still capture must trace. A copy would report 0 rays.
+                    if (!lamp_pick_hold_off() && floatBitsToUint(history.w_sum) == pix_sig && lighting_surface(hp, hpos, hn, halb, htwo) && length(hpos - pos) < LAMP_PICK_COPY_M) {
+                        copied = true;
+                        copied_rgb = lighting_unpack_rgb9e5(geo_h.w);
+                        history.m = lamp_res_samples(history);
+                        history.w_sum = uintBitsToFloat(pix_sig);
+                        uint slot = lamp_res_slot_now();
+                        lamp_res_store(idx, slot, history);
+                        lamp_geo_store(idx, slot, uvec4(floatBitsToUint(lamp_pick_depth(pos)), lighting_pack_normal(n), LAMP_GEO_COPY, geo_h.w));
+                    }
+                }
+                if (!copied) {
+                    bool hist_restir = reproj && geo_h.z == LAMP_GEO_RESTIR;
+                    uint mixf = lamp_pick_frame_mix();
+                    // Uniform, then the raw light. Pairwise W would hide the fault.
+                    if (lamp_pick_broken()) {
+                        float ub = lighting_unit(lighting_hash(idx ^ (mixf * 0x9e3779b9u) ^ 0x51u));
+                        uint k = lamp_pick_uniform(list, count, origin, n, two_sided, point_lit, ub);
+                        uint slot = lamp_res_slot_now();
+                        if (k == ~0u) {
+                            lamp_res_store(idx, slot, lamp_res_empty());
+                            lamp_geo_store(idx, slot, uvec4(0u));
+                        } else {
+                            LampReservoir cur;
+                            cur.lamp = lamp_list_index(list, k);
+                            cur.m = 1u;
+                            cur.w_sum = 1.0;
+                            cur.target = 1.0;
+                            lamp_res_store(idx, slot, cur);
+                            if (chosen_n < 4u) {
+                                chosen_k[chosen_n] = k;
+                                chosen_s[chosen_n] = 1.0;
+                                chosen_n += 1u;
+                            }
+                        }
+                    } else {
+                    // The gate's running mean is an average of fresh samples.
+                    // A temporal merge would lock one lamp, and the mean of that
+                    // lamp is 0 or the whole sum wherever it is shadowed.
+                    // Bitterli reuses. Production (the hold-off bit clear) still does.
+                    bool reuse_hist = hist_restir && !lamp_pick_hold_off();
+                    uint cand = reuse_hist ? 1u : lamp_pick_candidates();
+                    float w_ris = 0.0;
+                    uint win_k = ~0u;
+                    float win_phat = 0.0;
+                    [[dont_unroll]] for (uint c = 0u; c < cand; c++) {
+                        float uc = lighting_unit(lighting_hash(idx ^ lighting_hash(mixf ^ lighting_hash(2u * c))));
+                        float sample_phat = 0.0;
+                        uint sample_k = lamp_pick_one(list, count, origin, n, two_sided, point_total, point_lit, uc, sample_phat);
+                        float ris = point_total;
+                        w_ris += ris;
+                        float u_chao = lighting_unit(lighting_hash(idx ^ lighting_hash(mixf ^ lighting_hash(2u * c + 1u))));
+                        if (sample_k != ~0u && w_ris > 0.0 && u_chao < ris / w_ris) {
+                            win_k = sample_k;
+                            win_phat = sample_phat;
+                        }
+                    }
+                    uint slot = lamp_res_slot_now();
+                    if (win_k == ~0u || win_phat <= 0.0) {
+                        lamp_res_store(idx, slot, lamp_res_empty());
+                        lamp_geo_store(idx, slot, uvec4(0u));
+                    } else {
+                        LampReservoir canonical;
+                        canonical.lamp = lamp_list_index(list, win_k);
+                        canonical.m = cand;
+                        canonical.w_sum = point_total * float(cand);
+                        canonical.target = win_phat;
+                        uvec2 pix = uvec2(idx % pc.dims.x, idx / pc.dims.x);
+                        LampReservoir merged = canonical;
+                        if (reuse_hist) {
+                            LampReservoir history = lamp_res_load(hist_px, prev_slot);
+                            vec3 hpos;
+                            vec3 hn;
+                            vec3 halb;
+                            bool htwo;
+                            uvec2 hp = uvec2(hist_px % pc.dims.x, hist_px / pc.dims.x);
+                            bool hsurf = lighting_surface(hp, hpos, hn, halb, htwo);
+                            vec3 horigin = hpos + hn * LAMP_PICK_HIST_LIFT;
+                            float pq_can = lamp_pick_phat(list, count, canonical.lamp, origin, n, two_sided);
+                            float pq_hist = lamp_pick_phat(list, count, history.lamp, origin, n, two_sided);
+                            float ph_can = hsurf ? lamp_pick_phat(list, count, canonical.lamp, horigin, hn, htwo) : 0.0;
+                            float ph_hist = hsurf ? lamp_pick_phat(list, count, history.lamp, horigin, hn, htwo) : 0.0;
+                            float u_merge = lighting_unit(lighting_hash(idx ^ (mixf * 0x9e3779b9u)));
+                            if (lamp_pick_unbiased()) {
+                                merged = lamp_pick_pairwise(canonical, history, pq_can, pq_hist, ph_can, ph_hist, u_merge);
+                            } else {
+                                merged = lamp_pick_merge(canonical, history, pq_can, pq_hist, ph_can, ph_hist, false, pc.lamp.w, u_merge);
+                            }
+                            uint radius = pc.lamp.z;
+                            if (radius > 0u && merged.lamp != LAMP_ALL && merged.m > 0u) {
+                                uint hsh = lighting_hash(idx ^ (mixf * 0x85ebca6bu));
+                                uint span = radius * 2u + 1u;
+                                int rx = int(hsh % span) - int(radius);
+                                int ry = int((hsh >> 16u) % span) - int(radius);
+                                if (rx == 0 && ry == 0) {
+                                    rx = 1;
+                                }
+                                ivec2 npix = ivec2(pix) + ivec2(rx, ry);
+                                if (npix.x >= 0 && npix.y >= 0 && uint(npix.x) < pc.dims.x && uint(npix.y) < pc.dims.y) {
+                                    uint npi = uint(npix.y) * pc.dims.x + uint(npix.x);
+                                    if (lamp_geo_load(npi, prev_slot).z == LAMP_GEO_RESTIR) {
+                                        vec3 npos;
+                                        vec3 nn;
+                                        vec3 nalbedo;
+                                        bool ntwo;
+                                        if (lighting_surface(uvec2(npix), npos, nn, nalbedo, ntwo)) {
+                                            float dist = length(npos - pos);
+                                            float plane = 0.05 + 0.02 * dist;
+                                            if (dot(nn, n) > 0.9 && abs(dot(npos - pos, n)) < plane) {
+                                                if (lamp_pick_diag()) {
+                                                    atomicAdd(gstats.diag[52u], 1u);
+                                                }
+                                                LampReservoir spatial = lamp_res_load(npi, prev_slot);
+                                                vec3 norigin = npos + nn * 0.02;
+                                                float pq_cur = lamp_pick_phat(list, count, merged.lamp, origin, n, two_sided);
+                                                float pq_sp = lamp_pick_phat(list, count, spatial.lamp, origin, n, two_sided);
+                                                float ph_cur = lamp_pick_phat(list, count, merged.lamp, norigin, nn, ntwo);
+                                                float ph_sp = lamp_pick_phat(list, count, spatial.lamp, norigin, nn, ntwo);
+                                                float u_sp = lighting_unit(lighting_hash(idx ^ npi ^ (mixf * 0x27d4eb2fu)));
+                                                if (lamp_pick_unbiased()) {
+                                                    merged = lamp_pick_pairwise(merged, spatial, pq_cur, pq_sp, ph_cur, ph_sp, u_sp);
+                                                } else {
+                                                    merged = lamp_pick_merge(merged, spatial, pq_cur, pq_sp, ph_cur, ph_sp, false, pc.lamp.w, u_sp);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        lamp_res_store(idx, slot, reuse_hist ? merged : canonical);
+                        LampReservoir shown = reuse_hist ? merged : canonical;
+                        if (shown.lamp != LAMP_ALL && shown.m > 0u && shown.target > 0.0) {
+                            uint kwin = lamp_pick_find(list, count, shown.lamp);
+                            if (kwin != ~0u && kwin >= list.suns.y && chosen_n < 4u) {
+                                chosen_k[chosen_n] = kwin;
+                                float shade_w = point_total / shown.target;
+                                if (lamp_pick_unbiased()) {
+                                    shade_w = lamp_res_w(shown);
+                                }
+                                chosen_s[chosen_n] = shade_w;
+                                chosen_n += 1u;
+                            }
+                        }
+                    }
+                }
+            }
             }
         } else if (reuse_pix && !shade_exact) {
             lamp_res_store(idx, lamp_res_slot_now(), lamp_res_empty());
             lamp_geo_store(idx, lamp_res_slot_now(), uvec4(0u));
         }
-        if (!shade_exact && chosen_n == 0u && point_lit > 0u) {
+        if (!shade_exact && !copied && chosen_n == 0u && point_lit > 0u) {
             uint use_rays = lamp_pick_rays();
-            float pick_u = lamp_pick_u(idx, pixels, kept, false, reuse_pix, ray, 0u, pos, n);
+            float pick_u = lamp_pick_u(idx, pixels, kept, fill_hit, reuse_pix, ray, h, pos, n);
             bool exact_pt = point_lit <= use_rays;
             float step_pt = point_total / float(use_rays);
             float run_pt = 0.0;
@@ -441,53 +708,20 @@ void main() {
             }
         }
     }
-#ifdef GENOS_RESTIR_DI
-    uint restir_scene = 0xffffffffu;
-    uint restir_lamp = 0xffffffffu;
-    float restir_w = 0.0;
-    if (restir_pix) {
-        // One reservoir may cover a block of screen pixels (header 7 and 8
-        // are the reservoir grid; pc.dims is the screen). Scale 1 keeps the
-        // screen index. Each screen pixel still traces its own shadow ray.
-        uint rpix = idx;
-        uint rw = restir_words[7u];
-        uint rh = restir_words[8u];
-        if (rw != 0u && rh != 0u && (rw != pc.dims.x || rh != pc.dims.y)) {
-            uint sx = pc.dims.x / rw;
-            uint sy = pc.dims.y / rh;
-            if (sx == 0u) {
-                sx = 1u;
-            }
-            if (sy == 0u) {
-                sy = 1u;
-            }
-            uint rx = (idx % pc.dims.x) / sx;
-            uint ry = (idx / pc.dims.x) / sy;
-            if (rx >= rw) {
-                rx = rw - 1u;
-            }
-            if (ry >= rh) {
-                ry = rh - 1u;
-            }
-            rpix = ry * rw + rx;
-        }
-        uint at = restir_words[6u] + rpix * 4u;
-        restir_lamp = restir_words[at];
-        float restir_sum = uintBitsToFloat(restir_words[at + 1u]);
-        uint restir_m = restir_words[at + 2u];
-        float restir_target = uintBitsToFloat(restir_words[at + 3u]);
-        float restir_mf = float(restir_m >> 16u) * float(65536u) + float(restir_m & 0xffffu);
-        if (restir_m != 0u && restir_lamp != 0xffffffffu && restir_target > 0.0 && restir_sum > 0.0 && restir_mf > 0.0) {
-            restir_w = restir_sum / (restir_mf * restir_target);
-            restir_scene = restir_words[restir_words[1u] + restir_lamp * 8u + 7u];
-        }
-    }
+#else
+    const uint chosen_k[4] = uint[4](0u, 0u, 0u, 0u);
+    const float chosen_s[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    const uint chosen_n = 0u;
+    const bool shade_exact = false;
+    const bool copied = false;
+    const vec3 copied_rgb = vec3(0.0);
 #endif
     bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
     float step = total / float(LIGHTING_CACHE_PICKS);
     float run = 0.0;
     bool lobe = (gstats.ctrl_bits & 2097152u) != 0u && idx < pixels;
-    vec3 e = vec3(0.0);
+    bool copied_rgb_ok = copied && !lobe;
+    vec3 e = copied_rgb_ok ? copied_rgb : vec3(0.0);
     vec3 e_sun = vec3(0.0);
     vec3 spec = vec3(0.0);
     vec3 view = vec3(0.0, 1.0, 0.0);
@@ -506,13 +740,10 @@ void main() {
         gbuf_material(idx, base, rough, metal);
     }
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
-        // The reservoir samples every point lamp. The cap stays on the labelled
-        // exact walk and the hit picker, which do not set restir_pix.
-        bool cap_lamps = true;
-#ifdef GENOS_RESTIR_DI
-        cap_lamps = !restir_pix;
-#endif
-        if (cap_lamps && gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
+        if (copied_rgb_ok) {
+            break;
+        }
+        if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
             break;
         }
         Lamp sun_lamp_l = lamp_list_get(list, k);
@@ -523,12 +754,6 @@ void main() {
         }
         // A pixel reservoir already chose its point lamps. Skip the rest so the
         // shade walks the sample count, not the lamp list. The exact sum does not.
-#ifdef GENOS_RESTIR_DI
-        // ReSTIR replaces the point-lamp sum. This loop keeps the sun and the flame.
-        if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y) {
-            continue;
-        }
-#endif
         if (lamp_new && !shade_exact && !sun_lamp && chosen_n > 0u) {
             bool chosen = false;
             [[dont_unroll]] for (uint s = 0u; s < chosen_n; s++) {
@@ -610,7 +835,15 @@ void main() {
                 // Counts a real shadow ray. A shadow-cell hit does not. Off
                 // unless GENOS_LIGHTING_LAMP_PICK_DIAG set the push bit.
                 if (lamp_pick_diag()) {
-                    atomicAdd(gstats.diag[idx >= pixels ? 51u : 48u], 1u);
+                    uint slot_d = 48u;
+                    if (fill_hit) {
+                        slot_d = 50u;
+                    } else if (probe_hit) {
+                        slot_d = 49u;
+                    } else if (idx >= pixels) {
+                        slot_d = 51u;
+                    }
+                    atomicAdd(gstats.diag[slot_d], 1u);
                 }
                 if (cell && !(lighting_sun_small() && sun_lamp)) {
                     lighting_shadow_put(origin, n, li, shadow_lit);
@@ -620,14 +853,6 @@ void main() {
         if (shadow_lit) {
             vec3 add = (!lamp_new && exact) ? light : light * scale;
             e += add;
-#ifdef GENOS_RESTIR_DI
-            // Near point lamp actually added on a ReSTIR pixel. The skip at the
-            // top of this loop keeps the count at 0. Sun and flame stay out of
-            // this word.
-            if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y && lamp_pick_diag()) {
-                atomicAdd(restir_words[RESTIR_DIAG_POINT_ADD], 1u);
-            }
-#endif
             if (lobe) {
                 vec3 ldir = target - origin;
                 float llen = length(ldir);
@@ -653,74 +878,6 @@ void main() {
             }
         }
     }
-#ifdef GENOS_RESTIR_DI
-    // One reservoir sample: p(y) * V(y) * W, W = w_sum / (M * p_hat).
-    // The graded colour is the mean of the unbiased sample. The raw sample
-    // is one frame of that mean. Bitterli shows the current sample; a still
-    // surface keeps the mean so the picture can converge. A lamp change, a
-    // failed reprojection, or a change in this sample's visibility or
-    // unshadowed target drops it. The sun and the flame stay in e.
-    vec3 e_restir = vec3(0.0);
-    vec3 spec_restir = vec3(0.0);
-    bool restir_sampled = false;
-    float restir_luma = 0.0;
-    bool restir_vis = false;
-    if (restir_pix && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
-        && restir_lamp < restir_words[0u]) {
-        restir_sampled = true;
-        if (lamp_pick_diag()) {
-            atomicAdd(gstats.diag[59u], 1u);
-        }
-        uint la = restir_words[1u] + restir_lamp * 8u;
-        Lamp rl;
-        rl.pos = vec4(uintBitsToFloat(restir_words[la]), uintBitsToFloat(restir_words[la + 1u]), uintBitsToFloat(restir_words[la + 2u]), 0.0);
-        rl.color = vec4(uintBitsToFloat(restir_words[la + 4u]), uintBitsToFloat(restir_words[la + 5u]), uintBitsToFloat(restir_words[la + 6u]), uintBitsToFloat(restir_words[la + 3u]));
-        vec3 rt;
-        vec3 rlight = lamp_light(rl, origin, n, two_sided, rt);
-        if (rlight.r + rlight.g + rlight.b > 0.0) {
-            // Same pixel-ray probe as the shade loop (diag 48). A shadows-off
-            // frame does not trace and does not count. The unshadowed luma
-            // stays even when the ray is blocked: the mean compares that
-            // target, and the visibility bit, with the stored sample.
-            bool shadows_on = (gstats.ctrl_bits & 2u) != 0u;
-            bool rvis = true;
-            restir_luma = rlight.r + rlight.g + rlight.b;
-            if (shadows_on) {
-                rvis = !trace_occluded(origin, rt);
-                if (lamp_pick_diag()) {
-                    atomicAdd(gstats.diag[48u], 1u);
-                }
-            }
-            restir_vis = rvis;
-            if (rvis) {
-                e_restir = rlight * restir_w;
-                e += e_restir;
-                // The lobe picture is `spec`. The raw sample is irradiance, so
-                // the same Appendix B mix as the shade loop has to land in spec
-                // or a specular product frame drops the reservoir.
-                if (lobe) {
-                    vec3 ldir = rt - origin;
-                    float llen = length(ldir);
-                    ldir = llen > LAMP_PICK_DEPTH_FLOOR ? ldir / llen : ns;
-                    if (two_sided && dot(ns, ldir) < 0.0) {
-                        ldir = -ldir;
-                    }
-                    float ndl = max(dot(ns, ldir), 0.0);
-                    float ndv = max(dot(ns, view), 0.0);
-                    vec3 halfv = ldir + view;
-                    float hlen = length(halfv);
-                    halfv = hlen > DIRECT_DIR_EPS ? halfv / hlen : ns;
-                    float ndh = dot(ns, halfv);
-                    vec3 cx = cross(ns, halfv);
-                    float ncross = dot(cx, cx);
-                    float vdh = dot(view, halfv);
-                    spec_restir = pbr_eval(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * e_restir;
-                    spec += spec_restir;
-                }
-            }
-        }
-    }
-#endif
     n = n_hit;
     if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
         e = vec3(0.0);
@@ -759,126 +916,7 @@ void main() {
             cache.v[LIGHTING_TDL_AT + ts] = vec4(uintBitsToFloat(lighting_pack_rgb9e5(e)), fs, uintBitsToFloat(tdl_sig), uintBitsToFloat(lighting_frame()));
         }
     }
-#ifdef GENOS_RESTIR_DI
-    // Cumulative mean of the unbiased reservoir sample, visibility included.
-    // The three floats are the slot this shade already wrote. No second
-    // buffer. The shadow ray above re-traces the stored sample when the
-    // reservoir kept that lamp. A different lamp traces the stored one once.
-    // History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9), one pixel, and
-    // drops when the reservoir resets (word 15), any lamp changed (word 39),
-    // or the re-traced sample's visibility or unshadowed target changed.
-    // That check runs before the cap, so a frozen mean still drops. At
-    // RESTIR_MEAN_CAP the colour otherwise stays, so a still surface stops
-    // moving. The mean of one fixed integrand stays unbiased: temporal
-    // correlation changes the variance. Mixing two visibilities was the bias.
-    // The lobe off, the sample is irradiance. The lobe on, it is this frame's
-    // Appendix B outgoing radiance. Averaging irradiance and then showing this
-    // frame's lobe leaves the picture on one lamp. The noise gate has its own
-    // mean and does not read this one. A bounce-only frame does not write it
-    // into the picture and does not fold a zero into the stored mean.
-    if (restir_pix && lamp_pix) {
-        uint mean_px = 0u;
-        float z_ignore = 0.0;
-        uint mean_prev = 0u;
-        vec3 drawn = lobe ? spec_restir : e_restir;
-        vec3 mean_e = drawn;
-        uint prev_pack = RESTIR_MEAN_NO_LAMP;
-        // One slot is read and written in this dispatch. History is this
-        // pixel only, and the geo load stops before a neighbour. Two slots
-        // leave the previous frame alone, so a reprojected neighbour is safe.
-        uint mean_only = lamp_res_one_slot() ? idx : ~0u;
-        if (restir_words[15u] == 0u && restir_words[39u] == 0u && lamp_pick_reproject_at(pos, n, mean_only, mean_px, z_ignore)) {
-            uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
-            if (hg.z == LAMP_GEO_RESTIR_MEAN) {
-                LampReservoir pr = lamp_res_load(mean_px, lamp_res_slot_prev());
-                mean_prev = pr.m;
-                mean_e = vec3(pr.w_sum, pr.target, uintBitsToFloat(hg.w));
-                prev_pack = pr.lamp;
-            }
-        }
-        // Re-trace the stored sample before the cap. A moving occluder passes
-        // reprojection and changes no lamp, and a frozen mean would keep the
-        // old shadow. The shade ray is reused when the lamp matches.
-        bool mean_dropped = false;
-        if (mean_prev > 0u) {
-            uint old_lamp = prev_pack & 0xffffu;
-            bool old_vis = (prev_pack & 0x10000u) != 0u;
-            uint old_q = prev_pack >> 17u;
-            if (old_lamp != RESTIR_MEAN_NO_LAMP && old_lamp < restir_words[0u]) {
-                float luma_now = 0.0;
-                bool vis_now = false;
-                if (restir_sampled && restir_lamp == old_lamp) {
-                    luma_now = restir_luma;
-                    vis_now = restir_vis;
-                } else {
-                    // A different lamp from the one stored. One shadow ray,
-                    // and only when that lamp still reaches this point.
-                    uint la = restir_words[1u] + old_lamp * 8u;
-                    Lamp old_l;
-                    old_l.pos = vec4(uintBitsToFloat(restir_words[la]), uintBitsToFloat(restir_words[la + 1u]), uintBitsToFloat(restir_words[la + 2u]), 0.0);
-                    old_l.color = vec4(uintBitsToFloat(restir_words[la + 4u]), uintBitsToFloat(restir_words[la + 5u]), uintBitsToFloat(restir_words[la + 6u]), uintBitsToFloat(restir_words[la + 3u]));
-                    vec3 old_target;
-                    vec3 old_light = lamp_light(old_l, origin, n, two_sided, old_target);
-                    luma_now = old_light.r + old_light.g + old_light.b;
-                    if (luma_now > 0.0) {
-                        if ((gstats.ctrl_bits & 2u) == 0u) {
-                            vis_now = true;
-                        } else {
-                            vis_now = !trace_occluded(origin, old_target);
-                            if (lamp_pick_diag()) {
-                                atomicAdd(gstats.diag[48u], 1u);
-                            }
-                        }
-                    }
-                }
-                if (vis_now != old_vis || restir_mean_target_moved(old_q, luma_now)) {
-                    mean_dropped = true;
-                    mean_prev = 0u;
-                    mean_e = drawn;
-                }
-            }
-        }
-        vec3 e_mean = drawn;
-        uint mean_n = 1u;
-        if (mean_prev >= RESTIR_MEAN_CAP) {
-            e_mean = mean_e;
-            mean_n = RESTIR_MEAN_CAP;
-        } else if (!restir_sampled && mean_prev > 0u) {
-            e_mean = mean_e;
-            mean_n = mean_prev;
-        } else if (mean_prev > 0u) {
-            mean_n = mean_prev + 1u;
-            e_mean = mean_e + (drawn - mean_e) / float(mean_n);
-        } else if (mean_dropped && !restir_sampled) {
-            // The stored sample changed and this frame drew none. Count 1
-            // of black would be a sample that was not taken.
-            e_mean = vec3(0.0);
-            mean_n = 0u;
-        }
-        LampReservoir mr;
-        if (restir_sampled) {
-            mr.lamp = restir_mean_pack(restir_lamp, restir_vis, restir_luma);
-        } else if (mean_prev > 0u) {
-            mr.lamp = prev_pack;
-        } else {
-            mr.lamp = RESTIR_MEAN_NO_LAMP;
-        }
-        mr.m = mean_n;
-        mr.w_sum = e_mean.r;
-        mr.target = e_mean.g;
-        uint mslot = lamp_res_slot_now();
-        lamp_res_store(idx, mslot, mr);
-        lamp_geo_store(idx, mslot, uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_RESTIR_MEAN, floatBitsToUint(e_mean.b)));
-        bool bounce_only = (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u;
-        if (!bounce_only && !lamp_pick_hold_off() && (restir_sampled || mean_prev > 0u)) {
-            if (lobe) {
-                spec = spec - spec_restir + e_mean;
-            } else {
-                e = e - e_restir + e_mean;
-            }
-        }
-    }
-#endif
+#ifndef LIGHTING_DIRECT_PLAIN
     // Hold off: the displayed colour is the running mean of the unbiased sample.
     // The lobe off, that sample is irradiance (`light * W * visibility`) and
     // compose applies the Lambert weight. The lobe on, it is this frame's
@@ -888,7 +926,7 @@ void main() {
     // LAMP_PICK_MEAN_CAP the colour stays and the pixel keeps tracing.
     // Production does not set the bit. Averaging irradiance and then showing
     // this frame's lobe leaves the picture on one lamp.
-    if (idx < pixels && lamp_pix && lamp_pick_hold_off() && !shade_exact && chosen_n > 0u) {
+    if (idx < pixels && lamp_pix && lamp_pick_hold_off() && !shade_exact && !copied && chosen_n > 0u) {
         uint hist_px = 0u;
         float z_ignore = 0.0;
         uint prev_count = 0u;
@@ -939,6 +977,14 @@ void main() {
             if (lamp_pick_diag()) {
                 atomicAdd(gstats.diag[58u], 1u);
             }
+        } else if (copied) {
+            uvec4 geo = lamp_geo_load(idx, slot);
+            geo.w = lighting_pack_rgb9e5(e);
+            geo.z = LAMP_GEO_COPY;
+            lamp_geo_store(idx, slot, geo);
+            if (lamp_pick_diag()) {
+                atomicAdd(gstats.diag[57u], 1u);
+            }
         } else if (chosen_n > 0u) {
             LampReservoir cur = lamp_res_load(idx, slot);
             if (cur.lamp != LAMP_ALL) {
@@ -964,6 +1010,7 @@ void main() {
             }
         }
     }
+#endif
     if (idx < pixels) {
         uint emitted = gbuf_word(idx, 3u);
         uint glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? 0u : emitted;
@@ -1003,16 +1050,24 @@ void main() {
     } else {
         lighting_hit_sunfrac = 0.0;
         lighting_bounce_path = 2u;
-        lighting_hit_kind = 1u;
+        lighting_hit_kind = probe_hit ? 2u : 1u;
         if ((gstats.ctrl_bits & 512u) == 0u) {
             glow = vec3(0.0);
         }
-        lighting_gather_strict = lighting_lamp_settling();
+        lighting_gather_strict = !probe_hit && !fill_hit && lighting_lamp_settling();
         vec3 bounce = lighting_gi_on() ? lighting_cache_irradiance_at(pos, n, hit_t) : vec3(0.0);
         lighting_gather_strict = false;
         e += bounce;
         e_sun += lighting_hit_sunfrac * bounce;
-        // w: its sun/sky share as luminance (S63A).
-        work.v[lighting_rad_at(ray)] = vec4(reflectance * e + glow, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
+        if (fill_hit) {
+            lighting_put_fill_light(h, reflectance * e + glow);
+        } else if (probe_hit && lighting_check_within_noise(h, pos, n, reflectance, reflectance * e + glow)) {
+            lighting_chg(CHG_KEPT_HELD, 1u);
+        } else if (probe_hit) {
+            lighting_put_kept_light_d(h, reflectance * e + glow, tdl == ~0u ? 2u : ((tdl & 0x80000000u) != 0u ? 0u : 1u));
+        } else {
+            // w: its sun/sky share as luminance (S63A).
+            work.v[lighting_rad_at(ray)] = vec4(reflectance * e + glow, dot(reflectance * e_sun, vec3(0.2126, 0.7152, 0.0722)));
+        }
     }
 }

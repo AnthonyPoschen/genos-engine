@@ -15,11 +15,6 @@ path = "src/lib.rs"
 name = "genos-stress"
 path = "src/main.rs"
 
-[features]
-default = []
-# Forwards to genos-render so a picture gate can compile the cache-fill knockout.
-knockout = ["genos-render/knockout"]
-
 [dependencies]
 genos-input = { path = "../../crates/input" }
 genos-lighting-ref = { path = "../../crates/lighting-ref" }

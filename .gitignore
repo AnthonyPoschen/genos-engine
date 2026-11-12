@@ -4,7 +4,3 @@
 # Unanchored. `cargo test` runs with the package as its cwd, so a gate
 # under a crate directory is ignored too.
 genos-debug/
-# Python bytecode. scripts/lighting/grid_metric.py is the source; a tracked
-# cpython pyc was an accidental rebuild and must not come back.
-__pycache__/
-*.pyc

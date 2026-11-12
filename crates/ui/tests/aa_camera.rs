@@ -43,12 +43,7 @@ fn silhouette_world() -> World {
         }],
         ceiling: None,
         sky: None,
-        // Still pictures are compared byte for byte. Production ReSTIR
-        // resamples a quiet frame, so this fixture stays on the exact sum.
-        lighting: genos_scene::LightingSettings {
-            restir_di: false,
-            ..genos_scene::LightingSettings::default()
-        },
+        lighting: genos_scene::LightingSettings::default(),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),

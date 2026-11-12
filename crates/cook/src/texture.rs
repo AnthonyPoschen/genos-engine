@@ -5,8 +5,8 @@
 //! ([`genos_load::image_spaces`]). Colour (base colour, emissive) is BC7 sRGB,
 //! other data is BC7 unorm and normals are BC5 (X and Y; Z is rebuilt). Each
 //! image is one KTX2. The encoder is `intel_tex_2` (Intel ISPC Texture
-//! Compressor, basic profile, BC7 mode 2 left on). Edges are padded to whole
-//! 4×4 blocks by repeating the last row and column.
+//! Compressor, "basic" profile). Edges are padded to whole 4×4 blocks by
+//! repeating the last row and column.
 //!
 //! The record: `GTX1`, version, asset id, settings hash, inputs, then each
 //! texture (image index, KTX2 bytes), then a SHA-256 of every byte before it.

@@ -7,6 +7,7 @@
 #![expect(clippy::excessive_precision, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::ignore_without_reason, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![expect(clippy::ignored_unit_patterns, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
 #![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
@@ -723,15 +724,10 @@ pub fn render_gpu(setup: &RefSetup) -> Result<Reference, String> {
     })
 }
 
-/// File stem for [`render_cached`].
-///
-/// The hash is the scene's `Debug` text, the eye, yaw, pitch, width, height and
-/// bounce count. Seconds are not included. Analytic traces keep that stem.
-/// Triangle traces add `triangles`, and a GPU trace adds `gpuref-v2`. A specular
-/// lobe or a material override is not cached. An integrator revision is not in
-/// the hash: another commit can collide with a file that already meets the noise
-/// target. Callers that promote a file record the commit beside it.
-pub fn cache_key(setup: &RefSetup) -> u64 {
+/// `render`, reusing a trace saved under `dir` for the same scene, pose, size and
+/// bounce limit when it is at least as converged as asked; a new trace is saved there.
+/// The key hashes the scene's Debug text, so it holds within one build of the engine.
+pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     format!(
@@ -745,41 +741,21 @@ pub fn cache_key(setup: &RefSetup) -> u64 {
         setup.max_bounces
     )
     .hash(&mut hasher);
-    if setup.triangles {
-        "triangles".hash(&mut hasher);
-    }
-    if gpu_wanted() {
-        "gpuref-v2".hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-/// Read one cached reference. `None` when the file is missing, short, or the wrong size.
-pub fn read_cached(path: &std::path::Path, width: u32, height: u32) -> Option<Reference> {
-    load(path, width, height)
-}
-
-/// Write one cached reference in the format [`render_cached`] reads back.
-pub fn write_cached(path: &std::path::Path, reference: &Reference) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
-    }
-    std::fs::write(path, save(reference))
-}
-
-/// `render`, reusing a trace saved under `dir` for the same scene, pose, size and
-/// bounce limit when it is at least as converged as asked; a new trace is saved there.
-/// The key hashes the scene's Debug text, so it holds within one build of the engine.
-pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
     // The specular layer is not stored and gpuref has no materials: trace here.
     if setup.specular || !setup.materials.is_empty() {
         return render(setup);
     }
+    // Analytic traces keep their old keys, so existing caches stay valid.
+    if setup.triangles {
+        "triangles".hash(&mut hasher);
+    }
+    // GPU traces (triangles, their own tracer) keep their own keys.
     let gpu = gpu_wanted();
-    let path = dir.join(format!("{:016x}.ref", cache_key(setup)));
-    if let Some(r) = read_cached(&path, setup.width, setup.height) {
+    if gpu {
+        "gpuref-v2".hash(&mut hasher);
+    }
+    let path = dir.join(format!("{:016x}.ref", hasher.finish()));
+    if let Some(r) = load(&path, setup.width, setup.height) {
         if r.noise <= setup.noise_target || r.spp >= setup.max_spp {
             return r;
         }
@@ -795,7 +771,7 @@ pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
     } else {
         render(setup)
     };
-    let _ = write_cached(&path, &r);
+    let _ = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, save(&r)));
     r
 }
 
