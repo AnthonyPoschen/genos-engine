@@ -1,6 +1,6 @@
 # 0040: A vehicle is domain forces on one chassis body
 
-Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, A1, steady aircraft lift, drag, and thrust, T1, gear on that aircraft, and S1, the thruster force, are in the step as trials. The orbit and sea are not in those trials.
+Status: **Proposed** (7 Nov 2026). This file does not accept itself. G1, the four-wheel ground payload, P28's slip curve on that chassis, A1, steady aircraft lift, drag, and thrust, T1, gear on that aircraft, and S1, the thruster force, are in the step as trials. The orbit and sea are not in those trials.
 
 Design for review. Ground, aircraft, and space are the domains this proposal would commit to, each with its own payload and its own fixture. Sea is written down as buoyancy and quadratic drag on that same body, and it is not a domain, not a type, and not a stage.
 
@@ -109,7 +109,7 @@ That field is not part of `Vehicle` under this proposal.
 - A thruster's world force is `orientation * normalize(local_direction) * throttle * max_force`. World torque is `(orientation * local_position) × force`. The same `velocity` and `angular_velocity` update as the suspension force consumes it. Gravity is `World.gravity`. The space payload does not zero it. The S1 fixture sets gravity to zero. Aircraft lift, drag, and thrust use that linear update with zero torque.
 - Domain code does not set `Body.spring` or `Body.motor`. A parked chassis can sleep under the existing rule. While it sleeps, the wheel-ray count is 0 and suspension force is 0. An aircraft with finite fields and `throttle > 0`, whose `throttle * thrust_max` is a finite non-zero force, wakes a sleeping chassis and the rest of its island before gravity and before the aircraft force. The same check holds it awake. A closed, zero, negative, or non-finite throttle does not wake and does not hold. A thruster with `throttle > 0` holds the chassis awake the way a motor does. A chassis that is already asleep wakes, with the rest of its island, when a live thruster has `throttle > 0` and a finite non-zero force. That wake runs before gravity and before the wrench, so the ignition step integrates both. A closed, zero, or non-finite thruster does not wake it.
 - Force order in the existing dynamic loop, after `apply_forces` and before `integrate_body`: aircraft, space, ground. Torque is added to `angular_velocity` before `implicit_gyroscopic`. Swept motion still integrates inside `ccd.rs`.
-- Wheel index order and thruster index order are the only orders. No `atan2` and no hash-map walk. Two runs in one process match `f32` bits of pose, velocity, and stored wheel lengths.
+- Wheel index order and thruster index order are the only orders. There is no hash-map walk. `atan2` does not order wheels, contacts, or actuators. P28 uses it inside one wheel for the slip angle from the direction of travel, `atan2(lateral speed, |forward speed|)`, so straight reverse at zero sideslip is not a lateral force. Two runs in one process match `f32` bits of pose, velocity, and stored wheel lengths.
 - A world with no vehicles does no vehicle work. The allocation bench stays green.
 
 ## Stages and fixtures
@@ -125,7 +125,7 @@ G1, A1, T1, and S1 are in the tree as trials. This ADR stays proposed. S2, the o
 | S2 | orbit | wide positions, which are not in `step` | the plan's `a_circular_orbit_at_1e7_metres_keeps_its_radius` |
 | Sea | none | a later ADR | none |
 
-P28 (tyre slip) and P29 (gearbox and open differential) stay in the plan, unchanged, and they wait on G1. This ADR does not restate them. Shape-cast wheels, anti-roll bars, and Pacejka stay out.
+P28 (tyre slip) is in the step on the G1 chassis as the plan's three-point curve. This ADR does not restate that curve. P29 (gearbox and open differential) stays in the plan and waits. Shape-cast wheels, anti-roll bars, and Pacejka stay out.
 
 ### G1. Four wheel rays
 
@@ -210,8 +210,11 @@ The implementing stage extends `debug/physics`. It does not add `genos-vehicle-v
 | A thruster misses force or torque | `max_force`, local position | `thruster` and the S1 bounds |
 | Gear that misses still pushes | `max_length` | `a_gear_that_misses_matches_the_aircraft`, `gear_miss` |
 | Two runs diverge | actuator order | the second world in each fixture |
+| A locked wheel does not slow the chassis | `mu_peak`, `radius`, wheel `omega` | `a_locked_wheel_slows_the_car_and_a_free_wheel_rolls`, `locked_wheel`, `tyre_contacts` |
+| A free wheel or a zero curve is braked | `omega`, `mu_peak` 0 | the free-wheel and zero-mu runs in that test |
+| Straight reverse gains a lateral speed | slip angle from the travel direction | `a_matched_roll_in_reverse_stays_straight_and_sideslip_restores` |
 
-`wheel_rays` and `vehicle_count` join the JSON line in the first commit that has a vehicle. Until that commit the line is unchanged. `--replay` and `--checkpoint` keep their current meaning.
+`wheel_rays` and `vehicle_count` join the JSON line in the first commit that has a vehicle. Until that commit the line is unchanged. P28 adds `tyre_contacts` on that line and mixes each wheel's `omega` into the hash. `--replay` and `--checkpoint` keep their current meaning.
 
 ## Networking
 
