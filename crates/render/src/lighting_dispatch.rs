@@ -136,7 +136,7 @@ const CTRL_DENOISE_ADAPTIVE: u32 = 1 << 20;
 const CTRL_DENOISE_VAR_SHIFT: u32 = 22;
 
 /// What a buffer rebuild depends on. Screen size is compared beside this.
-pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32, u32, u32) {
+pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32, u32, u32, u32, u32, u32) {
     let (cache, probes, rays, tile) = settings.buffer_class();
     (
         cache,
@@ -145,12 +145,13 @@ pub(crate) fn lighting_alloc_key(settings: &LightingSettings) -> (u32, u32, u32,
         tile,
         u32::from(settings.direct.refresh_frames > 1),
         u32::from(settings.denoiser.enabled && settings.denoiser.screen),
-        // Bit 0: reservoirs are allocated. Bit 1: a second slot for spatial reuse.
-        // Radius 0 is one slot (temporal only).
+        // Bit 0: the visibility mean is allocated. Bit 1: a second slot for
+        // spatial reuse. Radius 0 is one slot (temporal only).
         // Bit 2: ReSTIR DI reservoirs. Sized while nothing is in flight.
         u32::from(settings.lamp_pick.reuse())
             | (u32::from(settings.lamp_pick.radius > 0) << 1)
             | (u32::from(settings.restir_di) << 2),
+        settings.surface_cache.resolved_slots(),
     )
 }
 
@@ -411,7 +412,7 @@ pub(crate) fn light_groups(
         bias: 0,
     };
     let pixels = w.saturating_mul(h);
-    let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
+    let slots = settings.surface_cache.resolved_slots().div_ceil(64);
     // Preset high, this frame, not frozen and not a held frame: the list the
     // pipeline recorded before the settings struct existed, without the
     // removed screen-probe passes.
@@ -542,7 +543,7 @@ fn gated(
     let pixels = w.saturating_mul(h);
     let k = settings.direct.resolution_scale.max(1);
     let lit = w.div_ceil(k).saturating_mul(h.div_ceil(k));
-    let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
+    let slots = settings.surface_cache.resolved_slots().div_ceil(64);
     if !settings.gi.enabled || settings.bounce.count == 0 || k > 1 {
         out.pixel_only = 1;
     }
@@ -734,8 +735,8 @@ mod probe_still_tests {
 
     #[test]
     fn screen_denoise_launches_the_picture_and_hash_keeps_the_slots() {
-        let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
         let high = LightingSettings::preset(LightingPreset::High);
+        let slots = high.surface_cache.resolved_slots().div_ceil(64);
         assert!(high.denoiser.screen, "high defaults to the screen launch");
         let screen_groups = groups(&high, false, true);
         let picture: Vec<_> = screen_groups

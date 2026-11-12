@@ -493,6 +493,15 @@ pub struct AmbientSettings {
     pub dusk_intensity: f32,
 }
 
+/// Default surface-cache hash slots. Four rounds of the 65,536-entry base
+/// batch. Texels stay one size. `lighting_cache_slots.glsl` bakes the same
+/// default as specialization constant 1.
+pub const SURFACE_CACHE_SLOTS_DEFAULT: u32 = 262_144;
+/// Smallest hash table a non-zero `surface_cache.slots` may allocate.
+pub const SURFACE_CACHE_SLOTS_MIN: u32 = 4_096;
+/// Largest hash table `surface_cache.slots` may allocate.
+pub const SURFACE_CACHE_SLOTS_MAX: u32 = 1_048_576;
+
 /// Knobs of the surface light cache. The world cache is this same cache.
 ///
 /// A cache entry is one hashed surface patch. `slot` is only its storage index.
@@ -521,6 +530,11 @@ pub struct SurfaceCacheSettings {
     /// `0` keeps one sweep in eight. `1` through `16` trace one new 16-ray entry
     /// every `ceil(16 / rays)` frames, which is that many rays per frame.
     pub dormant_rays: u32,
+    /// Hash slots in the surface light cache. `0` is [`SURFACE_CACHE_SLOTS_DEFAULT`].
+    /// Any other value is rounded up to a power of two and clamped to
+    /// [`SURFACE_CACHE_SLOTS_MIN`]..=[`SURFACE_CACHE_SLOTS_MAX`] when the
+    /// table is allocated. The shader's specialization constant 1 is that count.
+    pub slots: u32,
     /// Key `surface_cache.sh_cells` (ADR 0039 stage 2). On for High and Medium.
     /// Off for Low and for presets with no world cache. The three product bits
     /// below do nothing unless this is on. 25 cm world
@@ -581,6 +595,22 @@ pub struct SurfaceCacheSettings {
     /// errors of the round's own per-cell differences. `0` drops that test (the
     /// 1 % gap alone, as before).
     pub drain_sigma: f32,
+}
+
+impl SurfaceCacheSettings {
+    /// Slot count the GPU allocates. `0` is [`SURFACE_CACHE_SLOTS_DEFAULT`].
+    /// Any other value is a power of two in
+    /// [`SURFACE_CACHE_SLOTS_MIN`]..=[`SURFACE_CACHE_SLOTS_MAX`].
+    #[must_use]
+    pub fn resolved_slots(self) -> u32 {
+        if self.slots == 0 {
+            return SURFACE_CACHE_SLOTS_DEFAULT;
+        }
+        let capped = self
+            .slots
+            .clamp(SURFACE_CACHE_SLOTS_MIN, SURFACE_CACHE_SLOTS_MAX);
+        capped.next_power_of_two().min(SURFACE_CACHE_SLOTS_MAX)
+    }
 }
 
 /// Surface cache switches the renderer uses when nothing sets `sc_flags`
@@ -882,6 +912,7 @@ impl LightingSettings {
                 firefly_sigma: 8.0,
                 ray_budget: 0,
                 dormant_rays: 0,
+                slots: 0,
                 sh_cells: true,
                 sh_texel_detail: true,
                 sh_texel_ray_cut: true,
@@ -959,6 +990,9 @@ impl LightingSettings {
             8.0
         };
         self.surface_cache.dormant_rays = self.surface_cache.dormant_rays.min(16);
+        if self.surface_cache.slots != 0 {
+            self.surface_cache.slots = self.surface_cache.resolved_slots();
+        }
         self.surface_cache.drain_sigma = if self.surface_cache.drain_sigma.is_finite() {
             self.surface_cache.drain_sigma.max(0.0)
         } else {
@@ -1294,6 +1328,11 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
+            "surface_cache.slots={}",
+            self.surface_cache.slots
+        );
+        let _ = writeln!(
+            out,
             "surface_cache.dormant_rays={}",
             self.surface_cache.dormant_rays
         );
@@ -1520,6 +1559,7 @@ impl LightingSettings {
                 self.surface_cache.firefly_sigma = sigma;
             }
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
+            "surface_cache.slots" => self.surface_cache.slots = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
             "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
@@ -1697,6 +1737,7 @@ impl LightingSettings {
         let blend = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_BLEND").ok();
         let firefly = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
         let ray_budget = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
+        let slots = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_SLOTS").ok();
         let dormant_rays = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
         let launch = resolve_lighting_launch(
             refs,
@@ -1710,6 +1751,7 @@ impl LightingSettings {
                 blend: blend.as_deref(),
                 firefly_sigma: firefly.as_deref(),
                 ray_budget: ray_budget.as_deref(),
+                slots: slots.as_deref(),
                 dormant_rays: dormant_rays.as_deref(),
             },
         )?;
@@ -1850,6 +1892,9 @@ impl LightingSettings {
         if let Some(budget) = launch.ray_budget {
             self.surface_cache.ray_budget = budget;
         }
+        if let Some(slots) = launch.slots {
+            self.surface_cache.slots = slots;
+        }
         if let Some(rays) = launch.dormant_rays {
             self.surface_cache.dormant_rays = rays;
         }
@@ -1923,6 +1968,7 @@ struct LightingLaunch {
     blend: Option<SurfaceCacheBlend>,
     firefly_sigma: Option<f32>,
     ray_budget: Option<u32>,
+    slots: Option<u32>,
     dormant_rays: Option<u32>,
     direct_specular: Option<bool>,
 }
@@ -1939,6 +1985,7 @@ struct LightingMirrors<'a> {
     blend: Option<&'a str>,
     firefly_sigma: Option<&'a str>,
     ray_budget: Option<&'a str>,
+    slots: Option<&'a str>,
     dormant_rays: Option<&'a str>,
 }
 
@@ -1951,6 +1998,7 @@ enum LightingKind {
     Blend,
     FireflySigma,
     RayBudget,
+    Slots,
     DormantRays,
     DirectSpecular,
 }
@@ -1964,6 +2012,7 @@ enum LightingFlag {
     Blend(SurfaceCacheBlend),
     FireflySigma(f32),
     RayBudget(u32),
+    Slots(u32),
     DormantRays(u32),
     DirectSpecular(bool),
 }
@@ -2038,6 +2087,9 @@ fn resolve_lighting_launch(
         ray_budget: chosen
             .ray_budget
             .or_else(|| env.ray_budget.and_then(|value| num_u32(value).ok())),
+        slots: chosen
+            .slots
+            .or_else(|| env.slots.and_then(|value| num_u32(value).ok())),
         dormant_rays: chosen
             .dormant_rays
             .or_else(|| env.dormant_rays.and_then(|value| num_u32(value).ok())),
@@ -2055,6 +2107,7 @@ struct ChosenLighting {
     blend: Option<SurfaceCacheBlend>,
     firefly_sigma: Option<f32>,
     ray_budget: Option<u32>,
+    slots: Option<u32>,
     dormant_rays: Option<u32>,
     direct_specular: Option<bool>,
 }
@@ -2070,6 +2123,7 @@ impl ChosenLighting {
             LightingFlag::Blend(blend) => self.blend = Some(blend),
             LightingFlag::FireflySigma(sigma) => self.firefly_sigma = Some(sigma),
             LightingFlag::RayBudget(count) => self.ray_budget = Some(count),
+            LightingFlag::Slots(count) => self.slots = Some(count),
             LightingFlag::DormantRays(count) => self.dormant_rays = Some(count),
             LightingFlag::DirectSpecular(on) => self.direct_specular = Some(on),
         }
@@ -2097,6 +2151,7 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "surface-cache-blend" => Some(LightingKind::Blend),
         "surface-cache-firefly-sigma" => Some(LightingKind::FireflySigma),
         "surface-cache-ray-budget" => Some(LightingKind::RayBudget),
+        "surface-cache-slots" => Some(LightingKind::Slots),
         "surface-cache-dormant-rays" => Some(LightingKind::DormantRays),
         "lighting-direct-specular" => Some(LightingKind::DirectSpecular),
         _ => None,
@@ -2147,6 +2202,9 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
                 .map_err(|_| format!("{flag} {value} is not a non-negative number"))?,
         ),
         LightingKind::RayBudget => LightingFlag::RayBudget(
+            num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
+        LightingKind::Slots => LightingFlag::Slots(
             num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
         ),
         LightingKind::DormantRays => LightingFlag::DormantRays(
@@ -2731,6 +2789,35 @@ mod launch_tests {
         settings.apply_launch(&clamped);
         assert_eq!(settings.surface_cache.dormant_rays, 16);
         assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
+    }
+
+    #[test]
+    fn surface_cache_slots_round_to_a_power_of_two() {
+        let mut settings = LightingSettings::default();
+        assert_eq!(settings.surface_cache.slots, 0);
+        assert_eq!(
+            settings.surface_cache.resolved_slots(),
+            SURFACE_CACHE_SLOTS_DEFAULT
+        );
+        let launch =
+            resolve_lighting_launch(&["--surface-cache-slots", "300000"], &empty()).unwrap();
+        settings.apply_launch(&launch);
+        settings.sanitize();
+        assert_eq!(settings.surface_cache.slots, 524_288);
+        let env = LightingMirrors {
+            slots: Some("1000"),
+            ..empty()
+        };
+        let from_env = resolve_lighting_launch(&[], &env).unwrap();
+        settings = LightingSettings::default();
+        settings.apply_launch(&from_env);
+        settings.sanitize();
+        assert_eq!(settings.surface_cache.resolved_slots(), SURFACE_CACHE_SLOTS_MIN);
+        let cli = resolve_lighting_launch(&["--surface-cache-slots=8192"], &env).unwrap();
+        settings.apply_launch(&cli);
+        settings.sanitize();
+        assert_eq!(settings.surface_cache.slots, 8192);
+        assert!(check_lighting_arg("--surface-cache-slots", Some("nope")).is_err());
     }
 
     #[test]
