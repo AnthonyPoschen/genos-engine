@@ -1,17 +1,32 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_is_multiple_of, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::undocumented_unsafe_blocks, reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_is_multiple_of,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "TODO(lint-2026-10-14): Vulkan or OS FFI; add a SAFETY comment. docs/LINT_RULES.md"
+)]
 
 //! Held device outputs. Each one stays open and writes an already mixed buffer.
 
 #[cfg(target_os = "linux")]
 pub use alsa::AlsaDevice;
-#[cfg(target_os = "windows")]
-pub use wasapi::WasapiDevice;
 #[cfg(target_os = "macos")]
 pub use core_audio::CoreAudioDevice;
+#[cfg(target_os = "windows")]
+pub use wasapi::WasapiDevice;
 
 const PERIOD_FRAMES: u32 = 480;
 const DEVICE_RATE: u32 = 48_000;
@@ -82,7 +97,8 @@ mod alsa {
                 if opened < 0 {
                     return Err(format!("ALSA open failed: {}", error_text(opened)));
                 }
-                let latency_us = super::PERIOD_FRAMES.saturating_mul(1_000_000) / super::DEVICE_RATE;
+                let latency_us =
+                    super::PERIOD_FRAMES.saturating_mul(1_000_000) / super::DEVICE_RATE;
                 let params = snd_pcm_set_params(
                     pcm,
                     S16_LE,
@@ -309,8 +325,8 @@ mod wasapi {
                     bits: 16,
                     extra: 0,
                 };
-                let duration = i64::from(super::PERIOD_FRAMES) * 10_000_000
-                    / i64::from(super::DEVICE_RATE);
+                let duration =
+                    i64::from(super::PERIOD_FRAMES) * 10_000_000 / i64::from(super::DEVICE_RATE);
                 let init: unsafe extern "system" fn(
                     *mut c_void,
                     u32,
@@ -320,15 +336,7 @@ mod wasapi {
                     *const WaveFormat,
                     *const Guid,
                 ) -> i32 = vcall(self.client, 3);
-                let initialized = init(
-                    self.client,
-                    0,
-                    0,
-                    duration,
-                    0,
-                    &format,
-                    std::ptr::null(),
-                );
+                let initialized = init(self.client, 0, 0, duration, 0, &format, std::ptr::null());
                 if initialized < 0 {
                     return self.fail(format!("IAudioClient::Initialize failed: {initialized}"));
                 }
@@ -374,7 +382,8 @@ mod wasapi {
         fn close(&mut self) {
             unsafe {
                 if !self.client.is_null() {
-                    let stop: unsafe extern "system" fn(*mut c_void) -> i32 = vcall(self.client, 11);
+                    let stop: unsafe extern "system" fn(*mut c_void) -> i32 =
+                        vcall(self.client, 11);
                     let _ = stop(self.client);
                 }
                 release(self.render);
