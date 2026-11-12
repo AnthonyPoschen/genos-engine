@@ -46,6 +46,13 @@ void main() {
         uint sx = (idx % lw) * scale;
         uint sy = (idx / lw) * scale;
         idx = sy * pc.dims.x + sx;
+    } else if (lighting_ray_fill_on() && lighting_dense()) {
+        // The cache-ray dispatch only. The picture dispatch is not dense, and
+        // taking this branch there would shade cache rays instead of pixels.
+        if (idx >= lighting_fill_u(0)) {
+            return;
+        }
+        idx = pixels + kept + idx;
     } else if (lighting_dense()) {
         // S70A: this round's light cache rays only, live entries only.
         // Bias is a pixel skip for the kept-hit dispatch. Applying it here

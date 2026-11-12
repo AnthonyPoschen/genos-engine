@@ -345,6 +345,16 @@ float lamp_pick_u(uint idx, uint pixels, uint kept, bool fill_hit, bool reuse_pi
         return lighting_unit(reuse_pix ? (idx ^ pc.params.w) : idx);
     }
     if (idx >= pixels + kept && !fill_hit) {
+        if (lighting_ray_fill_on()) {
+            uint r = ray - lighting_probe_rays();
+            uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
+            if (r < on) {
+                uint slot = ckeys.key[LIGHTING_CACHE_SLOTS + 1u + r];
+                uint key = slot < LIGHTING_CACHE_SLOTS ? ckeys.key[slot] : 0u;
+                return lighting_unit(key ^ (r * 0x85ebca6bu + 0x5bd1e995u));
+            }
+            return lighting_unit(lighting_cell_hash(pos, nrm) ^ (r * 0x85ebca6bu + 0x27d4eb2fu));
+        }
         uint r = ray - lighting_probe_rays();
         uint ent = r / LIGHTING_CACHE_RAYS;
         if (lighting_world_mode() == 3u && ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {

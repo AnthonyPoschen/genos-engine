@@ -691,3 +691,22 @@ fn experiment_keys_reject_bad_values() {
     settings.set_key("toggles", "none").unwrap();
     assert_eq!(settings.experiments.toggles, 0);
 }
+
+#[test]
+fn fill_budgets_follow_the_preset_and_round_trip() {
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert_eq!(high.surface_cache.fill.budget, 100_000);
+    assert_eq!(high.surface_cache.fill.tile, 8);
+    assert_eq!(high.surface_cache.fill.warmup_rays, 16);
+    let medium = LightingSettings::preset(LightingPreset::Medium);
+    assert_eq!(medium.surface_cache.fill.budget, 50_000);
+    assert_eq!(medium.surface_cache.fill.tile, 16);
+    let low = LightingSettings::preset(LightingPreset::Low);
+    assert_eq!(low.surface_cache.fill.budget, 25_000);
+    assert_eq!(low.surface_cache.fill.tile, 32);
+    let mut edited = high;
+    edited.set_key("surface_cache.fill_budget", "1000").unwrap();
+    let parsed = LightingSettings::parse(&edited.to_text()).unwrap();
+    assert_eq!(parsed.surface_cache.fill.budget, 1000);
+    assert!((parsed.surface_cache.fill.lod_near - 8.0).abs() < 1.0e-4);
+}

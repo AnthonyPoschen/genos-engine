@@ -433,14 +433,23 @@ Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-
 
 ### Tile fill
 
-**Tile fill**: choosing screen tiles and tracing paths into the surface cache from the pixels that need samples. Off unless `fill-ref --tile-fill on`. The live cache does not run it yet.
+**Tile fill**: the scheduler that spends `fill_budget` rays every world-cache round. About one need-weighted pick per screen tile, and the rest on a clipmap around the player. The world cache is the only store. Texels are its 12.5 cm detail.
 Role: SCHED · Literature: Lumen World Cache fill; SHaRC update pass · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
-**Pick**: one path from one pixel in a tile. The pixel is drawn by need, not uniformly.
+**Pick**: one ray from one world-cache entry, chosen by need, or one clipmap ray.
 Role: SAMPLE · Literature: ReSTIR candidate; Lumen's per-tile pixel · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
 
-**Fill budget**: the ray ceiling for a frame. It is a ceiling, not a target. The default in the checker is 1,000,000.
+**Fill budget**: `fill_budget`, the ray count one cache round traces. It is spent in full. High starts at 100,000. `0` traces no cache rays. `surface_cache.ray_budget` stays the ceiling for the other modes.
 Role: SCHED · Literature: Lumen's fixed update budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.1
+
+**Clipmap**: player-centred cells. 25 cm inside `fill_lod_near` (8 m), then double until `fill_cell_max` (4 m), then that size out to `fill_far`. Screen texels stay 12.5 cm.
+Role: STORE · Literature: clipmap LOD · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Fill leash**: a stored cell stays until the player is `fill_leash` times its create radius past it. New cells use the create radius, shifted ahead by `fill_look_ahead`. The two radii stop a boundary from creating and dropping the same cell.
+Role: SCHED · Literature: hysteresis band · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Off-screen floor**: `fill_offscreen_floor` (0.25) is the share of `fill_budget` the screen cannot take. That share ranks resident clipmap cells by closeness times remaining error. `fill_far_share` of the budget is reserved for cells at `fill_cell_max`. Rays the resident set does not take discover surfaces.
+Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
 Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
@@ -451,11 +460,14 @@ Role: SAMPLE · Literature: ReSTIR GI reconnection shift (Ouyang et al., HPG 202
 **Share gate**: a named reason a neighbour gets nothing: plane, normal, axis, near hit, own count, stamp, or the weight clamp.
 Role: VIS · Literature: ReSTIR spatial depth and normal test · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.2
 
-**Virtual tile**: an off-screen direction that stands in for a pixel so the same need applies behind the camera. The checker does not trace them; stage F3 does.
-Role: SCHED · Literature: the engine's scout rays · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.5
+**Virtual tile**: an off-screen direction. F2 traces the clipmap. Water-filling those directions is F3.
+Role: SCHED · Literature: Lumen off-screen page update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.5
 
-**Need**: `prox * max(under, stale, disagree)`. It is how a pixel asks for picks.
+**Need**: closeness times remaining error. Closeness is `1 / max(distance, fill_prox_min)`. Remaining error is the standard error over the mean, past `fill_error_target`. `fill_change_weight * lambda` is the measured-change term. Lambda is 0 until F3.
 Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Fill check rate**: `fill_check_rate`, one same-seed ray per this many texels. Named now. F2 does not trace them.
+Role: SCHED · Literature: A-SVGF gradient check · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
 ### Historical (do not reuse)
 

@@ -105,7 +105,7 @@ fn ckeys_bytes() -> u64 {
     // (`lighting_gpu`). This dispatch is 1x1 (`dims` in the push constant),
     // and a published corner writes eight words at pixel 0.
     const PIXELS: u64 = 1;
-    (super::lighting_sh_keys_words() + PIXELS * 8) * 4
+    super::lighting_fill_keys_words(PIXELS) * 4
 }
 
 impl Gpu {
