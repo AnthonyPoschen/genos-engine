@@ -409,6 +409,13 @@ pub(crate) struct Lighting {
     /// Last collected frame (one frame behind the one just submitted).
     last_ms: [f64; BUCKETS],
     last_dispatches: [u32; BUCKETS],
+    /// Sum of ReSTIR pass milliseconds, and how many frames that sum holds.
+    /// Order: initial, temporal, spatial, prepare, shade. Shade is the direct
+    /// dispatch, so its visibility ray is inside that number.
+    restir_ms_sum: [f64; 5],
+    restir_ms_frames: u32,
+    /// Flight slot whose host stats were copied on the last submitted frame.
+    stats_slot: usize,
     /// Bloom plus the display pass. Zero when timestamps are off.
     hdr_ms: f64,
     /// Query index of that pair. `u32::MAX` means this slot did not stamp it.
@@ -677,6 +684,9 @@ impl Default for Lighting {
             frame_prefill: [false; 2],
             last_ms: [0.0; BUCKETS],
             last_dispatches: [0; BUCKETS],
+            restir_ms_sum: [0.0; 5],
+            restir_ms_frames: 0,
+            stats_slot: 0,
             hdr_ms: 0.0,
             hdr_query: [u32::MAX; 2],
             ctrl_bytes: [0; 64],
@@ -4882,6 +4892,7 @@ impl Gpu {
                 1,
                 &region as *const Region as *const u8,
             );
+            self.lighting.stats_slot = slot;
             // The dirty-list length. The same barrier covers the compute writes.
             // One host buffer: read it only after the device is idle.
             if self.lighting.cache_full && !self.lighting.compose_host.buffer.is_null() {
@@ -6137,6 +6148,92 @@ fn reachable_from_main(bytes: &[u8]) -> Vec<String> {
 
 include!("lighting_dispatch.rs");
 
+/// One frame of surface-cache scheduling counters (`gstats`).
+#[derive(Clone, Copy, Debug)]
+pub struct CacheRound {
+    /// Occupied cache slots.
+    pub live: u32,
+    /// Cells claimed this round.
+    pub claimed: u32,
+    /// Histogram bucket the scheduler cut below. Zero means nothing was cut.
+    pub thr: u32,
+    /// Cache rays traced (texels and world cells, not the scout count).
+    pub rays: u32,
+    /// Entries the ranking marked due.
+    pub due: u32,
+    /// Entries that waited (not due, or a settle turn).
+    pub waiting: u32,
+    /// Scout rays scheduled this round. Zero when the scout was not due.
+    pub scouts: u32,
+}
+
+impl CacheRound {
+    fn from_words(words: &[u32; LIGHTING_STATS_WORDS]) -> Self {
+        Self {
+            live: words[2],
+            claimed: words[8],
+            thr: words[12],
+            rays: words[16],
+            due: words[17],
+            waiting: words[18],
+            scouts: words[19],
+        }
+    }
+}
+
+/// The shade's chosen reservoir and the visibility mean for one pixel.
+///
+/// `mean_kind` 3 is the product mean (`LAMP_GEO_RESTIR_MEAN`). `mean_rgb` is
+/// that mean's irradiance. `restir_w` is `w_sum / (M * target)` from the
+/// spatial scratch the shade reads.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectSample {
+    pub pixel: u32,
+    pub restir_lamp: u32,
+    pub restir_w: f32,
+    pub restir_m: u32,
+    pub restir_target: f32,
+    pub mean_kind: u32,
+    pub mean_m: u32,
+    pub mean_lamp: u32,
+    pub mean_vis: bool,
+    pub mean_rgb: [f32; 3],
+}
+
+impl DirectSample {
+    fn empty(pixel: u32) -> Self {
+        Self {
+            pixel,
+            restir_lamp: 0,
+            restir_w: 0.0,
+            restir_m: 0,
+            restir_target: 0.0,
+            mean_kind: 0,
+            mean_m: 0,
+            mean_lamp: 0,
+            mean_vis: false,
+            mean_rgb: [0.0; 3],
+        }
+    }
+}
+
+/// `LAMP_GEO_RESTIR_MEAN` in `lighting_lamp_pick.glsl`.
+const LAMP_GEO_RESTIR_MEAN: u32 = 3;
+
+fn f32_from_u32(v: u32) -> f32 {
+    let mut acc = 0.0f32;
+    let mut bit = 1.0f32;
+    let mut n = v;
+    while n != 0 {
+        if n & 1 == 1 {
+            acc += bit;
+        }
+        bit += bit;
+        n >>= 1;
+    }
+    acc
+}
+
 impl Gpu {
     /// Hash lookup of the surface-cache cells under `queries`, after the device is idle.
     pub(crate) fn read_cache_cells(
@@ -6184,6 +6281,146 @@ impl Gpu {
             out.push(crate::cache_probe::stored_cell(*query, hit, records));
         }
         Ok(out)
+    }
+
+    /// Mean of the collected ReSTIR stamps. Zeros until a timestamped frame lands.
+    pub(crate) fn lighting_restir_ms(&self) -> [f64; 5] {
+        let frames = self.lighting.restir_ms_frames;
+        if frames == 0 {
+            return [0.0; 5];
+        }
+        let denom = f64::from(frames);
+        let mut out = [0.0; 5];
+        for (i, sum) in self.lighting.restir_ms_sum.into_iter().enumerate() {
+            out[i] = sum / denom;
+        }
+        out
+    }
+
+    /// Latest cache-round counters. The world round wins when it wrote rays or
+    /// scouts; otherwise the frame copy from the last submitted slot.
+    pub(crate) fn lighting_cache_round(&mut self) -> Result<CacheRound, String> {
+        self.idle_device();
+        let mut best: Option<CacheRound> = None;
+        let mut take = |words: [u32; LIGHTING_STATS_WORDS]| {
+            let round = CacheRound::from_words(&words);
+            let rank = round.rays.saturating_add(round.scouts);
+            let prev = best.map_or(0, |item| item.rays.saturating_add(item.scouts));
+            if best.is_none() || rank > prev {
+                best = Some(round);
+            }
+        };
+        if !self.lighting.world_stats.memory.is_null() {
+            if let Ok(words) = self.read_stats16(self.lighting.world_stats.memory) {
+                take(words);
+            }
+        }
+        if let Some(buf) = self.lighting.stats.get(self.lighting.stats_slot) {
+            if !buf.memory.is_null() {
+                if let Ok(words) = self.read_stats16(buf.memory) {
+                    take(words);
+                }
+            }
+        }
+        best.ok_or_else(|| "lighting stats were not readable".to_string())
+    }
+
+    /// Scratch reservoir and the visibility mean for each pixel.
+    pub(crate) fn read_direct_samples(
+        &mut self,
+        pixels: &[u32],
+    ) -> Result<Vec<DirectSample>, String> {
+        if pixels.is_empty() {
+            return Ok(Vec::new());
+        }
+        if pixels.len() > 8 {
+            return Err("direct sample read is limited to 8 pixels".to_string());
+        }
+        self.idle_device();
+        let width = self.lighting.restir_w;
+        let height = self.lighting.restir_h;
+        let count = width.saturating_mul(height);
+        if count == 0
+            || self.lighting.restir_buf.buffer.is_null()
+            || self.lighting.lamp_res.buffer.is_null()
+        {
+            return Err("direct reservoirs are not allocated".to_string());
+        }
+        let header = self.copy_device_range(self.lighting.restir_buf.buffer, 0, 256)?;
+        let words = u32_words(&header);
+        let scratch = words.get(6).copied().unwrap_or(0);
+        let mut out = Vec::with_capacity(pixels.len());
+        for &pixel in pixels {
+            if pixel >= count {
+                return Err(format!("pixel {pixel} is outside {width}x{height}"));
+            }
+            out.push(self.read_one_direct(pixel, scratch, count)?);
+        }
+        Ok(out)
+    }
+
+    fn read_one_direct(&self, pixel: u32, scratch: u32, count: u32) -> Result<DirectSample, String> {
+        let mut sample = DirectSample::empty(pixel);
+        let scratch_at = u64::from(scratch)
+            .saturating_mul(4)
+            .saturating_add(u64::from(pixel).saturating_mul(16));
+        if scratch != 0 && scratch_at.saturating_add(16) <= self.lighting.restir_buf.size {
+            let bytes = self.copy_device_range(self.lighting.restir_buf.buffer, scratch_at, 16)?;
+            let words = u32_words(&bytes);
+            if words.len() >= 4 && words[2] > 0 {
+                let target = f32::from_bits(words[3]);
+                sample.restir_lamp = words[0];
+                sample.restir_m = words[2];
+                sample.restir_target = target;
+                if target > 0.0 {
+                    let sum = f32::from_bits(words[1]);
+                    let denom = f32_from_u32(words[2]) * target;
+                    if denom > 0.0 {
+                        sample.restir_w = sum / denom;
+                    }
+                }
+            }
+        }
+        let stride = u64::from(count).saturating_mul(32);
+        let mut best_m = 0u32;
+        let mut found = false;
+        for slot in 0..2u32 {
+            let at = u64::from(slot)
+                .saturating_mul(stride)
+                .saturating_add(u64::from(pixel).saturating_mul(32));
+            if at.saturating_add(32) > self.lighting.lamp_res.size {
+                break;
+            }
+            let bytes = self.copy_device_range(self.lighting.lamp_res.buffer, at, 32)?;
+            let words = u32_words(&bytes);
+            if words.len() < 8 {
+                continue;
+            }
+            let kind = words[6];
+            if kind != LAMP_GEO_RESTIR_MEAN {
+                if !found {
+                    sample.mean_kind = kind;
+                }
+                continue;
+            }
+            let mean_m = words[2];
+            if found && mean_m < best_m {
+                continue;
+            }
+            found = true;
+            best_m = mean_m;
+            let pack = words[0];
+            sample.mean_kind = kind;
+            sample.mean_m = mean_m;
+            sample.mean_lamp = pack & 0xffff;
+            sample.mean_vis = (pack & 0x1_0000) != 0;
+            sample.mean_rgb = [
+                f32::from_bits(words[1]),
+                f32::from_bits(words[3]),
+                f32::from_bits(words[7]),
+            ];
+        }
+        Ok(sample)
     }
 
     fn push_cell_regions(&self, slot: u32, regions: &mut Vec<(u64, u64)>) -> Result<(), String> {

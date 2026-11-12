@@ -657,6 +657,36 @@ impl Renderer {
         self.gpu.lighting.last_ms
     }
 
+    /// Mean GPU milliseconds of the ReSTIR direct passes.
+    ///
+    /// Order: initial (candidates; temporal is fused here unless the passes are
+    /// split), temporal, spatial, prepare, shade. Shade is the direct dispatch
+    /// and includes that pixel's visibility ray. Zero until a timestamped frame
+    /// has been collected.
+    pub fn lighting_restir_ms(&self) -> [f64; 5] {
+        self.gpu.lighting_restir_ms()
+    }
+
+    /// Surface-cache counters from the latest world round, or the frame copy
+    /// when that round has not written yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when neither stats buffer can be mapped.
+    pub fn read_cache_round(&mut self) -> Result<CacheRound, String> {
+        self.gpu.lighting_cache_round()
+    }
+
+    /// ReSTIR scratch and the visibility mean for a few screen pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reservoirs are not allocated, a pixel is
+    /// outside the frame, or the device rejects the copy.
+    pub fn read_direct_samples(&mut self, pixels: &[u32]) -> Result<Vec<DirectSample>, String> {
+        self.gpu.read_direct_samples(pixels)
+    }
+
     /// `--gi-metrics` is on, so pass times and work counters are recorded.
     pub fn gi_metrics_enabled(&self) -> bool {
         self.gpu
@@ -4376,6 +4406,17 @@ impl Gpu {
                         ];
                         let sum = parts[0] + parts[1] + parts[2];
                         bucket_ms[B_DIRECT as usize] += sum;
+                        let prepare_ms = if prepare_got == 0 {
+                            part(prepare_raw[0], prepare_raw[1])
+                        } else {
+                            0.0
+                        };
+                        let frame_parts = [parts[0], parts[1], parts[2], prepare_ms, shade_ms];
+                        for (i, ms) in frame_parts.into_iter().enumerate() {
+                            self.lighting.restir_ms_sum[i] += ms;
+                        }
+                        self.lighting.restir_ms_frames =
+                            self.lighting.restir_ms_frames.saturating_add(1);
                         if times.print {
                             times.lighting[3] += sum;
                             times.lighting_bucket[B_DIRECT as usize] += sum;
