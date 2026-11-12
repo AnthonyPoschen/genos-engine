@@ -10,13 +10,10 @@
 // Each slot is two uvec4s: the reservoir, then depth along that frame's
 // forward, the packed normal, the record kind, and the shaded direct.
 // Kind 2 is the exact sum, kind 0 a noise-gate sample, kind 3 the stored
-// ReSTIR mean. The high 8 bits of `m` are the hold count. Deviations from
+// ReSTIR mean. The sample count is the low 24 bits of `m`. Deviations from
 // the papers are listed in docs/systems/lighting/README.md. The CPU twin
 // of the checker merge stays in crates/render/src/lamp_pick.rs.
 
-// A settled exact record carries this in the high 8 bits of `m`, so the next
-// quiet held frame takes the S78J early-out. Matches LAMP_PICK_HOLD_FRAMES.
-const uint LIGHTING_DIRECT_HOLD = 32u;
 // At this many positive point lamps, or fewer, the noise-gate reuse row
 // shades the sum. Production pixels do not: they take the ReSTIR sample.
 // Matches EXACT_LIT_LAMPS.
@@ -84,10 +81,6 @@ LampReservoir lamp_res_empty() {
     r.m = 0u;
     r.target = 0.0;
     return r;
-}
-
-uint lamp_res_frames(LampReservoir r) {
-    return r.m >> 24u;
 }
 
 uint lamp_res_samples(LampReservoir r) {

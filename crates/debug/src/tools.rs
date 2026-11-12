@@ -1059,6 +1059,7 @@ impl Tools {
                     ("camera", camera_value(ctx.camera)),
                     ("stable", Value::Bool(stats.settled)),
                     ("still_frames", num(stats.still_frames as f64)),
+                    ("cache_rays", num(stats.cache_rays as f64)),
                     (
                         "picture_settled",
                         Value::Bool(ctx.renderer.picture_settled()),

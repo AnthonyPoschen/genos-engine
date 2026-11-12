@@ -124,36 +124,22 @@ void main() {
         // A small sun step still traces. Reusing last frame's direct would
         // leave the sun and its shadow a frame behind.
         if (pix_sig != 0u && floatBitsToUint(pv[c]) == pix_sig && lighting_pix_quiet() && !lighting_sun_small()) {
-            // Mode 4 holds only an exact sum (kind 2) once the view is still.
-            // The record goes into this frame's slot only. Writing the other slot
-            // races the pixel that owns it. The next frame reads this slot.
             // Bit 21 with bits 18-20 clear is the production reservoir, including
             // mode off and mode hits. A quiet view must not return last frame's
             // colour and skip that sample. The signature hold is the success
-            // path: bit 19 is clear on a frame whose prepare bound the reservoir,
-            // so the clear below does not run. Bit 19 is a failed prepare, or
-            // restir off on a mode that used to sample. It clears the signature
-            // hold for every mode except 4, so mode hits shades the sum instead
-            // of the previous reservoir colour. Mode 4 keeps a stored exact
-            // record (the quiet labelled-exact hold). A stored exact record
-            // cannot survive into a reservoir frame.
+            // path for a non-exact mode: bit 19 is clear on a frame whose
+            // prepare bound the reservoir, so the clear below does not run.
+            // Bit 19 is a failed prepare, or restir off on a mode that used to
+            // sample. It clears the signature hold, so mode hits shades the sum
+            // instead of the previous reservoir colour. Mode 4 retraces.
             bool restir_product = ((pc.lamp.y >> 21u) & 1u) != 0u
                 && ((pc.lamp.y >> 18u) & 7u) == 0u;
+            // Mode 4 retraces every quiet frame. A 32-frame exact hold returned
+            // last frame's colour and froze the grain. ReSTIR (bit 21, bits
+            // 18-20 clear) never takes this signature hold.
             bool hold = !restir_product && pc.lamp.x != 4u;
-            // Hold off: the noise gate grades the random path on a still view.
-            // The exact record would return here with zero shadow rays.
-            if (!restir_product && pc.lamp.x == 4u && lighting_view_held() && !lamp_pick_hold_off()) {
-                LampReservoir held = lamp_res_load(idx, lamp_res_slot_prev());
-                uvec4 geo = lamp_geo_load(idx, lamp_res_slot_prev());
-                hold = geo.z == LAMP_GEO_EXACT && lamp_res_frames(held) >= LIGHTING_DIRECT_HOLD;
-                if (hold) {
-                    lamp_res_store(idx, lamp_res_slot_now(), held);
-                    lamp_geo_store(idx, lamp_res_slot_now(), geo);
-                }
-            }
-            // Mode 4 is the exact-record hold. Bit 19 must not cancel it: a
-            // restir-off reuse frame sets that bit, and clearing the hold
-            // retraced the full sum on every quiet frame.
+            // Bit 19 is a failed prepare, or restir off on a mode that used to
+            // sample. It clears the signature hold. Mode 4 does not hold.
             if (hold && pc.lamp.x != 4u && ((pc.lamp.y >> 19u) & 1u) != 0u) {
                 hold = false;
             }
@@ -506,6 +492,13 @@ void main() {
         gbuf_material(idx, base, rough, metal);
     }
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+#ifdef GENOS_RESTIR_DI
+        // The reservoir replaces near point lamps. Skip the load. The sun
+        // (k < suns) and the flame (k == suns + near) stay in this loop.
+        if (restir_pix && k >= list.suns.y && k < list.suns.y + list.near.y) {
+            continue;
+        }
+#endif
         // The reservoir samples every point lamp. The cap stays on the labelled
         // exact walk and the hit picker, which do not set restir_pix.
         bool cap_lamps = true;
@@ -521,14 +514,6 @@ void main() {
         if (view_only != LAMP_ALL && lamp_list_index(list, k) != view_only) {
             continue;
         }
-        // A pixel reservoir already chose its point lamps. Skip the rest so the
-        // shade walks the sample count, not the lamp list. The exact sum does not.
-#ifdef GENOS_RESTIR_DI
-        // ReSTIR replaces the point-lamp sum. This loop keeps the sun and the flame.
-        if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y) {
-            continue;
-        }
-#endif
         if (lamp_new && !shade_exact && !sun_lamp && chosen_n > 0u) {
             bool chosen = false;
             [[dont_unroll]] for (uint s = 0u; s < chosen_n; s++) {
@@ -923,15 +908,14 @@ void main() {
         }
     }
     if (idx < pixels && pc.lamp.x == 4u && lamp_pix) {
-        // The exact sum is the integral, so a quiet pixel holds it instead of
-        // a 32-frame mean (that mean was the frozen grain). A ReSTIR sample
-        // keeps frames at 0 so it cannot take the early-out.
+        // The exact sum is the integral. A quiet pixel retraces it. Stamping a
+        // hold count in the high byte of m used to skip the next frames.
         uint slot = lamp_res_slot_now();
         if (shade_exact) {
             LampReservoir cur;
             cur.lamp = 0u;
             cur.w_sum = uintBitsToFloat(pix_sig);
-            cur.m = (LIGHTING_DIRECT_HOLD << 24u) | 1u;
+            cur.m = 1u;
             cur.target = 0.0;
             uvec4 geo = uvec4(floatBitsToUint(max(lamp_pick_depth(pos), LAMP_PICK_DEPTH_FLOOR)), lighting_pack_normal(n), LAMP_GEO_EXACT, lighting_pack_rgb9e5(e));
             lamp_res_store(idx, slot, cur);
@@ -993,7 +977,7 @@ void main() {
             // this frame's direct on every pixel. The block is not a GI dirty.
             // Flag off: same mark.
             bool sun_only = lighting_sun_small() && glow == prev_e && pix_sig == prev_sig;
-            if (!sun_only && (glow != prev_e || packed != prev_d || pix_sig != prev_sig)) {
+            if (!sun_only && (glow != prev_e || lighting_compose_direct_moved(packed, prev_d) || pix_sig != prev_sig)) {
                 lighting_compose_mark_px(idx);
             }
         }

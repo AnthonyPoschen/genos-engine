@@ -120,7 +120,7 @@ Role: SAMPLE · Literature: GIBS surfel rays; DDGI probe rays
 **Compact**: rebuilds the live-entry list each round and frees entries nobody has read.
 Role: SCHED · Literature: GIBS recycling heuristic (§1.4) · More detail: [`lighting_compact.comp`](../../crates/render/shaders/lighting_compact.comp)
 
-**Trickle**: the lowest relight tier. Settled entries that are still slightly inconsistent get an occasional relight.
+**Trickle**: an occasional relight of a matched cell whose change is under the trickle threshold. It is one 16-ray entry on the main list when that cell is due. A cell that has not matched is not on this tier.
 Role: SCHED · Literature: GIBS variance-driven ray count (§1.12, partial) · More detail: S65A in [`lighting_compact.comp`](../../crates/render/shaders/lighting_compact.comp); S78H
 
 **Pre-fill**: gives a newly seen entry a usable value on the frame it appears (coarse-to-fine), so the picture never shows missing light. Required by rule.
@@ -189,6 +189,9 @@ Role: DENOISE · Literature: variance-guided SVGF · More detail: `denoise_varia
 
 **Screen denoise**: the picture-sized launch of the denoiser (`denoise_launch=screen`). Preset high uses it. The other presets keep `hash`. `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
 Role: DENOISE · Literature: Lumen/GIBS screen denoise; the kernel is still SVGF (Schied 2017) · More detail: [`lighting_screen.comp`](../../crates/render/shaders/lighting_screen.comp); S80
+
+**Still refresh**: on a camera that has not moved, a texel with 16 sets keeps its wavelet and its pushed field for 32 frames, a world cell does not mark its screen rect, a direct sample within one percent does not mark its block, and compose reuses the bounce stored on the last full walk. Frame 32 applies the mean, redraws, and stores a new bounce. A camera move does not take the hold.
+Role: DENOISE · Literature: SVGF re-filters every pixel every frame; this is the departure · More detail: [`lighting_cache.glsl`](../../crates/render/shaders/lighting_cache.glsl) `lighting_still_refresh`
 
 **Visibility / leak test**: stops light passing through thin walls. The neighbour read rejects a cell whose stored normal faces the other way and a cell more than half a cell off the query plane. A same-facing surface closer than half a cell is not rejected. Depth moments are not used.
 Role: VIS · Literature: GIBS depth moments + Chebyshev (§1.10); DDGI Chebyshev visibility · More detail: [GIBS.md §1.10](research/GIBS.md)

@@ -52,7 +52,7 @@ fn lighting_dg_guards_reserved_words() {
 /// counts. It leaves 8 for that follow-up. The restir counters stay off all three.
 const PARENT_DIAG: [u32; 3] = [8, 38, 39];
 
-const DIAG_NAMES: [(&str, u32); 9] = [
+const DIAG_NAMES: [(&str, u32); 10] = [
     ("LIGHTING_DIAG_PROBE_SKIP", 0),
     ("LIGHTING_DIAG_PROBE_EVAL", 1),
     ("LIGHTING_DIAG_PROBE_READS", 2),
@@ -61,6 +61,7 @@ const DIAG_NAMES: [(&str, u32); 9] = [
     ("LIGHTING_DIAG_SCREEN_LIST_COARSE", 40),
     ("LIGHTING_DIAG_SCREEN_LIST_FINE", 41),
     ("LIGHTING_DIAG_UNDER_TRUSTED", 57),
+    ("LIGHTING_DIAG_FILTER_HEAVY", 60),
     ("LIGHTING_DIAG_SCREEN_CHANGED", 61),
 ];
 

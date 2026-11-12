@@ -215,10 +215,6 @@ pub const LAMP_PICK_CANDIDATES_HIGH: u32 = 8;
 /// Previous-frame neighbour radius, in pixels, for Medium and High.
 /// Low stays at 0 (temporal only, one reservoir).
 pub const LAMP_PICK_SPATIAL_RADIUS: u32 = 16;
-/// Hold count written into an exact reservoir so the next quiet frame skips it.
-/// The shader constant `LIGHTING_DIRECT_HOLD` is this value.
-pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
-
 /// Which points sample point lamps instead of tracing every one.
 ///
 /// The sun is never a sample. It is traced on its own. With `restir_di` on,

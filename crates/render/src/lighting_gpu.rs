@@ -275,6 +275,8 @@ pub(crate) struct Lighting {
     draining: bool,
     /// The last read cache round's batch entries, 16 rays each (stats word 147).
     round_entries: u32,
+    /// Cache rays that round actually traced (stats word 16). Scouts are not in this.
+    cache_rays: u32,
     /// Occluders (index in the scene's list) that moved in the last
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
@@ -355,6 +357,9 @@ pub(crate) struct Lighting {
     compose_kind: u8,
     /// Compose dispatches recorded for that frame. The sun path is one.
     compose_dispatches: u32,
+    /// Maintenance and the lattice drain ran this frame. A held camera skips
+    /// both except on frame 32. The picture compile still runs.
+    maint_ran: bool,
     /// Point lamps only. `None` until the first frame, so a still open does not
     /// look like a lamp that just stopped.
     lamp_key: Option<u64>,
@@ -407,6 +412,25 @@ pub(crate) struct Lighting {
     /// Last collected frame (one frame behind the one just submitted).
     last_ms: [f64; BUCKETS],
     last_dispatches: [u32; BUCKETS],
+    /// Sum of ReSTIR pass milliseconds, and how many frames that sum holds.
+    /// Order: initial, temporal, spatial, prepare, shade. Shade is the direct
+    /// dispatch, so its visibility ray is inside that number.
+    restir_ms_sum: [f64; 5],
+    restir_ms_frames: u32,
+    /// Last collected frame, same order as `restir_ms_sum`. Zero until one lands.
+    restir_ms_last: [f64; 5],
+    /// How many frames have written `last_ms`. The CSV writes one row per step.
+    pass_samples: u32,
+    /// Last collected frame by dispatch pass id. Index 6 is the cache relight,
+    /// index 9 is the SH prep. The cache bucket sums both. The `LIGHTING_MS`
+    /// line is nine pass ids, so pass 9 is not in that total.
+    pass_id_ms: [f64; 10],
+    /// Bottom-of-pipe lighting span of the last collected frame, the `lighting`
+    /// column of `GPU_MS`. Pass 9 and the prepare stamp sit in this span and
+    /// outside the nine-wide `LIGHTING_MS` total.
+    span_ms: f64,
+    /// Flight slot whose host stats were copied on the last submitted frame.
+    stats_slot: usize,
     /// Bloom plus the display pass. Zero when timestamps are off.
     hdr_ms: f64,
     /// Query index of that pair. `u32::MAX` means this slot did not stamp it.
@@ -435,6 +459,18 @@ pub struct LightingAtrousStats {
     pub coarse_pixels: u32,
     /// Fine pixels whose input moved more than 2% from the stored field.
     pub changed_pixels: u32,
+    /// Variance kernels that did not take the dirty early-out. A held camera
+    /// leaves a texel with 16 sets out of this count until the 32-frame
+    /// backstop. The count is the texels still being filtered.
+    pub filter_heavy: u32,
+    /// Screen-list cells written by a full rebuild this frame. Zero when the
+    /// held list was reused.
+    pub list_rebuilt: u32,
+    /// Cells appended onto a reused screen list this frame.
+    pub list_appended: u32,
+    /// Pixels whose compose walked the world cache (`diag[0]`). A held frame
+    /// reuses the stored bounce and this stays near zero.
+    pub cache_walks: u32,
 }
 
 /// Shadow rays traced last frame, and how pixels shaded.
@@ -498,6 +534,13 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         changed_pixels: w[85],
         screen_pixels: w[86],
         coarse_pixels: w[87],
+        // diag[60] is word 84 (diag[0] is word 24).
+        filter_heavy: w[84],
+        // diag[40] and diag[41]: the screen list rebuilt this frame, and the cells appended.
+        list_rebuilt: w[64],
+        list_appended: w[65],
+        // diag[0] is word 24.
+        cache_walks: w[24],
     }
 }
 
@@ -513,6 +556,9 @@ pub struct SettleStats {
     pub draining: bool,
     /// The last read cache round's batch entries (16 rays each), a few frames old.
     pub round_entries: u32,
+    /// Cache rays traced that round (texels and world cells, not scouts), a few
+    /// frames old. Zero means the round dispatched no cache rays.
+    pub cache_rays: u32,
 }
 
 impl Default for Lighting {
@@ -596,6 +642,7 @@ impl Default for Lighting {
             light_quiet: 0,
             draining: false,
             round_entries: 0,
+            cache_rays: 0,
             movers: std::collections::BTreeMap::new(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
@@ -638,6 +685,7 @@ impl Default for Lighting {
             sun_bounce_live: false,
             compose_kind: 0,
             compose_dispatches: 0,
+            maint_ran: false,
             lamp_key: None,
             lamp_moving: false,
             catch_left: 0,
@@ -671,6 +719,13 @@ impl Default for Lighting {
             frame_prefill: [false; 2],
             last_ms: [0.0; BUCKETS],
             last_dispatches: [0; BUCKETS],
+            restir_ms_sum: [0.0; 5],
+            restir_ms_frames: 0,
+            restir_ms_last: [0.0; 5],
+            pass_samples: 0,
+            pass_id_ms: [0.0; 10],
+            span_ms: 0.0,
+            stats_slot: 0,
             hdr_ms: 0.0,
             hdr_query: [u32::MAX; 2],
             ctrl_bytes: [0; 64],
@@ -1547,6 +1602,7 @@ impl Gpu {
             still_frames: self.lighting.still,
             draining: self.lighting.draining,
             round_entries: self.lighting.round_entries,
+            cache_rays: self.lighting.cache_rays,
         }
     }
 
@@ -1797,6 +1853,7 @@ impl Gpu {
             compose: self.lighting.compose_kind,
             dispatches: self.lighting.compose_dispatches,
             blocks: self.read_compose_blocks(),
+            maint_ran: self.lighting.maint_ran,
         }
     }
 
@@ -1903,12 +1960,24 @@ impl Gpu {
         // the cache meanwhile. It is one word of this slot's stats ring buffer,
         // whose fence the frame loop already waited (frames in flight), so the
         // value is a few frames old and nothing waits on the GPU for it.
-        if self.lighting.stats_round[slot] && self.lighting.settings.world_mode() == 3 {
-            if let Ok(flag) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 2) {
-                self.lighting.draining = flag != 0;
-            }
-            if let Ok(e) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 3) {
-                self.lighting.round_entries = e;
+        if self.lighting.settings.world_mode() == 3 {
+            if self.lighting.stats_round[slot] {
+                if let Ok(flag) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 2) {
+                    self.lighting.draining = flag != 0;
+                }
+                if let Ok(e) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 3) {
+                    self.lighting.round_entries = e;
+                }
+                if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
+                    self.lighting.cache_rays = rays;
+                }
+            } else if !self.lighting.async_on {
+                // That slot did not dispatch a cache round. The stats buffer was
+                // cleared and never counted, so the probe is zero, not the
+                // previous round's leftover. The async queue reports its own
+                // round from poll_lighting_world.
+                self.lighting.cache_rays = 0;
+                self.lighting.round_entries = 0;
             }
         }
         let read = lighting_stats_wanted(
@@ -2111,6 +2180,7 @@ impl Gpu {
             head.copy_from_slice(&words[..8]);
             self.lighting.draining = words[LIGHTING_DRAIN_WORD + 2] != 0;
             self.lighting.round_entries = words[LIGHTING_DRAIN_WORD + 3];
+            self.lighting.cache_rays = words[LIGHTING_CACHE_RAYS_WORD];
             self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
         if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
@@ -2160,11 +2230,22 @@ impl Gpu {
     /// The sun path and the compose-writes kill switch leave this empty.
     /// The gather stays on the cache timestamp, not in compose.
     fn dispatch_sh_prep(&mut self, sun_compose: bool, compose_full: bool, gx: u32, gy: u32) {
+        self.lighting.maint_ran = false;
         let maint = self.lighting.compose_maint_pipe;
         let drain = self.lighting.sh_drain_pipe;
         if sun_compose || maint.is_null() || drain.is_null() {
             return;
         }
+        // The walk is four world-cache finds per pixel of every dirty block,
+        // and the colour is thrown away. The drain then fills the lattice the
+        // picture compile reads. On a held camera that lattice is already
+        // filled. Frame 32 (and a camera move, which takes the full grid)
+        // requests it again.
+        let refresh = self.lighting.frame != 0 && self.lighting.frame % 32 == 0;
+        if self.lighting.still > 0 && !compose_full && !refresh {
+            return;
+        }
+        self.lighting.maint_ran = true;
         const BINS: u64 = 16;
         const LATTICE_CAP: u32 = 16384;
         // SAFETY: the command buffer, the key buffer, and both pipelines are the
@@ -4308,16 +4389,21 @@ impl Gpu {
         }
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.lighting.sets[slot];
-        // Settled (frozen above): the probes and the light cache hold their light,
-        // and only the pixels' direct light and the final pass run, so a still
-        // scene draws the same picture every frame (no residual cache drift) and
-        // idles cheaply.
+        // `frozen` is the host settle bit (32 still frames, then either the
+        // change counter or `sc_settle`, and the drain flag). It used to cancel
+        // the cache round. A 1440p still hall hits that bit around frame 94,
+        // and every later frame traced zero cache rays. The surface cache
+        // keeps its budget; probe-only still idles.
         self.lighting.held = if frozen { self.lighting.held.saturating_add(1) } else { 0 };
         // A light cache round is due (`experiments.cache_hz` caps them per second). On
         // the async queue (`experiments.cache_async`) it goes there, else into this frame;
         // a frame without one runs the picture's passes only (lighting_mode 1).
         let cache_hz = f64::from(self.lighting.settings.experiments.cache_hz);
-        let due = !frozen
+        let surface_budget = self.lighting.settings.world_mode() == 3
+            && self.lighting.settings.world_cache.enabled
+            && self.lighting.settings.gi.enabled
+            && self.lighting.settings.bounce.count >= 2;
+        let due = (surface_budget || !frozen)
             && (cache_hz <= 0.0
                 || self
                     .lighting
@@ -4857,6 +4943,7 @@ impl Gpu {
                 1,
                 &region as *const Region as *const u8,
             );
+            self.lighting.stats_slot = slot;
             // The dirty-list length. The same barrier covers the compute writes.
             // One host buffer: read it only after the device is idle.
             if self.lighting.cache_full && !self.lighting.compose_host.buffer.is_null() {
@@ -5269,9 +5356,12 @@ const LIGHTING_UNFILLED_MASK_AT: usize = 148;
 /// LIGHTING_DRAIN_FLAG_AT): the samples still differ from the held light.
 /// Word 147: the round's batch entries (16 rays each).
 const LIGHTING_DRAIN_WORD: usize = 144;
+/// Word 16: cache rays traced this round (`CacheStats.rays`). Scouts are word 19.
+const LIGHTING_CACHE_RAYS_WORD: usize = 16;
 /// (4096/32) * 2160. A larger picture clamps the mask.
 const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
 const _: () = assert!(LIGHTING_UNFILLED_MASK_AT == LIGHTING_STATS_WORDS);
+const _: () = assert!(LIGHTING_CACHE_RAYS_WORD < LIGHTING_STATS_WORDS);
 const _: () = assert!(LIGHTING_CTRL_WORD as usize + 16 == LIGHTING_UNFILLED_WORD);
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 
@@ -5555,6 +5645,9 @@ pub struct LightingSunStats {
     /// count. Zero when the key table was not copied. A full compose can still
     /// report the marks it did not use.
     pub blocks: u32,
+    /// Maintenance and the lattice drain were recorded. False on a held frame
+    /// that is not the 32-frame backstop.
+    pub maint_ran: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -6109,6 +6202,518 @@ fn reachable_from_main(bytes: &[u8]) -> Vec<String> {
 
 include!("lighting_dispatch.rs");
 
+/// One frame of surface-cache scheduling counters (`gstats`).
+#[derive(Clone, Copy, Debug)]
+pub struct CacheRound {
+    /// Occupied cache slots.
+    pub live: u32,
+    /// Cells claimed this round.
+    pub claimed: u32,
+    /// Histogram bucket the scheduler cut below. Zero means nothing was cut.
+    pub thr: u32,
+    /// Cache rays traced (texels and world cells, not the scout count).
+    pub rays: u32,
+    /// Entries the ranking marked due.
+    pub due: u32,
+    /// Entries that waited (not due, or a settle turn).
+    pub waiting: u32,
+    /// Scout rays scheduled this round. Zero when the scout was not due.
+    pub scouts: u32,
+}
+
+impl CacheRound {
+    fn from_words(words: &[u32; LIGHTING_STATS_WORDS]) -> Self {
+        Self {
+            live: words[2],
+            claimed: words[8],
+            thr: words[12],
+            rays: words[16],
+            due: words[17],
+            waiting: words[18],
+            scouts: words[19],
+        }
+    }
+}
+
+/// The shade's chosen reservoir and the visibility mean for one pixel.
+///
+/// `mean_kind` 3 is the product mean (`LAMP_GEO_RESTIR_MEAN`). `mean_rgb` is
+/// that mean's irradiance. `restir_w` is `w_sum / (M * target)` from the
+/// spatial scratch the shade reads.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectSample {
+    pub pixel: u32,
+    pub restir_lamp: u32,
+    pub restir_w: f32,
+    pub restir_m: u32,
+    pub restir_target: f32,
+    pub mean_kind: u32,
+    pub mean_m: u32,
+    pub mean_lamp: u32,
+    pub mean_vis: bool,
+    pub mean_rgb: [f32; 3],
+}
+
+impl DirectSample {
+    fn empty(pixel: u32) -> Self {
+        Self {
+            pixel,
+            restir_lamp: 0,
+            restir_w: 0.0,
+            restir_m: 0,
+            restir_target: 0.0,
+            mean_kind: 0,
+            mean_m: 0,
+            mean_lamp: 0,
+            mean_vis: false,
+            mean_rgb: [0.0; 3],
+        }
+    }
+}
+
+/// `LAMP_GEO_RESTIR_MEAN` in `lighting_lamp_pick.glsl`.
+const LAMP_GEO_RESTIR_MEAN: u32 = 3;
+
+fn f32_from_u32(v: u32) -> f32 {
+    let mut acc = 0.0f32;
+    let mut bit = 1.0f32;
+    let mut n = v;
+    while n != 0 {
+        if n & 1 == 1 {
+            acc += bit;
+        }
+        bit += bit;
+        n >>= 1;
+    }
+    acc
+}
+
+impl Gpu {
+    /// Hash lookup of the surface-cache cells under `queries`, after the device is idle.
+    pub(crate) fn read_cache_cells(
+        &mut self,
+        queries: &[crate::cache_probe::CacheQuery],
+    ) -> Result<Vec<crate::cache_probe::StoredCell>, String> {
+        if queries.len() > 32 {
+            return Err("cache cell read is limited to 32 points".to_string());
+        }
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.lighting.cache_full || self.lighting.cache.buffer.is_null() {
+            return Err("surface cache is not allocated".to_string());
+        }
+        self.idle_device();
+        let key_bytes = LIGHTING_CACHE_SLOTS.saturating_mul(4);
+        if self.lighting.cache_keys.size < key_bytes || self.lighting.cache_keys.buffer.is_null() {
+            return Err("cache key table is shorter than the slot count".to_string());
+        }
+        let raw_keys = self.copy_device_range(self.lighting.cache_keys.buffer, 0, key_bytes)?;
+        let keys = u32_words(&raw_keys);
+        let mut hits = Vec::with_capacity(queries.len());
+        let mut regions = Vec::new();
+        for query in queries {
+            let key = crate::cache_probe::cache_key(query.position, query.normal, query.size);
+            let hit = crate::cache_probe::classify_window(&keys, key);
+            if let Some(slot) = hit.slot {
+                let base = regions.len();
+                self.push_cell_regions(slot, &mut regions)?;
+                hits.push((query, hit, Some(base)));
+            } else {
+                hits.push((query, hit, None));
+            }
+        }
+        let packed = if regions.is_empty() {
+            Vec::new()
+        } else {
+            self.copy_device_regions(self.lighting.cache.buffer, &regions)?
+        };
+        let words = f32_vec4s(&packed);
+        let mut out = Vec::with_capacity(hits.len());
+        for (query, hit, base) in hits {
+            let records = base.and_then(|at| seven_vec4s(&words, at));
+            out.push(crate::cache_probe::stored_cell(*query, hit, records));
+        }
+        Ok(out)
+    }
+
+    /// Last collected ReSTIR frame, same order as [`Self::lighting_restir_ms`].
+    ///
+    /// One frame behind the draw that just returned. Zeros until a timestamped
+    /// frame lands. Shade includes that dispatch's visibility ray.
+    pub(crate) fn lighting_restir_last_ms(&self) -> [f64; 5] {
+        self.lighting.restir_ms_last
+    }
+
+    /// Bottom-of-pipe lighting span of the last collected frame.
+    ///
+    /// The same window as the `lighting` column of `GPU_MS`. One frame behind
+    /// the draw that just returned.
+    pub(crate) fn lighting_span_ms(&self) -> f64 {
+        self.lighting.span_ms
+    }
+
+    /// Mean of the collected ReSTIR stamps. Zeros until a timestamped frame lands.
+    pub(crate) fn lighting_restir_ms(&self) -> [f64; 5] {
+        let frames = self.lighting.restir_ms_frames;
+        if frames == 0 {
+            return [0.0; 5];
+        }
+        let denom = f64::from(frames);
+        let mut out = [0.0; 5];
+        for (i, sum) in self.lighting.restir_ms_sum.into_iter().enumerate() {
+            out[i] = sum / denom;
+        }
+        out
+    }
+
+    /// Latest cache-round counters. The world round wins when it wrote rays or
+    /// scouts; otherwise the frame copy from the last submitted slot.
+    pub(crate) fn lighting_cache_round(&mut self) -> Result<CacheRound, String> {
+        self.idle_device();
+        let mut best: Option<CacheRound> = None;
+        let mut take = |words: [u32; LIGHTING_STATS_WORDS]| {
+            let round = CacheRound::from_words(&words);
+            let rank = round.rays.saturating_add(round.scouts);
+            let prev = best.map_or(0, |item| item.rays.saturating_add(item.scouts));
+            if best.is_none() || rank > prev {
+                best = Some(round);
+            }
+        };
+        if !self.lighting.world_stats.memory.is_null() {
+            if let Ok(words) = self.read_stats16(self.lighting.world_stats.memory) {
+                take(words);
+            }
+        }
+        if let Some(buf) = self.lighting.stats.get(self.lighting.stats_slot) {
+            if !buf.memory.is_null() {
+                if let Ok(words) = self.read_stats16(buf.memory) {
+                    take(words);
+                }
+            }
+        }
+        best.ok_or_else(|| "lighting stats were not readable".to_string())
+    }
+
+    /// Scratch reservoir and the visibility mean for each pixel.
+    pub(crate) fn read_direct_samples(
+        &mut self,
+        pixels: &[u32],
+    ) -> Result<Vec<DirectSample>, String> {
+        if pixels.is_empty() {
+            return Ok(Vec::new());
+        }
+        if pixels.len() > 8 {
+            return Err("direct sample read is limited to 8 pixels".to_string());
+        }
+        self.idle_device();
+        let width = self.lighting.restir_w;
+        let height = self.lighting.restir_h;
+        let count = width.saturating_mul(height);
+        if count == 0
+            || self.lighting.restir_buf.buffer.is_null()
+            || self.lighting.lamp_res.buffer.is_null()
+        {
+            return Err("direct reservoirs are not allocated".to_string());
+        }
+        let header = self.copy_device_range(self.lighting.restir_buf.buffer, 0, 256)?;
+        let words = u32_words(&header);
+        let scratch = words.get(6).copied().unwrap_or(0);
+        let mut out = Vec::with_capacity(pixels.len());
+        for &pixel in pixels {
+            if pixel >= count {
+                return Err(format!("pixel {pixel} is outside {width}x{height}"));
+            }
+            out.push(self.read_one_direct(pixel, scratch, count)?);
+        }
+        Ok(out)
+    }
+
+    fn read_one_direct(&self, pixel: u32, scratch: u32, count: u32) -> Result<DirectSample, String> {
+        let mut sample = DirectSample::empty(pixel);
+        let scratch_at = u64::from(scratch)
+            .saturating_mul(4)
+            .saturating_add(u64::from(pixel).saturating_mul(16));
+        if scratch != 0 && scratch_at.saturating_add(16) <= self.lighting.restir_buf.size {
+            let bytes = self.copy_device_range(self.lighting.restir_buf.buffer, scratch_at, 16)?;
+            let words = u32_words(&bytes);
+            if words.len() >= 4 && words[2] > 0 {
+                let target = f32::from_bits(words[3]);
+                sample.restir_lamp = words[0];
+                sample.restir_m = words[2];
+                sample.restir_target = target;
+                if target > 0.0 {
+                    let sum = f32::from_bits(words[1]);
+                    let denom = f32_from_u32(words[2]) * target;
+                    if denom > 0.0 {
+                        sample.restir_w = sum / denom;
+                    }
+                }
+            }
+        }
+        let stride = u64::from(count).saturating_mul(32);
+        let mut best_m = 0u32;
+        let mut found = false;
+        for slot in 0..2u32 {
+            let at = u64::from(slot)
+                .saturating_mul(stride)
+                .saturating_add(u64::from(pixel).saturating_mul(32));
+            if at.saturating_add(32) > self.lighting.lamp_res.size {
+                break;
+            }
+            let bytes = self.copy_device_range(self.lighting.lamp_res.buffer, at, 32)?;
+            let words = u32_words(&bytes);
+            if words.len() < 8 {
+                continue;
+            }
+            let kind = words[6];
+            if kind != LAMP_GEO_RESTIR_MEAN {
+                if !found {
+                    sample.mean_kind = kind;
+                }
+                continue;
+            }
+            let mean_m = words[2];
+            if found && mean_m < best_m {
+                continue;
+            }
+            found = true;
+            best_m = mean_m;
+            let pack = words[0];
+            sample.mean_kind = kind;
+            sample.mean_m = mean_m;
+            sample.mean_lamp = pack & 0xffff;
+            sample.mean_vis = (pack & 0x1_0000) != 0;
+            sample.mean_rgb = [
+                f32::from_bits(words[1]),
+                f32::from_bits(words[3]),
+                f32::from_bits(words[7]),
+            ];
+        }
+        Ok(sample)
+    }
+
+    fn push_cell_regions(&self, slot: u32, regions: &mut Vec<(u64, u64)>) -> Result<(), String> {
+        let slot_u = u64::from(slot);
+        let slots = LIGHTING_CACHE_SLOTS;
+        let indices = [
+            slot_u.saturating_mul(3),
+            slot_u.saturating_mul(3).saturating_add(1),
+            slot_u.saturating_mul(3).saturating_add(2),
+            slots.saturating_mul(3).saturating_add(slot_u),
+            slots.saturating_mul(6).saturating_add(slot_u),
+            slots.saturating_mul(8).saturating_add(slot_u),
+            slots.saturating_mul(10).saturating_add(slot_u),
+        ];
+        for index in indices {
+            let offset = index.saturating_mul(16);
+            if offset.saturating_add(16) > self.lighting.cache.size {
+                return Err("cache cell record sits past the cache buffer".to_string());
+            }
+            regions.push((offset, 16));
+        }
+        Ok(())
+    }
+
+    fn copy_device_range(&self, src: Handle, offset: u64, size: u64) -> Result<Vec<u8>, String> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        self.copy_device_regions(src, &[(offset, size)])
+    }
+
+    fn copy_device_regions(&self, src: Handle, regions: &[(u64, u64)]) -> Result<Vec<u8>, String> {
+        let mut total = 0u64;
+        for (_, size) in regions {
+            total = total.saturating_add(*size);
+        }
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        let mut dst = self.make_buffer(total, 0x2, Memory::Readback)?;
+        let copied = self.record_region_copy(src, dst.buffer, regions);
+        let bytes = match copied {
+            Ok(()) => map_buffer_bytes(self, &dst, total),
+            Err(err) => Err(err),
+        };
+        self.destroy_buffer(&mut dst);
+        bytes
+    }
+
+    fn record_region_copy(&self, src: Handle, dst: Handle, regions: &[(u64, u64)]) -> Result<(), String> {
+        let pool = self.cache_copy_pool()?;
+        let cmd = match self.cache_copy_cmd(pool) {
+            Ok(cmd) => cmd,
+            Err(err) => {
+                self.drop_copy_pool(pool);
+                return Err(err);
+            }
+        };
+        self.oracle_barrier(cmd, 0x1_0000, 0x1000, 0x1_8000, 0x800);
+        let mut copies = Vec::with_capacity(regions.len());
+        let mut dst_at = 0u64;
+        for (src_at, size) in regions {
+            copies.push(BufferCopy {
+                src: *src_at,
+                dst: dst_at,
+                size: *size,
+            });
+            dst_at = dst_at.saturating_add(*size);
+        }
+        unsafe {
+            (self.fns.cmd_copy_buffer)(
+                cmd,
+                src,
+                dst,
+                u32::try_from(copies.len()).unwrap_or(0),
+                copies.as_ptr().cast::<u8>(),
+            );
+        }
+        self.oracle_barrier(cmd, 0x1000, 0x4000, 0x1000, 0x2000);
+        let ended = unsafe { check((self.fns.end_cmd)(cmd), "end cache-cell copy") };
+        let submitted = ended.and_then(|()| self.oracle_submit(cmd));
+        self.drop_copy_pool(pool);
+        submitted
+    }
+
+    fn cache_copy_pool(&self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            family: u32,
+        }
+        let pool_info = PoolInfo {
+            s_type: 39,
+            next: std::ptr::null(),
+            flags: 1,
+            family: self.queue_family,
+        };
+        let mut pool = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &pool_info as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut pool,
+                ),
+                "cache-cell command pool",
+            )?;
+        }
+        Ok(pool)
+    }
+
+    fn cache_copy_cmd(&self, pool: Handle) -> Result<Handle, String> {
+        #[repr(C)]
+        struct AllocInfo {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            level: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        let alloc = AllocInfo {
+            s_type: 40,
+            next: std::ptr::null(),
+            pool,
+            level: 0,
+            count: 1,
+        };
+        let begin = BeginInfo {
+            s_type: 42,
+            next: std::ptr::null(),
+            flags: 1,
+            inherit: std::ptr::null(),
+        };
+        let mut cmd = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.alloc_cmd)(self.device, &alloc as *const AllocInfo as *const u8, &mut cmd),
+                "cache-cell command",
+            )?;
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin cache-cell copy",
+            )?;
+        }
+        Ok(cmd)
+    }
+
+    fn drop_copy_pool(&self, pool: Handle) {
+        unsafe {
+            (self.fns.destroy_pool)(self.device, pool, std::ptr::null());
+        }
+    }
+}
+
+#[repr(C)]
+struct BufferCopy {
+    src: u64,
+    dst: u64,
+    size: u64,
+}
+
+fn u32_words(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut lane = [0u8; 4];
+            lane.copy_from_slice(chunk);
+            u32::from_le_bytes(lane)
+        })
+        .collect()
+}
+
+fn f32_vec4s(bytes: &[u8]) -> Vec<[f32; 4]> {
+    let mut out = Vec::new();
+    for chunk in bytes.chunks_exact(16) {
+        let mut word = [0.0f32; 4];
+        for (lane, value) in word.iter_mut().enumerate() {
+            let at = lane.saturating_mul(4);
+            let mut raw = [0u8; 4];
+            raw.copy_from_slice(&chunk[at..at + 4]);
+            *value = f32::from_le_bytes(raw);
+        }
+        out.push(word);
+    }
+    out
+}
+
+fn seven_vec4s(words: &[[f32; 4]], at: usize) -> Option<[[f32; 4]; 7]> {
+    let mut records = [[0.0f32; 4]; 7];
+    for (i, record) in records.iter_mut().enumerate() {
+        *record = *words.get(at.saturating_add(i))?;
+    }
+    Some(records)
+}
+
+fn map_buffer_bytes(gpu: &Gpu, buffer: &Buffer, size: u64) -> Result<Vec<u8>, String> {
+    if size > buffer.size {
+        return Err("cache cell copy does not fit".to_string());
+    }
+    let len = usize::try_from(size).unwrap_or(0);
+    let mut out = vec![0u8; len];
+    unsafe {
+        let mut mapped = std::ptr::null_mut();
+        check(
+            (gpu.fns.map_mem)(gpu.device, buffer.memory, 0, size, 0, &mut mapped),
+            "map cache cell",
+        )?;
+        std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), out.as_mut_ptr(), len);
+        (gpu.fns.unmap_mem)(gpu.device, buffer.memory);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod sh_knob_tests {
     use super::*;
@@ -6132,5 +6737,6 @@ mod sh_knob_tests {
             .find(|l| l.starts_with("const uint LIGHTING_CACHE_RAYS"))
             .expect("LIGHTING_CACHE_RAYS in lighting_cache_slots.glsl");
         assert!(rays.contains(&format!("= {LIGHTING_CACHE_RAYS}u;")), "{rays}");
+        assert_eq!(u64::from(crate::cache_probe::SLOTS), LIGHTING_CACHE_SLOTS);
     }
 }
