@@ -109,6 +109,34 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         !compact.contains("LIGHTING_WRC_SCOUT"),
         "the old refresh walk must not be listed"
     );
+    assert!(
+        fill.contains("lighting_fill_tile_at"),
+        "tile words must sit past the ray links"
+    );
+    assert!(
+        fill.contains("lighting_fill_pick_at"),
+        "pick words must sit past the tiles"
+    );
+    assert!(
+        !fill.contains("2u * LIGHTING_CACHE_SLOTS - LIGHTING_FILL_TILE_CAP"),
+        "tiles must not be carved from the young-list tail"
+    );
+    let cache = source("lighting_cache.glsl");
+    let Some(slot_fn) = cache.find("uint lighting_cache_batch_slot") else {
+        panic!("batch slot");
+    };
+    let rest = &cache[slot_fn..];
+    let end = rest[10..].find("\nuint ").map_or(rest.len(), |i| i + 10);
+    let slot_body = &rest[..end];
+    assert!(
+        !slot_body.contains("LIGHTING_SC_TRICKLE"),
+        "mode 3 must not read the trickle list"
+    );
+    let relight = source("lighting_cache.comp");
+    assert!(
+        relight.contains("lighting_fill_header_at() + 2u"),
+        "the fill reports occupied cells, not the empty due lists"
+    );
 }
 
 #[test]

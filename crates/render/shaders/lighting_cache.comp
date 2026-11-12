@@ -30,7 +30,7 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (lighting_ray_fill_on()) {
         if (gid == 0u) {
-            gstats.live = lighting_live_count();
+            gstats.live = ckeys.key[lighting_fill_header_at() + 2u];
             lighting_wrc_note_lamps();
             lighting_ls_note();
         }

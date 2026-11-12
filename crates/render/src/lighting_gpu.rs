@@ -127,6 +127,9 @@ const FILL_PARAM_WORDS: u64 = 16;
 const FILL_LOCK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
 /// Header, then two hit words and two link words per cache-ray slot.
 const FILL_TAIL_PER_RAY: u64 = 4;
+/// Tile words, then one pick word per cache ray. Kept out of the list range so
+/// a 262,144-slot table cannot alias a pick onto a tile.
+const FILL_TILE_WORDS: u64 = 262_144;
 
 fn lighting_fill_param_words(pixels: u64) -> u64 {
     lighting_sh_keys_words() + pixels * 8
@@ -134,7 +137,13 @@ fn lighting_fill_param_words(pixels: u64) -> u64 {
 
 pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
     let rays = (LIGHTING_CACHE_BATCH as u64) * (LIGHTING_CACHE_RAYS as u64);
-    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS + 4 + rays * FILL_TAIL_PER_RAY
+    lighting_fill_param_words(pixels)
+        + FILL_PARAM_WORDS
+        + FILL_LOCK_WORDS
+        + 4
+        + rays * FILL_TAIL_PER_RAY
+        + FILL_TILE_WORDS
+        + rays
 }
 
 fn lighting_compose_minx() -> u64 {

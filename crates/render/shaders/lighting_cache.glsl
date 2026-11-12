@@ -3411,45 +3411,24 @@ uint lighting_live_count() {
 // Slot of this round's batch entry j, or ~0u when the batch has no entry j: the
 // young first, then the mature ones in turn.
 uint lighting_cache_batch_slot(uint j) {
-    uint room = LIGHTING_CACHE_BATCH;
+    // World mode 3 spends the fill budget. It does not read the trickle,
+    // refresh, or scout holes.
     if (lighting_world_mode() == 3u) {
-        if (j >= LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES - LIGHTING_GRAD_ENTRIES) {
-            return ~0u;
-        }
-        room = lighting_sc_room();
-        if (j >= room && j < room + LIGHTING_SC_TRICKLE) {
-            // S65A trickle entries: one a texel.
-            uint k = j - room;
-            return k < min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> lighting_sc_budget_shift()) ? ckeys.key[LIGHTING_SC_TRICKLE_AT + k] : ~0u;
-        }
-        if (j >= room) {
-            // The WRC refresh entries: change-driven, then background, each
-            // cell a whole set (4 consecutive entries).
-            uint k = j - room - LIGHTING_SC_TRICKLE;
-            uint rc = LIGHTING_WRC_REFRESH_CELLS >> lighting_sc_budget_shift();
-            uint c = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], rc);
-            if (k < c) {
-                return ckeys.key[LIGHTING_WRC_CHG_AT + k];
-            }
-            k = (k - c) / 4u;
-            if (k < min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], rc)) {
-                return ckeys.key[LIGHTING_WRC_BG_AT + k];
-            }
-            return ~0u;
-        }
+        return ~0u;
     }
-    uint first = min(lighting_young_count(), lighting_world_mode() == 3u ? (ckeys.key[LIGHTING_SETTLE_ROOM_AT] != 0u ? ckeys.key[LIGHTING_SETTLE_ROOM_AT] : lighting_sc_base_room() >> lighting_sc_budget_shift()) : room);
+    uint room = LIGHTING_CACHE_BATCH;
+    uint first = min(lighting_young_count(), room);
     if (j < first) {
         return ckeys.key[2u * LIGHTING_CACHE_SLOTS - j];
     }
     uint count = lighting_mature_count();
     uint k = j - first;
-    if ((lighting_young_only() && lighting_world_mode() != 3u) || k >= count) {
+    if (lighting_young_only() || k >= count) {
         return ~0u;
     }
     // The scheduler lists only what this round should take (from the front);
     // otherwise the sweep turns with the rounds.
-    uint start = (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) ? 0u : (lighting_round() * LIGHTING_CACHE_BATCH) % count;
+    uint start = (lighting_round() * LIGHTING_CACHE_BATCH) % count;
     return ckeys.key[LIGHTING_CACHE_SLOTS + 1u + (start + k) % count];
 }
 
