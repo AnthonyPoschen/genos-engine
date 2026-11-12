@@ -253,6 +253,11 @@ kind = "test"
 detail = "harness only"
 
 [[var]]
+name = "GENOS_PROFILE_PASSES"
+kind = "mirror"
+detail = "--profile-passes"
+
+[[var]]
 name = "GENOS_PICTURE_DUMP"
 kind = "test"
 detail = "harness only"
@@ -446,6 +451,36 @@ detail = "no CLI argument yet"
 name = "GENOS_LIGHTING_FILL"
 kind = "mirror"
 detail = "--lighting-fill (stress), LightingSettings key; MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_LOD_CREATE"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_lod_create; stress knob lighting_fine_lod_create; MCP set_key"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_LOD_DROP"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_lod_drop; stress knob lighting_fine_lod_drop; MCP set_key"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_LOD_LOOKAHEAD"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_lod_lookahead; stress knob lighting_fine_lod_lookahead; MCP set_key"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_BUDGET_SHARE"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_budget_share; stress knob lighting_fine_budget_share; MCP set_key"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_SCREEN_BOOST"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_screen_boost; stress knob lighting_fine_screen_boost; MCP set_key"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_CLOSE_BOOST"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_close_boost; stress knob lighting_fine_close_boost; MCP set_key"
 
 [[var]]
 name = "GENOS_LIGHTING_GI"

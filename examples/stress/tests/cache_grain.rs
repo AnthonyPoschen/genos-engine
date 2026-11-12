@@ -728,3 +728,185 @@ fn a_turn_seeds_fine_texels_from_the_world_cell() {
     eprintln!("compared {compared} max_seed_rel {seed_gap:.3} max_parent_rel {coarse_gap:.3}");
     assert!(compared >= 4, "the turn did not bring nearby surfaces on screen");
 }
+
+fn trunc_u32(v: f32) -> u32 {
+    if !v.is_finite() || v <= 0.0 {
+        return 0;
+    }
+    let bits = v.to_bits();
+    let biased = i32::from(u8::try_from((bits >> 23) & 0xff).unwrap_or(0));
+    let exp = biased - 127;
+    if exp < 0 {
+        return 0;
+    }
+    if exp >= 31 {
+        return u32::MAX;
+    }
+    let frac = (bits & 0x7f_ffff) | 0x80_0000;
+    let shift = 23 - exp;
+    if shift >= 0 {
+        let places = u32::try_from(shift).unwrap_or(31);
+        frac >> places
+    } else {
+        let places = u32::try_from(-shift).unwrap_or(0);
+        frac << places
+    }
+}
+
+fn pixel_of(camera: &Camera, point: [f32; 3]) -> Option<u32> {
+    let aspect = f32_u32(WIDTH) / f32_u32(HEIGHT);
+    let uv = viewport_uv(camera, aspect, point)?;
+    if !(0.0..=1.0).contains(&uv[0]) || !(0.0..=1.0).contains(&uv[1]) {
+        return None;
+    }
+    let x = trunc_u32(uv[0] * f32_u32(WIDTH)).min(WIDTH - 1);
+    let y = trunc_u32((1.0 - uv[1]) * f32_u32(HEIGHT)).min(HEIGHT - 1);
+    Some(y * WIDTH + x)
+}
+
+fn draw_presented(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    stage: &Stage,
+    camera: &Camera,
+) -> Vec<u8> {
+    let _ = window.pump();
+    renderer
+        .draw(&stage.world, camera, true)
+        .expect("draw")
+        .expect("pixels")
+}
+
+struct YawTurn {
+    shown: u32,
+    filled: u32,
+    mean_weight: f64,
+    pixel_delta: f64,
+}
+
+fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: bool) -> YawTurn {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    if !fill {
+        settings.surface_cache.fine_lod_create = 0.0;
+        settings.surface_cache.fine_lod_drop = 0.0;
+        settings.surface_cache.fine_budget_share = 0.0;
+        settings.surface_cache.fine_screen_boost = 1.0;
+        settings.surface_cache.fine_close_boost = 0.0;
+    }
+    settings.sanitize();
+    renderer.set_lighting_settings(settings);
+    renderer.reset_lighting_cache();
+    let mut camera = Camera::opening();
+    camera.set_pose(Vec3::new(14.5, 1.7, 23.5), -0.3554, 0.08);
+    let spots = nearby_spots(&stage.world.scene, &camera);
+    for _ in 0..24 {
+        let _ = draw_presented(window, renderer, stage, &camera);
+    }
+    let fine_q: Vec<CacheQuery> = spots
+        .iter()
+        .map(|spot| query(spot.position, spot.normal, TEXEL))
+        .collect();
+    let before = renderer.read_cache_cells(&fine_q).expect("fine before the turn");
+    let mut acc = [0.0f32; 3];
+    for spot in &spots {
+        acc = add(acc, spot.position);
+    }
+    let nspots = f32_u32(u32::try_from(spots.len()).unwrap_or(1)).max(1.0);
+    let (yaw, pitch) = aim(eye_of(&camera), scale(acc, 1.0 / nspots));
+    camera.set_pose(camera.position, yaw, pitch);
+    let mut shown = 0u32;
+    let mut filled = 0u32;
+    let mut weight_sum = 0.0f64;
+    let mut on_screen = Vec::with_capacity(spots.len());
+    for (i, spot) in spots.iter().enumerate() {
+        let on = !off_screen(&camera, spot.position);
+        on_screen.push(on);
+        if !on {
+            continue;
+        }
+        shown += 1;
+        let ready = before[i].hit.slot.is_some() && before[i].weight >= 4.0;
+        if ready {
+            filled += 1;
+            weight_sum += f64_f32(before[i].weight);
+        }
+        eprintln!(
+            "fill {fill} spot {i} dist {:.2} slot {:?} weight {:.1} luma {:.4} ready {ready}",
+            spot.distance,
+            before[i].hit.slot,
+            before[i].weight,
+            cell_luma(&before[i])
+        );
+    }
+    let entry = draw_presented(window, renderer, stage, &camera);
+    let mut later = entry.clone();
+    for _ in 0..16 {
+        later = draw_presented(window, renderer, stage, &camera);
+    }
+    let mut delta = 0.0f64;
+    let mut counted = 0u32;
+    for (i, spot) in spots.iter().enumerate() {
+        if !on_screen[i] {
+            continue;
+        }
+        let Some(px) = pixel_of(&camera, spot.position) else {
+            continue;
+        };
+        let a = display_luma(&entry, px);
+        let b = display_luma(&later, px);
+        delta += (a - b).abs();
+        counted += 1;
+        eprintln!("fill {fill} spot {i} pixel {px} entry {a:.4} later {b:.4}");
+    }
+    let pixel_delta = if counted == 0 {
+        0.0
+    } else {
+        delta / f64::from(counted)
+    };
+    let mean_weight = if filled == 0 {
+        0.0
+    } else {
+        weight_sum / f64::from(filled)
+    };
+    eprintln!(
+        "fill {fill} shown {shown} filled {filled} mean_weight {mean_weight:.2} pixel_delta {pixel_delta:.4} counted {counted}"
+    );
+    YawTurn {
+        shown,
+        filled,
+        mean_weight,
+        pixel_delta,
+    }
+}
+
+/// Surfaces near the player already hold a fine texel before the camera turns
+/// toward them, so the presented pixel does not feed in on entry.
+#[test]
+fn a_yaw_turn_finds_nearby_surfaces_already_filled() {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let (stage, _) = hall();
+    let off = yaw_once(window, renderer, &stage, false);
+    let on = yaw_once(window, renderer, &stage, true);
+    assert!(off.shown >= 4, "the turn brought {} surfaces on screen", off.shown);
+    assert!(on.shown >= 4, "the turn brought {} surfaces on screen", on.shown);
+    assert!(
+        on.filled * 2 >= on.shown,
+        "fine texels before the turn: {} of {} (mean weight {:.2})",
+        on.filled,
+        on.shown,
+        on.mean_weight
+    );
+    assert!(
+        off.pixel_delta > 0.01,
+        "the unfilled turn moved the picture by only {:.4}",
+        off.pixel_delta
+    );
+    assert!(
+        on.pixel_delta < off.pixel_delta * 0.6,
+        "entry change {:.4} with the band, {:.4} without",
+        on.pixel_delta,
+        off.pixel_delta
+    );
+}

@@ -54,6 +54,10 @@ const LIGHTING_CACHE_SLOT_BYTES: u64 = {
 const LIGHTING_PC_BYTES: u32 = 48;
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
+/// Off-screen fine-texel admission count (`LIGHTING_FINE_COUNT_AT`). Zeroed each round.
+const LIGHTING_FINE_COUNT_AT: u64 = LIGHTING_WRC_COUNTS_AT + 20;
+/// Create, drop, lookahead, budget share, screen boost, close boost. Not zeroed.
+const LIGHTING_FINE_WORD_AT: u64 = LIGHTING_WRC_COUNTS_AT + 24;
 /// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
 const LIGHTING_DRAIN_FLAG_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 82;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
@@ -2043,9 +2047,10 @@ impl Gpu {
             }
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world && self.lighting.cache_full {
-                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
+                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7, LIGHTING_FINE_COUNT_AT] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
+                self.write_fine_lod(self.cmd)?;
             }
             // Settled: the cache holds its light and runs no rounds, so the drain
             // flag would keep the last value its args pass wrote. The host settled
@@ -2243,6 +2248,25 @@ impl Gpu {
         self.lighting.pipes[3]
     }
 
+    /// The fine-band distances and the budget split, for the cache shaders.
+    fn write_fine_lod(&mut self, cmd: Handle) -> Result<(), String> {
+        let cache = self.lighting.settings.surface_cache;
+        let words = [
+            cache.fine_lod_create.to_bits(),
+            cache.fine_lod_drop.to_bits(),
+            cache.fine_lod_lookahead.to_bits(),
+            cache.fine_budget_share.to_bits(),
+            cache.fine_screen_boost.to_bits(),
+            cache.fine_close_boost.to_bits(),
+        ];
+        self.write_device(
+            cmd,
+            self.lighting.cache_keys.buffer,
+            LIGHTING_FINE_WORD_AT * 4,
+            pod_bytes(&words),
+        )
+    }
+
     /// Record and submit one light cache round on the async compute queue: list
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
@@ -2302,6 +2326,8 @@ impl Gpu {
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_WRC_COUNTS_AT * 4, 8, 0);
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, (LIGHTING_WRC_COUNTS_AT + 4) * 4, 8, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_FINE_COUNT_AT * 4, 4, 0);
+            self.write_fine_lod(cmd)?;
             (self.fns.cmd_fill_buffer)(
                 cmd,
                 self.lighting.cache_keys.buffer,

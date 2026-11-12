@@ -171,6 +171,33 @@ fn surface_cache_drain_sigma_round_trips_and_rejects_negatives() {
 }
 
 #[test]
+fn fine_band_distances_and_budget_share_round_trip() {
+    let settings = LightingSettings::default();
+    assert!((settings.surface_cache.fine_lod_create - 6.0).abs() < 1.0e-6);
+    assert!((settings.surface_cache.fine_lod_drop - 8.0).abs() < 1.0e-6);
+    assert!((settings.surface_cache.fine_budget_share - 0.10).abs() < 1.0e-6);
+    let mut settings = settings;
+    settings.set_key("surface_cache.fine_lod_create", "4").unwrap();
+    settings.set_key("surface_cache.fine_lod_drop", "3").unwrap();
+    settings.set_key("surface_cache.fine_lod_lookahead", "1.5").unwrap();
+    settings.set_key("surface_cache.fine_budget_share", "0.2").unwrap();
+    settings.set_key("surface_cache.fine_screen_boost", "2").unwrap();
+    settings.set_key("surface_cache.fine_close_boost", "0").unwrap();
+    settings.sanitize();
+    assert!((settings.surface_cache.fine_lod_drop - 4.0).abs() < 1.0e-6);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert!((parsed.surface_cache.fine_lod_create - 4.0).abs() < 1.0e-6);
+    assert!((parsed.surface_cache.fine_lod_lookahead - 1.5).abs() < 1.0e-6);
+    assert!((parsed.surface_cache.fine_budget_share - 0.2).abs() < 1.0e-6);
+    assert!((parsed.surface_cache.fine_screen_boost - 2.0).abs() < 1.0e-6);
+    assert_eq!(parsed.surface_cache.fine_close_boost, 0.0);
+    assert!(settings.set_key("surface_cache.fine_budget_share", "-0.1").is_err());
+    settings.set_key("surface_cache.fine_budget_share", "0.9").unwrap();
+    settings.sanitize();
+    assert!((settings.surface_cache.fine_budget_share - 0.5).abs() < 1.0e-6);
+}
+
+#[test]
 fn surface_cache_blend_and_firefly_sigma_round_trip() {
     let mut settings = LightingSettings::default();
     assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
