@@ -405,6 +405,8 @@ fn rerun_shader_pieces() {
         "lighting_check.comp",
         "lighting_sh_drain.comp",
         "scene.vert",
+        "gbuffer.vert",
+        "instance_ssbo.glsl",
         "overlay.frag",
         "depth_mask.frag",
         "material_atlas.glsl",

@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "instance_ssbo.glsl"
 // GI G-buffer vertices (lighting_gpu.rs): scene.vert's positions, colour and normal,
 // computed the same way so the depth prepass's depth holds, plus the instance's
 // emitted light (instance colour w, shared-exponent RGB bits; 0 for none).
@@ -24,15 +26,6 @@ invariant gl_Position;
 layout(push_constant) uniform Push {
     mat4 view_proj;
 } pc;
-struct Instance {
-    mat4 model;
-    uvec4 color;
-    vec4 atlas;
-    vec4 normal_atlas;
-    vec4 extra;
-    // x = object id, y = top-weight bone id (0 → use object id).
-    uvec4 ids;
-};
 layout(std430, set = 0, binding = 3) readonly buffer Instances {
     Instance items[];
 } instances;
@@ -43,11 +36,11 @@ void main() {
     float len = length(spun);
     gl_Position = pc.view_proj * world;
     v_pos = world.xyz;
-    v_albedo = in_albedo * uintBitsToFloat(item.color.rgb);
+    v_albedo = in_albedo * item.color.rgb;
     v_normal = len > 1e-6 ? spun / len : spun;
     v_shade = in_shade;
     v_uv = in_uv;
-    v_emit = item.color.w;
+    v_emit = floatBitsToUint(item.color.w);
     v_atlas = item.atlas;
     v_normal_atlas = item.normal_atlas;
     v_cutoff = item.extra.x;
