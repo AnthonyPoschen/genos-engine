@@ -40,8 +40,8 @@ Moving objects must carry their own lighting records so a spin or slide does not
 | F | GPU SSBO (binding 15): header + table + texel pool; dirty-range upload |
 | G | G-buffer object id; compose O(1) table + hashed span read |
 | H | Shared fill list; cache pass deposits world-direction lighting from the lattice |
+| I | Compose: O(1) mover read; Far → world cells only; hitch scan off when attach_movers |
 
 ## Still open
 
-- Stage I compose polish (Far never writes world cells — already gated; verify gates).
 - Stage J lavapipe: spin 0.027, knockout ≤ 0.213, ReSTIR REF_ERR 0.05, moving-boxes vs #282, rays/frame 10/100/1000.

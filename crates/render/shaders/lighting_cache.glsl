@@ -1366,14 +1366,15 @@ vec4 lighting_mover_texel_mean(uint tex) {
         uintBitsToFloat(movers_gpu.header[at + 7u])); // samples in w
 }
 
-// Stage H fill list (header words 8..10; indices after the pool).
+// Stage H fill/deposit stays out of compose (GENOS_COMPOSE_NO_WALK) to keep
+// lighting_compose.comp under the 248k SPIR-V ceiling.
+#ifndef GENOS_COMPOSE_NO_WALK
 uint lighting_mover_fill_count() { return movers_gpu.header[8]; }
 uint lighting_mover_fill_off() { return movers_gpu.header[9] / 4u; }
 uint lighting_mover_fill_texel(uint i) {
     return movers_gpu.header[lighting_mover_fill_off() + i];
 }
 
-// World position of a mover texel (local → yaw about Y → centre).
 vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
     uint at = lighting_mover_pool_off() + tex * 16u;
     vec3 local = vec3(
@@ -1402,7 +1403,6 @@ vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
     return w;
 }
 
-// Blend one world-direction irradiance sample into a mover texel (Far never listed).
 void lighting_mover_deposit(uint tex, vec3 rgb, float w) {
     if (w <= 0.0 || tex == ~0u) {
         return;
@@ -1424,6 +1424,7 @@ void lighting_mover_deposit(uint tex, vec3 rgb, float w) {
     movers_gpu.header[at + 6u] = floatBitsToUint(mean.z);
     movers_gpu.header[at + 7u] = floatBitsToUint(next);
 }
+#endif
 
 // Packed hitch records: retired. Kept as zeros so call sites compile.
 uint lighting_movers_hitch() { return 0u; }
@@ -4514,27 +4515,26 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     uint mode = lighting_world_mode();
     lighting_obj_salt = 0.0;
     // Mover texel pool via G-buffer object id (O(1) table + hashed span).
+    // Far (tier ≥ 2): lookup returns ~0 → world cells; fill never lists Far.
     if (mode == 3u && lighting_px_object_id != 0u && lighting_sc_local_on()) {
         uint slot = lighting_mover_find_slot(lighting_px_object_id);
         if (slot != ~0u && lighting_mover_tier(slot) < 2u) {
-            // Object-local position: subtract sphere centre (rigid yaw ignored for lookup key).
             uint at = lighting_mover_table_off() + slot * 16u;
             vec3 centre = vec3(
                 uintBitsToFloat(movers_gpu.header[at + 8u]),
                 uintBitsToFloat(movers_gpu.header[at + 9u]),
                 uintBitsToFloat(movers_gpu.header[at + 10u]));
-            vec3 local_pos = pos - centre;
-            uint tex = lighting_mover_texel_lookup(lighting_px_object_id, local_pos);
+            uint tex = lighting_mover_texel_lookup(lighting_px_object_id, pos - centre);
             if (tex != ~0u) {
                 vec4 mean = lighting_mover_texel_mean(tex);
                 if (mean.w > 0.5) {
                     return vec4(mean.rgb, 1.0);
                 }
             }
-            // Empty Near/Mid pool: fall through to world cells (never write them from Far).
         }
     }
-    uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
+    // Hitch retired when attach_movers is on (scan is a no-op stub either way).
+    uint om = mode == 3u && !lighting_sc_local_on() ? lighting_mover_on(pos, n) : ~0u;
     if (om != ~0u && lighting_sh_texel_detail_on()) {
         vec4 sh = lighting_sh_compose_lattice(pos, n, false);
         if ((lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
