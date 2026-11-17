@@ -6113,24 +6113,28 @@ fn reach_footprint_unproven(frame: &[u8], spheres: &[[f32; 4]], width: u32, heig
         } else {
             (0.0, 0.0)
         };
-        let px = (ndc_x + 1.0) * 0.5 * width as f32;
-        let py = (1.0 - ndc_y) * 0.5 * height as f32;
-        let pry = (rad / zc) / t * (0.5 * height as f32);
-        let prx = (rad / zc) / (t * aspect) * (0.5 * width as f32);
+        let width_px = u32_f32(width);
+        let height_px = u32_f32(height);
+        let px = (ndc_x + 1.0) * 0.5 * width_px;
+        let py = (1.0 - ndc_y) * 0.5 * height_px;
+        let pry = (rad / zc) / t * (0.5 * height_px);
+        let prx = (rad / zc) / (t * aspect) * (0.5 * width_px);
         let pr = prx.max(pry);
-        let x0 = ((px - pr) / 32.0).floor() as i32;
-        let y0 = ((py - pr) / 32.0).floor() as i32;
-        let x1 = ((px + pr) / 32.0).floor() as i32;
-        let y1 = ((py + pr) / 32.0).floor() as i32;
+        let x0 = floor_i32((px - pr) / 32.0);
+        let y0 = floor_i32((py - pr) / 32.0);
+        let x1 = floor_i32((px + pr) / 32.0);
+        let y1 = floor_i32((py + pr) / 32.0);
+        let tw_i = i32::try_from(tw).unwrap_or(i32::MAX);
+        let th_i = i32::try_from(th).unwrap_or(i32::MAX);
         // Entirely off the picture. A disc that only crosses the edge still
         // has its on-screen tiles; measured notes cover the rest.
-        if x1 < 0 || y1 < 0 || x0 >= tw as i32 || y0 >= th as i32 {
+        if x1 < 0 || y1 < 0 || x0 >= tw_i || y0 >= th_i {
             return true;
         }
         let x0 = x0.max(0);
         let y0 = y0.max(0);
-        let x1 = x1.min(tw as i32 - 1);
-        let y1 = y1.min(th as i32 - 1);
+        let x1 = x1.min(tw_i - 1);
+        let y1 = y1.min(th_i - 1);
         for y in y0..=y1 {
             for x in x0..=x1 {
                 let tile = u32::try_from(y).unwrap_or(0) * tw + u32::try_from(x).unwrap_or(0);
@@ -6145,6 +6149,39 @@ fn reach_footprint_unproven(frame: &[u8], spheres: &[[f32; 4]], width: u32, heig
         }
     }
     marked.saturating_mul(2) >= total
+}
+
+/// `u32` to `f32` with no silent cast. Both halves fit the mantissa.
+fn u32_f32(v: u32) -> f32 {
+    let hi = u16::try_from(v >> 16).unwrap_or(0);
+    let lo = u16::try_from(v & 0xffff).unwrap_or(0);
+    f32::from(hi) * 65536.0 + f32::from(lo)
+}
+
+/// `floor` as an `i32`. A tile index past 65535 clamps. The reach mask
+/// stops at that many words.
+fn floor_i32(v: f32) -> i32 {
+    let n = v.floor();
+    if !n.is_finite() {
+        return 0;
+    }
+    let neg = n < 0.0;
+    let mag = if neg { -n } else { n };
+    if mag >= 65535.0 {
+        return if neg { -65535 } else { 65535 };
+    }
+    let mut lo = 0u16;
+    let mut hi = 65535u16;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if f32::from(mid) < mag {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let mag_i = i32::from(lo);
+    if neg { -mag_i } else { mag_i }
 }
 
 /// Spheres (centre, radius) around every occluder that moved, came or went between
@@ -7361,8 +7398,8 @@ mod sh_knob_tests {
 #[cfg(test)]
 mod reach_footprint_tests {
     use super::{
-        dot3, f32_at, reach_footprint_unproven, reach_mask_saturated, vec3_at, REACH_NDC_Z,
-        REACH_NEAR_Z, REACH_TAN_FLOOR,
+        dot3, f32_at, floor_i32, reach_footprint_unproven, reach_mask_saturated, u32_f32, vec3_at,
+        REACH_NDC_Z, REACH_NEAR_Z, REACH_TAN_FLOOR,
     };
 
     /// Half the diagonal of a unit square. A cell of edge `size` uses
@@ -7436,23 +7473,27 @@ mod reach_footprint_tests {
         } else {
             (0.0, 0.0)
         };
-        let px = (ndc_x + 1.0) * 0.5 * width as f32;
-        let py = (1.0 - ndc_y) * 0.5 * height as f32;
-        let pry = (rad / zc) / t * (0.5 * height as f32);
-        let prx = (rad / zc) / (t * aspect) * (0.5 * width as f32);
+        let width_px = u32_f32(width);
+        let height_px = u32_f32(height);
+        let px = (ndc_x + 1.0) * 0.5 * width_px;
+        let py = (1.0 - ndc_y) * 0.5 * height_px;
+        let pry = (rad / zc) / t * (0.5 * height_px);
+        let prx = (rad / zc) / (t * aspect) * (0.5 * width_px);
         let pr = prx.max(pry);
-        let mut x0 = ((px - pr) / 32.0).floor() as i32;
-        let mut y0 = ((py - pr) / 32.0).floor() as i32;
-        let mut x1 = ((px + pr) / 32.0).floor() as i32;
-        let mut y1 = ((py + pr) / 32.0).floor() as i32;
-        if x1 < 0 || y1 < 0 || x0 >= tw as i32 || y0 >= th as i32 {
+        let mut x0 = floor_i32((px - pr) / 32.0);
+        let mut y0 = floor_i32((py - pr) / 32.0);
+        let mut x1 = floor_i32((px + pr) / 32.0);
+        let mut y1 = floor_i32((py + pr) / 32.0);
+        let tw_i = i32::try_from(tw).unwrap_or(i32::MAX);
+        let th_i = i32::try_from(th).unwrap_or(i32::MAX);
+        if x1 < 0 || y1 < 0 || x0 >= tw_i || y0 >= th_i {
             return (false, Vec::new());
         }
         x0 = x0.max(0);
         y0 = y0.max(0);
-        x1 = x1.min(tw as i32 - 1);
-        y1 = y1.min(th as i32 - 1);
-        let span = (x1 - x0 + 1) as u32 * (y1 - y0 + 1) as u32;
+        x1 = x1.min(tw_i - 1);
+        y1 = y1.min(th_i - 1);
+        let span = u32::try_from(x1 - x0 + 1).unwrap_or(0) * u32::try_from(y1 - y0 + 1).unwrap_or(0);
         if span.saturating_mul(2) >= total {
             return (true, Vec::new());
         }

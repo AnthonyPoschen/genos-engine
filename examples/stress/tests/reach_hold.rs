@@ -177,8 +177,12 @@ struct Shot {
     wide: bool,
 }
 
+fn u32_f32(v: u32) -> f32 {
+    f32::from(u16::try_from(v).unwrap_or(u16::MAX))
+}
+
 fn tile_on(mask: &[u32], tile: u32) -> bool {
-    let i = tile as usize;
+    let i = usize::try_from(tile).unwrap_or(0);
     mask.get(i / 32)
         .is_some_and(|word| word & (1 << (i % 32)) != 0)
 }
@@ -190,7 +194,7 @@ fn tile_mean_abs(a: &[u8], b: &[u8], tx: u32, ty: u32) -> f64 {
     let x0 = tx * TILE;
     for y in y0..(y0 + TILE).min(HEIGHT) {
         for x in x0..(x0 + TILE).min(WIDTH) {
-            let i = ((y * WIDTH + x) * 4) as usize;
+            let i = usize::try_from((y * WIDTH + x) * 4).unwrap_or(0);
             if i + 2 >= a.len() || i + 2 >= b.len() {
                 continue;
             }
@@ -253,7 +257,7 @@ fn push_spread(stage: &mut Stage) {
             size: 2.5,
             height: 2.0,
             yaw: 0.0,
-            color: [0.2, 0.2, 0.2 + i as f32 * 0.05],
+            color: [0.2, 0.2, 0.2 + f32::from(u8::try_from(i).unwrap_or(0)) * 0.05],
             absorption: 0.0,
             reflectance: -1.0,
             color_mix: -1.0,
@@ -269,7 +273,7 @@ fn apply_frame(stage: &mut Stage, camera: &mut Camera, frame: u32, spread: &mut 
         return;
     }
     if frame < 60 {
-        let step = if frame < 44 { (frame - 35) as f32 } else { 8.0 };
+        let step = if frame < 44 { u32_f32(frame - 35) } else { 8.0 };
         let x = 3.0 + 0.12 * step;
         box_at(stage, x, 0.4, 4.0, 1.0, 1.0);
         return;
@@ -279,7 +283,7 @@ fn apply_frame(stage: &mut Stage, camera: &mut Camera, frame: u32, spread: &mut 
         return;
     }
     if frame < 72 {
-        let x = 12.0 + 0.2 * (frame - 66) as f32;
+        let x = 12.0 + 0.2 * u32_f32(frame - 66);
         box_at(stage, x, 0.0, 14.0, 8.0, 6.0);
         return;
     }
@@ -289,7 +293,7 @@ fn apply_frame(stage: &mut Stage, camera: &mut Camera, frame: u32, spread: &mut 
             *spread = true;
         }
         let n = stage.world.scene.solids.len();
-        let shift = 0.15 * (frame - 71) as f32;
+        let shift = 0.15 * u32_f32(frame - 71);
         for solid in stage
             .world
             .scene
@@ -301,7 +305,7 @@ fn apply_frame(stage: &mut Stage, camera: &mut Camera, frame: u32, spread: &mut 
         }
         return;
     }
-    box_at(stage, 3.0 + 0.2 * (frame - 77) as f32, 0.4, 4.0, 1.0, 1.0);
+    box_at(stage, 3.0 + 0.2 * u32_f32(frame - 77), 0.4, 4.0, 1.0, 1.0);
     camera.set_pose(Vec3::new(14.5 + 0.35, 1.7, 23.5), -0.3554, 0.08);
 }
 
