@@ -13,7 +13,35 @@
     clippy::as_conversions,
     reason = "brick indices and pool lengths use small integer casts"
 )]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "pool indices and brick coords fit the float mantissa in practice"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "brick indices and packed colour channels are clamped"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "exp bias and clamped colour packing stay non-negative"
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "MoverCache Error variants are named; callers match on the enum"
+)]
+#![expect(
+    clippy::unreadable_literal,
+    reason = "hash golden multipliers match the GPU path literals"
+)]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::assert_is_empty, reason = "fixtures assert empty dirty/fill lists")
+)]
 
 /// Bytes per mover texel on the GPU path (fp16 SH + packed normal).
 /// The CPU reference keeps full floats for tests; this is the GPU budget.
@@ -1065,8 +1093,7 @@ fn pack_rgb9e5(rgb: [f32; 3]) -> u32 {
     let exp = (max_c.log2().ceil() as i32).clamp(-15, 15);
     let scale = 2.0f32.powi(exp);
     let enc = |c: f32| -> u32 {
-        let n = ((c / scale) * 511.0).round().clamp(0.0, 511.0) as u32;
-        n
+        ((c / scale) * 511.0).round().clamp(0.0, 511.0) as u32
     };
     let e = (exp + 15) as u32;
     enc(rgb[0]) | (enc(rgb[1]) << 9) | (enc(rgb[2]) << 18) | (e << 27)

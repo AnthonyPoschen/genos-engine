@@ -7,6 +7,7 @@
 //! did not show there. Validation layers report 0 errors (in-bounds misread).
 
 #![expect(clippy::expect_used, reason = "a missing field fails the gate")]
+#![expect(clippy::panic, reason = "a missing field fails the gate")]
 
 use std::mem::{offset_of, size_of};
 

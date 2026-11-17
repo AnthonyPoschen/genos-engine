@@ -7544,7 +7544,7 @@ impl Gpu {
         if memory_kind == Memory::Device {
             return;
         }
-        if std::env::var_os("GENOS_BUFFER_POISON").is_none() {
+        if genos_scene::lighting_env_os("GENOS_BUFFER_POISON").is_none() {
             return;
         }
         let size = buffer.size;

@@ -5600,7 +5600,7 @@ impl Gpu {
             }
         }
         if let Some(obj) = world_object {
-            for (&field_i, _) in &self.lighting.mesh_movers {
+            for &field_i in self.lighting.mesh_movers.keys() {
                 if self
                     .lighting
                     .mesh_field_object
@@ -5609,7 +5609,7 @@ impl Gpu {
                     .flatten()
                     == Some(obj)
                 {
-                    return 10001u32.saturating_add(u32::try_from(field_i).unwrap_or(0));
+                    return 10_001u32.saturating_add(u32::try_from(field_i).unwrap_or(0));
                 }
             }
         }
