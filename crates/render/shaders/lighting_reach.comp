@@ -1,9 +1,11 @@
 #version 450
 // One group. Marks the screen tiles a mover's before and after bounds cover,
-// and any tile a measured direct or cell change noted. The bounds are this
-// frame's change-list spheres. #288's mover table replaces that read; the
-// mark stays. A clipped, off-screen, or screen-filling footprint is not
-// marked as local: the host unholds the picture. A lamp is not in this list.
+// any tile whose direct shade stepped, and any tile a world cell's bounce
+// noted. The bounds are this frame's change-list spheres. #288's mover table
+// replaces that read; the mark stays. A clipped, off-screen, or screen-filling
+// footprint is not marked as local: the host unholds the picture. A lamp is
+// not in this list. The cell note is lighting_reach_note_cell. This pass
+// reads the count and clears it, so a tile drops once the step stops.
 // pc.dims.z == 0xffffffff clears the slot stamps only, after the cache pass.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
@@ -13,7 +15,6 @@ shared uint reach_hot_count;
 
 const float REACH_NEAR_Z = 0.25;
 const float REACH_TILE = 32.0;
-const uint REACH_DIRECT_PIXELS = 128u;
 
 uint reach_tw() {
     return (pc.dims.x + 31u) / 32u;

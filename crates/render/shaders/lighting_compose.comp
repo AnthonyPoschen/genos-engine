@@ -200,8 +200,6 @@ void main() {
                 // black is a real zero. A miss does not replace a colour
                 // already stored. A block that still has no colour is queued
                 // so the next frame visits it after the dirty list goes idle.
-                // Frames 9 and 10 do not walk. The scheduled store after that
-                // is a full replace.
                 uint packed = lighting_pack_rgb9e5(max(bounce, vec3(0.0)));
                 if (lighting_bounce_keep(packed, stored)) {
                     outc.px[at] = packed + 1u;

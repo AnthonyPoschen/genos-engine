@@ -5361,6 +5361,9 @@ const float REACH_HALF = 0.5;
 // A relit pixel crosses the one-percent hold in most tiles. A shadow is a
 // much larger step. The tile count below asks for a region of those.
 const float REACH_SHADOW = 0.25;
+// One cell, or this many direct-shade pixels, is a tile. A single relit
+// pixel is not: the one-percent hold fires in almost every tile.
+const uint REACH_DIRECT_PIXELS = 128u;
 // One projection. No change-list walk: that overflowed lavapipe's stack.
 bool lighting_reach_project(vec3 world, out uvec2 px) {
     px = uvec2(0u);
@@ -5410,6 +5413,68 @@ void lighting_reach_count_px(uvec2 p) {
         return;
     }
     atomicAdd(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + ty * tw + tx], 1u);
+}
+// The new sample against the stored mean. Unpacked luminance, not an rgb9e5
+// pack: one bucket does not keep a settled cell hot, and a pack that matches
+// while the sample is still outside the band does not clear it. The sample
+// has to clear REACH_SHADOW, the same quarter as a direct shade step, and
+// the cell's own noise. A running-mean nudge and a young cell with no
+// estimator are convergence, not a bounce change. The tile drops on the
+// next reach pass once the sample is inside that band.
+bool lighting_reach_radiance_hot(vec3 taken, vec3 mean, uint slot) {
+    float ys = dot(max(taken, vec3(0.0)), LIGHTING_SVGF_LW);
+    float ym = dot(max(mean, vec3(0.0)), LIGHTING_SVGF_LW);
+    float peak = max(max(ys, ym), REACH_SHADOW);
+    float dl = abs(ys - ym);
+    if (dl <= REACH_SHADOW * peak) {
+        return false;
+    }
+    vec2 nz = lighting_sc_noise(slot);
+    if (!(nz.x >= 0.0)) {
+        return false;
+    }
+    return dl > LIGHTING_DIRTY_SE * nz.y * lighting_sc_sun_gain(slot);
+}
+void lighting_reach_raise_px(uvec2 px) {
+    if (px.x >= pc.dims.x || px.y >= pc.dims.y) {
+        return;
+    }
+    uint tw = (pc.dims.x + 31u) / 32u;
+    uint tx = px.x >> 5u;
+    uint ty = px.y >> 5u;
+    uint th = (pc.dims.y + 31u) / 32u;
+    if (tw == 0u || tx >= tw || ty >= th) {
+        return;
+    }
+    uint tile = ty * tw + tx;
+    if (tile >= LIGHTING_REACH_CHANGE_WORDS) {
+        return;
+    }
+    atomicMax(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + tile], REACH_DIRECT_PIXELS);
+}
+// A world cell whose new sample left its mean. The note is the cell centre:
+// the compose coverage rect is the fill's accumulation, not the footprint.
+// While a mover is listed the centre's tile joins even outside the disc.
+// A tile already marked stays while the sample is still outside the band,
+// including the frames after the mover stops, and drops once it is not.
+// A centre the camera cannot see does not invent a tile.
+void lighting_reach_note_cell(uint slot, vec3 mean, vec3 taken) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    if (!(cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH)) {
+        return;
+    }
+    if (!lighting_reach_radiance_hot(taken, mean, slot)) {
+        return;
+    }
+    uvec2 px;
+    if (!lighting_reach_project(cache.v[3u * slot].xyz, px)) {
+        return;
+    }
+    if (lighting_reach_noting() || lighting_reach_tile_bit(px)) {
+        lighting_reach_raise_px(px);
+    }
 }
 // The stamp is one load. The projection stays out of the picture compose:
 // that shader is at its SPIR-V ceiling, and the screen pass stamps the slot.

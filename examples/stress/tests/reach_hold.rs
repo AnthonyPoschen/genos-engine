@@ -326,6 +326,12 @@ fn capture(unhold: bool) -> Vec<Shot> {
     shots
 }
 
+/// Far shadow and bounce outside a corner mover's disc, then the cases where
+/// the disc is not a proof: an off-screen mover, a large mover, many movers,
+/// and a camera move with a mover. Each frame's tiles outside the mask match
+/// a second run that unholds the whole picture. The stop tail fails if the
+/// mask clears while that difference is still there, and if the mask is still
+/// marked once the box has been still.
 #[test]
 fn outside_the_mask_matches_a_picture_wide_unhold() {
     let control = capture(true);
@@ -363,16 +369,22 @@ fn outside_the_mask_matches_a_picture_wide_unhold() {
     }
     assert!(local_disc, "the corner box never stayed a local disc");
 
+    // Stop tail. The box is still from frame 44. Clearing the mask while the
+    // picture still differs from the unhold is an early clear. A mask that is
+    // still marked at frame 59, after the picture has settled, is perpetual hot.
     for frame in 44..47 {
         let (diff, _) = max_tile_diff(&local[frame], &control[frame], true);
+        let cleared = local[frame].tiles == 0 && !local[frame].wide;
         eprintln!(
-            "reach tail-early {frame} tiles {} wide {} diff {diff:.3}",
+            "reach tail-early {frame} tiles {} wide {} cleared {cleared} diff {diff:.3}",
             local[frame].tiles, local[frame].wide
         );
-        assert!(
-            local[frame].tiles > 0 || local[frame].wide || diff < 8.0,
-            "the mask cleared while the picture still differed ({diff:.3})"
-        );
+        if cleared {
+            assert!(
+                diff < 8.0,
+                "early clear: the mask dropped while the picture still differed ({diff:.3})"
+            );
+        }
     }
     let tail = &local[59];
     let (tail_diff, _) = max_tile_diff(tail, &control[59], true);
@@ -381,9 +393,9 @@ fn outside_the_mask_matches_a_picture_wide_unhold() {
         tail.tiles, tail.wide
     );
     assert!(
-        tail.tiles == 0 || tail.wide,
-        "the mask stayed hot after the box stopped (tiles {})",
-        tail.tiles
+        tail.tiles == 0 && !tail.wide,
+        "perpetual hot: the mask stayed marked after the box stopped (tiles {} wide {})",
+        tail.tiles, tail.wide
     );
     assert!(
         tail_diff < 8.0,
