@@ -1,4 +1,7 @@
-#![expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::doc_markdown,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Game audio. The mix is stereo PCM. The operating system only receives that mix.
 //!
@@ -15,6 +18,7 @@ mod engine;
 mod mix;
 mod path;
 mod poly;
+mod reverb;
 mod ring;
 mod space;
 
@@ -28,5 +32,6 @@ pub use engine::{start_disk, start_with, AudioStats, Stream};
 pub use genos_math::Vec3;
 pub use mix::{allocating_mix_entries, mix, mix_into, Barrier, Listener, Source};
 pub use path::{calling_thread, DevicePath, FakeCapture, FakeDevice, NullDevice, OpenedDevice};
+pub use reverb::{apply_reverb, zone_index, Quality, Reverb, Zone};
 pub use ring::Command;
 pub use space::SPEED_OF_SOUND;
