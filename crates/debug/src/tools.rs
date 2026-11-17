@@ -1934,10 +1934,9 @@ enum Step {
 }
 
 fn region_arg(args: &Args) -> Result<Region, String> {
-    Ok(args
-        .floats("region", 4)?
-        .map(|r| Region([r[0], r[1], r[2], r[3]]))
-        .unwrap_or_default())
+    Ok(args.floats("region", 4)?.map_or_else(Region::default, |r| {
+        Region([r[0], r[1], r[2], r[3]])
+    }))
 }
 
 fn yaw_pitch(d: Vec3) -> (f32, f32) {

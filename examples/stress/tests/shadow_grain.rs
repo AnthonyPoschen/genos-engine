@@ -209,6 +209,7 @@ fn cell_luma(cell: &StoredCell) -> f32 {
 /// Full-shadow samples on a still hall, at a pixel pitch finer than the texel.
 /// The first frame is a cold cache. Later frames must show the filled indirect
 /// instead of holding that first miss.
+#[expect(clippy::too_many_lines, reason = "the shadow series is one loop and its window checks")]
 #[test]
 fn a_held_shadow_does_not_keep_the_first_black_bounce() {
     let (_gpu, mut owner) = open();
@@ -275,17 +276,15 @@ fn a_held_shadow_does_not_keep_the_first_black_bounce() {
         let query = CacheQuery {
             position: samples
                 .get(watched_index)
-                .map(|sample| sample.point)
-                .unwrap_or([0.0, 0.0, 0.0]),
+                .map_or([0.0, 0.0, 0.0], |sample| sample.point),
             normal: samples
                 .get(watched_index)
-                .map(|sample| sample.normal)
-                .unwrap_or([0.0, 1.0, 0.0]),
+                .map_or([0.0, 1.0, 0.0], |sample| sample.normal),
             size: TEXEL,
         };
         let cells = renderer.read_cache_cells(&[query]).expect("cell");
-        let field = cells.first().map(cell_luma).unwrap_or(0.0);
-        let weight = cells.first().map(|cell| cell.weight).unwrap_or(0.0);
+        let field = cells.first().map_or(0.0, cell_luma);
+        let weight = cells.first().map_or(0.0, |cell| cell.weight);
         eprintln!(
             "frame {frame} shadow_median {:.4} dark {dark}/{} zero {zeros} watched {:.4} field {:.4} weight {:.1}",
             median(&frame_y),

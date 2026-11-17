@@ -4575,8 +4575,7 @@ impl Gpu {
                 times.lighting_bucket[B_HIT as usize] / f64::from(times.lighting_frames),
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
                 self.last_unfilled
-                    .map(|stats| format!(" | {}", stats.line()))
-                    .unwrap_or_default(),
+                    .map_or_else(String::new, |stats| format!(" | {}", stats.line())),
                 lamp_pick_line,
                 if times.restir_frames > 0 {
                     let n = f64::from(times.restir_frames);

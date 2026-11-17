@@ -64,7 +64,8 @@ fn mean_codes(px: &[u8]) -> f64 {
         sum += f64::from(px[p + 1]);
         sum += f64::from(px[p + 2]);
     }
-    sum / (3.0 * n as f64)
+    let count = u32::try_from(n).unwrap_or(u32::MAX);
+    sum / (3.0 * f64::from(count))
 }
 
 fn max_step(means: &[f64]) -> f64 {

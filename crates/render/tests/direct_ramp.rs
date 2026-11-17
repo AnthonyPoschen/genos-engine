@@ -2,11 +2,15 @@
 //! channel. A ramp of sub-percent steps has to add up. A dim channel on a
 //! bright pixel has to be able to go out.
 
+#![expect(clippy::expect_used, reason = "a test aborts when a fixture fails")]
+
 const EPS: f32 = 0.01;
 const FLOOR: f32 = 1.0e-4;
 
 /// `lighting_compose_direct_moved` for one held frame that is not the drift pass.
 fn marks(curr: [f32; 3], prev: [f32; 3]) -> bool {
+    // An unchanged sample is the same three bits. The shader compares with ==.
+    #[expect(clippy::float_cmp, reason = "the shader's unchanged sample is an exact match")]
     if curr == prev {
         return false;
     }

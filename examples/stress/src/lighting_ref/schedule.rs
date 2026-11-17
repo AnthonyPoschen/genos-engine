@@ -450,16 +450,13 @@ pub fn write_frames_tsv(path: &Path, rows: &[FrameRecord]) -> Result<(), String>
     for row in rows {
         let mean = row
             .mean_rel
-            .map(|value| format!("{value:.6}"))
-            .unwrap_or_default();
+            .map_or_else(String::new, |value| format!("{value:.6}"));
         let blur = row
             .blur_rel
-            .map(|value| format!("{value:.6}"))
-            .unwrap_or_default();
+            .map_or_else(String::new, |value| format!("{value:.6}"));
         let ratio = row
             .luma_ratio
-            .map(|value| format!("{value:.6}"))
-            .unwrap_or_default();
+            .map_or_else(String::new, |value| format!("{value:.6}"));
         let _ = writeln!(
             text,
             "{scene}\t{checkpoint}\t{frame}\t{sim:.6}\t{wall:.3}\t{settled}\t{trusted}\t{mean}\t{blur}\t{ratio}\t{captured}\t{phase}\t{box:.6}\t{lamp:.6}\t{day:.6}",

@@ -1467,7 +1467,7 @@ impl LightingSettings {
                 lines.push((key.to_string(), value.to_string()));
             }
         }
-        let mut settings = preset.map(Self::preset).unwrap_or_default();
+        let mut settings = preset.map_or_else(Self::default, Self::preset);
         for (key, value) in lines {
             settings.set_key(&key, &value)?;
         }

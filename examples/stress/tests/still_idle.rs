@@ -62,7 +62,8 @@ fn mean_abs(a: &[u8], b: &[u8]) -> f64 {
         sum += f64::from(u32::from(a[p + 1].abs_diff(b[p + 1])));
         sum += f64::from(u32::from(a[p + 2].abs_diff(b[p + 2])));
     }
-    sum / (3.0 * n as f64)
+    let count = u32::try_from(n).unwrap_or(u32::MAX);
+    sum / (3.0 * f64::from(count))
 }
 
 #[test]

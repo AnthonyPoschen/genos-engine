@@ -1652,7 +1652,7 @@ impl Gpu {
         let slot = self.lighting.last_slot;
         let restir_diag = self.read_restir_diag(self.lighting.stats[slot].memory);
         self.read_stats16(self.lighting.stats[slot].memory)
-            .map(|w| LampPickCounts {
+            .map_or_else(|_| LampPickCounts::default(), |w| LampPickCounts {
                 pixels: w[LAMP_PICK_DIAG_WORD],
                 kept: w[LAMP_PICK_DIAG_WORD + 1],
                 fills: w[LAMP_PICK_DIAG_WORD + 2],
@@ -1671,7 +1671,6 @@ impl Gpu {
                 history_rejects: restir_diag[1],
                 restir_point_adds: restir_diag[2],
             })
-            .unwrap_or_default()
     }
 
     /// Displaying picture pixels whose fine world-cache read was under a full
@@ -1699,8 +1698,7 @@ impl Gpu {
         self.idle_device();
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
-            .map(|w| lighting_atrous_from(&w))
-            .unwrap_or_default()
+            .map_or_else(|_| LightingAtrousStats::default(), |w| lighting_atrous_from(&w))
     }
 
     /// Build the sun compose pipeline the first time a small step needs it.
@@ -2273,7 +2271,8 @@ impl Gpu {
         // picture compile reads. On a held camera that lattice is already
         // filled. Frame 32 (and a camera move, which takes the full grid)
         // requests it again.
-        let refresh = self.lighting.frame != 0 && self.lighting.frame % LIGHTING_STILL_REFRESH == 0;
+        let refresh = self.lighting.frame != 0
+            && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
         if self.lighting.still > 0 && !compose_full && !refresh {
             return;
         }
@@ -4425,7 +4424,8 @@ impl Gpu {
         // The drift pass visits every pixel. A miss that never resolved is
         // stored then, and a block the retry list could not hold is not left
         // black. Later held frames reuse that store.
-        let refresh = self.lighting.frame != 0 && self.lighting.frame % LIGHTING_STILL_REFRESH == 0;
+        let refresh = self.lighting.frame != 0
+            && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
         let compose_full = bounce_filling
             || opening
             || refresh
