@@ -4209,10 +4209,10 @@ impl Gpu {
                 lighting_mover_frame(&mut self.lighting.mover_cache, &movers, eye);
             self.lighting.mover_stats = [live_m, live_t, boosts.len() as u32];
             // Priority boost: append boost spheres as ordinary change entries so
-            // lighting_near_change wakes world cells. Leaves room for the mover
-            // list below (4 vec4 each) while that path still uploads.
-            let mover_room = (movers.len().min(16)) * 4;
-            let boost_room = LIGHTING_CHANGES.saturating_sub(used + mover_room);
+            // lighting_near_change wakes world cells. The old 16×4-vec4 mover
+            // list no longer occupies this block; the object-attached pool owns
+            // movers (head.w carries the live count for the hold / unhold path).
+            let boost_room = LIGHTING_CHANGES.saturating_sub(used);
             let mut boost_n = 0usize;
             for (centre, brick) in boosts.iter().take(boost_room) {
                 let at = 4 * (LIGHTING_CHANGE_HEAD + used + boost_n);
@@ -4223,40 +4223,30 @@ impl Gpu {
                 // Integer change count (head.x); keep any scene-changed fraction.
                 let frac = block[0].fract();
                 block[0] = (used + boost_n) as f32 + frac;
-                used += boost_n;
                 sent += boost_n;
             }
-            let n = movers.len().min((LIGHTING_CHANGES - used) / 4);
-            for (j, m) in movers.iter().take(n).enumerate() {
-                for (k, b) in m.iter().enumerate() {
-                    let at = 4 * (LIGHTING_CHANGE_HEAD + used + 4 * j + k);
-                    block[at..at + 4].copy_from_slice(b);
-                }
-            }
+            // Live mover count for lighting_movers_count / unhold only. No
+            // per-mover vec4 packing (superseded by MoverCache). Cap at 999 so
+            // the ×200000 encoding stays inside the head word.
+            let n = (live_m as usize).min(999);
             block[3] += (n * 200000) as f32;
-            sent += 4 * n;
             if lighting_debug_on() {
                 eprintln!(
-                    "lighting world {world} cap {} flags {flags} local {} movers {n} of {} pool {}/{} boosts {} occs {} meshes {} of {} {:?}",
+                    "lighting world {world} cap {} flags {} movers {n} pool {}/{} texels {} boosts {} occs {} meshes {}",
                     head.mode_cap % 1000,
                     u8::from(self.lighting.settings.surface_cache.attach_movers),
-                    self.lighting.movers.len(),
-                    self.lighting.mover_stats[1],
                     self.lighting.mover_cache.capacity(),
+                    live_m,
+                    live_t,
                     self.lighting.mover_stats[2],
                     lighting_occs(&self.frame_bytes).len(),
-                    self.lighting.mesh_movers.len(),
-                    self.lighting.mesh_poses.len(),
-                    movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>()
+                    self.lighting.mesh_movers.len()
                 );
             }
-            // Object-local cache entries for movers (GIBS §1.5). The public
-            // knob is surface_cache.attach_movers. Static geometry stays on
-            // the world lattice. Stage D deletes this path in favour of the
-            // mover pool when compose wiring lands.
-            if self.lighting.settings.surface_cache.attach_movers {
-                block[3] += 100000.0;
-            }
+            // Object-local keys in the shared world hash are deleted. Movers use
+            // the object-attached pool (`surface_cache.mover_pool`). The
+            // attach_movers bit (100000) is no longer raised; lighting_sc_local_on
+            // stays false so compose does not enter the old local-salt path.
         }
         if had {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.

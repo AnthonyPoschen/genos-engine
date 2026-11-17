@@ -502,9 +502,8 @@ pub struct AmbientSettings {
 /// deprecated aliases, is step 1 of `docs/lighting/RENAMES.md`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceCacheSettings {
-    /// Cache entries on a moving object are stored in that object's frame and
-    /// transformed each frame. Static geometry stays on the world lattice.
-    /// Off keeps those entries world-anchored.
+    /// Deprecated. Object-local keys in the shared world hash are removed;
+    /// movers use `mover_pool` instead. Kept as a parse/round-trip alias.
     pub attach_movers: bool,
     /// Published blend. Only a finished long-term mean is shown.
     pub blend: SurfaceCacheBlend,

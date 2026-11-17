@@ -46,7 +46,7 @@ stays on the other agent’s PR. This path must not edit those sites.
 | A | Pool + mover table + O(1) lookup + unit tests + `mover_pool` setting |
 | B | Allocation, tiers, hysteresis, free-on-drop |
 | C | Frame sync into the pool; world-cell priority boosts enter the change list for `lighting_near_change` / compact |
-| D | Compose wiring; delete old attach path and 16-mover change-block list |
+| D | Delete object-local hash + 16-mover change-block list; head.w keeps live count for unhold; compose uses world cells for movers (detail) until mover-texel SH fill lands |
 | E | Scaling scene (10/100/1000), spin gate 0.027, design note |
 
 ### Observability (stage C)

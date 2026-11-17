@@ -1262,32 +1262,40 @@ vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
 // How far around a change a patch is relit first (lighting_compact.comp), metres.
 const float LIGHTING_NEAR_CHANGE = 1.0;
 
-// Movers (lighting_gpu.rs lighting_movers): occluders that moved in the last
-// LIGHTING_MOVER_KEEP frames, listed after the changes, four vec4 each: bounding
-// sphere; centre and id + 1; half extents (x, y, z); cosine and sine of the yaw.
-// Count in head w above 200000, the object-local texel switch at 100000.
+// Movers: live count in head w above 200000 (for the hold / unhold path).
+// The old 16×4-vec4 packed list is deleted; object-attached lighting lives in
+// the mover pool (`surface_cache.mover_pool`, docs/systems/lighting/mover-attach-cache.md).
+// The 100000 attach_movers bit is no longer raised, so lighting_sc_local_on is off.
 const uint LIGHTING_MOVER_VEC4 = 4u;
+// Object-local keys in the shared world hash are deleted. Always false: movers
+// use the object-attached pool, static geometry stays world-lattice (ADR 0012).
+bool lighting_sc_local_on() {
+    return false;
+}
 uint lighting_movers_first() {
     vec4 head = work.v[lighting_change_at()];
     return head.y > 0.5 ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
 }
 uint lighting_movers_count() {
-    uint n = uint(work.v[lighting_change_at()].w) / 200000u;
-    return min(n, (LIGHTING_CHANGES - lighting_movers_first()) / LIGHTING_MOVER_VEC4);
+    // Head count only (no packed list capacity clamp). Unhold reads > 0.
+    return uint(work.v[lighting_change_at()].w) / 200000u;
 }
+// Kept for any leftover object-local texel transform; returns zeros when the
+// packed list is gone (local path off).
 vec4 lighting_mover(uint m, uint k) {
+    if (!lighting_sc_local_on()) {
+        return vec4(0.0);
+    }
     return work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + lighting_movers_first() + LIGHTING_MOVER_VEC4 * m + k];
 }
-// Object-local cache entries (GIBS 2021 §1.5: a surfel stores a transform id
-// and an object-relative position). Movers only; static geometry stays
-// world-lattice (ADR 0012). The bit is surface_cache.attach_movers, head w / 100000.
-bool lighting_sc_local_on() {
-    return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
-}
 
-// A point inside the bounds of a mover.
+// A point inside the bounds of a mover. Packed-list path removed with local-on.
 bool lighting_in_change(vec3 p) {
+    if (!lighting_sc_local_on()) {
+        return false;
+    }
     uint n = lighting_movers_count();
+    n = min(n, (LIGHTING_CHANGES - lighting_movers_first()) / LIGHTING_MOVER_VEC4);
     [[dont_unroll]] for (uint m = 0u; m < n; m++) {
         vec4 b = lighting_mover(m, 0u);
         vec3 d = p - b.xyz;
@@ -1376,7 +1384,11 @@ uint lighting_mover_on(vec3 pos, vec3 n) {
 // Mover list position of the object with id + 1 = idp, or ~0 (it has rested and
 // left the list).
 uint lighting_mover_by_id(float idp) {
+    if (!lighting_sc_local_on()) {
+        return ~0u;
+    }
     uint n = lighting_movers_count();
+    n = min(n, (LIGHTING_CHANGES - lighting_movers_first()) / LIGHTING_MOVER_VEC4);
     [[dont_unroll]] for (uint m = 0u; m < n; m++) {
         if (abs(lighting_mover(m, 1u).w - idp) < 0.5) {
             return m;
