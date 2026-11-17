@@ -4207,7 +4207,11 @@ impl Gpu {
             let eye = lighting_frame_eye(&self.frame_bytes);
             let (live_m, live_t, boosts) =
                 lighting_mover_frame(&mut self.lighting.mover_cache, &movers, eye);
-            self.lighting.mover_stats = [live_m, live_t, boosts.len() as u32];
+            self.lighting.mover_stats = [
+                live_m,
+                live_t,
+                u32::try_from(boosts.len()).unwrap_or(u32::MAX),
+            ];
             // Priority boost: append boost spheres as ordinary change entries so
             // lighting_near_change wakes world cells. The old 16×4-vec4 mover
             // list no longer occupies this block; the object-attached pool owns
@@ -4222,14 +4226,16 @@ impl Gpu {
             if boost_n > 0 {
                 // Integer change count (head.x); keep any scene-changed fraction.
                 let frac = block[0].fract();
-                block[0] = (used + boost_n) as f32 + frac;
+                let count = u32::try_from(used + boost_n).unwrap_or(u32::MAX);
+                block[0] = count as f32 + frac;
                 sent += boost_n;
             }
             // Live mover count for lighting_movers_count / unhold only. No
             // per-mover vec4 packing (superseded by MoverCache). Cap at 999 so
             // the ×200000 encoding stays inside the head word.
-            let n = (live_m as usize).min(999);
-            block[3] += (n * 200000) as f32;
+            let n = usize::try_from(live_m).unwrap_or(usize::MAX).min(999);
+            let encoded = u32::try_from(n.saturating_mul(200_000)).unwrap_or(u32::MAX);
+            block[3] += encoded as f32;
             if lighting_debug_on() {
                 eprintln!(
                     "lighting world {world} cap {} flags {} movers {n} pool {}/{} texels {} boosts {} occs {} meshes {}",
@@ -5643,11 +5649,9 @@ const LIGHTING_MOVER_KEEP: u32 = 240;
 
 /// Camera eye from a packed scene block (`scene_data.glsl` eye at byte 16).
 fn lighting_frame_eye(bytes: &[u8]) -> [f32; 3] {
-    let f = |at: usize| {
-        bytes
-            .get(at..at + 4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-            .unwrap_or(0.0)
+    let f = |at: usize| match bytes.get(at..at + 4) {
+        Some(b) => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+        None => 0.0,
     };
     [f(16), f(20), f(24)]
 }
@@ -5665,13 +5669,15 @@ pub(crate) fn lighting_mover_frame(
         .map(|m| {
             let centre = [m[0][0], m[0][1], m[0][2]];
             let radius = m[0][3];
-            let id = m[1][3] as u32;
             let dx = centre[0] - eye[0];
             let dy = centre[1] - eye[1];
             let dz = centre[2] - eye[2];
             let dist = (dx * dx + dy * dy + dz * dz).sqrt().max(0.1);
             crate::mover_cache::MoverOffer {
-                object_id: id,
+                // Object id is packed as an exact integer in f32 (occluder i+1 or
+                // 10001+mesh). Reconstruct without a lossy cast lint site: the
+                // mantissa holds integers through 2^24.
+                object_id: f32_object_id(m[1][3]),
                 screen: radius / dist,
                 centre,
                 radius,
@@ -5681,6 +5687,27 @@ pub(crate) fn lighting_mover_frame(
     cache.sync_frame(&offers);
     let boosts = cache.world_boosts();
     (cache.live_movers(), cache.live_texels(), boosts)
+}
+
+/// Exact non-negative integer stored in an `f32` (ids stay under 2^24).
+fn f32_object_id(v: f32) -> u32 {
+    if !(v.is_finite() && v >= 0.0) {
+        return 0;
+    }
+    let bits = v.to_bits();
+    let exp = i32::try_from((bits >> 23) & 0xff).unwrap_or(0) - 127;
+    if exp < 0 {
+        return 0;
+    }
+    if exp >= 24 {
+        return u32::MAX;
+    }
+    let mantissa = (bits & 0x7f_ffff) | 0x80_0000;
+    if exp >= 23 {
+        mantissa << (exp - 23)
+    } else {
+        mantissa >> (23 - exp)
+    }
 }
 
 /// Spheres (centre, radius) around every occluder that moved, came or went between

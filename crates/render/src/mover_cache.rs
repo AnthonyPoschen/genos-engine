@@ -7,7 +7,11 @@
 //!
 //! Design: `docs/systems/lighting/mover-attach-cache.md`.
 
+#![expect(clippy::as_conversions, reason = "pool indices cross u32/usize at the GPU boundary. docs/LINT_RULES.md")]
+#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
 
 /// Bytes per mover texel (object-local pos + id + world-direction SH-L1).
 pub const MOVER_TEXEL_BYTES: usize = 64;
@@ -203,7 +207,7 @@ impl MoverCache {
                 live_texels: 0,
             };
         }
-        let n = capacity as usize;
+        let n = usize::try_from(capacity).unwrap_or(0);
         let table_slots = n.next_power_of_two().max(16);
         Self {
             texels: vec![MoverTexel::EMPTY; n],
@@ -299,9 +303,7 @@ impl MoverCache {
             match self.slots[i] {
                 SLOT_EMPTY => return Some(tomb.unwrap_or(i)),
                 SLOT_TOMB => {
-                    if tomb.is_none() {
-                        tomb = Some(i);
-                    }
+                    tomb = tomb.or(Some(i));
                 }
                 _ => {}
             }
@@ -414,10 +416,10 @@ impl MoverCache {
         if object_id == 0 || self.capacity == 0 {
             return None;
         }
-        let prev_tier = self
-            .lookup(object_id)
-            .map(|e| e.tier)
-            .unwrap_or(MoverTier::Far);
+        let prev_tier = match self.lookup(object_id) {
+            Some(e) => e.tier,
+            None => MoverTier::Far,
+        };
         let tier = MoverTier::with_hysteresis(prev_tier, screen);
         let live_after = if self.lookup(object_id).is_some() {
             self.live_movers.max(1)
@@ -450,7 +452,7 @@ impl MoverCache {
             centre,
             radius,
         };
-        self.slots[slot] = slot as u32;
+        self.slots[slot] = u32::try_from(slot).unwrap_or(u32::MAX);
         self.live_movers += 1;
         Some(self.table[slot])
     }
@@ -631,7 +633,7 @@ impl MoverCache {
         out
     }
 
-    /// World-cell priority boost centres: (centre, brick_metres) for each
+    /// World-cell priority boost centres: `(centre, brick_metres)` for each
     /// mover that dirties the world.
     pub fn world_boosts(&self) -> Vec<([f32; 3], f32)> {
         self.table
@@ -811,7 +813,7 @@ mod tests {
             .upsert(4, 0.001, [0.0; 3], 0.4)
             .expect("far");
         assert!(!MoverCache::dirties_world(&e));
-        assert!(cache.world_boosts().is_empty());
+        assert_eq!(cache.world_boosts().len(), 0);
     }
 
     #[test]
@@ -859,7 +861,10 @@ mod tests {
                 .collect();
             cache.sync_frame(&offers);
             let boosts = cache.world_boosts();
-            let share = cache.lookup(1).map(|e| e.texel_count).unwrap_or(0);
+            let share = match cache.lookup(1) {
+                Some(e) => e.texel_count,
+                None => 0,
+            };
             let line = format!(
                 "movers={n} live={} texels={} free={} share={} dirtied_cells≈{} pool={}",
                 cache.live_movers(),
