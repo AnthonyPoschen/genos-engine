@@ -64,7 +64,7 @@ This stage is **yaw-only** and **boxes-first**. That is intentional and safe for
 
 - Slide: before max step **1.7008** at 250 mm; after **0** (pool fine `[7,3,1]`). world_hit 0, object_hit 1, drops 1.
 - Rays/frame at 10/100/1000 Near movers (budget 4096): **4096 / 4096 / 4096**.
-- Compose SPIR-V: **229880** B (ceiling 248000; after #290 merge; hitch mesh/on out of compose, lattice warm-up).
+- Compose SPIR-V: **230656** B (ceiling 248000; after #285+#290 merge; hitch mesh/on out of compose, lattice warm-up).
 - Warm-up locks: slide `warm_ok` = live gather; `compose_lattice_warm_up_prior_loads_stored_ids` = `GENOS_COMPOSE_NO_WALK` stored-id load.
 - ReSTIR `REF_ERR` 0.05 gate scenes: pass (merge oracle still fails on lighting-v3).
 - fill_knockout: early→late **0.5954 → 0.0828** (under frozen **0.213** ceiling). Gain gate `MIN_ERROR_GAIN=0.03` stays. The 0.5557 regression was stale-drop treating `last==0` as aged (wiped hall cells) + Stage H `prepare_fill` spending the batch on KEEP leftovers via closeness-only priority.

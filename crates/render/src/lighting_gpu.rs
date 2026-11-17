@@ -54,6 +54,10 @@ const LIGHTING_CACHE_SLOT_BYTES: u64 = {
 const LIGHTING_PC_BYTES: u32 = 48;
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
+/// Off-screen fine-texel admission count (`LIGHTING_FINE_COUNT_AT`). Zeroed each round.
+const LIGHTING_FINE_COUNT_AT: u64 = LIGHTING_WRC_COUNTS_AT + 20;
+/// Create, drop, lookahead. Not zeroed.
+const LIGHTING_FINE_WORD_AT: u64 = LIGHTING_WRC_COUNTS_AT + 24;
 /// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
 const LIGHTING_DRAIN_FLAG_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 82;
 /// ckeys word of the last host-hash change frame (lighting_cache.glsl LIGHTING_LAMP_CATCH_AT).
@@ -2330,9 +2334,10 @@ impl Gpu {
             }
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world && self.lighting.cache_full {
-                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
+                for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7, LIGHTING_FINE_COUNT_AT] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
+                self.write_fine_lod(self.cmd)?;
             }
             // Settled: the cache holds its light and runs no rounds, so the drain
             // flag would keep the last value its args pass wrote. The host settled
@@ -2544,6 +2549,22 @@ impl Gpu {
         self.lighting.pipes[3]
     }
 
+    /// The fine-band distances, for the cache shaders.
+    fn write_fine_lod(&mut self, cmd: Handle) -> Result<(), String> {
+        let cache = self.lighting.settings.surface_cache;
+        let words = [
+            cache.fine_lod_create.to_bits(),
+            cache.fine_lod_drop.to_bits(),
+            cache.fine_lod_lookahead.to_bits(),
+        ];
+        self.write_device(
+            cmd,
+            self.lighting.cache_keys.buffer,
+            LIGHTING_FINE_WORD_AT * 4,
+            pod_bytes(&words),
+        )
+    }
+
     /// Record and submit one light cache round on the async compute queue: list
     /// the live patches, trace and light this round's batch of their rays, relight
     /// them. Skipped while the last round still runs, so at most one is in flight
@@ -2603,6 +2624,8 @@ impl Gpu {
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_WRC_COUNTS_AT * 4, 8, 0);
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, (LIGHTING_WRC_COUNTS_AT + 4) * 4, 8, 0);
+            (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_FINE_COUNT_AT * 4, 4, 0);
+            self.write_fine_lod(cmd)?;
             (self.fns.cmd_fill_buffer)(
                 cmd,
                 self.lighting.cache_keys.buffer,
@@ -6824,7 +6847,7 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
+        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_CACHE_SLOTS, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
         LIGHTING_COMPOSE_SPV, LIGHTING_SH_DRAIN_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
     };
 
@@ -6908,11 +6931,14 @@ mod sun_step {
     fn compose_spirv_stays_near_the_picture_pass() {
         // The missing-field read, the path debug view, the texels population
         // record, the shown-mean age tally, the bounce store rule, and the
-        // retry list sit in this pass. A mover tile sets the field bit compose
-        // already tests; the tile bitset stays out of this shader. Hitch
-        // mesh/on bodies stay out of GENOS_COMPOSE_NO_WALK (pool path +
-        // lattice warm-up). Compose is 229_880 bytes after merging #290.
-        // 248_000 still rejects another walk in this pass.
+        // retry list sit in this pass. Compose compiles the slot count as a
+        // literal, so the compiler folds it. Specialization constant 1 left
+        // every slot mask dynamic and that module was 252_688 bytes.
+        // Hitch mesh/on bodies stay out of GENOS_COMPOSE_NO_WALK (pool path
+        // + lattice warm-up). A mover tile sets the field bit compose already
+        // tests; the tile bitset stays out of this shader. Compose is
+        // 230_656 bytes after merging #285. 248_000 still rejects a second
+        // occluder walk.
         assert!(
             LIGHTING_COMPOSE_SPV.len() < 248_000,
             "compose SPIR-V is {} bytes",
@@ -6924,6 +6950,35 @@ mod sun_step {
             "sun compose grew by {extra} bytes (compose {}, sun {})",
             LIGHTING_COMPOSE_SPV.len(),
             SUN_COMPOSE_SPV.len()
+        );
+    }
+
+    /// The compose module compiles the slot count as a literal. The host table
+    /// and the specialization-constant default are the same number. Changing
+    /// one arm and not the others desyncs compose from the buffer.
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a test aborts when the slot count does not fit in a SPIR-V word"
+    )]
+    fn compose_slot_literal_matches_the_host() {
+        let src = include_str!("../shaders/lighting_cache_slots.glsl");
+        let literals = slot_literals(src);
+        assert_eq!(
+            literals.len(),
+            2,
+            "compose literal and constant-id default, got {literals:?}"
+        );
+        let host = LIGHTING_CACHE_SLOTS;
+        let probe = u64::from(crate::cache_probe::SLOTS);
+        assert_eq!(host, probe, "host table and the cache probe disagree");
+        for n in literals {
+            assert_eq!(n, host, "shader slot count {n} is not the host {host}");
+        }
+        let want = u32::try_from(host).expect("slot count fits in a SPIR-V word");
+        assert!(
+            spirv_has_u32(LIGHTING_COMPOSE_SPV, want),
+            "compose SPIR-V does not contain the host slot count {want}"
         );
     }
 
@@ -7031,6 +7086,51 @@ fn reachable_from_main(bytes: &[u8]) -> Vec<String> {
     }
     reached
 }
+
+fn slot_literals(src: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let line = line.trim();
+        if line.starts_with("//") || !line.contains("LIGHTING_CACHE_SLOTS =") {
+            continue;
+        }
+        let Some(eq) = line.rfind('=') else {
+            continue;
+        };
+        let rest = line[eq + 1..].trim().trim_end_matches(';').trim();
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if let Ok(n) = digits.parse() {
+            out.push(n);
+        }
+    }
+    out
+}
+
+fn spirv_has_u32(bytes: &[u8], want: u32) -> bool {
+    if bytes.len() < 20 || !bytes.len().is_multiple_of(4) {
+        return false;
+    }
+    let mut words = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let raw = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        words.push(u32::from_le_bytes(raw));
+    }
+    let mut i = 5usize;
+    while i < words.len() {
+        let word = words[i];
+        let count = usize::try_from(word >> 16).unwrap_or(0);
+        let op = word & 0xffff;
+        if count == 0 || i + count > words.len() {
+            return false;
+        }
+        // OpConstant: result type, result id, literal.
+        if op == 43 && count >= 4 && words[i + 3] == want {
+            return true;
+        }
+        i += count;
+    }
+    false
+}
 }
 
 include!("lighting_dispatch.rs");
@@ -7052,6 +7152,10 @@ pub struct CacheRound {
     pub waiting: u32,
     /// Scout rays scheduled this round. Zero when the scout was not due.
     pub scouts: u32,
+    /// Lookups that found neither their entry nor a free slot.
+    pub missed: u32,
+    /// Entries freed this round (distance drop, expiry, or a full-table eviction).
+    pub freed: u32,
 }
 
 impl CacheRound {
@@ -7064,6 +7168,8 @@ impl CacheRound {
             due: words[17],
             waiting: words[18],
             scouts: words[19],
+            missed: words[3],
+            freed: words[10],
         }
     }
 }

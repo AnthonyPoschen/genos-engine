@@ -99,6 +99,7 @@ void main() {
         if (lighting_ray_fill_on()) {
             atomicAdd(ckeys.key[lighting_fill_header_at() + 7u], 1u);
             lighting_fill_visit(slot);
+            lighting_fine_world_filter(slot);
             return;
         }
         // World mode 3 due lists, settle-every-cell, and the old refresh walks
