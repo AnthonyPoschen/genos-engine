@@ -304,6 +304,8 @@ pub(crate) struct Lighting {
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
     movers: std::collections::BTreeMap<usize, u32>,
+    /// Object-attached mover texel pool + O(1) table (replaces the change-block hitch list).
+    mover_cache: crate::mover_cache::MoverCache,
     /// Traced mesh instances (mesh_field order): last poses, the ones that moved in
     /// the last LIGHTING_MOVER_KEEP frames, and every instance's bounding sphere now.
     mesh_poses: Vec<[f32; 16]>,
@@ -669,6 +671,7 @@ impl Default for Lighting {
             round_entries: 0,
             cache_rays: 0,
             movers: std::collections::BTreeMap::new(),
+            mover_cache: crate::mover_cache::MoverCache::high(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
@@ -4177,35 +4180,42 @@ impl Gpu {
             }
         }
         sent += used;
-        // Movers (surface cache): bounds of every occluder that moved in the
-        // last LIGHTING_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
-        // Compared whenever there is a last scene (not only when the trace key held:
-        // a spinning box can change the key every frame and must stay a mover).
+        // Movers (surface cache): KEEP timers still run; head w carries the
+        // live count for unhold. The 16×4-vec4 hitch list in the change block
+        // is gone — records live in MoverCache (O(1) table + texel pool).
         if world == 3 && !self.lighting.kept_bytes.is_empty() {
-            let movers = lighting_movers(&self.lighting.kept_bytes, &self.frame_bytes, &mut self.lighting.movers);
-            let mut movers = movers;
-            // Traced mesh instances that moved: id 10001 + instance index (the
-            // shader reads their frame from the mesh field).
+            let packed = lighting_movers(
+                &self.lighting.kept_bytes,
+                &self.frame_bytes,
+                &mut self.lighting.movers,
+            );
+            let mut records = packed;
             for &i in self.lighting.mesh_movers.keys() {
                 if let Some(sph) = self.lighting.mesh_spheres.get(i) {
-                    movers.push([*sph, [0.0, 0.0, 0.0, (10001 + i) as f32], [0.0; 4], [0.0; 4]]);
+                    records.push([
+                        *sph,
+                        [0.0, 0.0, 0.0, (10001 + i) as f32],
+                        [0.0; 4],
+                        [0.0; 4],
+                    ]);
                 }
             }
-            let n = movers.len().min((LIGHTING_CHANGES - used) / 4);
-            for (j, m) in movers.iter().take(n).enumerate() {
-                for (k, b) in m.iter().enumerate() {
-                    let at = 4 * (LIGHTING_CHANGE_HEAD + used + 4 * j + k);
-                    block[at..at + 4].copy_from_slice(b);
-                }
-            }
+            self.sync_mover_cache(&records);
+            let n = records.len();
+            // Unhold signal only — do not pack hitch records into the change block.
             block[3] += (n * 200000) as f32;
-            sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", head.mode_cap % 1000, u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!(
+                    "lighting world {world} cap {} flags {flags} local {} movers {n} pool {}/{} occs {} meshes {} of {}",
+                    head.mode_cap % 1000,
+                    u8::from(self.lighting.settings.surface_cache.attach_movers),
+                    self.lighting.mover_cache.used_texels(),
+                    self.lighting.mover_cache.pool_cap(),
+                    lighting_occs(&self.frame_bytes).len(),
+                    self.lighting.mesh_movers.len(),
+                    self.lighting.mesh_poses.len()
+                );
             }
-            // Object-local cache entries for movers (GIBS §1.5). The public
-            // knob is surface_cache.attach_movers. Static geometry stays on
-            // the world lattice.
             if self.lighting.settings.surface_cache.attach_movers {
                 block[3] += 100000.0;
             }
@@ -5527,6 +5537,51 @@ fn lighting_occ_bounds(rec: &[u8]) -> [f32; 4] {
     let (hx, hy, hz, r) = (f(4).abs(), f(5).abs() * 0.5, f(6).abs(), f(7).abs());
     let (hx, hz) = (hx.max(r), hz.max(r));
     [f(0), f(1), f(2), (hx * hx + hy * hy + hz * hz).sqrt() + 0.05]
+}
+
+
+impl Gpu {
+    /// Rebuilds the host mover table from this frame's KEEP hitch records.
+    /// Drops movers that left the list so their texels are freed (no orphans).
+    fn sync_mover_cache(&mut self, records: &[[[f32; 4]; 4]]) {
+        use crate::mover_cache::{MoverRecord, MoverTier, MOVER_ID_NONE};
+        let want: std::collections::BTreeSet<u32> = records
+            .iter()
+            .filter_map(|m| {
+                let id = m[1][3] as u32;
+                (id != MOVER_ID_NONE).then_some(id)
+            })
+            .collect();
+        let live = self.lighting.mover_cache.table_object_ids();
+        for id in live {
+            if !want.contains(&id) {
+                self.lighting.mover_cache.remove(id);
+            }
+        }
+        let pool = self.lighting.settings.surface_cache.mover_texels;
+        if pool > 0 && self.lighting.mover_cache.pool_cap() != pool {
+            self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
+        }
+        for m in records {
+            let id = m[1][3] as u32;
+            if id == MOVER_ID_NONE {
+                continue;
+            }
+            let rec = MoverRecord {
+                object_id: id,
+                sphere: m[0],
+                centre: [m[1][0], m[1][1], m[1][2]],
+                half_extents: [m[2][0], m[2][1], m[2][2]],
+                yaw_cos: m[3][0],
+                yaw_sin: m[3][1],
+                texel_base: u32::MAX,
+                texel_count: 0,
+                tier: MoverTier::Near,
+            };
+            let _ = self.lighting.mover_cache.upsert(rec);
+        }
+        self.lighting.mover_cache.rebalance_all();
+    }
 }
 
 /// Movers: occluders (by index) whose record differs between two scene blocks of

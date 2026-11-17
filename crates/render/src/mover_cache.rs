@@ -248,6 +248,16 @@ impl MoverCache {
         self.pool_cap.saturating_sub(self.free_count)
     }
 
+    /// Live object ids currently in the table (for host sync / drop).
+    #[must_use]
+    pub fn table_object_ids(&self) -> Vec<u32> {
+        self.table
+            .iter()
+            .filter(|r| r.is_live())
+            .map(|r| r.object_id)
+            .collect()
+    }
+
     /// O(1) open-address lookup by object id. Returns the table slot.
     #[must_use]
     pub fn find_slot(&self, object_id: u32) -> Option<u32> {

@@ -958,7 +958,9 @@ bool lighting_sc_stale(uint slot) {
     }
     return lighting_ls_ratio(u) > LIGHTING_SC_STALE_UP;
 }
-// Set while a lookup runs in a mover's frame: id + 1 salts the key.
+// Retired: object-local keys no longer salt the shared world hash. Mover
+// lighting lives in the side mover texel pool (mover_cache.rs). Kept as a
+// zero so older call sites that save/restore it stay valid until removed.
 float lighting_obj_salt = 0.0;
 
 vec3 lighting_axis_vec(uint a) {
@@ -975,9 +977,6 @@ uint lighting_cache_key_sized(vec3 pos, vec3 n, float size) {
     ivec3 c = ivec3(floor(pos / size - inset));
     uint h = hash_cell3(c, 0u);
     h = lighting_hash(h ^ lighting_hash(lighting_axis(n) ^ lighting_hash(floatBitsToUint(size))));
-    if (lighting_obj_salt > 0.5) {
-        h = lighting_hash(h ^ (uint(lighting_obj_salt) * 0x85ebca6bu));
-    }
     return max(h, 1u);
 }
 
@@ -1066,7 +1065,9 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
             cache.v[LIGHTING_SC_SPARSE_AT + slot] = vec4(0.0);
             if (lighting_world_mode() == 3u) {
-                cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
+                // .x was the object-local salt; always 0 after the mover-pool cutover.
+                // .y / .w still carry other surface-cache scratch.
+                cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(0.0, 0.0, 0.0, 0.0);
             }
             // ADR 0039 stage 2: no harmonics from the slot's last owner.
             if (lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u) {
@@ -1262,32 +1263,36 @@ vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
 // How far around a change a patch is relit first (lighting_compact.comp), metres.
 const float LIGHTING_NEAR_CHANGE = 1.0;
 
-// Movers (lighting_gpu.rs lighting_movers): occluders that moved in the last
-// LIGHTING_MOVER_KEEP frames, listed after the changes, four vec4 each: bounding
-// sphere; centre and id + 1; half extents (x, y, z); cosine and sine of the yaw.
-// Count in head w above 200000, the object-local texel switch at 100000.
+// Movers: presence/count lives in head w (/ 200000) for unhold. The old
+// 16×4-vec4 hitch list in the change block is gone; the host MoverCache /
+// mover table owns records. Hitch helpers below return empty so compose does
+// not walk stale change-block words. attach_movers bit stays at / 100000.
 const uint LIGHTING_MOVER_VEC4 = 4u;
 uint lighting_movers_first() {
     vec4 head = work.v[lighting_change_at()];
     return head.y > 0.5 ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
 }
 uint lighting_movers_count() {
-    uint n = uint(work.v[lighting_change_at()].w) / 200000u;
-    return min(n, (LIGHTING_CHANGES - lighting_movers_first()) / LIGHTING_MOVER_VEC4);
+    return uint(work.v[lighting_change_at()].w) / 200000u;
+}
+// Packed hitch records in the change block: always none after the mover-table cutover.
+uint lighting_movers_hitch() {
+    return 0u;
 }
 vec4 lighting_mover(uint m, uint k) {
-    return work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + lighting_movers_first() + LIGHTING_MOVER_VEC4 * m + k];
+    // Change-block mover payload deleted; return zero until the table SSBO binds.
+    return vec4(0.0);
 }
-// Object-local cache entries (GIBS 2021 §1.5: a surfel stores a transform id
-// and an object-relative position). Movers only; static geometry stays
+// Object-attached mover pool (GIBS 2021 §1.5). Static geometry stays
 // world-lattice (ADR 0012). The bit is surface_cache.attach_movers, head w / 100000.
 bool lighting_sc_local_on() {
     return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
 }
 
-// A point inside the bounds of a mover.
+// A point inside the bounds of a hitch-listed mover. Hitch list is empty after
+// the mover-table cutover; world-cell boost uses the host swept-brick path.
 bool lighting_in_change(vec3 p) {
-    uint n = lighting_movers_count();
+    uint n = lighting_movers_hitch();
     [[dont_unroll]] for (uint m = 0u; m < n; m++) {
         vec4 b = lighting_mover(m, 0u);
         vec3 d = p - b.xyz;
@@ -1341,7 +1346,7 @@ uint lighting_mover_on(vec3 pos, vec3 n) {
     if (!lighting_sc_local_on()) {
         return ~0u;
     }
-    uint cnt = lighting_movers_count();
+    uint cnt = lighting_movers_hitch();
     [[dont_unroll]] for (uint m = 0u; m < cnt; m++) {
         vec4 b = lighting_mover(m, 0u);
         vec3 d = pos - b.xyz;
@@ -1376,7 +1381,7 @@ uint lighting_mover_on(vec3 pos, vec3 n) {
 // Mover list position of the object with id + 1 = idp, or ~0 (it has rested and
 // left the list).
 uint lighting_mover_by_id(float idp) {
-    uint n = lighting_movers_count();
+    uint n = lighting_movers_hitch();
     [[dont_unroll]] for (uint m = 0u; m < n; m++) {
         if (abs(lighting_mover(m, 1u).w - idp) < 0.5) {
             return m;
@@ -1384,22 +1389,11 @@ uint lighting_mover_by_id(float idp) {
     }
     return ~0u;
 }
-// Texel slot's surface point and normal in the world now: a texel of a moving
-// object stores them in the object's frame (LIGHTING_SC_OBJ_AT holds id + 1). False
-// for an object texel whose object is no longer listed.
+// Texel slot's surface point and normal in the world. Object-local shared-hash
+// slots are gone; stored positions are always world.
 bool lighting_sc_texel_world(uint slot, out vec3 p, out vec3 n) {
     p = cache.v[3u * slot].xyz;
     n = cache.v[3u * slot + 1u].xyz;
-    float idp = cache.v[LIGHTING_SC_OBJ_AT + slot].x;
-    if (idp < 0.5) {
-        return true;
-    }
-    uint m = lighting_mover_by_id(idp);
-    if (m == ~0u) {
-        return false;
-    }
-    p = lighting_mover_to_world(m, p, false);
-    n = lighting_mover_to_world(m, n, true);
     return true;
 }
 vec3 lighting_sc_texel_pos(uint slot) {
@@ -4375,40 +4369,23 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_shade = 8u;
     lighting_px_parent = 0u;
     uint mode = lighting_world_mode();
-    // Detail off (GENOS_LIGHTING_SC_LOCAL=1): a mover still reads object-local
-    // texels, trust 0, and is not a detail candidate. Detail on returns above
-    // that, before the local transform, through lighting_sh_read with claim
-    // false. That call does not enter the object-local texel loop.
+    // Object-local shared-hash path deleted. Mover pixels read world cells
+    // (and later the mover texel pool). Hitch is empty until the table SSBO
+    // binds, so om stays ~0 and the world lattice path runs.
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
-    // Detail on: a mover shows the world-cell read at this world position and
-    // true normal. It does not enter the object-local texel loop, does not
-    // seed, and does not stamp (claim stays false). An empty read has w = 0,
-    // so a coarse miss keeps the fine world colour. Detail off still uses the object frame below.
+    lighting_obj_salt = 0.0;
     if (om != ~0u && lighting_sh_texel_detail_on()) {
-        lighting_obj_salt = 0.0;
         vec4 sh = lighting_sh_compose_lattice(pos, n, false);
         if ((lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
             return vec4(sh.rgb, 1.0);
         }
         return sh;
     }
-    vec3 lpos = pos;
-    vec3 ln = n;
-    if (om != ~0u) {
-        lighting_obj_salt = lighting_mover(om, 1u).w;
-        lpos = lighting_mover_to_local(om, pos, false);
-        ln = lighting_mover_to_local(om, n, true);
-    }
-    // Flag 4194304 (surface cache): a pixel on or inside the bounds of a mover
-    // (an object that moved in the last LIGHTING_MOVER_KEEP frames) takes the screen
-    // probes, which trace it as it is now, instead of world texels it sweeps
-    // through.
+    // Flag 4194304 (surface cache): a pixel on a hitch-listed mover takes probes.
     if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }
-    vec4 r = lighting_world_irradiance_in(lpos, ln, pos, om != ~0u);
-    lighting_obj_salt = 0.0;
-    return r;
+    return lighting_world_irradiance_in(pos, n, pos, om != ~0u);
 }
 // Debug view "texels" (lighting_compose.comp mode 7): the size a pixel at pos facing n
 // reads and the sets its texel holds (0 when unclaimed).
