@@ -4,8 +4,10 @@
 // noted. It runs after direct and the cache in the same frame, so those notes
 // are in the mask the wavelet and compose read. The bounds are this frame's
 // change-list spheres. #288's mover table replaces that read; the mark stays.
-// A clipped, off-screen, or screen-filling footprint is not marked as local:
-// the host unholds the picture. A lamp is not in this list. The cell note is
+// A clipped, off-screen, or screen-filling mover footprint is not marked as
+// local: the host unholds the picture. A hot cell whose bounds are behind
+// the camera, on it, or half the picture sets the same unhold from the last
+// change word. A lamp is not in this list. The cell note is
 // lighting_reach_note_cell. This pass reads the count and clears it, so a
 // tile drops once the step stops.
 // pc.dims.z == 0xffffffff clears the slot stamps only, after the cache pass.
@@ -16,9 +18,7 @@ layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
 shared uint reach_hot_count;
-
-const float REACH_NEAR_Z = 0.25;
-const float REACH_TILE = 32.0;
+shared uint reach_wide_cell;
 
 uint reach_tw() {
     return (pc.dims.x + 31u) / 32u;
@@ -130,6 +130,22 @@ void main() {
     uint tiles = tw * th;
     uint hot = 0u;
     uint change_at = base + LIGHTING_REACH_MASK_WORDS;
+    if (id == 0u) {
+        reach_wide_cell = ckeys.key[change_at + LIGHTING_REACH_CHANGE_WORDS - 1u];
+    }
+    barrier();
+    if (reach_wide_cell != 0u && tw > 0u) {
+        for (uint tile = id; tile < tiles && tile < LIGHTING_REACH_CHANGE_WORDS - 1u; tile += 64u) {
+            reach_mark_tile(tile % tw, tile / tw);
+        }
+        if (id == 0u) {
+            vec4 head = work.v[lighting_change_at()];
+            if (fract(head.x) < LIGHTING_SCENE_CHANGED_MARK) {
+                head.x = floor(head.x) + LIGHTING_SCENE_CHANGED_MARK;
+                work.v[lighting_change_at()] = head;
+            }
+        }
+    }
     if (tw > 0u) {
         for (uint tile = id; tile < tiles && tile < LIGHTING_REACH_CHANGE_WORDS; tile += 64u) {
             // The one-percent dirty test fires in almost every tile. A tile

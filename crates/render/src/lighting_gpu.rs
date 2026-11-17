@@ -6696,7 +6696,7 @@ mod sun_step {
         // record, the shown-mean age tally, the bounce store rule, and the
         // retry list sit in this pass. A mover tile sets the field bit compose
         // already tests. The tile bitset stays out of this shader. Compose is
-        // 247_076 bytes. 248_000 still rejects another walk in this pass.
+        // 247_092 bytes. 248_000 still rejects another walk in this pass.
         assert!(
             LIGHTING_COMPOSE_SPV.len() < 248_000,
             "compose SPIR-V is {} bytes",
@@ -7360,7 +7360,110 @@ mod sh_knob_tests {
 
 #[cfg(test)]
 mod reach_footprint_tests {
-    use super::{reach_footprint_unproven, reach_mask_saturated};
+    use super::{
+        dot3, f32_at, reach_footprint_unproven, reach_mask_saturated, vec3_at, REACH_NDC_Z,
+        REACH_NEAR_Z, REACH_TAN_FLOOR,
+    };
+
+    /// Half the diagonal of a unit square. A cell of edge `size` uses
+    /// `size * REACH_CELL_DIAG`, matching `REACH_CELL_DIAG` in the shader.
+    const REACH_CELL_DIAG: f32 = 0.70710677;
+
+    /// True when a sample a `step` away from a mean of `peak` joins a tile.
+    /// A step inside the quarter stays quiet. Unknown noise does not: a young
+    /// cell with no estimator is hot once the quarter is cleared. A running
+    /// estimator also has to clear `noise_band`.
+    fn reach_sample_hot(step: f32, peak: f32, noise_known: bool, noise_band: f32) -> bool {
+        let bar = 0.25 * peak.max(0.25);
+        if step <= bar {
+            return false;
+        }
+        if !noise_known {
+            return true;
+        }
+        step > noise_band
+    }
+
+    /// Tiles a world cell's square covers. `radius` is the half-diagonal.
+    /// Behind the camera, on it, or half the picture is wide and the tile list
+    /// is empty. An entirely off-screen cell covers nothing and is not wide.
+    /// Same projection as `lighting_reach_note_bounds`.
+    fn reach_cell_span(
+        frame: &[u8],
+        centre: [f32; 3],
+        radius: f32,
+        width: u32,
+        height: u32,
+    ) -> (bool, Vec<u32>) {
+        let Some(eye) = vec3_at(frame, 16) else {
+            return (true, Vec::new());
+        };
+        let Some(right) = vec3_at(frame, 96) else {
+            return (true, Vec::new());
+        };
+        let Some(tan) = f32_at(frame, 108) else {
+            return (true, Vec::new());
+        };
+        let Some(up) = vec3_at(frame, 112) else {
+            return (true, Vec::new());
+        };
+        let Some(fwd) = vec3_at(frame, 128) else {
+            return (true, Vec::new());
+        };
+        let Some(aspect) = f32_at(frame, 140) else {
+            return (true, Vec::new());
+        };
+        if width == 0 || height == 0 {
+            return (true, Vec::new());
+        }
+        let tw = width.div_ceil(32);
+        let th = height.div_ceil(32);
+        let total = tw * th;
+        if total == 0 {
+            return (true, Vec::new());
+        }
+        let rel = [centre[0] - eye[0], centre[1] - eye[1], centre[2] - eye[2]];
+        let rad = radius.max(0.0);
+        let z = dot3(rel, fwd);
+        if z < -rad || z <= REACH_NEAR_Z {
+            return (true, Vec::new());
+        }
+        let t = tan.max(REACH_TAN_FLOOR);
+        let aspect = aspect.max(REACH_TAN_FLOOR);
+        let zc = z.max(REACH_NEAR_Z);
+        let (ndc_x, ndc_y) = if z > REACH_NDC_Z {
+            (dot3(rel, right) / (z * t * aspect), dot3(rel, up) / (z * t))
+        } else {
+            (0.0, 0.0)
+        };
+        let px = (ndc_x + 1.0) * 0.5 * width as f32;
+        let py = (1.0 - ndc_y) * 0.5 * height as f32;
+        let pry = (rad / zc) / t * (0.5 * height as f32);
+        let prx = (rad / zc) / (t * aspect) * (0.5 * width as f32);
+        let pr = prx.max(pry);
+        let mut x0 = ((px - pr) / 32.0).floor() as i32;
+        let mut y0 = ((py - pr) / 32.0).floor() as i32;
+        let mut x1 = ((px + pr) / 32.0).floor() as i32;
+        let mut y1 = ((py + pr) / 32.0).floor() as i32;
+        if x1 < 0 || y1 < 0 || x0 >= tw as i32 || y0 >= th as i32 {
+            return (false, Vec::new());
+        }
+        x0 = x0.max(0);
+        y0 = y0.max(0);
+        x1 = x1.min(tw as i32 - 1);
+        y1 = y1.min(th as i32 - 1);
+        let span = (x1 - x0 + 1) as u32 * (y1 - y0 + 1) as u32;
+        if span.saturating_mul(2) >= total {
+            return (true, Vec::new());
+        }
+        let mut tiles = Vec::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                tiles.push(u32::try_from(y).unwrap_or(0) * tw + u32::try_from(x).unwrap_or(0));
+            }
+        }
+        (false, tiles)
+    }
 
     fn put(buf: &mut [u8], at: usize, v: f32) {
         buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
@@ -7394,6 +7497,48 @@ mod reach_footprint_tests {
         assert!(reach_footprint_unproven(&frame, &[], 320, 180));
         assert!(reach_mask_saturated(30, 320, 180));
         assert!(!reach_mask_saturated(9, 320, 180));
+    }
+
+    #[test]
+    fn a_cell_footprint_covers_every_tile_it_spans() {
+        let frame = camera();
+        let (wide, one) = reach_cell_span(&frame, [0.8, 0.0, -8.0], 0.02, 320, 180);
+        assert!(!wide, "a small on-screen cell was treated as the picture");
+        assert_eq!(one.len(), 1, "a cell inside one tile covered {one:?}");
+        let (wide, many) = reach_cell_span(&frame, [0.0, 0.0, -8.0], 0.2, 320, 180);
+        assert!(!wide);
+        assert!(
+            many.len() >= 2,
+            "the centre tile was the whole footprint, got {many:?}"
+        );
+        let centre = reach_cell_span(&frame, [0.0, 0.0, -8.0], 0.0, 320, 180).1;
+        assert!(
+            centre.iter().all(|t| many.contains(t)),
+            "the footprint dropped the centre tile"
+        );
+        assert!(reach_cell_span(&frame, [0.0, 0.0, 4.0], 0.2, 320, 180).0);
+        assert!(reach_cell_span(&frame, [0.0, 0.0, -8.0], 8.0, 320, 180).0);
+        let (wide, diag) =
+            reach_cell_span(&frame, [0.0, 0.0, -8.0], 0.25 * REACH_CELL_DIAG, 320, 180);
+        assert!(!wide);
+        assert!(diag.len() >= 2, "a cell-edge diagonal stayed on the centre tile");
+    }
+
+    #[test]
+    fn an_unknown_noise_sample_joins_and_a_quiet_one_does_not() {
+        assert!(
+            reach_sample_hot(0.4, 1.0, false, 0.0),
+            "a young cell with no estimator stayed quiet"
+        );
+        assert!(
+            !reach_sample_hot(0.1, 1.0, false, 0.0),
+            "a step inside the quarter joined"
+        );
+        assert!(
+            !reach_sample_hot(0.4, 1.0, true, 0.5),
+            "a step inside the cell's own noise joined"
+        );
+        assert!(reach_sample_hot(0.6, 1.0, true, 0.5));
     }
 }
 
