@@ -45,7 +45,6 @@ const float FILL_BUCKET_STEPS = 62.0;
 // Commits a world cell still takes before it can lose the tile to a neighbour.
 // One commit freezes the first direct-only sample; dark-fill needs the later
 // ones, which read a cache that already holds a bounce.
-const float FILL_OPEN_SETS = 48.0;
 const float FILL_T_EPS = 1.0e-3;
 const float FILL_Q10 = 1023.0;
 const float FILL_SHARE_COS0 = 0.05;
@@ -240,19 +239,10 @@ bool lighting_fill_pixel(vec3 p, out uint px, out uint py) {
     return true;
 }
 
-// An empty cell outranks one that already has samples. A moving mean holds
-// lambda at 1, which ties the empty cell's error of 1, and the slot id then
-// pins the same cell in the tile. Bit 27 is that open-cell rank. The bucket
-// stays in bits 21..26 and the slot stays in the low 21 bits.
+// The bucket is bits 21..26 and the slot is the low 21 bits. Remaining error
+// is the rank. A commit countdown is not: it expires and the cell leaves.
 uint lighting_fill_pack(uint slot, uint q) {
-    float shown = cache.v[3u * slot + 2u].w;
-    uint open = shown < FILL_OPEN_SETS ? 1u : 0u;
-    // Fewer commits outrank more, so a tile walks every young cell before
-    // one of them takes a second set. An equal count breaks on the slot id
-    // for one frame; the winner is then ahead and yields.
-    uint behind = shown >= FILL_OPEN_SETS ? 0u : min(uint(FILL_OPEN_SETS - shown), 63u);
-    uint rank = open == 1u ? behind : (q & 63u);
-    return (open << 27u) | (rank << 21u) | (slot + 1u);
+    return ((q & 63u) << 21u) | (slot + 1u);
 }
 
 uint lighting_fill_packed_q(uint w) {
@@ -391,15 +381,10 @@ void lighting_fill_visit(uint slot) {
     if (ti >= LIGHTING_FILL_TILE_CAP) {
         return;
     }
-    // The tile keeps one cell. The same cell is also a ranked candidate, so
-    // the cells that lose that slot still take rays from the off-screen share.
-    // The lock caps the two emits together.
+    // On-screen cells are the tile pick. They are not also an off-screen bin.
     ckeys.key[lighting_fill_lock_at() + slot] = 0u;
     uint packed = lighting_fill_pack(slot, q);
     atomicMax(ckeys.key[lighting_fill_tile_at() + ti], packed);
-    uint cap = lighting_fill_off_cap();
-    uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
-    atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
 }
 
 void lighting_fill_plan(uint hist[64], uint share, uint max_picks, inout uint base_m[64], inout uint extra_m[64], out uint take) {
@@ -811,12 +796,13 @@ void lighting_fill_dispatch() {
         ckeys.key[plan + 320u + i] = extra_m[i];
         serial += 2u;
     }
-    // Leftover rays are more hemisphere samples on the cells already chosen.
+    // Leftover rays stay on the cells already chosen, and they stop at the
+    // same per-cell cap as the fair pass.
     uint used = check_n + on_take + far_take + near_take;
     uint left = used >= budget ? 0u : budget - used;
-    lighting_fill_pour_row(hist, plan, 64u, left);
-    lighting_fill_pour_row(hist_far, plan + 128u, LIGHTING_CACHE_RAYS, left);
-    lighting_fill_pour_row(hist_near, plan + 256u, LIGHTING_CACHE_RAYS, left);
+    lighting_fill_pour_row(hist, plan, max_picks, left);
+    lighting_fill_pour_row(hist_far, plan + 128u, max_picks, left);
+    lighting_fill_pour_row(hist_near, plan + 256u, max_picks, left);
     serial += 192u;
     // Emit passes fill the cursors. They start at zero from the host clear.
     ckeys.key[lighting_fill_header_at() + 2u] = check_n;
@@ -1364,10 +1350,6 @@ void lighting_fill_resolve(uint gid) {
     uint on = ckeys.key[lighting_fill_header_at()];
     uint ranked = ckeys.key[lighting_fill_header_at() + 1u];
     uint placed = min(checks + on + ranked, budget);
-    uint far_n = ckeys.key[lighting_fill_header_at() + 5u];
-    uint far_got = ckeys.key[lighting_fill_header_at() + 4u];
-    uint far_disc = far_got >= far_n ? 0u : far_n - far_got;
-    uint lod_max = lighting_fill_lod_max();
     // The emit passes counted picks in the lock word. The chain starts empty.
     for (uint r = gid; r < placed; r += 64u) {
         uint slot = ckeys.key[lighting_fill_pick_at() + r];
@@ -1406,13 +1388,8 @@ void lighting_fill_resolve(uint gid) {
                 continue;
             }
             uint level = lighting_fill_level(d);
-            if ((r - placed) < far_disc && level < lod_max) {
-                continue;
-            }
-            // A primary finds the surface. It is not a hemisphere sample, so it
-            // does not enter the mean. A later round schedules the cell.
-            lighting_cache_find_sized(pos, hn, true, lighting_fill_cell_size(level), pos);
-            continue;
+            // Every traced ray deposits into the world cell it hit.
+            slot = lighting_cache_find_sized(pos, hn, true, lighting_fill_cell_size(level), pos);
         }
         if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
             continue;

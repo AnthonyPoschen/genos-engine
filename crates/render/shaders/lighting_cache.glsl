@@ -3154,8 +3154,18 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         return vec3(0.0);
     }
     float hsize = lighting_hit_size_n(pos, n);
-    uint slot = lighting_cache_find_sized(pos, n, true, hsize, pos);
+    // The fill leaves the 12.5 cm texel empty. Claiming it here would allocate
+    // that empty texel before the parent read.
+    bool fill_parent = lighting_world_mode() == 3u && lighting_ray_fill_on();
+    uint slot = lighting_cache_find_sized(pos, n, !fill_parent, hsize, pos);
     if (slot == ~0u) {
+        if (fill_parent) {
+            vec4 up = lighting_sc_parent(pos, n, hsize);
+            if (up.w > 0.0) {
+                lighting_bounce_path = 3u;
+                return up.rgb;
+            }
+        }
         if (LIGHTING_SC_WRITES) {
             atomicAdd(gstats.missed, 1u);
         }
@@ -3178,7 +3188,6 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // The tile fill leaves the 12.5 cm texel empty on purpose. A bounce that
     // stopped at that texel would stay on the direct light. The parent is the
     // world cell the rays deposit into.
-    bool fill_parent = lighting_world_mode() == 3u && lighting_ray_fill_on();
     if (e.w < 0.5 && (fill_any || fill_parent || ((pc.params.z >> 7u) & 1u) != 0u)) {
         float size = cache.v[3u * slot + 1u].w;
         if (lighting_world_mode() == 3u) {

@@ -264,8 +264,20 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
     );
     let relight = source("lighting_cache.comp");
     assert!(
-        relight.contains("lighting_fill_header_at() + 3u"),
+        relight.contains("lighting_fill_header_at() + 7u"),
         "the fill reports occupied cells, not the empty due lists"
+    );
+    assert!(
+        !fill.contains("FILL_OPEN_SETS"),
+        "a commit countdown must not outrank remaining error"
+    );
+    assert!(
+        fill.contains("lighting_fill_pour_row(hist, plan, max_picks, left)"),
+        "the leftover pour uses fill_max_picks"
+    );
+    assert!(
+        !fill.contains("does not enter the mean"),
+        "a ray past the placed list still deposits into the world cell"
     );
     assert!(
         !fill.contains("gstats.rays = budget"),
@@ -323,12 +335,18 @@ fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
     let fill = source("lighting_fill.glsl");
     let visit = function_body(&fill, "void lighting_fill_visit(uint slot)");
     let claim = visit.find("lighting_cache_find_sized(p, n, true, base, p)");
-    let tile = visit.find("atomicMax");
+    let tile = visit.find("lighting_fill_tile_at()");
     match (claim, tile) {
-        (Some(claim_at), Some(tile_at)) => assert!(
-            claim_at < tile_at,
-            "the screen texel must return before the tile pick"
-        ),
+        (Some(claim_at), Some(tile_at)) => {
+            assert!(
+                claim_at < tile_at,
+                "the screen texel must return before the tile pick"
+            );
+            assert!(
+                !visit[tile_at..].contains("lighting_fill_off_at()"),
+                "an on-screen cell is not also an off-screen bin"
+            );
+        }
         (None, _) => panic!("a screen texel must claim the world cell under it"),
         (Some(_), None) => panic!("a world cell must still enter the tile"),
     }
@@ -338,12 +356,16 @@ fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
     );
     assert!(
         visit.contains("lighting_fill_pack(slot, q)"),
-        "an empty world cell must outrank one that already has samples"
+        "the tile rank is the priority bucket"
     );
     let pack = function_body(&fill, "uint lighting_fill_pack(uint slot, uint q)");
     assert!(
-        pack.contains("open << 27u"),
-        "the open-cell rank sits above the priority bucket"
+        pack.contains("(q & 63u) << 21u"),
+        "the priority bucket is the rank"
+    );
+    assert!(
+        !pack.contains("<< 27u"),
+        "a commit countdown must not outrank the bucket"
     );
 }
 

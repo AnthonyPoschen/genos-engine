@@ -153,6 +153,7 @@ const FILL_TAIL_PER_RAY: u64 = 4;
 /// Tile words, then one pick word per cache ray. Kept out of the list range so
 /// a 262,144-slot table cannot alias a pick onto a tile.
 const FILL_TILE_WORDS: u64 = 262_144;
+const FILL_TILE_CAP: u64 = FILL_TILE_WORDS;
 
 fn lighting_fill_param_words(pixels: u64) -> u64 {
     lighting_sh_keys_words() + pixels * 8
