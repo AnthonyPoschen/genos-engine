@@ -1368,8 +1368,8 @@ impl Bench {
         if self.phase == BenchPhase::Switch {
             let shift = Vec3::new(BENCH_SWITCH_SHIFT, 0.0, BENCH_SWITCH_SHIFT);
             let count = scene.solid_len().min(self.solids.len());
-            for index in 0..count {
-                scene.solid_mut(index).position = self.solids[index] + shift;
+            for (index, solid) in self.solids.iter().take(count).enumerate() {
+                scene.solid_mut(index).position = *solid + shift;
             }
         }
         false
