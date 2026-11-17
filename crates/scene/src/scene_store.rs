@@ -416,6 +416,7 @@ impl PartialEq for Scene {
             && self.reflections == other.reflections
             && self.hdr == other.hdr
             && self.fog == other.fog
+            && self.particles == other.particles
             && self.walls().eq(other.walls())
             && self.solids().eq(other.solids())
             && self.lights().eq(other.lights())
@@ -441,6 +442,7 @@ impl std::fmt::Debug for Scene {
             .field("reflections", &self.reflections)
             .field("hdr", &self.hdr)
             .field("fog", &self.fog)
+            .field("particles", &self.particles)
             .finish()
     }
 }

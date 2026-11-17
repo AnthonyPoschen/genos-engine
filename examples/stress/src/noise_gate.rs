@@ -24,7 +24,7 @@ use genos_debug::{Image, RefSetup};
 use genos_render::{DebugView, LampPickCounts, LampShadeGate, Renderer, ViewMode, World};
 use genos_scene::{
     AmbientMode, Camera, Floor, FogSettings, FpsCounterSettings, HdrSettings, Light,
-    LightingPreset, LightingSettings, MenuSettings, Scene, Shape, Solid, Vec3,
+    LightingPreset, LightingSettings, MenuSettings, ParticleSettings, Scene, Shape, Solid, Vec3,
 };
 use genos_window::Window;
 
