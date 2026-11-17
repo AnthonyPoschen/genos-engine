@@ -8,6 +8,7 @@
 //! Decoders read bytes. They do not open a window, an audio device, or a socket.
 //! [`FileSource`] and [`MemorySource`] share one decode path.
 
+mod adpcm;
 mod animation;
 mod bin;
 mod cache;
@@ -66,6 +67,9 @@ pub use vram::{
     headroom_bytes, is_device_oom, retry_device_alloc, AllocError, Budget as VramBudget, Headroom,
     HeapSlice, DEFAULT_HEADROOM_FLOOR_MB, DEFAULT_HEADROOM_PERCENT, DEVICE_OOM,
     FALLBACK_HEAP_DIVISOR,
+};
+pub use adpcm::{
+    audio_cook_fallbacks, cook_ima, load_audio, parse_cooked, resident_clip, CookedAudio, ImaCursor,
 };
 pub use wav::Pcm;
 

@@ -52,6 +52,7 @@
 //! Linux uses the Wayland seat. Windows uses Win32 (`HWND` in [`Window::surface`],
 //! `HINSTANCE` in [`Window::display`]). The calls below stay the same.
 
+mod cocoa_keys;
 mod events;
 mod lifecycle;
 mod stall;
@@ -62,9 +63,11 @@ mod win32_keys;
 pub use events::{WindowEvent, WindowMode};
 pub use lifecycle::{
     block_ms_mirror, block_ms_needs_value, close_early_flag, close_early_mirror, exit,
-    gap_within_budget, parse_block_ms, parse_frames_presented, parse_quit_gap, parse_quit_phases,
-    parse_quit_total, phases_within_budget, Lifecycle, Phase, PhaseSample, ShutdownDevice,
-    ShutdownPermit, ThreadStop, PHASE_PREFIX, PRESENTED_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX,
+    full_destroy_flag, full_destroy_mirror, gap_within_budget, parse_block_ms,
+    parse_frames_presented, parse_quit_gap, parse_quit_phases, parse_quit_total, parse_visible_quit,
+    phases_within_budget, release_driver_on_process_exit, request_full_driver_destroy, Lifecycle,
+    Phase, PhaseSample, ShutdownDevice, ShutdownPermit, ThreadStop, DRIVER_RELEASE_LINE,
+    PHASE_PREFIX, PRESENTED_PREFIX, QUIT_GAP_PREFIX, QUIT_TOTAL_PREFIX, VISIBLE_QUIT_PREFIX,
 };
 pub use stall::{
     block_with_installed_pump, leave_seat_then, retire, run_pumped, seat_enter, seat_leave,
@@ -415,7 +418,7 @@ impl Window {
         let rc =
             unsafe { genos_window_set_pointer_capture(self.raw, if captured { 1 } else { 0 }) };
         if rc != 0 {
-            Err("Wayland pointer lock failed".into())
+            Err(pointer_lock_failed().into())
         } else {
             Ok(())
         }
@@ -434,9 +437,28 @@ fn open_failed() -> String {
     {
         "Win32 window failed to open".to_string()
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        "Cocoa window failed to open".to_string()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         "Wayland window failed to open".to_string()
+    }
+}
+
+fn pointer_lock_failed() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Win32 pointer lock failed"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "Cocoa pointer lock failed"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        "Wayland pointer lock failed"
     }
 }
 

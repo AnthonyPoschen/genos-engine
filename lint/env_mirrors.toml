@@ -268,6 +268,11 @@ kind = "test"
 detail = "harness only"
 
 [[var]]
+name = "GENOS_KNOCKOUT"
+kind = "test"
+detail = "harness only"
+
+[[var]]
 name = "OCC_DUMP"
 kind = "test"
 detail = "harness only"
@@ -1515,6 +1520,11 @@ detail = "--lifecycle-block-ms"
 name = "GENOS_LIFECYCLE_CLOSE_EARLY"
 kind = "mirror"
 detail = "--lifecycle-close-early"
+
+[[var]]
+name = "GENOS_LIFECYCLE_FULL_DESTROY"
+kind = "mirror"
+detail = "--lifecycle-full-destroy"
 
 [[var]]
 name = "GENOS_PBR_PARITY_DEVICE"

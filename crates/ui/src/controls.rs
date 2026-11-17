@@ -1,6 +1,7 @@
 //! Paint and hit values for [`crate::Kind`]. The lighting panel does not use this.
 
 use crate::arc;
+use crate::edit::{self, Caret};
 use crate::kind::Kind;
 use crate::layout::{Item, Rect};
 use crate::outline::{self, OutlineFont};
@@ -25,6 +26,7 @@ pub(crate) fn paint_item(
     look: crate::Look,
     theme: &Theme,
     font: Option<&OutlineFont>,
+    caret: Option<Caret>,
 ) -> Painted {
     let mut paints = Vec::new();
     push_rect(&mut paints, item.rect, fill(item, look, theme));
@@ -49,9 +51,10 @@ pub(crate) fn paint_item(
         | Kind::Box
         | Kind::Label
         | Kind::Button { .. }
-        | Kind::Radio { .. } => {}
+        | Kind::Radio { .. }
+        | Kind::TextField { .. } => {}
     }
-    paint_text(
+    let mut painted = paint_text(
         Painted {
             paints,
             segments: Vec::new(),
@@ -59,7 +62,9 @@ pub(crate) fn paint_item(
         item,
         theme,
         font,
-    )
+    );
+    edit::paint(&mut painted.paints, item, caret, theme);
+    painted
 }
 
 fn paint_text(
@@ -68,6 +73,9 @@ fn paint_text(
     theme: &Theme,
     font: Option<&OutlineFont>,
 ) -> Painted {
+    if matches!(item.kind, Kind::TextField { .. }) {
+        return painted;
+    }
     if let Some(text) = &item.text {
         let color = text_color(item, theme);
         match item.face {
@@ -154,7 +162,8 @@ fn fill(item: &Item, look: crate::Look, theme: &Theme) -> [f32; 3] {
         | Kind::Toggle { .. }
         | Kind::Checkbox { .. }
         | Kind::Slider { .. }
-        | Kind::Progress { .. } => look.background,
+        | Kind::Progress { .. }
+        | Kind::TextField { .. } => look.background,
     }
 }
 
@@ -168,7 +177,8 @@ fn text_color(item: &Item, theme: &Theme) -> [f32; 3] {
         | Kind::Checkbox { .. }
         | Kind::Radio { .. }
         | Kind::Slider { .. }
-        | Kind::Progress { .. } => theme.text,
+        | Kind::Progress { .. }
+        | Kind::TextField { .. } => theme.text,
     }
 }
 

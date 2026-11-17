@@ -4,6 +4,7 @@ mod cooked_load;
 mod fog;
 mod fog_budget;
 mod fog_pass;
+mod gate;
 mod gltf_draw;
 mod gpu;
 mod hdr_output;
@@ -49,6 +50,7 @@ pub use fog_pass::{
     FogPointLamp, FOG_F2_REFERENCE, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE,
     FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW, YAW_FRAMES,
 };
+pub use gate::{guard as gate_guard, BOUNCE_IN_COMPOSE, DIRECT_IN_COMPOSE};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{

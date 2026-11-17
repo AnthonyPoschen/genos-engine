@@ -2,6 +2,10 @@
     test,
     expect(clippy::panic, reason = "a test aborts when the stream fails to start")
 )]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when the cook fails")
+)]
 
 //! `mix_into` does not allocate. The output buffer is the caller's.
 
@@ -9,7 +13,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use genos_audio::{
-    calling_thread, mix_into, start_with, Barrier, Command, FakeDevice, Listener, Source, Vec3,
+    calling_thread, mix_into, start_disk, start_with, Barrier, Command, FakeDevice, Listener,
+    Source, Vec3,
 };
 use genos_load::Pcm;
 
@@ -140,4 +145,67 @@ fn the_quantum_callback_does_not_allocate() {
     capture.release(usize::MAX);
     stream.stop();
     assert!(wrote, "the callback did not write a quantum");
+}
+
+#[test]
+fn a_disk_quantum_does_not_allocate() {
+    let _guard = lock_test();
+    let mut samples = Vec::with_capacity(140_000);
+    for index in 0..140_000u32 {
+        let sample = if index % 64 < 32 { 8_000 } else { -8_000 };
+        samples.push(sample);
+    }
+    let pcm = genos_load::Pcm {
+        sample_rate: 48_000,
+        channels: 1,
+        samples,
+    };
+    let cooked =
+        genos_load::parse_cooked(&genos_load::cook_ima(&pcm, 0, 140_000).unwrap()).unwrap();
+    let (device, capture) = FakeDevice::new(64, 256);
+    capture.hold();
+    let stream = match start_disk(device, cooked, &[], true) {
+        Ok(stream) => stream,
+        Err(err) => panic!("stream did not start: {err}"),
+    };
+    let began = std::time::Instant::now();
+    while capture.parked() == 0 && began.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::yield_now();
+    }
+    let began = std::time::Instant::now();
+    while stream.stats().disk_queued < 128 && began.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::yield_now();
+    }
+    stream.set_listener(Listener {
+        position: Vec3::ZERO,
+        facing: Vec3::new(0.0, 0.0, -1.0),
+        velocity: Vec3::ZERO,
+    });
+    assert!(stream.push(Command::Play {
+        voice: 0,
+        clip: 0,
+        positional: false,
+        looping: true,
+        gain: 1.0,
+        position: Vec3::ZERO,
+        velocity: Vec3::ZERO,
+    }));
+    assert!(
+        capture.worker() != 0,
+        "the audio thread has not reached ready"
+    );
+    PANICKED.store(false, Ordering::SeqCst);
+    WATCH.store(capture.worker(), Ordering::SeqCst);
+    ARMED.store(true, Ordering::SeqCst);
+    capture.release(1);
+    let began = std::time::Instant::now();
+    while capture.filled() < 128 && began.elapsed() < std::time::Duration::from_secs(2) {
+        std::thread::yield_now();
+    }
+    ARMED.store(false, Ordering::SeqCst);
+    WATCH.store(0, Ordering::SeqCst);
+    let wrote = capture.filled() >= 128;
+    capture.release(usize::MAX);
+    stream.stop();
+    assert!(wrote, "the disk callback did not write a quantum");
 }

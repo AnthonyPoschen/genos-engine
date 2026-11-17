@@ -148,9 +148,9 @@ rules:
     languages: [rust]
     severity: ERROR
     message: >-
-      Leave the process with genos_window::exit. The app lifecycle destroys
-      the device and unmaps the window first. std::process::exit skips that
-      and skips destructors.
+      Leave the process with genos_window::exit. The app lifecycle unmaps
+      the window first. std::process::exit skips that and runs the driver
+      atexit handler.
     metadata:
       date: "2026-10-26"
     paths:

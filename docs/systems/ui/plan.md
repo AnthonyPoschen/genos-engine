@@ -1034,16 +1034,16 @@ pub struct Caret { pub anchor: usize, pub head: usize }
 
 Keys, with UI focus on the field: `key_a` inserts `"a"` at the head and emits `Event::Text` with the new string. Shift plus `key_right` grows the selection. Backspace deletes the selection or the character before the head. `key_left` at 0 stays at 0. Home and end jump. The game replaces `text` with the event's string on the next frame. The test drives `InputSystem` the way Task 17 does. `keys_captured` is true. A caret paint is a 2×cell-height rectangle. A selection paint uses the accent color behind the selected cells.
 
-- [ ] **Step 1: Test** insert, selection delete, and the home clamp.
+- [x] **Step 1: Test** insert, selection delete, and the home clamp.
 
-- [ ] **Step 2: Run** the test — expected: fail.
+- [x] **Step 2: Run** the test — expected: fail.
 
-- [ ] **Step 3: Implement** against the bitmap cell. Character index is a byte index only for ASCII. Reject a non-ASCII `text` by ignoring those scalars in this step (the outline step lifts that).
+- [x] **Step 3: Implement** against the bitmap cell. Character index is a byte index only for ASCII. Reject a non-ASCII `text` by ignoring those scalars in this step (the outline step lifts that).
 
-- [ ] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
+- [x] **Step 4: Run** `cargo test -p genos-ui` — expected: pass.
 
 - **Deviation:** egui's `TextEdit` moves a caret by grapheme clusters. This step indexes ASCII bytes on the bitmap cell and ignores a non-ASCII scalar. The outline step lifts that. Selection is `anchor` and `head`. The game replaces `text` from `Event::Text` on the next frame.
-- [ ] **Step 5: Commit** `ui: single-line text field with selection`
+- [x] **Step 5: Commit** `ui: single-line text field with selection`
 
 ### Task 27: Multiline
 
