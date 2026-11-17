@@ -45,9 +45,14 @@ stays on the other agent’s PR. This path must not edit those sites.
 |---|---|
 | A | Pool + mover table + O(1) lookup + unit tests + `mover_pool` setting |
 | B | Allocation, tiers, hysteresis, free-on-drop |
-| C | Scheduler integration + world-cell boost |
+| C | Frame sync into the pool; world-cell priority boosts enter the change list for `lighting_near_change` / compact |
 | D | Compose wiring; delete old attach path and 16-mover change-block list |
 | E | Scaling scene (10/100/1000), spin gate 0.027, design note |
+
+### Observability (stage C)
+
+- `Lighting.mover_stats`: `[live_movers, live_texels, world_boosts]`
+- Debug log (`GENOS_LIGHTING_DEBUG`): prints pool use and boost count with the mover line
 
 ## Networking
 

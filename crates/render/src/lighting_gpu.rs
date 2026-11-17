@@ -309,6 +309,11 @@ pub(crate) struct Lighting {
     mesh_poses: Vec<[f32; 16]>,
     mesh_movers: std::collections::BTreeMap<usize, u32>,
     mesh_spheres: Vec<[f32; 4]>,
+    /// Object-attached mover texel pool + O(1) table (stage A/B). Synced each
+    /// frame; world-cell boosts feed the change list for the compact scheduler.
+    mover_cache: crate::mover_cache::MoverCache,
+    /// Last frame's mover-pool stats (live movers, live texels, world boosts).
+    mover_stats: [u32; 3],
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
     stats_light: [u64; 2],
@@ -672,6 +677,8 @@ impl Default for Lighting {
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
+            mover_cache: crate::mover_cache::MoverCache::new(0),
+            mover_stats: [0; 3],
             stats_light: [0; 2],
             stats_young: [false; 2],
             dump: Vec::new(),
@@ -4191,6 +4198,34 @@ impl Gpu {
                     movers.push([*sph, [0.0, 0.0, 0.0, (10001 + i) as f32], [0.0; 4], [0.0; 4]]);
                 }
             }
+            // Object-attached pool: sync offers, free dropped movers, then push
+            // world-cell priority boosts into the change list (DDGI-style +1 m).
+            let pool = self.lighting.settings.surface_cache.mover_pool;
+            if self.lighting.mover_cache.capacity() != pool {
+                self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
+            }
+            let eye = lighting_frame_eye(&self.frame_bytes);
+            let (live_m, live_t, boosts) =
+                lighting_mover_frame(&mut self.lighting.mover_cache, &movers, eye);
+            self.lighting.mover_stats = [live_m, live_t, boosts.len() as u32];
+            // Priority boost: append boost spheres as ordinary change entries so
+            // lighting_near_change wakes world cells. Leaves room for the mover
+            // list below (4 vec4 each) while that path still uploads.
+            let mover_room = (movers.len().min(16)) * 4;
+            let boost_room = LIGHTING_CHANGES.saturating_sub(used + mover_room);
+            let mut boost_n = 0usize;
+            for (centre, brick) in boosts.iter().take(boost_room) {
+                let at = 4 * (LIGHTING_CHANGE_HEAD + used + boost_n);
+                block[at..at + 4].copy_from_slice(&[centre[0], centre[1], centre[2], *brick]);
+                boost_n += 1;
+            }
+            if boost_n > 0 {
+                // Integer change count (head.x); keep any scene-changed fraction.
+                let frac = block[0].fract();
+                block[0] = (used + boost_n) as f32 + frac;
+                used += boost_n;
+                sent += boost_n;
+            }
             let n = movers.len().min((LIGHTING_CHANGES - used) / 4);
             for (j, m) in movers.iter().take(n).enumerate() {
                 for (k, b) in m.iter().enumerate() {
@@ -4201,11 +4236,24 @@ impl Gpu {
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", head.mode_cap % 1000, u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!(
+                    "lighting world {world} cap {} flags {flags} local {} movers {n} of {} pool {}/{} boosts {} occs {} meshes {} of {} {:?}",
+                    head.mode_cap % 1000,
+                    u8::from(self.lighting.settings.surface_cache.attach_movers),
+                    self.lighting.movers.len(),
+                    self.lighting.mover_stats[1],
+                    self.lighting.mover_cache.capacity(),
+                    self.lighting.mover_stats[2],
+                    lighting_occs(&self.frame_bytes).len(),
+                    self.lighting.mesh_movers.len(),
+                    self.lighting.mesh_poses.len(),
+                    movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>()
+                );
             }
             // Object-local cache entries for movers (GIBS §1.5). The public
             // knob is surface_cache.attach_movers. Static geometry stays on
-            // the world lattice.
+            // the world lattice. Stage D deletes this path in favour of the
+            // mover pool when compose wiring lands.
             if self.lighting.settings.surface_cache.attach_movers {
                 block[3] += 100000.0;
             }
@@ -5603,6 +5651,48 @@ pub(crate) fn lighting_mesh_movers(
 /// dynamic while it moves; once it rests its surroundings are ordinary cache).
 const LIGHTING_MOVER_KEEP: u32 = 240;
 
+/// Camera eye from a packed scene block (`scene_data.glsl` eye at byte 16).
+fn lighting_frame_eye(bytes: &[u8]) -> [f32; 3] {
+    let f = |at: usize| {
+        bytes
+            .get(at..at + 4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .unwrap_or(0.0)
+    };
+    [f(16), f(20), f(24)]
+}
+
+/// Build mover-pool offers and the world-cell boost list for one frame.
+///
+/// Used by the change-block upload and by the stage-C unit test.
+pub(crate) fn lighting_mover_frame(
+    cache: &mut crate::mover_cache::MoverCache,
+    movers: &[[[f32; 4]; 4]],
+    eye: [f32; 3],
+) -> (u32, u32, Vec<([f32; 3], f32)>) {
+    let offers: Vec<crate::mover_cache::MoverOffer> = movers
+        .iter()
+        .map(|m| {
+            let centre = [m[0][0], m[0][1], m[0][2]];
+            let radius = m[0][3];
+            let id = m[1][3] as u32;
+            let dx = centre[0] - eye[0];
+            let dy = centre[1] - eye[1];
+            let dz = centre[2] - eye[2];
+            let dist = (dx * dx + dy * dy + dz * dz).sqrt().max(0.1);
+            crate::mover_cache::MoverOffer {
+                object_id: id,
+                screen: radius / dist,
+                centre,
+                radius,
+            }
+        })
+        .collect();
+    cache.sync_frame(&offers);
+    let boosts = cache.world_boosts();
+    (cache.live_movers(), cache.live_texels(), boosts)
+}
+
 /// Spheres (centre, radius) around every occluder that moved, came or went between
 /// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept
 /// ray that crosses either sees something else now. None when there are more than
@@ -6209,6 +6299,35 @@ mod sun_step {
         settings.surface_cache.sh_cells = true;
         let on = super::lighting_change_head(&settings);
         assert_eq!(on.head_hi & 1, 1, "sh_cells did not set head_hi bit 0");
+    }
+
+    #[test]
+    fn mover_frame_boosts_near_world_cells() {
+        let mut cache = crate::mover_cache::MoverCache::new(1024);
+        // Near mover: large screen size → dirties a +1 m brick.
+        let near = [[
+            [0.0, 0.0, 2.0, 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.5, 0.5, 0.5, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ]];
+        let eye = [0.0, 0.0, 0.0];
+        let (live_m, live_t, boosts) = super::lighting_mover_frame(&mut cache, &near, eye);
+        assert_eq!(live_m, 1);
+        assert!(live_t > 0);
+        assert_eq!(boosts.len(), 1);
+        assert!((boosts[0].1 - 1.5).abs() < 1e-5);
+        // Far mover: tiny on screen → no world dirty.
+        let far = [[
+            [0.0, 0.0, 200.0, 0.1],
+            [0.0, 0.0, 0.0, 2.0],
+            [0.1, 0.1, 0.1, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ]];
+        let (live_m, _, boosts) = super::lighting_mover_frame(&mut cache, &far, eye);
+        assert_eq!(live_m, 1);
+        assert!(boosts.is_empty(), "far mover dirtied world: {boosts:?}");
+        assert!(cache.lookup(1).is_none(), "dropped near mover left orphans");
     }
 
     fn assert_spirv_1(name: &str, words: &[u8]) {
