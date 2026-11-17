@@ -709,6 +709,20 @@ impl Estimator {
     }
 }
 
+/// Tile word above the slot id. Under `open_sets` commits, fewer commits
+/// outrank more so one slot cannot pin the tile. At and past `open_sets` the
+/// rank is `bucket`, which is the stored-variance priority, not zero.
+#[must_use]
+pub fn open_rank(shown: u32, bucket: u32, open_sets: u32) -> u32 {
+    let bucket = bucket & 63;
+    if shown < open_sets {
+        let behind = (open_sets - shown).min(63);
+        (1 << 27) | (behind << 21)
+    } else {
+        bucket << 21
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,6 +1029,17 @@ mod tests {
         }
         assert_eq!(total, max_picks);
         assert_eq!(cell_grant(max_picks, max_picks, max_picks), 0);
+    }
+
+    #[test]
+    fn a_young_cell_outranks_a_full_one_and_then_the_variance_bucket_does() {
+        let open = 48;
+        assert!(open_rank(0, 1, open) > open_rank(10, 63, open));
+        assert!(open_rank(10, 1, open) > open_rank(47, 63, open));
+        assert!(open_rank(47, 1, open) > open_rank(48, 63, open));
+        assert!(open_rank(48, 5, open) > open_rank(48, 4, open));
+        assert_eq!(open_rank(80, 0, open), 0);
+        assert!(open_rank(80, 3, open) > open_rank(80, 0, open));
     }
 
     #[test]

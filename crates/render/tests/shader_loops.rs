@@ -188,9 +188,18 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
 #[test]
 fn the_fill_share_writes_a_seed_under_the_five_gates() {
     let fill = source("lighting_fill.glsl");
+    let commit = function_body(&fill, "void lighting_fill_commit(");
+    let cell_arm = commit
+        .find("} else if (cell)")
+        .expect("a world cell has its own deposit");
+    let after_cell = commit[cell_arm..].find("} else {").expect("the texel deposit follows");
     assert!(
-        fill.contains("lighting_fill_note_var(slot, e)"),
-        "a world cell must store short variance so error keeps scheduling rays"
+        commit[cell_arm..cell_arm + after_cell].contains("lighting_fill_note_var(slot, e)"),
+        "a world cell must store short variance in its own deposit"
+    );
+    assert!(
+        !commit[cell_arm + after_cell..].contains("lighting_fill_note_var"),
+        "the variance note must not sit in the branch a world cell skips"
     );
     assert!(
         fill.contains("lighting_fill_share("),
@@ -268,16 +277,16 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         "the fill reports occupied cells, not the empty due lists"
     );
     assert!(
-        !fill.contains("FILL_OPEN_SETS"),
-        "a commit countdown must not outrank remaining error"
+        fill.contains("FILL_OPEN_SETS"),
+        "young cells take turns until the variance bucket is the rank"
     );
     assert!(
-        fill.contains("lighting_fill_pour_row(hist, plan, max_picks, left)"),
-        "the leftover pour uses fill_max_picks"
+        fill.contains("lighting_fill_pour_row(hist, plan, 64u, left)"),
+        "leftover on-screen rays pour onto the chosen cells"
     );
     assert!(
-        !fill.contains("does not enter the mean"),
-        "a ray past the placed list still deposits into the world cell"
+        fill.contains("Claiming the cell is the deposit"),
+        "a camera primary claims the world cell and does not enter the mean as a hemisphere sample"
     );
     assert!(
         !fill.contains("gstats.rays = budget"),
@@ -343,8 +352,8 @@ fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
                 "the screen texel must return before the tile pick"
             );
             assert!(
-                !visit[tile_at..].contains("lighting_fill_off_at()"),
-                "an on-screen cell is not also an off-screen bin"
+                visit[tile_at..].contains("lighting_fill_off_at()"),
+                "an on-screen cell also stays in its off-screen bin"
             );
         }
         (None, _) => panic!("a screen texel must claim the world cell under it"),
@@ -360,12 +369,12 @@ fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
     );
     let pack = function_body(&fill, "uint lighting_fill_pack(uint slot, uint q)");
     assert!(
-        pack.contains("(q & 63u) << 21u"),
-        "the priority bucket is the rank"
+        pack.contains("open << 27u"),
+        "a cell under the open-set count outranks one that has them"
     );
     assert!(
-        !pack.contains("<< 27u"),
-        "a commit countdown must not outrank the bucket"
+        pack.contains("(q & 63u)"),
+        "after the open count the stored-variance bucket is the rank"
     );
 }
 

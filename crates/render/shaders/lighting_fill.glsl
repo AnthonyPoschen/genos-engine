@@ -239,10 +239,17 @@ bool lighting_fill_pixel(vec3 p, out uint px, out uint py) {
     return true;
 }
 
-// The bucket is bits 21..26 and the slot is the low 21 bits. Remaining error
-// is the rank. A commit countdown is not: it expires and the cell leaves.
+// While a cell has fewer than FILL_OPEN_SETS commits, fewer commits outrank
+// more, so one slot id cannot pin the tile. After that the rank is the
+// priority bucket. That bucket is the stored variance, so the cell does not
+// drop to bucket 0 when the countdown ends.
+const float FILL_OPEN_SETS = 48.0;
 uint lighting_fill_pack(uint slot, uint q) {
-    return ((q & 63u) << 21u) | (slot + 1u);
+    float shown = cache.v[3u * slot + 2u].w;
+    uint open = shown < FILL_OPEN_SETS ? 1u : 0u;
+    uint behind = shown >= FILL_OPEN_SETS ? 0u : min(uint(FILL_OPEN_SETS - shown), 63u);
+    uint rank = open == 1u ? behind : (q & 63u);
+    return (open << 27u) | (rank << 21u) | (slot + 1u);
 }
 
 uint lighting_fill_packed_q(uint w) {
@@ -381,10 +388,15 @@ void lighting_fill_visit(uint slot) {
     if (ti >= LIGHTING_FILL_TILE_CAP) {
         return;
     }
-    // On-screen cells are the tile pick. They are not also an off-screen bin.
+    // The tile keeps one cell. The same cell is also a ranked candidate, so
+    // the cells that lose that slot still take rays from the off-screen share.
+    // The lock caps the two emits together.
     ckeys.key[lighting_fill_lock_at() + slot] = 0u;
     uint packed = lighting_fill_pack(slot, q);
     atomicMax(ckeys.key[lighting_fill_tile_at() + ti], packed);
+    uint cap = lighting_fill_off_cap();
+    uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
+    atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
 }
 
 void lighting_fill_plan(uint hist[64], uint share, uint max_picks, inout uint base_m[64], inout uint extra_m[64], out uint take) {
@@ -800,9 +812,11 @@ void lighting_fill_dispatch() {
     // same per-cell cap as the fair pass.
     uint used = check_n + on_take + far_take + near_take;
     uint left = used >= budget ? 0u : budget - used;
-    lighting_fill_pour_row(hist, plan, max_picks, left);
-    lighting_fill_pour_row(hist_far, plan + 128u, max_picks, left);
-    lighting_fill_pour_row(hist_near, plan + 256u, max_picks, left);
+    // The fair pass stops at fill_max_picks. Rays still in the budget are more
+    // samples on those cells: one screen bucket up to 64, and one set off screen.
+    lighting_fill_pour_row(hist, plan, 64u, left);
+    lighting_fill_pour_row(hist_far, plan + 128u, LIGHTING_CACHE_RAYS, left);
+    lighting_fill_pour_row(hist_near, plan + 256u, LIGHTING_CACHE_RAYS, left);
     serial += 192u;
     // Emit passes fill the cursors. They start at zero from the host clear.
     ckeys.key[lighting_fill_header_at() + 2u] = check_n;
@@ -1012,11 +1026,11 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         b = vec4(vb, inc, k, b.w);
     } else if (cell) {
         mean = old.w < FILL_HALF ? e : mix(old.rgb, e, blend);
+        // The texel MSME fold above is `!cell`. A world cell still has to
+        // store short variance or its priority falls to 0 after one ray.
+        lighting_fill_note_var(slot, e);
     } else {
         mean = old.w < FILL_HALF ? e : mix(old.rgb, e, clamp(k, 0.0, 1.0));
-        if (cell) {
-            lighting_fill_note_var(slot, e);
-        }
     }
     float cap = float(lighting_fill_u(13));
     float rays_after = min(rays0 + n, max(cap, float(warmup)));
@@ -1388,8 +1402,12 @@ void lighting_fill_resolve(uint gid) {
                 continue;
             }
             uint level = lighting_fill_level(d);
-            // Every traced ray deposits into the world cell it hit.
-            slot = lighting_cache_find_sized(pos, hn, true, lighting_fill_cell_size(level), pos);
+            // A camera primary is not a cosine hemisphere sample. Folding it
+            // with TAU stores the shaded hit as irradiance and the hall moves
+            // away from the reference. Claiming the cell is the deposit; the
+            // hemisphere samples are what enter the mean.
+            lighting_cache_find_sized(pos, hn, true, lighting_fill_cell_size(level), pos);
+            continue;
         }
         if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
             continue;
