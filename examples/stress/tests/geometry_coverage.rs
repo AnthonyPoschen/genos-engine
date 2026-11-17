@@ -3,6 +3,13 @@
     test,
     expect(clippy::as_conversions, reason = "pixel index is width * height * 4")
 )]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "solid pixel counts fit the f64 mantissa for proof frames"
+    )
+)]
 
 //! Geometry coverage: the stress building must not be sky where mesh sits.
 //!
@@ -91,8 +98,9 @@ fn solid_fraction(pixels: &[u8]) -> f64 {
     let n = pixels.len() / 4;
     assert!(n > 0, "empty picture");
     let mut solid = 0usize;
-    for px in pixels.chunks_exact(4) {
-        let luma = (u16::from(px[0]) + u16::from(px[1]) + u16::from(px[2])) as f32 / (3.0 * 255.0);
+    for px in pixels.as_chunks::<4>().0 {
+        let sum = u16::from(px[0]) + u16::from(px[1]) + u16::from(px[2]);
+        let luma = f32::from(sum) / (3.0 * 255.0);
         if luma > 0.04 {
             solid += 1;
         }
