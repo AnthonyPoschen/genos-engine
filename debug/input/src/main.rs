@@ -144,7 +144,7 @@ fn serve(session: &mut Session, port: u16) -> Result<(), String> {
     eprintln!("mcp {}", server.url());
     loop {
         session.input.poll_gamepads();
-        for pending in command::take_wait(Duration::from_millis(200)) {
+        for pending in command::take_wait(Duration::from_millis(200)).unwrap_or_default() {
             let result = handle(session, &pending.name, &pending.args);
             command::reply(pending.id, result);
         }
