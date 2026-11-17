@@ -49,8 +49,10 @@
 
 //! Window. Each pump pulls the platform queue, then tells subscribers what changed.
 //!
-//! Linux uses the Wayland seat. Windows uses Win32 (`HWND` in [`Window::surface`],
-//! `HINSTANCE` in [`Window::display`]). The calls below stay the same.
+//! Linux uses the Wayland seat, and X11 for an X11 session or a failed Wayland
+//! connect. Windows uses
+//! Win32 (`HWND` in [`Window::surface`], `HINSTANCE` in [`Window::display`]).
+//! The calls below stay the same.
 
 mod cocoa_keys;
 mod events;
@@ -59,6 +61,7 @@ mod stall;
 #[cfg(test)]
 mod touch_log;
 mod win32_keys;
+mod x11_keys;
 
 pub use events::{WindowEvent, WindowMode};
 pub use lifecycle::{
@@ -169,7 +172,7 @@ pub struct Frame {
     pub pointer_y: f32,
     /// Vertical wheel this pump, in notches. Positive is wheel up. Cleared each pump.
     pub wheel_y: f32,
-    /// The Win32 window is minimized. The frame skips the draw until it returns.
+    /// The Win32 or X11 window is minimized. The frame skips the draw until it returns.
     pub minimized: bool,
 }
 
@@ -215,6 +218,9 @@ impl Window {
     }
 
     /// `wayland_display` is the Wayland display name (`wayland-1`). An empty name is refused.
+    ///
+    /// `None` uses `WAYLAND_DISPLAY` when it is set, and otherwise an X11 `DISPLAY`.
+    /// A failed Wayland connect falls back to X11. A named Wayland display does not.
     pub fn open_named_on(
         width: u32,
         height: u32,
@@ -256,7 +262,7 @@ impl Window {
         };
         if pump.display.is_null() || pump.surface.is_null() {
             unsafe { genos_window_destroy(raw) };
-            return Err("Wayland surface is missing".into());
+            return Err("window surface is missing".into());
         }
         let frame = decode(&pump);
         let meter = StallMeter::new();
@@ -443,7 +449,7 @@ fn open_failed() -> String {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        "Wayland window failed to open".to_string()
+        "Wayland and X11 windows failed to open".to_string()
     }
 }
 
@@ -458,7 +464,7 @@ fn pointer_lock_failed() -> &'static str {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        "Wayland pointer lock failed"
+        "pointer lock failed"
     }
 }
 

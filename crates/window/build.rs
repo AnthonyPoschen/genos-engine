@@ -213,6 +213,24 @@ fn build_wayland() {
     compiled.push(touch_obj);
     println!("cargo:rerun-if-changed=src/touch_log.c");
     println!("cargo:rerun-if-changed=src/touch_log.h");
+    for source in ["src/x11_shim.c", "src/linux_dispatch.c"] {
+        let obj = out.join(PathBuf::from(source).with_extension("o").file_name().unwrap());
+        run(
+            "cc",
+            &[
+                "-c",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                source,
+                "-o",
+                obj.to_str().unwrap(),
+            ],
+        );
+        compiled.push(obj);
+        println!("cargo:rerun-if-changed={source}");
+    }
     for source in &sources {
         let obj = source.with_extension("o");
         run(
@@ -239,6 +257,9 @@ fn build_wayland() {
     println!("cargo:rustc-link-lib=static=genos_wayland");
     println!("cargo:rustc-link-lib=wayland-client");
     println!("cargo:rustc-link-lib=xkbcommon");
+    println!("cargo:rustc-link-lib=Xfixes");
+    println!("cargo:rustc-link-lib=Xi");
+    println!("cargo:rustc-link-lib=X11");
     println!("cargo:rerun-if-changed=src/wayland_shim.c");
     println!("cargo:rerun-if-changed=src/genos_pump.h");
 }

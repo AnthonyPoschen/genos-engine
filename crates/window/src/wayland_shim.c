@@ -14,6 +14,7 @@
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 #include "genos_pump.h"
+#include "linux_host.h"
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 1U
@@ -81,23 +82,13 @@ struct GenosWindow {
     int wheel_120;
 };
 
-int genos_window_backend_value = GENOS_BACKEND_WAYLAND;
-
-int genos_window_backend(void) {
-    return genos_window_backend_value;
-}
-
-int genos_window_copy_extra(void *window, struct GenosExtra *out) {
+int genos_wayland_copy_extra(void *window, struct GenosExtra *out) {
     (void)window;
     if (!out) {
         return -1;
     }
     memset(out, 0, sizeof(*out));
     return 0;
-}
-
-int genos_window_extra_size(void) {
-    return (int)sizeof(struct GenosExtra);
 }
 
 static void apply_cursor(struct GenosWindow *win);
@@ -667,7 +658,7 @@ static void release_pointer_lock(struct GenosWindow *win) {
     apply_cursor(win);
 }
 
-struct GenosWindow *genos_window_open_on(
+struct GenosWindow *genos_wayland_open_on(
     int width,
     int height,
     const char *app_id,
@@ -734,11 +725,11 @@ struct GenosWindow *genos_window_open_on(
     return win;
 }
 
-struct GenosWindow *genos_window_open(int width, int height, const char *app_id, const char *title) {
-    return genos_window_open_on(width, height, app_id, title, NULL);
+struct GenosWindow *genos_wayland_open(int width, int height, const char *app_id, const char *title) {
+    return genos_wayland_open_on(width, height, app_id, title, NULL);
 }
 
-void genos_window_pump(struct GenosWindow *win, struct GenosPump *out) {
+void genos_wayland_pump(struct GenosWindow *win, struct GenosPump *out) {
     if (!win || !out) {
         return;
     }
@@ -777,21 +768,17 @@ void genos_window_pump(struct GenosWindow *win, struct GenosPump *out) {
     win->resized = 0;
 }
 
-int genos_window_pump_size(void) {
-    return (int)sizeof(struct GenosPump);
-}
-
 /* Dispatch the socket without copying input out. A side thread calls this while
  * the frame thread is inside a device wait, so a ping is answered and the next
  * genos_window_pump still sees the keys and the pointer. */
-void genos_window_dispatch(struct GenosWindow *win) {
+void genos_wayland_dispatch(struct GenosWindow *win) {
     if (!win || !win->display) {
         return;
     }
     pump_events(win);
 }
 
-int genos_window_set_title(struct GenosWindow *win, const char *title) {
+int genos_wayland_set_title(struct GenosWindow *win, const char *title) {
     if (!win || !win->toplevel || !title) {
         return -1;
     }
@@ -800,7 +787,7 @@ int genos_window_set_title(struct GenosWindow *win, const char *title) {
     return 0;
 }
 
-int genos_window_set_fullscreen(struct GenosWindow *win, int fullscreen) {
+int genos_wayland_set_fullscreen(struct GenosWindow *win, int fullscreen) {
     if (!win || !win->toplevel) {
         return -1;
     }
@@ -814,7 +801,7 @@ int genos_window_set_fullscreen(struct GenosWindow *win, int fullscreen) {
     return 0;
 }
 
-int genos_window_set_pointer_capture(struct GenosWindow *win, int capture) {
+int genos_wayland_set_pointer_capture(struct GenosWindow *win, int capture) {
     if (!win) {
         return -1;
     }
@@ -839,7 +826,7 @@ int genos_window_set_pointer_capture(struct GenosWindow *win, int capture) {
     return 0;
 }
 
-void genos_window_destroy(struct GenosWindow *win) {
+void genos_wayland_destroy(struct GenosWindow *win) {
     if (!win) {
         return;
     }
