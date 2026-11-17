@@ -27,7 +27,8 @@ pub enum DisplayTransform {
 }
 
 /// Swapchain choice. Fallback and Low force [`OutputMode::Sdr`] on desktop and on the Deck LCD.
-/// Low on the Deck OLED may take HDR10 when that pair is listed.#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Low on the Deck OLED may take HDR10 when that pair is listed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputMode {
     Auto,
     Sdr,
