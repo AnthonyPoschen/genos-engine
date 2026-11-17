@@ -1,5 +1,6 @@
 mod aa;
 mod budget;
+mod cache_probe;
 mod cooked_load;
 mod fog;
 mod fog_budget;
@@ -31,6 +32,7 @@ mod world;
 
 pub use aa::Antialias;
 pub use budget::{FrameMemory, ImageAdmit};
+pub use cache_probe::{offer_origin, CacheQuery, StoredCell};
 pub use cooked_load::{CookedReport, RenderSettings};
 pub use fog::{
     apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, dispatched_grid,
@@ -58,8 +60,9 @@ pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
 pub use gpu::{
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
-    gpu_times_flag_needs_value, lighting_change_head, lighting_sun_flag_needs_value, DebugView,
-    DrawProfile, GiSample, GpuKind, LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats,
+    gpu_times_flag_needs_value, lighting_change_head, lighting_sun_flag_needs_value, CacheRound,
+    DebugView, DirectSample, DrawProfile, GiSample, GpuKind, LampPickCounts, LampReport,
+    LampShadeGate, LightingAtrousStats,
     LightingChangeHead, LightingSunStats, MaterialStats, Renderer, ScreenLine, ScreenRect,
     SettleStats, TexelDetailPlant, UnfilledControl, UnfilledStats, ViewMode, VkTraffic,
     release_software_compiler_heap,

@@ -146,10 +146,10 @@ impl Gpu {
                     .iter()
                     .position(|f| f.queue_flags.contains(vk::QueueFlags::COMPUTE));
                 if let Some(f) = fam {
-                    let name = props
-                        .device_name_as_c_str()
-                        .map(|c| c.to_string_lossy().into_owned())
-                        .unwrap_or_default();
+                    let name = props.device_name_as_c_str().map_or_else(
+                        |_| String::new(),
+                        |c| c.to_string_lossy().into_owned(),
+                    );
                     if pick.is_none() || discrete {
                         pick = Some((phys, f as u32, name));
                     }

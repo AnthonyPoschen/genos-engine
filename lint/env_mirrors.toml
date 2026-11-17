@@ -43,6 +43,11 @@ kind = "mirror"
 detail = "--gpu-times"
 
 [[var]]
+name = "GENOS_PROFILE_PASSES"
+kind = "mirror"
+detail = "--profile-passes"
+
+[[var]]
 name = "GENOS_GI_METRICS"
 kind = "mirror"
 detail = "--gi-metrics"

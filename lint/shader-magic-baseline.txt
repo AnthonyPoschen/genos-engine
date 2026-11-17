@@ -7,10 +7,10 @@ crates/render/shaders/fxaa.comp 30
 crates/render/shaders/gbuffer.frag 8
 crates/render/shaders/lighting_atrous.comp 1
 crates/render/shaders/lighting_cache.comp 89
-crates/render/shaders/lighting_cache.glsl 325
+crates/render/shaders/lighting_cache.glsl 324
 crates/render/shaders/lighting_check.comp 4
 crates/render/shaders/lighting_common.glsl 31
-crates/render/shaders/lighting_compact.comp 41
+crates/render/shaders/lighting_compact.comp 40
 crates/render/shaders/lighting_compose.comp 25
 crates/render/shaders/lighting_direct.comp 25
 crates/render/shaders/lighting_lamp_pick.glsl 5

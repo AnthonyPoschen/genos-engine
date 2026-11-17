@@ -750,10 +750,11 @@ fn run() -> Result<i32, String> {
         };
         let stats = renderer.settle_stats();
         genos_mcp::publish_lighting(&format!(
-            "stable: {}\nstill_frames: {}\npicture_settled: {}\n",
+            "stable: {}\nstill_frames: {}\npicture_settled: {}\ncache_rays: {}\n",
             stats.settled,
             stats.still_frames,
             renderer.picture_settled(),
+            stats.cache_rays,
         ));
         let draw_cpu = timing
             .map(|timing| timing.cpu)

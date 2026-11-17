@@ -269,8 +269,8 @@ fn solve_velocity(bodies: &mut [Body], manifold: &mut Manifold) {
     }
     solve_normal_block(a, b, normal, &mut manifold.points[..count]);
     manifold.twist = solve_twist(a, b, normal, &manifold.points[..count], manifold.twist);
-    for index in 0..count {
-        friction_at_point(a, b, t1, t2, &mut manifold.points[index]);
+    for point in &mut manifold.points[..count] {
+        friction_at_point(a, b, t1, t2, point);
     }
 }
 
@@ -589,8 +589,7 @@ fn friction_delta(
     let friction = a.friction.max(b.friction).max(0.0);
     let limit = (friction * point.normal_impulse).max(0.0);
     let mut impulse = Vec3::ZERO;
-    for slot in 0..2 {
-        let axis = if slot == 0 { t1 } else { t2 };
+    for (axis, stored) in [t1, t2].into_iter().zip(point.tangent.iter_mut()) {
         let rel = point_velocity(a, ra) - point_velocity(b, rb);
         let vt = rel.dot(axis);
         let kt = mass_along(a, b, ra, rb, axis);
@@ -598,9 +597,9 @@ fn friction_delta(
             continue;
         }
         let jt = -vt / kt;
-        let old = point.tangent[slot];
-        point.tangent[slot] = (old + jt).clamp(-limit, limit);
-        impulse += axis * (point.tangent[slot] - old);
+        let old = *stored;
+        *stored = (old + jt).clamp(-limit, limit);
+        impulse += axis * (*stored - old);
     }
     impulse
 }

@@ -61,7 +61,7 @@
 //! `GENOS_STRESS_LIGHTS`, `GENOS_STRESS_DYNAMIC`, `GENOS_STRESS_LAYOUT`,
 //! `GENOS_STRESS_DAY_SECONDS`, `GENOS_STRESS_STEP`, `GENOS_STRESS_FIXED_DT`); a flag
 //! wins over the variable. Lighting launch flags (`--preset`, `--bounces`,
-//! `--ambient`, `--time-of-day`, `--gpu-times`) win the same way: each
+//! `--ambient`, `--time-of-day`, `--gpu-times`, `--profile-passes`) win the same way: each
 //! `GENOS_LIGHTING_*` or `GENOS_GPU_TIMES` mirror applies only when that
 //! argument was omitted. The panel switches lamps, dynamic share, scale and the sun
 //! live.
@@ -72,6 +72,7 @@ mod gi_check;
 mod knobs;
 mod stage;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -205,6 +206,13 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             variable override the preset
   --denoise-screen on|off   alias of --denoise-launch (on is screen, off is hash)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
+  --profile-passes FILE     write GPU pass times as CSV (GENOS_PROFILE_PASSES).
+                            The argument wins. When --gpu-times was omitted
+                            this turns timestamps on every frame. One row per
+                            collected timestamp frame, one frame behind the
+                            draw. The first two draws have no sample. Shade
+                            includes its visibility ray. Lavapipe milliseconds
+                            are not a 4070 result
   --lamp-pick MODE          off, hits, pixels, both, or reuse
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
   --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
@@ -347,6 +355,8 @@ struct Options {
     denoise_launch: Option<String>,
     denoise_screen: Option<String>,
     gpu_times: Option<String>,
+    /// `--profile-passes`. The mirror applies when this stays empty.
+    profile_passes: Option<PathBuf>,
     lamp_pick: Option<String>,
     lamp_pick_samples: Option<String>,
     lamp_pick_rays: Option<String>,
@@ -507,6 +517,7 @@ fn options() -> Result<Options, String> {
         denoise_launch: None,
         denoise_screen: None,
         gpu_times: None,
+        profile_passes: None,
         lamp_pick: None,
         lamp_pick_samples: None,
         lamp_pick_rays: None,
@@ -628,6 +639,14 @@ fn options() -> Result<Options, String> {
             "--denoise-launch" => opts.denoise_launch = Some(value()?),
             "--denoise-screen" => opts.denoise_screen = Some(value()?),
             "--gpu-times" => opts.gpu_times = Some(value()?),
+            "--profile-passes" => opts.profile_passes = Some(PathBuf::from(value()?)),
+            arg if arg.starts_with("--profile-passes=") => {
+                let path = arg.trim_start_matches("--profile-passes=").trim();
+                if path.is_empty() {
+                    return Err("--profile-passes needs a file".into());
+                }
+                opts.profile_passes = Some(PathBuf::from(path));
+            }
             "--lamp-pick" => opts.lamp_pick = Some(value()?),
             "--lamp-pick-samples" => opts.lamp_pick_samples = Some(value()?),
             "--lamp-pick-rays" => opts.lamp_pick_rays = Some(value()?),
@@ -755,6 +774,14 @@ fn options() -> Result<Options, String> {
     }
     opts.block_ms = genos_window::block_ms_mirror(opts.block_ms);
     opts.close_early = genos_window::close_early_mirror(opts.close_early);
+    if opts.profile_passes.is_none() {
+        if let Ok(path) = std::env::var("GENOS_PROFILE_PASSES") {
+            let path = path.trim();
+            if !path.is_empty() {
+                opts.profile_passes = Some(PathBuf::from(path));
+            }
+        }
+    }
     Ok(opts)
 }
 
@@ -1017,6 +1044,10 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
     if let Some(every) = &opts.gpu_times {
         parse::<u32>("--gpu-times", every)?;
         std::env::set_var("GENOS_GPU_TIMES", every);
+    } else if opts.profile_passes.is_some() {
+        // The CSV is one row per collected frame. Timestamps stay off unless
+        // something asks for them, and an explicit --gpu-times already won.
+        std::env::set_var("GENOS_GPU_TIMES", "1");
     }
     Ok(())
 }
@@ -1024,10 +1055,11 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
 fn lighting_text(renderer: &Renderer) -> String {
     let stats = renderer.settle_stats();
     format!(
-        "stable: {}\nstill_frames: {}\npicture_settled: {}\n",
+        "stable: {}\nstill_frames: {}\npicture_settled: {}\ncache_rays: {}\n",
         stats.settled,
         stats.still_frames,
         renderer.picture_settled(),
+        stats.cache_rays,
     )
 }
 
@@ -1227,6 +1259,11 @@ fn run() -> Result<i32, String> {
     let keys = debug_keys()?;
     let controls = character_controller();
     let mut drawn = 0u32;
+    let mut profile = opts
+        .profile_passes
+        .as_ref()
+        .map(|path| open_pass_profile(path).map(|out| PassLog { out, samples: 0 }))
+        .transpose()?;
     let mut clock: Option<Instant> = None;
     let mut sim_time = 0.0f32;
     let run_started = Instant::now();
@@ -1413,6 +1450,13 @@ fn run() -> Result<i32, String> {
         renderer.set_particle_dt(dt);
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
+        if let Some(profile) = profile.as_mut() {
+            let samples = renderer.lighting_pass_samples();
+            if samples != profile.samples {
+                write_pass_row(&mut profile.out, drawn, renderer)?;
+                profile.samples = samples;
+            }
+        }
         if opts.step && dt > 0.0 {
             eprintln!(
                 "genos-stress: frame {drawn} sim {sim_time:.4} wall {:.3}s settled {} {}",
@@ -1462,6 +1506,67 @@ fn run() -> Result<i32, String> {
             return Ok(code);
         }
     }
+}
+
+struct PassLog {
+    out: std::io::BufWriter<std::fs::File>,
+    samples: u32,
+}
+
+fn open_pass_profile(path: &std::path::Path) -> Result<std::io::BufWriter<std::fs::File>, String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| format!("--profile-passes: {err}"))?;
+        }
+    }
+    let file = std::fs::File::create(path).map_err(|err| format!("--profile-passes: {err}"))?;
+    let mut out = std::io::BufWriter::new(file);
+    writeln!(
+        out,
+        "frame,candidates_ms,temporal_ms,spatial_ms,prepare_ms,shade_visibility_ms,cache_hit_shading_ms,cache_round_ms,sh_prep_ms,cache_rays_ms,compose_ms,filter_ms,direct_ms,compact_ms,lighting_span_ms"
+    )
+    .map_err(|err| format!("--profile-passes: {err}"))?;
+    Ok(out)
+}
+
+fn write_pass_row(
+    out: &mut impl Write,
+    frame: u32,
+    renderer: &Renderer,
+) -> Result<(), String> {
+    // One frame behind this draw. Shade is the direct dispatch, so its
+    // visibility ray is inside shade_visibility_ms. cache_round_ms is pass 6,
+    // the relight (the `cache` column of LIGHTING_MS). sh_prep_ms is pass 9;
+    // the nine-wide LIGHTING_MS total leaves it out. compact_ms is pass 0.
+    // cache_rays_ms is the ray dispatch. filter_ms is the a-trous wavelet.
+    // direct_ms is the direct bucket (the `light_px` column: candidates,
+    // temporal, spatial, and shade). lighting_span_ms is the GPU_MS lighting
+    // column for this collected frame.
+    let restir = renderer.lighting_restir_last_ms();
+    let pass = renderer.lighting_pass_ms();
+    let id = renderer.lighting_pass_id_ms();
+    writeln!(
+        out,
+        "{frame},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+        restir[0],
+        restir[1],
+        restir[2],
+        restir[3],
+        restir[4],
+        pass[10],
+        id[6],
+        id[9],
+        pass[9],
+        pass[7],
+        pass[8],
+        pass[3],
+        id[0],
+        renderer.lighting_span_ms(),
+    )
+    .map_err(|err| format!("--profile-passes: {err}"))?;
+    out.flush()
+        .map_err(|err| format!("--profile-passes: {err}"))?;
+    Ok(())
 }
 
 fn script_exit_code(

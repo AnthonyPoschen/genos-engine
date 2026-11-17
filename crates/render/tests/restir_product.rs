@@ -543,11 +543,10 @@ fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
     }
 }
 
-/// Restir off, mode Reuse. The second quiet frame holds the exact record, so
-/// its pixel shadow rays drop. Bit 19 used to cancel that hold. A Hits prepare
-/// failure is not mode 4, so it still traces.
+/// Restir off, mode Reuse. A quiet frame retraces the exact sum. The 32-frame
+/// hold used to drop the second frame's shadow rays.
 #[test]
-fn a_quiet_restir_off_reuse_frame_drops_its_shadow_rays() {
+fn a_quiet_restir_off_reuse_frame_keeps_tracing() {
     let _diag = LampDiag;
     std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
     let (_gpu, mut owner) = open();
@@ -575,8 +574,8 @@ fn a_quiet_restir_off_reuse_frame_drops_its_shadow_rays() {
         "the first restir-off reuse frame traced no shadow rays ({traced:?})"
     );
     assert!(
-        held.pixels < traced.pixels / 2,
-        "the second quiet restir-off reuse frame retraced ({held:?} vs {traced:?})"
+        held.pixels * 2 > traced.pixels,
+        "the second quiet restir-off reuse frame dropped its shadow rays ({held:?} vs {traced:?})"
     );
     renderer.force_restir_prepare_failure(true);
     renderer.set_lighting_settings(quiet_restir(LampPickMode::Hits));

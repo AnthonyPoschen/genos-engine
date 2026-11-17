@@ -155,8 +155,9 @@ void main() {
         outc.px[index] = pack_rgb(shown);
         return;
     }
-    // 0 means the slice has no bounce yet (cleared on entry). A real black
-    // bounce is stored as pack + 1, so it is not walked again.
+    // 0 means the slice has no bounce yet (cleared on entry, or an empty walk
+    // that was not stored). A real black bounce that replaces a stored colour
+    // is pack + 1, so it is not walked again.
     uint stored = outc.px[lighting_bounce_word(index)];
     bool walk = want && (stored == 0u || lighting_sun_pixel_band(p, pos, n));
     if (walk) {
@@ -180,7 +181,13 @@ void main() {
         store = true;
     }
     if (store) {
-        outc.px[lighting_bounce_word(index)] = lighting_pack_rgb9e5(max(bounce, vec3(0.0))) + 1u;
+        // Same rule as lighting_compose.comp. An unresolved miss stays 0, so
+        // the next full-grid frame walks it. A resolved zero is stored.
+        // A miss does not replace a colour already stored.
+        uint packed = lighting_pack_rgb9e5(max(bounce, vec3(0.0)));
+        if (lighting_bounce_keep(packed, stored)) {
+            outc.px[lighting_bounce_word(index)] = packed + 1u;
+        }
     }
     if (mode == 1u || mode == 6u) {
         bounce = vec3(0.0);

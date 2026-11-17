@@ -420,7 +420,11 @@ pub(crate) fn light_groups(
         && settings.world_mode() == 3
         && settings.world_cache.enabled
         && settings.bounce.count >= 2;
-    if frozen && full {
+    // A settled view with no cache round this frame keeps direct and compose.
+    // A settled view whose round is due does not take that idle: the ray
+    // budget still runs. Stopping it here left a 1440p still hall at zero
+    // cache rays from the frame the host called it settled.
+    if frozen && full && !round {
         out.push(3, pixels.div_ceil(64), 1, B_DIRECT);
         push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else if frozen && probe_only(settings) {
@@ -626,6 +630,21 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_DIRECT as usize], 1);
         assert_eq!(quiet.counts[B_COMPOSE as usize], 1);
         assert_eq!(quiet.pixel_only, 1);
+    }
+
+    #[test]
+    fn a_settled_surface_cache_frame_keeps_the_ray_budget() {
+        let settings = LightingSettings::preset(LightingPreset::High);
+        let idle = groups(&settings, true, false);
+        assert_eq!(idle.counts[B_CACHE_RAYS as usize], 0, "no round, no cache rays");
+        assert!(idle.counts[B_DIRECT as usize] > 0);
+        let quiet = groups(&settings, true, true);
+        assert!(
+            quiet.counts[B_CACHE_RAYS as usize] > 0,
+            "a settled high frame still dispatches the cache budget"
+        );
+        assert!(quiet.counts[B_HIT as usize] > 0);
+        assert!(quiet.counts[B_DIRECT as usize] > 0);
     }
 
     #[test]

@@ -138,6 +138,7 @@ fn hold_picture(
         walks: 0,
         dispatches: 0,
         blocks: 0,
+        maint_ran: false,
     };
     let mut peak_blocks = 0_u32;
     for frame in 1..=48 {
