@@ -173,7 +173,7 @@ void main() {
         // The linear-bounce slice holds the last full walk. A held frame
         // reuses it. The fill (the frames before the first 32-frame pass),
         // that pass, a camera move, and a pixel a lamp or a mover reaches
-        // walk again. Direct still updates. The walk is four cache finds per
+        // walk again. A mover walks the tiles the reach pass marked. Direct still updates. The walk is four cache finds per
         // pixel; it was the steady compose. A cache clear zeros the slice
         // for the next three frames (BOUNCE_FILL_FRAMES): the clear frame's
         // walk is empty, and a held frame would keep that empty store, which
@@ -200,7 +200,15 @@ void main() {
                 // black is a real zero. A miss does not replace a colour
                 // already stored. A block that still has no colour is queued
                 // so the next frame visits it after the dirty list goes idle.
+                // A scheduled store after the open and before the drift pass
+                // blends a quarter of the new bounce. Frame 11 was a full
+                // replace (median step 0.076). Frames 9 and 10 do not walk.
+                // A lamp catch stores the new bounce whole.
                 uint packed = lighting_pack_rgb9e5(max(bounce, vec3(0.0)));
+                // A reached tile whose packed bounce still differs stays marked.
+                if (stored != 0u && packed + 1u != stored && lighting_reach_tile_bit(p)) {
+                    atomicMax(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + (p.y >> 5u) * ((pc.dims.x + 31u) >> 5u) + (p.x >> 5u)], 20000u);
+                }
                 if (lighting_bounce_keep(packed, stored)) {
                     outc.px[at] = packed + 1u;
                 } else if (stored == 0u) {

@@ -269,6 +269,18 @@ const uint LIGHTING_DIAG_SCREEN_COARSE = 63u;
 // counts the texels whose mean moved, plus every plain texel on the
 // 32-frame backstop. The host reads it as LightingAtrousStats::filter_heavy.
 const uint LIGHTING_DIAG_FILTER_HEAVY = 60u;
+// Reach pack. diag[8] is otherwise unused. Low 16 bits are marked tiles, the
+// next 12 are tiles kept because the bounce still moved, and the top 4 are
+// the picture's corner tiles (bit set means that corner was unheld).
+const uint LIGHTING_DIAG_REACH = 8u;
+// Metres past a mover's before and after bounds. A corner box in the 25 m
+// hall must not cover the far side of the picture. A lamp is not dilated:
+// its catch stays the whole picture.
+const float LIGHTING_BOUNCE_REACH = 3.0;
+// Tile mask, one bit per 32 px tile, then one change word per tile, then one
+// bit per cache slot. lighting_gpu.rs sizes the key buffer with the same counts.
+const uint LIGHTING_REACH_MASK_WORDS = 2048u;
+const uint LIGHTING_REACH_CHANGE_WORDS = 65536u;
 bool lighting_diag_reserved(uint i) {
     return i == LIGHTING_DIAG_SCREEN_LIST_COARSE || i == LIGHTING_DIAG_SCREEN_LIST_FINE
         || (i >= LIGHTING_DIAG_SCREEN_CHANGED && i <= LIGHTING_DIAG_SCREEN_COARSE);
@@ -5299,9 +5311,8 @@ void lighting_svgf_inactive(uint slot) {
 // whole picture, long enough to cover the next drift pass. That pass then
 // sees a bounce that has already been walking, not a frozen one.
 const uint LIGHTING_HOLD_CATCH = 16u;
-// The CPU stored the frame the host hash last changed. Age 0 is that frame.
-// A mover still on the keep list unholds the picture too: the list is the
-// window after the box stops, and walking it per texel overflowed the stack.
+// The CPU stored the frame a lamp, the camera, or the sky last changed.
+// Age 0 is that frame. Occluder motion does not arm this catch.
 bool lighting_lamp_catch_scene() {
     uint stamp = ckeys.key[LIGHTING_LAMP_CATCH_AT];
     if (stamp == 0u) {
@@ -5310,30 +5321,98 @@ bool lighting_lamp_catch_scene() {
     int age = int(lighting_frame()) - int(stamp);
     return age >= 0 && age <= int(LIGHTING_HOLD_CATCH);
 }
+uint lighting_reach_base() {
+    return LIGHTING_SC_SEED_PAY_AT + pc.dims.x * pc.dims.y * 8u;
+}
+void lighting_reach_or_tile(uint tile) {
+    if (tile >= LIGHTING_REACH_CHANGE_WORDS) {
+        return;
+    }
+    atomicOr(ckeys.key[lighting_reach_base() + (tile >> 5u)], 1u << (tile & 31u));
+}
+bool lighting_reach_tile_bit(uvec2 p) {
+    uint tw = (pc.dims.x + 31u) / 32u;
+    if (tw == 0u) {
+        return false;
+    }
+    uint tile = (p.y >> 5u) * tw + (p.x >> 5u);
+    if (tile >= LIGHTING_REACH_CHANGE_WORDS) {
+        return false;
+    }
+    uint word = ckeys.key[lighting_reach_base() + (tile >> 5u)];
+    return (word & (1u << (tile & 31u))) != 0u;
+}
+bool lighting_reach_slot_bit(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    uint at = lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + LIGHTING_REACH_CHANGE_WORDS + (slot >> 5u);
+    return (ckeys.key[at] & (1u << (slot & 31u))) != 0u;
+}
+void lighting_reach_stamp(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    uint at = lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + LIGHTING_REACH_CHANGE_WORDS + (slot >> 5u);
+    atomicOr(ckeys.key[at], 1u << (slot & 31u));
+}
+// One projection. No change-list walk: that overflowed lavapipe's stack.
+bool lighting_reach_world(vec3 world) {
+    vec3 rel = world - scene.eye.xyz;
+    float z = dot(rel, scene.view_forward.xyz);
+    if (z < 0.05) {
+        return false;
+    }
+    float t = max(scene.view_right.w, 1.0e-4);
+    float aspect = max(scene.view_forward.w, 1.0e-4);
+    float ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
+    float ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
+    float px = (ndc_x + 1.0) * 0.5 * float(pc.dims.x) - 0.5;
+    float py = (1.0 - ndc_y) * 0.5 * float(pc.dims.y) - 0.5;
+    if (px < 0.0 || py < 0.0 || px >= float(pc.dims.x) || py >= float(pc.dims.y)) {
+        return false;
+    }
+    return lighting_reach_tile_bit(uvec2(uint(px + 0.5), uint(py + 0.5)));
+}
+// The stamp is one load. The projection stays out of the picture compose:
+// that shader is at its SPIR-V ceiling, and the screen pass stamps the slot.
+bool lighting_slot_loose(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    if (lighting_reach_slot_bit(slot)) {
+        return true;
+    }
+    bool screen = (gstats.ctrl_bits & (1u << 19u)) != 0u;
+    if (cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5) {
+        return !screen && lighting_movers_count() > 0u;
+    }
+    return lighting_reach_world(cache.v[3u * slot].xyz);
+}
 bool lighting_change_reaches() {
     if (lighting_still_opening() || lighting_scene_changed() || lighting_lamp_catch_scene()) {
         return true;
     }
     vec4 head = work.v[lighting_change_at()];
-    if (head.y > LIGHTING_CHANGES_DROPPED) {
-        return true;
-    }
-    return lighting_movers_count() > 0u;
+    return head.y > LIGHTING_CHANGES_DROPPED;
 }
-// Compose has a pixel. The reach is the picture, so the position is not a walk.
+// A lamp, the open, or a dropped change list is the whole picture. A mover is
+// the tile the reach pass marked. Compose has already stored the pixel.
 bool lighting_pixel_reached(vec3 p) {
-    return lighting_change_reaches() || p.x != p.x;
+    return lighting_change_reaches() || p.x != p.x || lighting_reach_tile_bit(lighting_compose_px);
 }
 bool lighting_slot_reached(uint slot) {
     if (slot >= LIGHTING_CACHE_SLOTS) {
         return true;
     }
-    return lighting_change_reaches();
+    return lighting_change_reaches() || lighting_reach_slot_bit(slot) || lighting_slot_loose(slot);
 }
 // The steady hold. False while the picture is still filling, on the drift
-// pass, on a moving camera, and on a texel a change reaches.
+// pass, on a moving camera, on a lamp catch, and on a slot the screen pass
+// stamped. The hash projection is lighting_slot_loose, checked by the wavelet.
 bool lighting_wavelet_held(uint slot) {
-    return slot < LIGHTING_CACHE_SLOTS && lighting_view_held() && !lighting_still_refresh() && !lighting_change_reaches();
+    return slot < LIGHTING_CACHE_SLOTS && lighting_view_held() && !lighting_still_refresh()
+        && !lighting_change_reaches() && !lighting_reach_slot_bit(slot);
 }
 // A texel with 16 sets used to rerun variance and every a-trous level on
 // every frame, so the dirty early-out never fired once the set count closed.
@@ -5344,7 +5423,8 @@ bool lighting_svgf_plain_rebuild(uint slot) {
     if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_PLAIN_SETS) {
         return false;
     }
-    return lighting_still_refresh() || !lighting_view_held() || lighting_change_reaches();
+    return lighting_still_refresh() || !lighting_view_held() || lighting_change_reaches()
+        || lighting_reach_slot_bit(slot) || lighting_slot_loose(slot);
 }
 void lighting_svgf_variance(uint slot) {
     // A texel that has closed its set count used to rerun the 7x7 and then
@@ -5355,7 +5435,7 @@ void lighting_svgf_variance(uint slot) {
     // The dirty test below does not catch this: the mean keeps crossing one
     // percent, so the early-out never fires and the kernel stays the picture.
     float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
-    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_svgf_was_active(slot) && lighting_wavelet_held(slot)) {
+    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_svgf_was_active(slot) && lighting_wavelet_held(slot) && !lighting_slot_loose(slot)) {
         return;
     }
     float var;
@@ -5615,7 +5695,7 @@ void lighting_svgf_push(uint slot) {
     // Pushing the raw mean on the frames in between was the frame-to-frame
     // step. A moving camera still pushes.
     float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
-    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_wavelet_held(slot)) {
+    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_wavelet_held(slot) && !lighting_slot_loose(slot)) {
         // The wavelet stays put. Every fourth frame, until the first drift
         // pass, a field that has split from its raw mean by the sparse ratio
         // steps toward that mean. After that pass the filter owns the field:

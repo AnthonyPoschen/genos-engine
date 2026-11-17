@@ -137,6 +137,14 @@ pub(super) fn lighting_sh_keys_words() -> u64 {
     lattice + LATTICE_CAP * STRIDE + 2 * LIGHTING_CACHE_SLOTS
 }
 
+/// Words after the per-pixel seed payload. Matches `lighting_reach.comp`:
+/// 2048 mask words (one bit per 32 px tile), 65536 change words, one bit per slot.
+fn lighting_reach_words() -> u64 {
+    const MASK: u64 = 2048;
+    const CHANGE: u64 = 65536;
+    MASK + CHANGE + LIGHTING_CACHE_SLOTS / 32
+}
+
 fn lighting_compose_minx() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + LIGHTING_CACHE_SLOTS
 }
@@ -151,6 +159,8 @@ pub(crate) struct Lighting {
     /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
     atrous_plain: Handle,
     screen_pipe: Handle,
+    /// Tile mask for a mover. A lamp does not use it.
+    reach_pipe: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -246,6 +256,17 @@ pub(crate) struct Lighting {
     /// Frame the host hash last changed. The hold reads it for LIGHTING_HOLD_CATCH
     /// frames (shader LIGHTING_LAMP_CATCH_AT). 0 until the first change.
     scene_catch: u32,
+    /// This frame's hash change is occluder motion with the camera, lamps, fog,
+    /// and meshes held. The drawn solid moves with that occluder. The
+    /// picture-wide mark stays off.
+    mover_local: bool,
+    /// Tiles still moving, from the previous stats readback (`diag[8]`).
+    reach_hot: u32,
+    /// Frames to keep the lattice walk on after a local unhold. The readback
+    /// is a frame or two behind the mask.
+    reach_arm: u32,
+    kept_froxel: bool,
+    kept_mesh: u64,
     /// Hash of this frame's draw instances (poses, colours, emission).
     pub(crate) draw_key: u64,
     /// Frames in a row drawn from held light (settled): the picture no longer changes.
@@ -494,6 +515,13 @@ pub struct LightingAtrousStats {
     /// Pixels whose compose walked the world cache (`diag[0]`). A held frame
     /// reuses the stored bounce and this stays near zero.
     pub cache_walks: u32,
+    /// Screen tiles a mover reached this frame (`diag[8]`, low 16 bits).
+    pub reach_tiles: u32,
+    /// Tiles kept because the bounce still moved more than one percent.
+    pub reach_hot: u32,
+    /// Corner tiles of the picture. Bit 0 is the origin, then +x, +y, +x+y.
+    /// A set bit means that corner was unheld.
+    pub reach_corners: u32,
 }
 
 /// Shadow rays traced last frame, and how pixels shaded.
@@ -564,6 +592,10 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         list_appended: w[65],
         // diag[0] is word 24.
         cache_walks: w[24],
+        // diag[8] is word 32. Low 16 tiles, next 12 hot, top 4 corners.
+        reach_tiles: w[32] & 0xffff,
+        reach_hot: (w[32] >> 16) & 0xfff,
+        reach_corners: w[32] >> 28,
     }
 }
 
@@ -595,6 +627,7 @@ impl Default for Lighting {
             pipes: [std::ptr::null_mut(); 9],
             atrous_plain: std::ptr::null_mut(),
             screen_pipe: std::ptr::null_mut(),
+            reach_pipe: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -643,6 +676,11 @@ impl Default for Lighting {
             held: 0,
             still: 0,
             scene_catch: 0,
+            mover_local: false,
+            reach_hot: 0,
+            reach_arm: 0,
+            kept_froxel: false,
+            kept_mesh: 0,
             stats: [Buffer::empty(), Buffer::empty()],
             stats_dev: [Buffer::empty(), Buffer::empty()],
             quiet: 0,
@@ -1040,6 +1078,13 @@ impl Gpu {
         )?;
         self.note_pipeline_time("screen-denoise", start);
         let start = Instant::now();
+        self.lighting.reach_pipe = self.make_compute_pipe(
+            LIGHTING_REACH_SPV,
+            self.lighting.layout,
+            "reach",
+        )?;
+        self.note_pipeline_time("reach", start);
+        let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
         let made = self.make_pipeline(true, false, false);
@@ -1358,7 +1403,7 @@ impl Gpu {
                 // election (lighting_sh_keys_words). Eight words per pixel
                 // after that: the seed winner's payload, four corners.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_sh_keys_words() + pixels * 8) * 4,
+                    (lighting_sh_keys_words() + pixels * 8 + lighting_reach_words()) * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -1996,6 +2041,10 @@ impl Gpu {
                 if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
                     self.lighting.cache_rays = rays;
                 }
+                // diag[8], a frame or two behind the dispatch that wrote it.
+                if let Ok(reach) = self.read_stats_word(self.lighting.stats[slot].memory, 32) {
+                    self.lighting.reach_hot = (reach >> 16) & 0xfff;
+                }
             } else if !self.lighting.async_on {
                 // That slot did not dispatch a cache round. The stats buffer was
                 // cleared and never counted, so the probe is zero, not the
@@ -2273,7 +2322,9 @@ impl Gpu {
         // requests it again.
         let refresh = self.lighting.frame != 0
             && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
-        if self.lighting.still > 0 && !compose_full && !refresh {
+        // A mover's tiles need the lattice this frame. A held camera with
+        // nothing local still returns, which is the still-idle probe.
+        if self.lighting.still > 0 && !compose_full && !refresh && self.lighting.reach_arm == 0 {
             return;
         }
         self.lighting.maint_ran = true;
@@ -2489,24 +2540,40 @@ impl Gpu {
                 let fine = w[86];
                 let coarse = w[87];
                 let changed = w[85];
+                let heavy = w[84];
+                let walks = w[24];
+                let reach = w[32];
+                let tiles = reach & 0xffff;
+                let hot = (reach >> 16) & 0xfff;
+                let corners = reach >> 28;
                 eprintln!(
-                    "lightingdenoise {queue} frame {} pixels {fine} coarse {coarse} changed {changed} filtered {fine} mode screen ran 1",
+                    "lightingdenoise {queue} frame {} pixels {fine} coarse {coarse} changed {changed} filtered {fine} heavy {heavy} walks {walks} reach {tiles} hot {hot} corners {corners} mode screen ran 1",
                     self.lighting.frame
                 );
-                self.write_denoise_log(fine, coarse, changed);
+                self.write_denoise_log(fine, coarse, changed, heavy, walks, tiles, hot, corners);
             }
         }
     }
 
     /// `./genos-debug/denoise/` (or `<out>/denoise` when `--out` is set). Written
     /// only from the stats read the debug line already performed.
-    fn write_denoise_log(&self, fine: u32, coarse: u32, changed: u32) {
+    fn write_denoise_log(
+        &self,
+        fine: u32,
+        coarse: u32,
+        changed: u32,
+        heavy: u32,
+        walks: u32,
+        tiles: u32,
+        hot: u32,
+        corners: u32,
+    ) {
         let dir = std::path::Path::new(&self.debug_out).join("denoise");
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
         let text = format!(
-            "frame {}\npixels {fine}\ncoarse {coarse}\nchanged {changed}\nfiltered {fine}\nmode screen\nran 1\n",
+            "frame {}\npixels {fine}\ncoarse {coarse}\nchanged {changed}\nfiltered {fine}\nheavy {heavy}\nwalks {walks}\nreach {tiles}\nhot {hot}\ncorners {corners}\nmode screen\nran 1\n",
             self.lighting.frame
         );
         let _ = std::fs::write(dir.join("latest.txt"), &text);
@@ -4168,7 +4235,22 @@ impl Gpu {
         // The shaders read this fraction as "the host hash changed". The
         // integer count is what lighting_near_change walks. A lamp does not
         // land in that list; the fraction is how the hold hears it this frame.
-        if self.lighting.still == 0 {
+        // Occluder motion with the camera and the lamps held is not that mark.
+        // The reach pass marks the tiles. A lamp stays picture-wide, this frame.
+        // The drawn instances move with the solid, so the draw key changes too.
+        // Fog and a traced mesh are not that solid: those stay picture-wide.
+        let mover_local = self.lighting.still == 0
+            && !self.lighting.kept_bytes.is_empty()
+            && scene_mover_only(&self.lighting.kept_bytes, &self.frame_bytes)
+            && self.froxel_wrote == self.lighting.kept_froxel
+            && self.mesh_field_key == self.lighting.kept_mesh;
+        self.lighting.mover_local = mover_local;
+        if mover_local || self.lighting.reach_hot > 0 {
+            self.lighting.reach_arm = 4;
+        } else {
+            self.lighting.reach_arm = self.lighting.reach_arm.saturating_sub(1);
+        }
+        if self.lighting.still == 0 && !mover_local {
             block[0] += LIGHTING_SCENE_CHANGED_MARK;
             // The first frames are the fill. Arming the catch there keeps the
             // wavelet off through the frames a still-hall gate scores.
@@ -4235,6 +4317,8 @@ impl Gpu {
         if !frozen {
             self.lighting.kept_key = key;
             self.lighting.kept_bytes.clone_from(&self.frame_bytes);
+            self.lighting.kept_froxel = self.froxel_wrote;
+            self.lighting.kept_mesh = self.mesh_field_key;
             self.lighting.probe_runs = self.lighting.probe_runs.wrapping_add(1);
         }
         let block_at = 16
@@ -4430,7 +4514,7 @@ impl Gpu {
             || opening
             || refresh
             || !self.lighting.compose_valid
-            || !(self.lighting.still > 0 || sun_amortise)
+            || (self.lighting.still == 0 && !sun_amortise && !self.lighting.mover_local)
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
@@ -4710,6 +4794,14 @@ impl Gpu {
             if let Some(pool) = stamps {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
+            // Tiles a mover can reach, before the wavelet and before maintenance.
+            // The compose list was cleared in lighting_begin, so these marks
+            // are on the list the lattice walk and the picture both dispatch.
+            if self.lighting.cache_full && !self.lighting.reach_pipe.is_null() {
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.reach_pipe);
+                (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            }
             let mut filter_round = 0u32;
             let mut atrous_i = 0usize;
             let mut atrous_ran = false;
@@ -4733,6 +4825,26 @@ impl Gpu {
                     cur_pc = round_pc;
                 }
                 if pass == 8 {
+                    // The cache pass already read last frame's slot stamps.
+                    // Clear them before this frame's wavelet writes its own.
+                    if atrous_i == 0
+                        && self.lighting.cache_full
+                        && !self.lighting.reach_pipe.is_null()
+                    {
+                        let mut clear_pc = pc;
+                        clear_pc[2] = 0xffff_ffff;
+                        (self.fns.cmd_push)(
+                            self.cmd,
+                            self.lighting.layout,
+                            0x20,
+                            0,
+                            LIGHTING_PC_BYTES,
+                            clear_pc.as_ptr() as *const c_void,
+                        );
+                        (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.reach_pipe);
+                        (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+                        self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                    }
                     // S72V: the a-trous stage (lighting_atrous_stage, bits 1-3).
                     // S72V6: bits 1-3 cleared first; bit 3 is the gather's "changes
                     // this frame", so on frames with a change every stage read 4-7
@@ -5282,6 +5394,7 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.restir_spatial_wide))
                 .chain(std::iter::once(&mut self.lighting.restir_direct))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
+                .chain(std::iter::once(&mut self.lighting.reach_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
                 .chain(std::iter::once(&mut self.lighting.agx_pipe))
@@ -5602,6 +5715,40 @@ pub(crate) fn lighting_mesh_movers(
 /// Frames an occluder stays a mover after it last moved (Lumen treats a mesh as
 /// dynamic while it moves; once it rests its surroundings are ordinary cache).
 const LIGHTING_MOVER_KEEP: u32 = 240;
+
+/// True when the two scene blocks differ only in occluder records and the
+/// occupancy grid those records rebuild. A lamp, the camera, or the sky is a
+/// picture-wide change and returns false. The grid header starts at byte 176
+/// (`occ_grid` in `scene_data.glsl`); the grid words follow the occluders.
+fn scene_mover_only(old: &[u8], new: &[u8]) -> bool {
+    const GRID_AT: usize = 176;
+    if old.len() < crate::pack::SCENE_TAIL || new.len() < crate::pack::SCENE_TAIL {
+        return false;
+    }
+    if old[..GRID_AT] != new[..GRID_AT] {
+        return false;
+    }
+    let word = |bytes: &[u8], at: usize| -> usize {
+        bytes
+            .get(at * 4..at * 4 + 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
+    };
+    let tail = crate::pack::SCENE_TAIL;
+    let lamps = word(old, 0);
+    let occs = word(old, 1);
+    if lamps != word(new, 0) || occs != word(new, 1) {
+        return false;
+    }
+    let lamp_end = tail + lamps * 32;
+    let occ_end = lamp_end + occs * 64;
+    if occ_end > old.len() || occ_end > new.len() {
+        return false;
+    }
+    if old[tail..lamp_end] != new[tail..lamp_end] {
+        return false;
+    }
+    old[lamp_end..occ_end] != new[lamp_end..occ_end]
+}
 
 /// Spheres (centre, radius) around every occluder that moved, came or went between
 /// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept
@@ -6149,9 +6296,10 @@ mod sun_step {
     #[test]
     fn compose_spirv_stays_near_the_picture_pass() {
         // The missing-field read, the path debug view, the texels population
-        // record, the shown-mean age tally, the bounce store rule, and the
-        // retry list sit in this pass. Compose is 245_364 bytes. 248_000
-        // still rejects a second occluder walk.
+        // record, the shown-mean age tally, the bounce store rule, the
+        // retry list, and the mover tile note sit in this pass. Compose is
+        // 247_988 bytes. 248_000 still rejects a second occluder walk. A
+        // quarter blend of the scheduled bounce did not fit.
         assert!(
             LIGHTING_COMPOSE_SPV.len() < 248_000,
             "compose SPIR-V is {} bytes",

@@ -1,0 +1,157 @@
+#version 450
+// One group. Marks the screen tiles a mover's before and after bounds can
+// reach, dilated by LIGHTING_BOUNCE_REACH, and any tile whose packed bounce
+// still differed from the stored one. The hash wavelet loads one of those
+// bits. It does not walk the change list. A lamp is not in this list: the
+// picture-wide catch is unchanged. pc.dims.z == 0xffffffff clears the slot
+// stamps only. That runs after the cache pass, so the pass still sees the
+// stamps from the previous frame.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+
+shared uint reach_hot_count;
+
+uint reach_tw() {
+    return (pc.dims.x + 31u) / 32u;
+}
+
+void reach_mark_tile(uint tx, uint ty) {
+    uint tw = reach_tw();
+    uint th = (pc.dims.y + 31u) / 32u;
+    if (tx >= tw || ty >= th) {
+        return;
+    }
+    lighting_reach_or_tile(ty * tw + tx);
+    uint bw = (pc.dims.x + 7u) / 8u;
+    for (uint by = 0u; by < 4u; by++) {
+        for (uint bx = 0u; bx < 4u; bx++) {
+            uvec2 p = uvec2(tx * 32u + bx * 8u, ty * 32u + by * 8u);
+            if (p.x < pc.dims.x && p.y < pc.dims.y) {
+                lighting_compose_mark_block((p.y >> 3u) * bw + (p.x >> 3u));
+            }
+        }
+    }
+}
+
+void reach_disc(vec3 centre, float rad) {
+    vec3 rel = centre - scene.eye.xyz;
+    vec3 fwd = scene.view_forward.xyz;
+    float z = dot(rel, fwd);
+    if (z < -rad) {
+        return;
+    }
+    float t = max(scene.view_right.w, 1.0e-4);
+    float aspect = max(scene.view_forward.w, 1.0e-4);
+    float zc = max(z, 0.25);
+    float ndc_x = 0.0;
+    float ndc_y = 0.0;
+    if (z > 0.05) {
+        ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
+        ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
+    }
+    float px = (ndc_x + 1.0) * 0.5 * float(pc.dims.x);
+    float py = (1.0 - ndc_y) * 0.5 * float(pc.dims.y);
+    float pry = (rad / zc) / t * (0.5 * float(pc.dims.y));
+    float prx = (rad / zc) / (t * aspect) * (0.5 * float(pc.dims.x));
+    float pr = max(prx, pry);
+    if (z <= 0.25) {
+        pr = max(pr, float(pc.dims.x + pc.dims.y));
+    }
+    int x0 = int(floor((px - pr) / 32.0));
+    int y0 = int(floor((py - pr) / 32.0));
+    int x1 = int(floor((px + pr) / 32.0));
+    int y1 = int(floor((py + pr) / 32.0));
+    uint tw = reach_tw();
+    uint th = (pc.dims.y + 31u) / 32u;
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (y0 < 0) {
+        y0 = 0;
+    }
+    if (x1 >= int(tw)) {
+        x1 = int(tw) - 1;
+    }
+    if (y1 >= int(th)) {
+        y1 = int(th) - 1;
+    }
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            reach_mark_tile(uint(x), uint(y));
+        }
+    }
+}
+
+void main() {
+    uint id = gl_LocalInvocationIndex;
+    // After the cache pass. Last frame's stamps stay visible to the SH write.
+    if (pc.dims.z == 0xffffffffu) {
+        uint slot_at = lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + LIGHTING_REACH_CHANGE_WORDS;
+        uint slot_words = LIGHTING_CACHE_SLOTS / 32u;
+        for (uint i = id; i < slot_words; i += 64u) {
+            ckeys.key[slot_at + i] = 0u;
+        }
+        return;
+    }
+    if (id == 0u) {
+        reach_hot_count = 0u;
+    }
+    uint base = lighting_reach_base();
+    for (uint i = id; i < LIGHTING_REACH_MASK_WORDS; i += 64u) {
+        ckeys.key[base + i] = 0u;
+    }
+    barrier();
+    uint tw = reach_tw();
+    uint th = (pc.dims.y + 31u) / 32u;
+    uint tiles = tw * th;
+    uint hot = 0u;
+    uint change_at = base + LIGHTING_REACH_MASK_WORDS;
+    if (tw > 0u) {
+        for (uint tile = id; tile < tiles && tile < LIGHTING_REACH_CHANGE_WORDS; tile += 64u) {
+            if (ckeys.key[change_at + tile] > uint(LIGHTING_DIRTY_EPS * 1000000.0)) {
+                reach_mark_tile(tile % tw, tile / tw);
+                hot++;
+            }
+        }
+    }
+    atomicAdd(reach_hot_count, hot);
+    if (id == 0u) {
+        vec4 head = work.v[lighting_change_at()];
+        if (head.y <= 0.5 && tw > 0u) {
+            uint n = min(uint(head.x), LIGHTING_CHANGES);
+            for (uint i = 0u; i < n; i++) {
+                vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + i];
+                reach_disc(b.xyz, b.w + LIGHTING_BOUNCE_REACH);
+            }
+        }
+    }
+    barrier();
+    for (uint i = id; i < LIGHTING_REACH_CHANGE_WORDS; i += 64u) {
+        ckeys.key[change_at + i] = 0u;
+    }
+    barrier();
+    if (id == 0u) {
+        uint marked = 0u;
+        uint words = (tiles + 31u) >> 5u;
+        for (uint i = 0u; i < words && i < LIGHTING_REACH_MASK_WORDS; i++) {
+            marked += bitCount(ckeys.key[base + i]);
+        }
+        uint corners = 0u;
+        if (tw > 0u && th > 0u) {
+            uvec2 c = uvec2(0u, tw - 1u);
+            uvec2 r = uvec2(0u, th - 1u);
+            for (uint k = 0u; k < 4u; k++) {
+                uint tx = c[k & 1u];
+                uint ty = r[k >> 1u];
+                uint tile = ty * tw + tx;
+                uint bit = ckeys.key[base + (tile >> 5u)] & (1u << (tile & 31u));
+                if (bit != 0u) {
+                    corners |= 1u << k;
+                }
+            }
+        }
+        uint hot_pack = min(reach_hot_count, 4095u);
+        gstats.diag[LIGHTING_DIAG_REACH] = (marked & 65535u) | (hot_pack << 16u) | (corners << 28u);
+    }
+}
