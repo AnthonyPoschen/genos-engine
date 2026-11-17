@@ -921,6 +921,112 @@ fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: b
     }
 }
 
+/// A fine child whose own samples disagree with the parent prior moves onto
+/// its own value. The prior counts as at most four sets and clears at four
+/// own sets, so the field is not stuck on the parent.
+#[test]
+fn a_fine_child_replaces_a_wrong_parent_prior() {
+    const HAND: usize = 96;
+    const SEEN: usize = 32;
+    const READY: f32 = 4.0;
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let (stage, _) = hall();
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.sanitize();
+    renderer.set_lighting_settings(settings);
+    renderer.reset_lighting_cache();
+    let mut camera = Camera::opening();
+    camera.set_pose(Vec3::new(14.5, 1.7, 23.5), -0.3554, 0.08);
+    let spots = nearby_spots(&stage.world.scene, &camera);
+    for _ in 0..HAND {
+        let _ = draw_presented(window, renderer, &stage, &camera);
+    }
+    let queries: Vec<CacheQuery> = spots
+        .iter()
+        .map(|spot| query(spot.position, spot.normal, TEXEL))
+        .collect();
+    let before = renderer
+        .read_cache_cells(&queries)
+        .expect("fine cells before they are shown");
+    for (i, cell) in before.iter().enumerate() {
+        eprintln!(
+            "handoff before spot {i} weight {:.1} own {:.4} seed {:.4} field {:.4}",
+            cell.weight,
+            cell_luma(cell),
+            luma(cell.seed),
+            luma(cell.field)
+        );
+    }
+    let mut pick = None;
+    let mut pick_gap = 0.0f32;
+    for (i, cell) in before.iter().enumerate() {
+        if cell.weight + 1.0e-3 < READY {
+            continue;
+        }
+        let own = cell_luma(cell);
+        let seed = luma(cell.seed);
+        let gap = (seed - own).abs();
+        let scale = own.max(seed).max(0.05);
+        if gap < scale * 0.25 {
+            continue;
+        }
+        if pick.is_none() || gap > pick_gap {
+            pick = Some(i);
+            pick_gap = gap;
+        }
+    }
+    let pick = pick.unwrap_or_else(|| {
+        panic!(
+            "no fine child reached {READY} own sets and differed from the parent in {HAND} frames"
+        )
+    });
+    let (yaw, pitch) = aim(eye_of(&camera), spots[pick].position);
+    camera.set_pose(camera.position, yaw, pitch);
+    assert!(
+        !off_screen(&camera, spots[pick].position),
+        "spot {pick} stayed off screen, so the screen filter cannot retire the prior"
+    );
+    for _ in 0..SEEN {
+        let _ = draw_presented(window, renderer, &stage, &camera);
+    }
+    let after = renderer
+        .read_cache_cells(&queries)
+        .expect("fine cells after the screen filter");
+    let mut checked = 0u32;
+    for (i, cell) in after.iter().enumerate() {
+        let own = cell_luma(cell);
+        let seed = luma(cell.seed);
+        let field = luma(cell.field);
+        let shown = !off_screen(&camera, spots[i].position);
+        eprintln!(
+            "handoff after spot {i} shown {shown} weight {:.1} own {own:.4} seed {seed:.4} field {field:.4}",
+            cell.weight
+        );
+        if !shown || cell.weight + 1.0e-3 < READY {
+            continue;
+        }
+        let gap_seed = (seed - own).abs();
+        let scale = own.max(seed).max(0.05);
+        if gap_seed < scale * 0.25 {
+            continue;
+        }
+        checked += 1;
+        let gap_field = (field - own).abs();
+        // The blend at three own sets still holds a quarter of the parent.
+        // A retired prior is the screen filter, closer than that leftover.
+        assert!(
+            gap_field < gap_seed * 0.15,
+            "spot {i} stayed on the parent: own {own:.4} seed {seed:.4} field {field:.4}"
+        );
+    }
+    assert!(
+        checked > 0,
+        "the child aimed at (spot {pick}) did not keep {READY} own sets on screen"
+    );
+}
+
 /// Surfaces near the player already hold a fine texel, seeded from the parent
 /// cell, before the camera turns toward them. The presented pixel does not
 /// feed in on entry. Readiness is that prior, not four of the child's own sets.

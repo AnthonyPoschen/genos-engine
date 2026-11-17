@@ -582,9 +582,6 @@ const uint LIGHTING_FINE_THR_AT = LIGHTING_SC_HIST_AT + 87u;
 const uint LIGHTING_FINE_CREATE_AT = LIGHTING_SC_HIST_AT + 90u;
 const uint LIGHTING_FINE_DROP_AT = LIGHTING_SC_HIST_AT + 91u;
 const uint LIGHTING_FINE_AHEAD_AT = LIGHTING_SC_HIST_AT + 92u;
-const uint LIGHTING_FINE_SHARE_AT = LIGHTING_SC_HIST_AT + 93u;
-const uint LIGHTING_FINE_BOOST_AT = LIGHTING_SC_HIST_AT + 94u;
-const uint LIGHTING_FINE_CLOSE_AT = LIGHTING_SC_HIST_AT + 95u;
 // Ranked seats for the fine band. One word per bucket, cleared when the
 // threshold is chosen. Stops before the lamp snapshot at +160.
 const uint LIGHTING_FINE_HIST_AT = LIGHTING_SC_HIST_AT + 96u;
@@ -3739,37 +3736,38 @@ bool lighting_fine_has_prior(uint slot) {
     return cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
         && cache.v[LIGHTING_SC_SHOWN_AT + slot].z > LIGHTING_SC_SET_HALF;
 }
-// Parent prior plus the child's own mean, weighted by precision (sample count
-// over luminance variance). Stored in the filtered field, which compose
-// already shows. The radiance is not clamped.
+// Parent prior plus the child's own mean. The prior counts as at most the
+// four sets the child's own filter needs, and that weight fades as the child
+// gains sets. A frozen parent variance is not a weight: dividing by it kept a
+// settled parent in the field forever. At four own sets the prior mark clears
+// and the caller runs the screen filter. The radiance is not clamped.
 void lighting_fine_publish(uint slot) {
     if (!lighting_fine_has_prior(slot)) {
+        return;
+    }
+    vec4 own = cache.v[3u * slot + 2u];
+    float child_sets = floor(max(own.w, 0.0));
+    if (child_sets >= LIGHTING_FINE_READY_SETS) {
+        vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + slot];
+        mark.z = 0.0;
+        mark.w = 0.0;
+        cache.v[LIGHTING_SC_SHOWN_AT + slot] = mark;
         return;
     }
     vec4 prior = lighting_sc_seed(slot);
     if (!(prior.w > 0.0)) {
         return;
     }
-    vec4 own = cache.v[3u * slot + 2u];
-    float child_sets = floor(max(own.w, 0.0));
     vec3 outc = prior.rgb;
     if (child_sets > LIGHTING_SC_SET_HALF) {
-        const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+        float pn = cache.v[LIGHTING_SC_SHOWN_AT + slot].z;
+        float cap = min(pn, LIGHTING_FINE_READY_SETS);
+        float fade = 1.0 - child_sets / LIGHTING_FINE_READY_SETS;
+        float pn_eff = cap * fade;
         float ls = lighting_sc_sun_gain(slot);
         vec3 child_rgb = own.rgb * ls;
-        float lum = max(dot(max(child_rgb, vec3(0.0)), lw), LIGHTING_SC_LIT_LUMA);
-        float pn = cache.v[LIGHTING_SC_SHOWN_AT + slot].z;
-        float pv = cache.v[LIGHTING_SC_SHOWN_AT + slot].w;
-        vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
-        vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
-        float open_var = lum * lum * LIGHTING_FINE_PRIOR_SIGMA * LIGHTING_FINE_PRIOR_SIGMA;
-        // No estimator yet: one sample is not more precise than the prior.
-        // A dark sample's relative regulariser is tiny and would erase the parent.
-        float cv = (eb.x > 0.0 && eb.w > LIGHTING_SC_SET_HALF) ? max(ea.w, 0.0) : max(open_var, pv);
-        float pp = pn / max(pv, LIGHTING_FINE_SCORE_MIN);
-        float cp = child_sets / max(cv, LIGHTING_FINE_SCORE_MIN);
-        float inv = 1.0 / max(pp + cp, LIGHTING_FINE_SCORE_MIN);
-        outc = (prior.rgb * pp + child_rgb * cp) * inv;
+        float w = max(pn_eff + child_sets, LIGHTING_FINE_SCORE_MIN);
+        outc = (prior.rgb * pn_eff + child_rgb * child_sets) / w;
     }
     cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(outc, vec3(0.0))));
     if (!(abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].w) > 0.0)) {
@@ -5889,8 +5887,13 @@ vec4 lighting_svgf_target(uint slot) {
 float lighting_sc_lambda(uint slot);
 void lighting_svgf_push(uint slot) {
     if (lighting_fine_has_prior(slot)) {
+        float child_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
         lighting_fine_publish(slot);
-        return;
+        // Below four own sets the blend is the field. At four the publish
+        // clears the prior, and this push is the screen filter.
+        if (child_sets < LIGHTING_FINE_READY_SETS) {
+            return;
+        }
     }
     vec4 nb = cache.v[3u * slot + 1u];
     if (nb.w > 0.2) {
