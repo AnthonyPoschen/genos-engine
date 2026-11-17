@@ -387,6 +387,68 @@ def spec_self_test():
     return 0 if ok else 1
 
 
+def _png(path, code, size, hot=None):
+    from PIL import Image
+    im = Image.new("RGB", size, (code, code, code))
+    if hot is not None:
+        x, y, hcode = hot
+        im.putpixel((x, y), (hcode, hcode, hcode))
+    im.save(path)
+
+
+def ceiling_self_test():
+    """score() on the review's pictures. A live code 199 against flat code 40
+    must move ref_err, and blotch, energy, slant mid_err and score_spec must
+    not see the inverse's ~1099 clamp. Codes 196 and 197 are under the dither
+    band, so they stay in the error and are not over_ceiling."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        def scene(name, live_code, size=(8, 8), ref_size=None, hot=None, spec=False):
+            ref_size = size if ref_size is None else ref_size
+            folder = os.path.join(d, "oracle", name)
+            os.makedirs(folder)
+            _png(os.path.join(folder, "f0001-live.png"), live_code, size, hot)
+            _png(os.path.join(folder, "f0001-reference.png"), 40 if hot else live_code, ref_size)
+            if spec:
+                _png(os.path.join(folder, "f0001-reference-spec.png"), 40, ref_size)
+        scene("clip199", 40, hot=(0, 0, 199))
+        scene("clip196", 40, hot=(0, 0, 196))
+        scene("clip197", 40, hot=(0, 0, 197))
+        scene("slant-clip", 40, hot=(4, 4, 199))
+        scene("gloss-clip", 40, hot=(0, 0, 199), spec=True)
+        scene("clip-big", 40, size=(16, 16), ref_size=(8, 8), hot=(0, 0, 199))
+        scene("clip-both", 199)
+        got = score(d)
+    raw199 = float(linear_from_display(np.float32(199 / 255)))
+    rows = {}
+    for name, s in got.items():
+        rows[name] = {k: s.get(k) for k in (
+            "ref_err_mean", "blotch_worst", "energy_mean", "over_ceiling_px",
+            "over_ceiling_frac", "slant_mid_err_mean", "spec_err_near_mean")}
+    print(json.dumps({"ceiling_score": rows, "linear_from_display_199": round(raw199, 2)}))
+    c199, c196, c197 = got["clip199"], got["clip196"], got["clip197"]
+    slant, gloss, big, both = got["slant-clip"], got["gloss-clip"], got["clip-big"], got["clip-both"]
+    # The inverse clamp stays. The score must not use it.
+    inverse_ok = abs(raw199 - 1099.54) < 1.0
+    one_sided = (1.0 < c199["ref_err_mean"] < 20.0 and c199["blotch_worst"] < 10.0
+                 and c199["energy_mean"] < 20.0 and c199["over_ceiling_px"] == 1
+                 and c199.get("over_ceiling_frac") is not None
+                 and abs(c199["over_ceiling_frac"] - 1.0 / 64.0) < 1e-3)
+    kept = (c196["over_ceiling_px"] == 0 and c196["ref_err_mean"] > 0.5
+            and c196.get("over_ceiling_frac") == 0
+            and c197["over_ceiling_px"] == 0 and c197["ref_err_mean"] > 0.5)
+    others = (1.0 < slant["slant_mid_err_mean"] < 40.0
+              and 1.0 < gloss["spec_err_near_mean"] < 30.0
+              and 0.1 < big["ref_err_mean"] < 10.0)
+    # Both sides at the ceiling are unmeasurable. The fraction says so.
+    paired = (both["ref_err_mean"] < 1e-6 and both["over_ceiling_px"] == 64
+              and both.get("over_ceiling_frac") == 1.0 and both["blotch_worst"] < 1.0
+              and both["energy_mean"] < 2.0)
+    ok = inverse_ok and one_sided and kept and others and paired
+    print("ceiling score", "ok" if ok else "FAIL")
+    return ok
+
+
 def self_test():
     rng = np.random.default_rng(3)
     ref = rng.uniform(0.1, 0.5, (32, 32)).astype(np.float32)
@@ -411,16 +473,22 @@ def self_test():
     x = 180 / 255 - 0.64
     tone_ok = abs(la - 128 / 255) < 1e-3 and abs(lb - (0.64 + 1.1 * x / (0.14 - x))) < 1e-2
     print(json.dumps({"lin_luma_128": round(la, 4), "lin_luma_180": round(lb, 4)}))
-    # Pixels at the shoulder ceiling (0.78 = 198.9/255, +-dither) carry no
-    # recoverable radiance: they must be counted, not decoded to ~1100.
-    sat = np.full((4, 4, 3), 0.3, np.float32); sat[0, 0] = 198 / 255; sat[1, 1] = (199 / 255, 0.2, 0.2)
-    sat[2, 2] = 190 / 255  # bright but below the ceiling: still decoded
+    # dither.glsl's noise is under one code, so the asymptote (code 198.9)
+    # rounds to 198 and above. 196 and 197 are measured. 190 is below the band.
+    sat = np.full((4, 4, 3), 0.3, np.float32)
+    sat[0, 0] = 198 / 255
+    sat[0, 1] = 199 / 255
+    sat[1, 0] = 196 / 255
+    sat[1, 1] = 197 / 255
+    sat[2, 2] = 190 / 255
     oc = over_ceiling(sat)
     flat = np.full((4, 4), 0.3, np.float32)
     hot = flat.copy(); hot[0, 0] = 1100.0
     masked, _ = ref_error(hot, flat, None, mask=np.zeros((4, 4), bool) | (np.arange(16).reshape(4, 4) == 0))
-    ceil_ok = int(oc.sum()) == 2 and oc[0, 0] and oc[1, 1] and not oc[2, 2] and masked < 1e-6
-    print(json.dumps({"over_ceiling_px": int(oc.sum()), "masked_err": round(masked, 6)}))
+    band_ok = bool(oc[0, 0] and oc[0, 1] and not oc[1, 0] and not oc[1, 1] and not oc[2, 2])
+    mask_ok = masked < 1e-6
+    print(json.dumps({"over_ceiling": [bool(oc[0, 0]), bool(oc[0, 1]), bool(oc[1, 0]), bool(oc[1, 1]), bool(oc[2, 2])],
+                      "masked_err": round(masked, 6)}))
     # A sliding edge in both live and reference cancels; a checkerboard only
     # in live does not.
     edge = [np.zeros((48, 48), np.float32) for _ in range(3)]
@@ -440,8 +508,10 @@ def self_test():
     b_bias, b_blob, b_blob2 = blotch(flat * 1.2, flat), blotch(blob, flat), blotch(blob2, flat)
     ok_blotch = b_bias < 1e-9 and b_blob > 1e-3 and abs(b_blob2 / b_blob - 2.0) < 0.05
     ok_mid = mid_err(blob, flat) > 3 * ref_error(blob, flat)[1] and mid_err(flat, flat) < 1e-9
+    scored_ok = ceiling_self_test()
     ok = (ok_ex and ok_blotch and ok_mid and same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
-          and unchanged(still) == 1.0 and unchanged(moving) == 0.0 and tone_ok and ceil_ok)
+          and unchanged(still) == 1.0 and unchanged(moving) == 0.0 and tone_ok and band_ok
+          and mask_ok and scored_ok)
     print(json.dumps({"near_err_near_bad": round(n1, 4), "near_err_far_bad": round(n2, 4),
                       "plain": [round(p1, 4), round(p2, 4)],
                       "blotch": [b_bias, round(b_blob, 4), round(b_blob2, 4)], "mid": ok_mid}))
