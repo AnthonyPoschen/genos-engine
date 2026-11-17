@@ -4266,7 +4266,7 @@ impl Gpu {
                 times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
                 self.last_unfilled
-                    .map_or_default(|stats| format!(" | {}", stats.line())),
+                    .map_or_else(String::new, |stats| format!(" | {}", stats.line())),
                 lamp_pick_line
             );
         }

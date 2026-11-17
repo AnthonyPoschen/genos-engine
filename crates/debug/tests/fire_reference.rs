@@ -1,12 +1,5 @@
-#![cfg_attr(
-    test,
-    expect(clippy::as_conversions, reason = "pixel index from a projected point")
-)]
-#![cfg_attr(
-    test,
-    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
-)]
-#![cfg_attr(test, expect(clippy::needless_range_loop, reason = "three channels"))]
+#![cfg_attr(test, expect(clippy::as_conversions, reason = "pixel index from a projected point"))]
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 
 //! Path-traced reference for the fire test in genos-render `gpu_frame.rs`
 //! (`the_outside_lamp_and_the_fire_stop_at_the_corridor_wall`): how bright the
@@ -28,7 +21,7 @@ fn the_fire_floor_reference() {
         )))
         .expect("shipped scene"),
     );
-    world.scene.clear_lights();
+    world.scene.lights.clear();
     let mut sim = genos_render::Simulation::from_scene(&world.scene);
     for _ in 0..genos_render::PROOF_STEPS {
         sim.advance(&mut world, genos_render::STEP_DT);
@@ -38,11 +31,11 @@ fn the_fire_floor_reference() {
     let eye = [camera.position.x, camera.position.y, camera.position.z];
     let (fire, _) = genos_render::medium(&world, eye);
     let mut scene = world.scene.clone();
-    scene.set_lights(vec![Light {
+    scene.lights = vec![Light {
         position: Vec3::new(fire.position[0], fire.position[1], fire.position[2]),
         color: fire.color.map(|c| c * fire.strength),
         direction: Vec3::ZERO,
-    }]);
+    }];
     let (width, height) = (320_u32, 180_u32);
     let setup = genos_debug::reference::RefSetup::from_camera(&scene, &camera, width, height, 256);
     let reference = genos_debug::reference::render(&setup);
@@ -63,17 +56,11 @@ fn the_fire_floor_reference() {
         sum[0] + sum[1] + sum[2],
         reference.noise
     );
-    assert!(
-        reference.noise < 0.1,
-        "reference too noisy: {}",
-        reference.noise
-    );
+    assert!(reference.noise < 0.1, "reference too noisy: {}", reference.noise);
 }
 
 /// Rounds a screen coordinate to the nearest pixel index without a lossy cast.
 fn nearest_pixel(v: f32, size: u16) -> u32 {
-    let p = (0..size)
-        .find(|&p| f32::from(p) + 0.5 > v)
-        .unwrap_or(size - 1);
+    let p = (0..size).find(|&p| f32::from(p) + 0.5 > v).unwrap_or(size - 1);
     u32::from(p)
 }
