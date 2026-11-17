@@ -872,7 +872,7 @@ mod tests {
             report.push_str(&line);
             report.push('\n');
             assert_eq!(cache.live_movers(), n);
-            assert_eq!(boosts.len() as u32, n);
+            assert_eq!(u32::try_from(boosts.len()).expect("boost count fits u32"), n);
             // Fair share shrinks under crowd; 1000 → 32 on High.
             if n == 1000 {
                 assert!(share <= 32, "1000-mover share was {share}");
