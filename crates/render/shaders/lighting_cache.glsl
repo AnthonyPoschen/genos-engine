@@ -3629,6 +3629,15 @@ const float LIGHTING_FINE_SCORE_NEAR = 0.25;
 const float LIGHTING_FINE_CHG_CAP = 4.0;
 const float LIGHTING_FINE_PLANE_EPS = 1.0e-3;
 const float LIGHTING_FINE_HALF = 0.5;
+// A texel under this many sets outranks one that already has them.
+const float LIGHTING_FINE_READY_SETS = 4.0;
+// How far an unsettled texel jumps ahead of one that has yielded.
+const float LIGHTING_FINE_FRESH = 8.0;
+const float LIGHTING_FINE_SCORE_MIN = 1.0e-4;
+const float LIGHTING_FINE_BUCKET_SCALE = 8.0;
+const float LIGHTING_FINE_BUCKET_BIAS = 32.0;
+// Young in-band field chase, as a fraction of the normal 1/16 step.
+const float LIGHTING_FINE_FIELD_SLOW = 0.25;
 float lighting_fine_word(uint at) {
     return uintBitsToFloat(ckeys.key[at]);
 }
@@ -3688,12 +3697,12 @@ float lighting_fine_score(uint slot, vec3 p, float t, bool on_screen) {
     float screen = (on_screen && boost > 1.0) ? boost : 1.0;
     // Under four sets the texel stays in the rank, nearer first. At four it
     // yields, so the next shell is reached instead of one texel taking the lane.
-    float fresh = floor(max(t, 0.0)) < 4.0 ? 1.0 : 0.0;
-    return screen * dist * (1.0 + err) * (1.0 + min(chg, LIGHTING_FINE_CHG_CAP)) * (1.0 + 8.0 * fresh);
+    float fresh = floor(max(t, 0.0)) < LIGHTING_FINE_READY_SETS ? 1.0 : 0.0;
+    return screen * dist * (1.0 + err) * (1.0 + min(chg, LIGHTING_FINE_CHG_CAP)) * (1.0 + LIGHTING_FINE_FRESH * fresh);
 }
 uint lighting_fine_bucket(float score) {
-    float l = log2(max(score, 1.0e-4));
-    return uint(clamp(l * 8.0 + 32.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
+    float l = log2(max(score, LIGHTING_FINE_SCORE_MIN));
+    return uint(clamp(l * LIGHTING_FINE_BUCKET_SCALE + LIGHTING_FINE_BUCKET_BIAS, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
 }
 bool lighting_fine_keep_visiting(uint slot) {
     if (lighting_fine_budget_entries() == 0u) {
@@ -3787,7 +3796,7 @@ void lighting_fine_spawn(uint slot) {
         cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w = 0.0;
         return;
     }
-    if (reach > create || cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w > 0.5) {
+    if (reach > create || cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w > LIGHTING_FINE_VALID) {
         return;
     }
     uint ax = lighting_axis(n) >> 1u;
@@ -5768,7 +5777,7 @@ void lighting_svgf_push(uint slot) {
                     if (sd.w > 0.0) {
                         outc = mix(sd.rgb, outc, held);
                     }
-                    catch_up = min(catch_up, mix(LIGHTING_FIELD_CATCH * 0.25, catch_up, held));
+                    catch_up = min(catch_up, mix(LIGHTING_FIELD_CATCH * LIGHTING_FINE_FIELD_SLOW, catch_up, held));
                 }
             }
             outc = mix(prev, outc, catch_up);
