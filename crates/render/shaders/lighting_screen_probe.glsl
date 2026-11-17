@@ -94,6 +94,7 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_px_probe_skipped = 1u;
     lighting_px_probes = vec3(-1.0);
     lighting_px_world_w = 0.0;
+    lighting_px_bounce_found = false;
     lighting_sc_display = true;
     vec4 world = lighting_world_irradiance(pos, n);
     lighting_px_world_w = world.w;
@@ -107,6 +108,8 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     }
     float trust = clamp(world.w, 0.0, 1.0);
     if (trust >= 1.0) {
+        // A full-trust black is a real zero, not a miss.
+        lighting_px_bounce_found = true;
         return max(world.rgb, vec3(0.0));
     }
     vec4 coarse = lighting_coarse_world(pos, n);
@@ -120,5 +123,7 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
             return max(world.rgb, vec3(0.0));
         }
     }
+    // A coarser mix is not a resolved zero. Trust below 1 can still be a
+    // young texel, and holding pack(black) would freeze it.
     return max(mix(coarse.rgb, max(world.rgb, vec3(0.0)), trust), vec3(0.0));
 }

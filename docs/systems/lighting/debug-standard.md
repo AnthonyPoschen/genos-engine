@@ -64,7 +64,7 @@ genos-lighting --headless --menu hidden --scene stress --checkpoint hall \
   --report genos-debug/gi/s1-spin
 ```
 
-Repeat for `s2-strafe`, `s3-approach`, `s4-many-movers`, `s5-aba`, and `s6-settle`. `--script` fixes the step at 1/60 and does not turn metrics on by itself.
+Repeat for `s2-strafe`, `s3-approach`, `s4-many-movers`, `s5-aba`, and `s6-settle`. `s7-shadow-bounce.rhai` holds the hall for 24 frames with the sun running and requires the picture mean above 0.02, the darkest pixel above 0.01, and the black share under 0.05. The counted shadow pixels are `examples/stress/tests/shadow_grain.rs`. `--script` fixes the step at 1/60 and does not turn metrics on by itself.
 
 The lighting MCP server listens on port 8766. `--mcp-port N` overrides it. `GENOS_MCP_PORT` applies only when that argument was omitted. `genos-stress` stays on 8765.
 

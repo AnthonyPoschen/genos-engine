@@ -361,3 +361,92 @@ fn a_held_shadow_does_not_keep_the_first_black_bounce() {
         "mean temporal variance {var_mean:.6} of settled shadow pixels"
     );
 }
+
+/// The sun band reuses a stored bounce outside this frame's row. A frozen sun
+/// never takes that path. A one-tick sun step must recover the same shadow
+/// and then walk a band, not every dark pixel.
+#[test]
+fn a_small_sun_step_does_not_keep_the_first_black_bounce() {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_lighting_settings(LightingSettings::preset(LightingPreset::High));
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        lamp: 0,
+    });
+    let (mut stage, camera) = hall();
+    let mut direct_picture = Vec::new();
+    for _ in 0..4 {
+        let _ = window.pump();
+        direct_picture = renderer
+            .draw(&stage.world, &camera, true)
+            .expect("direct draw")
+            .expect("direct pixels");
+    }
+    let samples = shadow_samples(&stage.world.scene, &camera, &direct_picture);
+    assert!(
+        samples.len() > 200,
+        "shadow sample count {} is too small to judge the sun band",
+        samples.len()
+    );
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Full,
+        lamp: 0,
+    });
+    renderer.reset_lighting_cache();
+    stage.sun_frozen = false;
+    let mut series: Vec<Vec<f64>> = samples.iter().map(|_| Vec::new()).collect();
+    let mut saw_sun = false;
+    let mut late_walks = u32::MAX;
+    for frame in 0..FRAMES {
+        stage.advance(1.0 / 60.0);
+        let _ = window.pump();
+        let displayed = renderer
+            .draw(&stage.world, &camera, true)
+            .expect("draw")
+            .expect("pixels");
+        let mut frame_y = Vec::with_capacity(samples.len());
+        for (sample, row) in samples.iter().zip(series.iter_mut()) {
+            let y = display_luma(&displayed, sample.pixel);
+            row.push(y);
+            frame_y.push(y);
+        }
+        let zeros = frame_y.iter().filter(|y| **y < ZERO).count();
+        let sun = renderer.lighting_sun_stats();
+        if frame >= 8 && sun.gpu_sun {
+            saw_sun = true;
+            late_walks = late_walks.min(sun.walks);
+        }
+        eprintln!(
+            "sun frame {frame} shadow_median {:.4} zero {zeros}/{} gpu_sun {} walks {}",
+            median(&frame_y),
+            samples.len(),
+            u32::from(sun.gpu_sun),
+            sun.walks
+        );
+    }
+    let mut zero_px = 0usize;
+    for row in &series {
+        let late = row.get(8..).unwrap_or(&[]);
+        let (mean, _) = mean_var(late);
+        if mean < ZERO {
+            zero_px += 1;
+        }
+    }
+    eprintln!(
+        "sun_grain n={} zero={zero_px} saw_sun {saw_sun} late_walks {late_walks}",
+        samples.len()
+    );
+    assert!(saw_sun, "a one-tick sun step never took the sun compose");
+    let pixels = WIDTH * HEIGHT;
+    assert!(
+        late_walks * 4 < pixels,
+        "sun compose walked {late_walks} of {pixels} (a band is about an eighth)"
+    );
+    assert!(
+        zero_px * 20 < samples.len(),
+        "black shadow pixels {zero_px} of {} stayed at display zero on the sun path",
+        samples.len()
+    );
+}

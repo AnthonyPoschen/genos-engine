@@ -4201,6 +4201,9 @@ vec3 lighting_px_probes = vec3(-1.0);
 // cells_only can still land on diag[0]: covers() does not read that toggle, and
 // the pixel then shows lighting_sh_read. A fixture dispatch is not a presented frame.
 float lighting_px_world_w = 0.0;
+// True when this pixel's indirect came from a cache hit, including a real
+// zero. An unresolved miss leaves it false so compose does not hold black.
+bool lighting_px_bounce_found = false;
 uint lighting_px_probe_reads = 0u;
 uint lighting_px_probe_skipped = 0u;
 // Debug view "path" (compose mode 9). The colour is not light.

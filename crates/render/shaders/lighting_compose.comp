@@ -185,13 +185,14 @@ void main() {
         } else {
             bounce = indirect(p, pos, n);
             if (mode == 0u) {
-                // An empty walk is not a colour to hold. Storing packed black
-                // (plus one, so the slot looked full) froze the first miss for
-                // 32 frames: the shadow field filled and the pixel stayed black.
-                // A later walk still replaces a stored bounce, including with
-                // black when a lamp has left.
+                // An unresolved miss is not a colour. Storing pack(black)+1
+                // froze that first miss for 32 frames after the field filled.
+                // A cache hit that is black is a real zero, so it is stored.
+                // Frame 32 also stores a zero that never resolved. A later
+                // walk can still replace a stored bounce with black.
                 uint packed = lighting_pack_rgb9e5(max(bounce, vec3(0.0)));
-                if (packed != 0u || stored != 0u) {
+                bool hold = packed != 0u || stored != 0u || lighting_px_bounce_found || lighting_still_refresh();
+                if (hold) {
                     outc.px[at] = packed + 1u;
                 }
             }
