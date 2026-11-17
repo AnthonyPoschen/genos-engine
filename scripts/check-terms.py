@@ -10,7 +10,8 @@ names), alias shims (a line saying `deprecated` or `alias`), and history
 notes (a line saying `retired`, `removed` or `gone`).
 
 Diff under test: in GitHub Actions, the PR's base branch to HEAD (pull_request)
-or HEAD's first parent (push); locally, merge-base with origin/master, or the
+or, on push, every parent of HEAD: a merge commit only flags lines that are new
+relative to ALL its parents, so lines merged in from master don't count; locally, merge-base with origin/master, or the
 ref in CHECK_TERMS_BASE.
 """
 
@@ -28,10 +29,12 @@ EXEMPT = (GLOSSARY, "docs/lighting/RENAMES.md", "docs/plans/")
 SHIM = re.compile(r"deprecated|alias|retired|removed|\bgone\b", re.I)
 
 
-def git(*args: str, cwd: Path | None = None, check: bool = True) -> str:
+def git(*args: str, cwd: Path | None = None, check: bool = True) -> str | None:
     r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    if check and r.returncode != 0:
-        raise SystemExit(f"check-terms: git {' '.join(args)}: {r.stderr.strip()}")
+    if r.returncode != 0:
+        if check:
+            raise SystemExit(f"check-terms: git {' '.join(args)}: {r.stderr.strip()}")
+        return None
     return r.stdout
 
 
@@ -67,18 +70,37 @@ def violations(diff: str, terms: list[str]) -> list[str]:
     return out
 
 
-def diff_range(root: Path) -> list[str]:
+def fetch_tip(root: Path, ref: str) -> str | None:
+    fetched = git("fetch", "--no-tags", "--depth=1", "origin", ref, cwd=root, check=False)
+    if fetched is None:
+        return None
+    return git("rev-parse", "FETCH_HEAD", cwd=root).strip()
+
+
+def diff_bases(root: Path) -> list[str]:
+    """Refs to diff HEAD against; a line must be added relative to every one."""
     base = os.environ.get("CHECK_TERMS_BASE")
     if base:
-        return [git("merge-base", base, "HEAD", cwd=root).strip(), "HEAD"]
+        return [git("merge-base", base, "HEAD", cwd=root).strip()]
     if os.environ.get("GITHUB_ACTIONS"):
         ref = os.environ.get("GITHUB_BASE_REF")
         if ref:  # HEAD is the PR merge commit; base tip..HEAD is the PR's change
-            git("fetch", "--no-tags", "--depth=1", "origin", ref, cwd=root)
-            return ["FETCH_HEAD", "HEAD"]
+            fetched = fetch_tip(root, ref)
+            if fetched is None:
+                # A merged pull deletes its branch while a stacked job is still
+                # running. Master has that history, so the diff stays meaningful.
+                print(
+                    f"check-terms: base {ref} is gone; diffing against master",
+                    file=sys.stderr,
+                )
+                fetched = fetch_tip(root, "master")
+            if fetched is None:
+                raise SystemExit(f"check-terms: cannot fetch base {ref} or master")
+            return [fetched]
         git("fetch", "--no-tags", "--depth=2", "origin", os.environ["GITHUB_SHA"], cwd=root)
-        return ["HEAD^", "HEAD"]
-    return [git("merge-base", "origin/master", "HEAD", cwd=root).strip(), "HEAD"]
+        # push: all parents, so a merge commit only flags its own new lines
+        return git("rev-list", "--parents", "-n1", "HEAD", cwd=root).split()[1:]
+    return [git("merge-base", "origin/master", "HEAD", cwd=root).strip()]
 
 
 def self_test() -> None:
@@ -106,6 +128,25 @@ def self_test() -> None:
         assert run(r, env) == 0
         (r / "a.txt").write_text("old_name here before\nold_name again\n")
         assert run(r, env) == 1
+        # push run on a merge commit: lines merged in from master don't count
+        c = ("-c", "user.name=t", "-c", "user.email=t@t")
+        (r / "a.txt").write_text("old_name here before\n")
+        git("checkout", "-qb", "topic", cwd=r)
+        (r / "b.txt").write_text("topic line\n")
+        git("add", ".", cwd=r); git(*c, "commit", "-qm", "t", cwd=r)
+        git("checkout", "-q", "master", cwd=r)
+        (r / "c.txt").write_text("old_name from master\n")
+        git("add", ".", cwd=r); git(*c, "commit", "-qm", "m", cwd=r)
+        git("checkout", "-q", "topic", cwd=r)
+        git(*c, "merge", "-q", "--no-edit", "master", cwd=r)
+        push = {k: v for k, v in env.items() if k != "CHECK_TERMS_BASE"}
+        push |= {"GITHUB_ACTIONS": "true", "GITHUB_SHA": git("rev-parse", "HEAD", cwd=r).strip()}
+        git("remote", "add", "origin", d, cwd=r)
+        assert run(r, push) == 0
+        (r / "b.txt").write_text("topic line\nold_name in merge\n")
+        git("add", ".", cwd=r); git(*c, "commit", "-q", "--amend", "--no-edit", cwd=r)
+        push["GITHUB_SHA"] = git("rev-parse", "HEAD", cwd=r).strip()
+        assert run(r, push) == 1
     print("check-terms: self-test ok")
 
 
@@ -116,14 +157,16 @@ def run(root: Path, env: dict[str, str] | None = None) -> int:
         os.environ.update(env)
     try:
         terms = retired_terms((root / GLOSSARY).read_text())
-        a, b = diff_range(root)
-        # b == HEAD: include uncommitted work locally (worktree diff)
-        diff = git("diff", "-U0", "--no-color", a, cwd=root) if not os.environ.get("GITHUB_ACTIONS") \
-            else git("diff", "-U0", "--no-color", a, b, cwd=root)
+        bad = None
+        for a in diff_bases(root):
+            # locally include uncommitted work (worktree diff); in CI diff to HEAD
+            tail = ["HEAD"] if os.environ.get("GITHUB_ACTIONS") else []
+            v = violations(git("diff", "-U0", "--no-color", a, *tail, cwd=root), terms)
+            bad = v if bad is None else [x for x in bad if x in v]
+        bad = bad or []
     finally:
         os.environ.clear()
         os.environ.update(saved)
-    bad = violations(diff, terms)
     for v in bad:
         print(v, file=sys.stderr)
     if bad:

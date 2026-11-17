@@ -12,9 +12,9 @@ The first proof uses the window, the input, Vulkan, Rhai, and the lighting pass.
 
 The first program is `examples/camera`. The execution goal is [MVP scene](goals/mvp-scene.md). See [ADR 0010](adr/0010-first-proof-is-the-lit-scripted-scene.md).
 
-Linux on Wayland is the first machine for this proof. Windows and macOS run the same scene when those machines are available. The X11 window waits until an X11 session is a target.
+Linux on Wayland is the first machine for this proof. Windows opens a Win32 window (`crates/window/src/win32_shim.c`) and reads XInput. macOS opens a Cocoa window (`crates/window/src/cocoa_shim.m`) and reads GameController. The X11 window waits until an X11 session is a target.
 
-On Wayland, the camera moves only while the window has keyboard focus. On X11, Windows, and macOS, the keyboard poll is global. That split already exists in `input-zig`.
+On Wayland, Win32, and Cocoa, the camera moves only while the window has keyboard focus. Those windows clear their keys when focus leaves. X11 is not in this tree yet. `input-zig` polls that keyboard globally.
 
 ## Frame
 
@@ -40,17 +40,22 @@ crates/input/       package genos-input
 crates/math/        package genos-math
 crates/physics/     package genos-physics
 crates/fracture/    package genos-fracture
+crates/ecs/         package genos-ecs
+crates/jobs/        package genos-jobs
 crates/scene/       package genos-scene
 crates/mcp/         package genos-mcp
 crates/debug/       package genos-debug
 debug/scene-lib/    package genos-scene-lib
 debug/lighting/     package genos-lighting
+debug/ecs/          package genos-ecs-debug
+debug/jobs/         package genos-jobs-debug
 crates/window/      package genos-window
 crates/ui/          package genos-ui
 crates/render/      package genos-render
 crates/lighting-ref/ package genos-lighting-ref
-crates/restir-ref/   package genos-restir-ref
-crates/restir-gpu/   package genos-restir-gpu
+crates/restir-ref/  package genos-restir-ref
+crates/fill-ref/    package genos-fill-ref
+crates/restir-gpu/  package genos-restir-gpu
 crates/load/        package genos-load
 crates/load-check/  package genos-load-check
 crates/audio/       package genos-audio
@@ -58,15 +63,21 @@ crates/audio-check/ package genos-audio-check
 examples/camera/    package genos-camera
 ```
 
-`genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device.
+`genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device. The plan keeps that mix as the only DSP and keeps each device output as a write of the finished buffer ([ADR 0041](adr/0041-one-audio-mix-device-outputs-only.md), [audio design](systems/audio-design.md)).
 
 `genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. `genos-scene-lib` parses those scene files and does not link the renderer. `genos-lighting` is the lighting debug binary: it builds the scenes and writes screenshots, dumps, and logs under `./genos-debug/`. See [Debugging](systems/debugging.md).
 
+`genos-fill-ref` is the CPU checker for screen-tile fill (stage F1). It does not open a window or a Vulkan device. The binary is `fill-ref`. `--tile-fill` defaults off. A run writes `./genos-debug/fill-ref/metrics.json`. `--out` overrides that directory. `GENOS_FILL_REF_OUT` applies only when `--out` was omitted. `GENOS_FILL_TILE` mirrors `--tile-fill` and applies only when the argument was omitted. The live cache does not read the flag.
+
 `genos-restir-ref` is the CPU checker for ReSTIR direct (ADR 0022 stage C). It does not open a window or a Vulkan device. The binary is `restir-ref`. A run writes `./genos-debug/restir/metrics.json` and `reference.json`. `--out` overrides that directory. `GENOS_RESTIR_OUT` applies only when `--out` was omitted. `genos-restir-gpu` (`restir-gpu`) is stage C1: initial candidates on lavapipe, off unless `--initial` is set. `GENOS_RESTIR_INITIAL` mirrors that flag. It writes `candidate.json` in the same schema. The GPU stages are [the ReSTIR DI plan](systems/lighting/restir-di-plan.md).
+
+`genos-ecs` stores placed objects in archetype tables. A scene handle is an index plus a generation. Each component cell stores the tick of its last write and can encode itself to bytes, so a replication pass can send one component. The crate does not open a window or a socket. The headless check is the `genos-ecs` binary in `genos-ecs-debug`: `--check` writes `./genos-debug/ecs/metrics.json`. `--out` changes that directory.
+
+`genos-jobs` runs a frame of jobs on a work-stealing deque. Serial mode is the server tick and the replay. The headless check is the `genos-jobs` binary in `genos-jobs-debug`: `--check` writes `./genos-debug/jobs/metrics.json`. `--out` changes that directory. `--jobs-workers`, `--jobs-order`, and `--jobs-budget-ms` are mirrored by `GENOS_JOBS_WORKERS`, `GENOS_JOBS_ORDER`, and `GENOS_JOBS_BUDGET_MS` when the argument was omitted.
 
 `genos-lighting-ref` is the CPU checker for lighting pictures. It holds the metrics, the verdicts, and the audit report, and it does not open a window or a Vulkan device. `reflections-check` is a binary in that crate: analytic gates for specular reflections, mirrors, portals, and water. It writes `./genos-debug/reflections/metrics.json`. The optics it grades live are `genos-math` `optics`, and the GLSL mirror is compiled with the renderer. The reflection passes are not in this crate. See [the reflections design](systems/reflections-design.md). `genos-stress lighting-ref` is the driver: it owns the scenes, calls the path tracer, and on a machine with Vulkan captures live frames. `make lighting-ref-check` runs it. `MODE=lavapipe-small` is the small wiring check. Pictures and reports are written under `./genos-debug/` in the current directory. The metric core is its own crate so the defect self-test can run without the renderer. `gi-check` remains the scripted picture gate inside the stress runner.
 
-`genos-math` stores positions, directions, and rotations. `genos-physics` steps gravity, a move wish, contact, and springs, and hot-swaps a broken fracture asset. `genos-fracture` cooks that asset offline. The camera capsule calls the physics step. The cook does not run inside `step`.
+`genos-math` stores positions, directions, and rotations, the headless exposure curves (`tonemap`), and the proposed bloom chain (`bloom`, ADR 0028). The renderer does not call `bloom`. `genos-physics` steps gravity, a move wish, contact, and springs, and hot-swaps a broken fracture asset. `genos-fracture` cooks that asset offline. The camera capsule calls the physics step. The cook does not run inside `step`.
 
 `genos-ui` lays out a tree and reports pointer hits. The UI crate does not open a window. The UI crate does not call Vulkan.
 

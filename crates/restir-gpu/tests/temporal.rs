@@ -75,12 +75,15 @@ fn diff_frames(frames: &str) -> (i32, String, String) {
     ]));
     assert_eq!(code, 0, "{text}");
     assert!(text.to_ascii_lowercase().contains("llvmpipe"), "{text}");
+    // Lavapipe dispatch time is not the 50 ms CPU microbench (tree.rs).
     let (code, diff_text) = output(restir_ref(&[
         "diff",
         "--reference",
         reference.join("reference.json").to_str().expect("utf8"),
         "--candidate",
         candidate.join("candidate.json").to_str().expect("utf8"),
+        "--frame-ms",
+        "60000",
         "--out",
         diff.to_str().expect("utf8"),
     ]));

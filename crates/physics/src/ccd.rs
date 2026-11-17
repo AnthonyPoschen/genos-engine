@@ -495,12 +495,10 @@ pub(crate) fn prepare_swept(
     scratch: &mut CcdScratch,
     cap: u32,
     dt: f32,
+    any_swept: bool,
     stats: &mut crate::StepStats,
 ) {
     scratch.pairs.clear();
-    let any_swept = bodies
-        .iter()
-        .any(|body| body.motion == MotionQuality::Swept);
     if !any_swept {
         if !scratch.covered.is_empty() {
             scratch.covered.fill(0);
@@ -661,9 +659,9 @@ fn advance_pair(
     let mut remaining = dt;
     let mut advances = 0_u32;
     loop {
-        if remaining <= TIME_EPSILON {
-            return;
-        }
+        // Test the gap before the time left: a pair whose last advance lands
+        // on contact exactly at the end of the tick still solves that contact
+        // in this tick, not in the discrete pass of the next one.
         let Some((normal, gap)) = gap_of(bodies, first, second) else {
             integrate_index(bodies, first, remaining);
             integrate_index(bodies, second, remaining);
@@ -671,6 +669,9 @@ fn advance_pair(
         };
         if gap <= GAP_TOLERANCE {
             settle(bodies, first, second, normal, gap, remaining, stats);
+            return;
+        }
+        if remaining <= TIME_EPSILON {
             return;
         }
         if advances >= MAX_ADVANCES {

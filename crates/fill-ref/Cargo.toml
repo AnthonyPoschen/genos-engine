@@ -1,0 +1,16 @@
+[package]
+name = "genos-fill-ref"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "CPU reference for screen-tile fill. No window and no Vulkan device."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "fill-ref"
+path = "src/bin/fill_ref.rs"
+
+[dependencies]
+genos-math = { path = "../math" }

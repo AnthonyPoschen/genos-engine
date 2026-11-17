@@ -1,0 +1,18 @@
+[package]
+name = "genos-ecs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Archetype scene store: generational handles, change ticks, component bytes"
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+genos-load = { path = "../load" }
+
+[[bench]]
+name = "columns"
+harness = false

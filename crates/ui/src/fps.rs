@@ -153,6 +153,7 @@ impl FpsOverlay {
             w: width,
             h: height,
             color: BG,
+            alpha: 1.0,
         });
         for blot in text::blots(&label, x + PAD, y + PAD, text_w) {
             paints.push(Paint {
@@ -161,6 +162,7 @@ impl FpsOverlay {
                 w: blot.w,
                 h: blot.h,
                 color: TEXT,
+                alpha: 1.0,
             });
         }
         self.paints = paints;

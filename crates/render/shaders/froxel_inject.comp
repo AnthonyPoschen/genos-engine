@@ -15,6 +15,10 @@ void main() {
     if (c.x >= fog.size.x || c.y >= fog.size.y || c.z >= fog.size.z) {
         return;
     }
+    if (froxel_f2_on()) {
+        imageStore(froxel_ext, ivec3(c), vec4(f2_mean_sigma(c.xy, c.z), 0.0, 0.0, 0.0));
+        return;
+    }
     float z0 = froxel_slice_edge(c.z, fog.size.z);
     float z1 = froxel_slice_edge(c.z + 1u, fog.size.z);
     vec3 p0 = froxel_point(c.xy, z0);

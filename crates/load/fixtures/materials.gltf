@@ -1,0 +1,44 @@
+{
+ "asset": {"version": "2.0", "generator": "hand-written for genos-load tests"},
+ "extensionsUsed": ["KHR_materials_emissive_strength"],
+ "materials": [
+  {
+   "name": "defaults"
+  },
+  {
+   "name": "gold",
+   "pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.766, 0.336, 1.0], "metallicFactor": 1.0, "roughnessFactor": 0.25}
+  },
+  {
+   "name": "lamp",
+   "pbrMetallicRoughness": {"baseColorFactor": [0.5, 0.5, 0.5, 1.0], "metallicFactor": 0.0, "roughnessFactor": 0.75},
+   "emissiveFactor": [1.0, 0.5, 0.25],
+   "extensions": {"KHR_materials_emissive_strength": {"emissiveStrength": 4.0}}
+  },
+  {
+   "name": "leaf",
+   "pbrMetallicRoughness": {"baseColorFactor": [0.2, 0.6, 0.1, 0.5], "metallicFactor": 0.0, "baseColorTexture": {"index": 0}},
+   "alphaMode": "MASK",
+   "doubleSided": true
+  },
+  {
+   "name": "glass",
+   "pbrMetallicRoughness": {"baseColorFactor": [0.9, 0.9, 1.0, 0.25], "metallicFactor": 0.0, "roughnessFactor": 0.0},
+   "alphaMode": "BLEND"
+  },
+  {
+   "name": "textured",
+   "pbrMetallicRoughness": {
+    "metallicFactor": 0.5, "roughnessFactor": 0.5,
+    "metallicRoughnessTexture": {"index": 0, "texCoord": 1}
+   },
+   "normalTexture": {"index": 0, "scale": 0.5},
+   "occlusionTexture": {"index": 0, "strength": 0.8},
+   "emissiveTexture": {"index": 0},
+   "emissiveFactor": [1.0, 1.0, 1.0]
+  }
+ ],
+ "textures": [{"source": 0, "sampler": 0}],
+ "samplers": [{"magFilter": 9728, "minFilter": 9728, "wrapS": 33071, "wrapT": 33648}],
+ "images": [{"uri": "quad.png"}]
+}

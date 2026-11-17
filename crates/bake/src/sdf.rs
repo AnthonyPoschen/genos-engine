@@ -1,11 +1,35 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::redundant_closure_for_method_calls,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Sparse signed distance field of one mesh, in object space.
 //!
@@ -94,9 +118,9 @@ impl MeshSdf {
     }
 }
 
-pub fn build(mesh: &BakeMesh, s: &BakeSettings) -> MeshSdf {
+/// Build over a BVH already built on `mesh.triangles`.
+pub fn build_with(mesh: &BakeMesh, s: &BakeSettings, bvh: &Bvh) -> MeshSdf {
     let tris = &mesh.triangles;
-    let bvh = Bvh::build(tris);
     let bounds = mesh.bounds();
     let extent: [f32; 3] = std::array::from_fn(|a| (bounds.max[a] - bounds.min[a]).max(0.0));
     let largest = extent.iter().fold(0.0f32, |m, &e| m.max(e));
@@ -117,7 +141,7 @@ pub fn build(mesh: &BakeMesh, s: &BakeSettings) -> MeshSdf {
     let coarse_band = BAND_VOXELS * brick_size;
     let signed = |p: [f32; 3], max: f32| -> f32 {
         let d = bvh.closest(tris, p, max).map_or(max, |(_, _, d)| d);
-        if !thin && inside(&bvh, tris, p) {
+        if !thin && inside(bvh, tris, p) {
             -d
         } else {
             d

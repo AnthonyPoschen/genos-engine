@@ -22,7 +22,7 @@ fn spec(name: &str, description: &str) -> CommandSpec {
 /// Every command [`crate::Tools`] runs. Shared by MCP, `POST /cmd/<name>` and scripts.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled)."),
+        spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled, cache_rays)."),
         spec("knobs", "List every knob the example publishes, with range and step. With name and value, set one first."),
         spec("lights", "Every light: position, colour, range, distance, in_view, screen_share, impact (colour luminance x screen share), on."),
         spec(
@@ -30,14 +30,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit a light: add (position, color, intensity), or index with on, color, intensity, position, path [[x,y,z],..] + frames (+ loop), remove, reset, solo; solo_off clears a solo and does not need an index.",
         ),
         spec("objects", "Every solid: index, position, yaw, size, colour, edited."),
-        spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), reset."),
+        spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), roughness and metallic (0-1, reference trace only until the specular pass lands), reset. Unknown fields are an error."),
         spec("camera", "Set position [x,y,z], yaw, pitch, look_at [x,y,z], or path [[x,y,z,yaw,pitch],..] over frames. Returns the pose."),
         spec("time", "pause (bool), fixed_dt (s; 0 or real_time: true for wall time)."),
-        spec("step", "Advance a paused scene by frames (default 1) and reply after them."),
-        spec("wait", "Reply after frames (default 1). Scene time runs unless paused."),
+        spec("step", "Advance a paused scene by frames (default 1) and reply after them. accepted is the present count when the step was taken. frame is accepted plus frames."),
+        spec("wait", "Reply after frames (default 1). Scene time runs unless paused. accepted is the present count when the wait was taken. frame is accepted plus frames. A status read from the previous command is one present behind accepted: that command returned while the next present was already open, and take() had already run."),
         spec(
             "wait_settled",
-            "Reply when the lighting has settled and a frame drawn from its held light is on screen, for quiet_frames (default 3), or after timeout_frames (default 600). Reply says settled true/false, frames, wall_ms and still_frames.",
+            "Reply when the lighting has settled and a frame drawn from its held light is on screen, for quiet_frames (default 3), or after timeout_frames (default 600). Reply says settled true/false, frames, wall_ms, still_frames, frame, and settled_frame. frames counts presents until settle and does not include then_frames. then_frames (optional) draws that many presents after the settle present before replying; with path, width, and height it saves the last of those presents. settled_frame is the settle present. frame is the saved present, so the pixels and the id are that same present. A capture command sent after this reply cannot name that present: it has already been drawn.",
         ),
         spec(
             "view",
@@ -45,7 +45,7 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "capture",
-            "Save the picture: path (relative to the shot dir), mode (a view), width/height (resampled), name (keep in memory for diff), region [x,y,w,h] in 0..1 for the luminance in the reply. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
+            "Save the picture: path (relative to the shot dir), mode (a view), width/height (resampled), name (keep in memory for diff), region [x,y,w,h] in 0..1 for the luminance in the reply. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays. frame (optional) is a present index still to be drawn. The saved pixels are that present and the reply's frame is the same index. A frame already presented is an error. The targeted present with no pixels is an error and is not replaced by a later present.",
         ),
         spec("captures", "Save several views in consecutive frames: modes [..], prefix, width, height. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays."),
         spec("luminance", "Mean, min and max linear luminance and black share of region [x,y,w,h] (0..1) in mode."),
@@ -59,16 +59,16 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         spec(
             "reference",
-            "Ground truth: path-trace the scene as drawn this frame from the camera pose on the CPU (unlimited bounce, next-event direct light, no probes), off the frame thread. Traces in passes of spp paths per pixel (default 64) until the mean relative noise of a pixel is at most noise (default 0.03), max_spp (default 16384) or seconds (default 300) run out; bounces (default inf; 0 = direct only), width/height (default the picture, at most 320 wide), name (stored as, default reference), prefix (files <prefix>-reference.png). Pause first: the trace is of one moment. A trace is kept in cache (default target/reference-cache or $GENOS_REFERENCE_CACHE; \"off\" never) and reused for the same scene, pose, size and bounces when it is as converged as asked. Replies with the path, spp done, noise, trace_seconds, coverage.",
+            "Ground truth: path-trace the scene as drawn this frame from the camera pose on the CPU (unlimited bounce, next-event direct light, no probes), off the frame thread. Traces in passes of spp paths per pixel (default 64) until the mean relative noise of a pixel is at most noise (default 0.03), max_spp (default 16384) or seconds (default 300) run out; bounces (default inf; 0 = direct only), width/height (default the picture, at most 320 wide), name (stored as, default reference), prefix (files <prefix>-reference.png), aov (full, default; or specular: also write <prefix>-reference-spec.png, the GGX lobe of solids given roughness/metallic by object, alone and without fog; such traces skip the cache and gpuref). Pause first: the trace is of one moment. A trace is kept in cache (default target/reference-cache or $GENOS_REFERENCE_CACHE; \"off\" never) and reused for the same scene, pose, size and bounces when it is as converged as asked. measure (bool, default false; scripted/headless): exactly one frame (one lighting update) is drawn after the request, frames is ignored, then the frame thread joins the CPU trace, so window events wait until it ends. Replies with the path, spp done, noise, trace_seconds, coverage.",
         ),
         spec(
             "compare",
-            "Trace a reference (as `reference`, or reuse a stored one: reference: name), then capture the live picture (mode, default full; frames: N waits N frames after the trace starts; or live: a capture name/PNG) and compare in linear luminance on block x block averages (default 2; the reference's noise falls with the block side). Saves <prefix>-reference.png, -live.png, -heatmap.png (red too bright, blue too dark, full at 50% error). Replies mean_abs, mean_rel (share of the light that is wrong), p95_abs, p95_rel, bias (+ too bright), ref_mean, live_mean and regions (grid, default [3,3], row-major mean_rel and bias). region limits it. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
+            "Trace a reference (as `reference`, or reuse a stored one: reference: name), then capture the live picture (mode, default full; frames: N waits N frames after the trace starts; measure: true takes the frame drawn after the request (after frames) as live, then joins the trace: one lighting update, window events wait; or live: a capture name/PNG) and compare in linear luminance on block x block averages (default 2; the reference's noise falls with the block side). Saves <prefix>-reference.png, -live.png, -heatmap.png (red too bright, blue too dark, full at 50% error). Replies mean_abs, mean_rel (share of the light that is wrong), p95_abs, p95_rel, bias (+ too bright), ref_mean, live_mean and regions (grid, default [3,3], row-major mean_rel and bias). region limits it. ui (default false) leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
         ),
         spec("timing", "Frame time breakdown over the last frames (default 60): fps, frame, draw CPU, GPU."),
         spec(
             "gi_metrics",
-            "GI pass times and work counters since the last reset. Passes: direct, atrous, compose, trace, filter, gather, resolve, and lighting. Counters: rays, cache_entries_refreshed, lamps_shaded. resolve is gather + filter + compose and is not added again into lighting. reset true clears the window and <out>/gi/frames.csv. write NAME saves <out>/gi/NAME.csv (p50, p99) and NAME-frames.csv. Requires --gi-metrics at launch. GENOS_GI_METRICS applies only when that argument was omitted. One frame behind the draw.",
+            "GI pass times and work counters since the last reset. Passes: direct, atrous, compose, trace, filter, gather, resolve, and lighting. Counters: rays, cache_entries_refreshed, lamps_shaded. spec_ms is the specular pass and reads 0 until that pass exists (ADR 0024). resolve is gather + filter + compose and is not added again into lighting. reset true clears the window and <out>/gi/frames.csv. write NAME saves <out>/gi/NAME.csv (p50, p99) and NAME-frames.csv. Requires --gi-metrics at launch. GENOS_GI_METRICS applies only when that argument was omitted. One frame behind the draw.",
         ),
         spec(
             "get_lighting_settings",
@@ -112,12 +112,27 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(under_trusted_specs())
     .chain(reflection_specs())
     .chain(hdr_specs())
     .chain(fog_specs())
+    .chain(particle_specs())
     .chain(host_specs())
     .chain(material_specs())
     .collect()
+}
+
+fn under_trusted_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "lighting_under_trusted",
+            "Displaying picture pixels whose fine world-cache read was under a full set count (gstats.diag[57], LIGHTING_DIAG_UNDER_TRUSTED). A full count of a real zero is dark and is not included. One frame behind the draw.",
+        ),
+        spec(
+            "lighting_fill_compact_work",
+            "Fill scheduler work from the last frame: serial is gstats.pad2 (the one-thread plan's iteration count) and hist_groups is gstats.pad3 (the histogram dispatch's group count). A slot-table scan is hundreds of thousands of serial iterations. One frame behind the draw.",
+        ),
+    ]
 }
 
 fn reflection_specs() -> Vec<CommandSpec> {
@@ -149,7 +164,7 @@ fn hdr_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "get_hdr",
-            "HDR probe. ev100, exposure, and scales (the last 8 exposure scales). grade is scene. still_pop is the share of subsampled scene luma that moved by more than 0.01. histogram is the last bin counts, also written to <out>/hdr-output/histogram.txt. surfaces lists the swapchain (format, color_space) in use. chosen is the output mode. resolved is the mode `resolve_swapchain` picked. pq_white and scrgb_white are `swapchain_nits` of graphics white. hdr_ms and post_ms_device are bloom plus the display pass, one frame behind, zero when the device has no timestamps. hdr_vram_bytes is the post buffers in bytes. post_vram_device is that sum in MiB. The 1.50 ms and 96 MiB ceilings are the 4070 budget, not a lavapipe score.",
+            "HDR probe. ev100, exposure, and scales (the last 8 exposure scales). grade is scene. still_pop is the share of subsampled scene luma that moved by more than 0.01. histogram is the last bin counts, also written to <out>/hdr-output/histogram.txt. surfaces lists the swapchain (format, color_space) in use. chosen is the output mode. resolved is the mode `resolve_swapchain` picked. pq_white and scrgb_white are `swapchain_nits` of graphics white. hdr_ms and post_ms_device are bloom plus the display pass, one frame behind, zero when the device has no timestamps. hdr_vram_bytes is the post buffers in bytes. post_vram_device is that sum in MiB. The 1.50 ms ceiling is the 4070 budget and the Deck at 800p. The gate applies it on a hardware device. A software rasterizer prints a finite positive timestamp and is not that score. ADR 0027's per-preset ceilings (High 37.50 MiB) are the table in the HDR pipeline record; the gate checks those bytes at 1440p against ceiling × 1024², for SDR, HDR10, and scRGB. There is no 96 MiB ceiling.",
         ),
     ]
 }
@@ -167,6 +182,55 @@ fn fog_specs() -> Vec<CommandSpec> {
         spec(
             "get_fog_stats",
             "Fog counters: dispatches, samples_used, samples_capped, grid_width, grid_height, grid_slices, dispatched_width, dispatched_height, dispatched_slices, history_accepts, history_rejects, vram_bytes, pass_ms, and the open view line. samples_used is the samples setting (0 keeps every cell). The dispatched_* fields are the grid the frame runs. Accepts and rejects stay 0 because history is off. pass_ms is the last frame's lavapipe froxel timestamp, or 0 before that frame. It is not graded against an RTX 4070 ceiling.",
+        ),
+    ]
+}
+
+fn particle_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_particle_settings",
+            "Stage-1 particle settings in text form: preset, enabled, max_particles, count, sort, lit, depth_collision, freeze, seed, origin, rate, life, rise, spread, size, albedo, soft_band. --fx-max, --fx-count, --fx-freeze, --fx-preset, and --fx-spawn win over GENOS_FX_MAX, GENOS_FX_COUNT, GENOS_FX_FREEZE, and GENOS_FX_PRESET, which win over the scene value. sort and lit are stored. Stage 1 does not sort or light. half_res is a deprecated alias and the draw is full resolution. max_particles is clamped to 4194240.",
+        ),
+        spec(
+            "set_particle_settings",
+            "Partial particle update. Keys match the settings text. A text field overlays key=value lines. Writes the scene. Launch flags and their mirrors overlay the fields they set on the next frame.",
+        ),
+        spec(
+            "get_particle_stats",
+            "Last particle step: fx.sim_ms, fx.sim_init_ms, fx.sim_death_ms, fx.sim_emit_ms, fx.sim_compact_ms, fx.sort_ms, fx.draw_ms, fx.alive, fx.spawned, fx.overdraw_px, fx.vram_mb, plus max_particles, count, and draw_instances. sim_ms and draw_ms are timestamps, or 0 before a frame. The four sim_* pieces sit inside sim_ms. sort_ms and overdraw_px stay 0. They are not a desktop-GPU score. vram_mb is decimal megabytes of the stage-1 buffers.",
+        ),
+        spec(
+            "fx.stats",
+            "Same counters as get_particle_stats. The design's name for the probe.",
+        ),
+        spec(
+            "fx.set",
+            "Set one stage-1 key. param is the settings key, value is the text. emitter may be stage1. A .gfx path is not parsed.",
+        ),
+        spec(
+            "fx.list",
+            "The one stage-1 emitter, named stage1. Curve files are a later stage.",
+        ),
+        spec(
+            "fx.spawn",
+            "Place the stage-1 emitter at x, y, z and turn it on. count is optional. Omitted, a count of 0 becomes 64 so the step dispatches. A file path is accepted and ignored: stage 1 has no .gfx parser.",
+        ),
+        spec(
+            "fx_stats",
+            "Same counters as get_particle_stats. Rhai name for fx.stats.",
+        ),
+        spec(
+            "fx_set",
+            "Same as fx.set. Rhai name: param is the settings key, value is the text.",
+        ),
+        spec(
+            "fx_list",
+            "Same as fx.list. Rhai name for the stage-1 emitter list.",
+        ),
+        spec(
+            "fx_spawn",
+            "Same as fx.spawn. Rhai name. Omitted count on a zero emitter becomes 64.",
         ),
     ]
 }

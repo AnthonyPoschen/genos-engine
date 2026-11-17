@@ -10,10 +10,10 @@ use genos_json::{array, encode, float, int, object, parse, string, Value};
 use genos_math::Vec3;
 
 use crate::metrics::{frames_to_ref, grid_worst, ref_err_luma, ref_err_near, GateLimits};
-use crate::reservoir::{reservoir_w, Reservoir, Weighting, LAMP_EMPTY};
+use crate::reservoir::{f32_from_f64, reservoir_w, Reservoir, Weighting, LAMP_EMPTY};
 use crate::restir::{Config, History, Proposal};
-use crate::tree::TreeFault;
 use crate::shade::{Aabb, Lamp, Receiver, Scene};
+use crate::tree::TreeFault;
 
 const KIND: &str = "genos-restir-reference";
 const VERSION: i64 = 1;
@@ -566,7 +566,7 @@ fn parse_f32(value: &Value) -> Result<f32, String> {
     if !wide.is_finite() {
         return Err("non-finite number".to_string());
     }
-    Ok(narrow(wide))
+    Ok(f32_from_f64(wide))
 }
 
 fn u32_field(value: &Value, key: &str) -> Result<u32, String> {
@@ -580,8 +580,4 @@ fn u32_field(value: &Value, key: &str) -> Result<u32, String> {
 fn usize_field(value: &Value, key: &str) -> Result<usize, String> {
     let raw = u32_field(value, key)?;
     Ok(usize::try_from(raw).unwrap_or(0))
-}
-
-fn narrow(value: f64) -> f32 {
-    genos_math::f32_from_f64(value)
 }

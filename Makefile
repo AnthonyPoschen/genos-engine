@@ -36,7 +36,7 @@ lighting-ref-check:
 	cargo run --release -p genos-stress -- lighting-ref check --mode $(if $(MODE),$(MODE),owner) $(if $(BASE),--base $(BASE),) $(if $(OUT),--out $(OUT),)
 
 # Lighting harness and oracle (docs/systems/lighting/oracle-harness.md).
-# PROFILE=quick (default) or full. OUT=<dir> overrides ./genos-debug/oracle.
+# PROFILE=quick (default), full, or lamps (many-lamp spin and switch). OUT=<dir> overrides ./genos-debug/oracle.
 lighting-oracle:
 	cargo build --release -p genos-stress
 	scripts/lighting/oracle_run.sh $(if $(PROFILE),$(PROFILE),quick) $(if $(OUT),$(OUT),genos-debug/oracle)

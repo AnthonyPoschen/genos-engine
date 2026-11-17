@@ -25,16 +25,10 @@ pub(crate) const LIGHTING_TILE: u32 = 16;
 /// below that the tile shrinks with the picture (down to 4 px) so the probes keep
 /// the same spacing on screen, about 45 rows. A small picture would otherwise get
 /// probes a ninth of its height apart and lose detail a 720p picture keeps.
-/// GENOS_LIGHTING_TILE (4..64) overrides it to experiment.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-)]
+/// A non-zero `probe_tile` setting (4..64, mirrored by GENOS_LIGHTING_TILE)
+/// replaces it.
 fn lighting_tile(height: u32) -> u32 {
-    genos_scene::lighting_env("GENOS_LIGHTING_TILE")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .map_or((height / 45).clamp(4, LIGHTING_TILE), |t| t.clamp(4, 64))
+    (height / 45).clamp(4, LIGHTING_TILE)
 }
 
 /// Rays per screen probe (Low in the design; a square for the stratified pattern).
@@ -43,25 +37,27 @@ pub(crate) const LIGHTING_RAYS: u32 = 64;
 const LIGHTING_CACHE_SLOTS: u64 = 1048576;
 const LIGHTING_CACHE_BATCH: u32 = 98304;
 const LIGHTING_CACHE_RAYS: u32 = 16;
+/// ADR 0039 stage 2 SH-L1 cell storage, a low-spec knob: fp16 (24 B a slot)
+/// or fp32 (48 B). lighting_cache_slots.glsl `LIGHTING_SH_HALF` has the same value.
+const LIGHTING_SH_HALF: bool = true;
+/// Cache bytes a slot: 23 vec4 regions, the SH-L1 (1.5 vec4 at fp16, 3 at
+/// fp32), padding so the shown-age word is region 26 in both layouts, then
+/// that word. Compose does not read the age. It must not share region 23
+/// with the SH.
+const LIGHTING_CACHE_SLOT_BYTES: u64 = {
+    let sh = if LIGHTING_SH_HALF { 24 } else { 48 };
+    let pad = if LIGHTING_SH_HALF { 24 } else { 0 };
+    23 * 16 + sh + pad + 16
+};
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
-/// `hdr_meter.comp` header: 4096 bin counts plus moved, total, and two pads.
-const METER_HEADER_BYTES: u64 = 16_400;
-const METER_BIN_CAP: usize = 4096;
-/// Still-check stride. The histogram counts every pixel. This stride does not.
-const STILL_STRIDE: u32 = 32;
-
-fn still_sample_slots(pixels: u64) -> u64 {
-    let stride = u64::from(STILL_STRIDE);
-    if pixels == 0 {
-        1
-    } else {
-        pixels.saturating_add(stride - 1) / stride
-    }
-}
 /// ckeys word of the WRC refresh lists' two counts (lighting_cache.glsl LIGHTING_WRC_CHG_COUNT_AT).
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
+/// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
+const LIGHTING_DRAIN_FLAG_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 82;
+/// ckeys word of the last host-hash change frame (lighting_cache.glsl LIGHTING_LAMP_CATCH_AT).
+const LIGHTING_LAMP_CATCH_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 86;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
 pub(crate) const LIGHTING_STRATA: u32 = 8;
@@ -80,6 +76,20 @@ const LIGHTING_SETTLE_FRAMES: u32 = 32;
 const LIGHTING_SETTLE_CHANGE: u32 = 2000;
 /// 8×8 compose blocks the quiet list can hold (lighting_cache.glsl LIGHTING_COMPOSE_CAP).
 const LIGHTING_COMPOSE_CAP: u64 = 65535;
+/// Frames after a cache clear that compose the whole picture and walk bounce.
+/// The clear frame's cache is empty, and that walk is stored as a finished
+/// black bounce (`pack + 1`). The next held frames reuse it and leave the
+/// previous picture in the buffer. Three frames covers the clear and the two
+/// frames whose rays make the bounce visible. The presented bounce gate reads
+/// the third draw.
+const BOUNCE_FILL_FRAMES: u32 = 3;
+/// Shader `LIGHTING_STILL_REFRESH`. The drift pass.
+const LIGHTING_STILL_REFRESH: u32 = 32;
+/// Shader `LIGHTING_FILL_WALK`. The fill walks this many frames, then the hold.
+const LIGHTING_FILL_WALK: u32 = 8;
+/// Shader `LIGHTING_SCENE_CHANGED_MARK`. Added to the change count's fraction
+/// when the host scene hash changed this frame.
+const LIGHTING_SCENE_CHANGED_MARK: f32 = 0.25;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
 fn lighting_compose_at() -> u64 {
@@ -102,6 +112,86 @@ fn lighting_ckeys_words() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + 5 * LIGHTING_CACHE_SLOTS
 }
 
+/// Words through the lattice table, then one lit-from offer word and one
+/// probe-seed election word per slot. Matches `LIGHTING_SH_LATTICE_AT` and
+/// `LIGHTING_SC_SEED_AT` in `lighting_cache.glsl`. The per-pixel seed payload
+/// is not included: its size is the picture.
+pub(super) fn lighting_sh_bin_count_at() -> u64 {
+    lighting_atrous_ppm_at()
+        + LIGHTING_ATROUS_META_WORDS
+        + LIGHTING_SUN_WORDS
+        + LIGHTING_CACHE_SLOTS
+        + 3
+        + LIGHTING_CACHE_SLOTS
+        + LIGHTING_CACHE_SLOTS
+}
+
+pub(super) fn lighting_sh_keys_words() -> u64 {
+    const STORE_BINS: u64 = 16;
+    const STORE_CAP: u64 = 8192;
+    const LATTICE_CAP: u64 = 16384;
+    const STRIDE: u64 = 14;
+    let lists = lighting_sh_bin_count_at() + STORE_BINS;
+    let lattice = lists + STORE_BINS * STORE_CAP;
+    // Lit-from offer and probe-seed election, one word per slot, past the lattice.
+    lattice + LATTICE_CAP * STRIDE + 2 * LIGHTING_CACHE_SLOTS
+}
+
+/// Fill param words sit after the per-pixel seed payload. One lock word per
+/// slot follows them (`lighting_fill.glsl`).
+const FILL_PARAM_WORDS: u64 = 32;
+const FILL_LOCK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
+/// Header, off-screen bins, histograms, water-fill plan, extra cursors, then
+/// two hit words and two link words per cache-ray slot. Matches
+/// `lighting_fill.glsl`.
+const FILL_OFF_CAP: u64 = 16384;
+const FILL_HIST_WORDS: u64 = 192;
+const FILL_PLAN_WORDS: u64 = 384;
+const FILL_EXTRA_WORDS: u64 = 192;
+const FILL_HEADER_WORDS: u64 = 8 + FILL_OFF_CAP + FILL_HIST_WORDS + FILL_PLAN_WORDS + FILL_EXTRA_WORDS;
+const FILL_TAIL_PER_RAY: u64 = 4;
+/// Tile words, then one pick word per cache ray. Kept out of the list range so
+/// a 262,144-slot table cannot alias a pick onto a tile.
+const FILL_TILE_WORDS: u64 = 262_144;
+const FILL_TILE_CAP: u64 = FILL_TILE_WORDS;
+
+fn lighting_fill_param_words(pixels: u64) -> u64 {
+    lighting_sh_keys_words() + pixels * 8
+}
+
+/// Tile start, pick start, and end, as word offsets from the fill lock base.
+/// Each step adds. A table of [`FILL_TILE_WORDS`] slots used to carve the tiles
+/// out of `2 * slots - FILL_TILE_WORDS` and put the picks at `slots + 1`, which
+/// aliases and underflows the pick capacity.
+#[expect(
+    clippy::expect_used,
+    reason = "a fill table that does not fit in u64 is a broken layout"
+)]
+fn fill_list_end(slots: u64) -> (u64, u64, u64) {
+    let rays = u64::from(LIGHTING_CACHE_BATCH)
+        .checked_mul(u64::from(LIGHTING_CACHE_RAYS))
+        .expect("fill ray words");
+    let tile = slots
+        .checked_add(FILL_HEADER_WORDS)
+        .and_then(|hit| hit.checked_add(rays.checked_mul(FILL_TAIL_PER_RAY).expect("link words")))
+        .expect("tile words");
+    let pick = tile.checked_add(FILL_TILE_WORDS).expect("pick words");
+    let end = pick.checked_add(rays).expect("fill end");
+    assert!(pick >= tile + FILL_TILE_WORDS);
+    assert!(end > pick);
+    (tile, pick, end)
+}
+
+fn lighting_fill_tile_at(pixels: u64) -> u64 {
+    let (tile, _pick, _end) = fill_list_end(FILL_LOCK_WORDS);
+    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + tile
+}
+
+pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
+    let (_tile, _pick, end) = fill_list_end(FILL_LOCK_WORDS);
+    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + end
+}
+
 fn lighting_compose_minx() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + LIGHTING_CACHE_SLOTS
 }
@@ -115,39 +205,53 @@ pub(crate) struct Lighting {
     pipes: [Handle; 9],
     /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
     atrous_plain: Handle,
-    /// Pre-reservoir direct shade. Bound when reuse would only sum a few lamps.
-    direct_plain: Handle,
     screen_pipe: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
     out: Buffer,
-    /// Scene-referred radiance, RGBA32F. w is the eye distance in metres.
+    /// Scene-referred radiance, RGBA16F. w is the eye distance in metres.
     scene_lin: Buffer,
-    /// Host copy of `scene_lin`, filled when a picture is read back.
+    /// Host copy of `scene_lin`, allocated for a picture readback and freed after it.
     scene_host: Buffer,
     /// Exposure, display mode, bloom intensity, output mode, then white, peak, and format.
     /// Host-visible. The compose shader reads the first `vec4`.
     hdr_params: Buffer,
-    /// HDR10 PQ or scRGB codes, RGBA32F. The fp16 image, when the swapchain is scRGB, follows it.
+    /// HDR10 or scRGB: RGBA16F codes, then one BGRA word per pixel. Empty on SDR.
     hdr_encode: Buffer,
-    /// `AgX` lattice from `agx_rec709`. Host-visible. Sampled when the display mode is 1.
-    agx_lut: Buffer,
-    /// Full-resolution bloom, then the mip chain. The GPU pyramid writes it.
-    /// The intensity scale is not in the texels.
+    /// Bloom mip pyramid. Finest level is RGBA16F. Later levels are RGB16F pairs. No full-resolution image.
     bloom: Buffer,
     /// Last still-check share from the GPU meter. Zero until a comparison exists.
     still_pop: f64,
-    /// GPU histogram and the stride-32 luma halves. The header is the bin counts.
-    meter_dev: Buffer,
-    /// Host copy of the meter header. Read after the fence, one frame late.
-    meter_host: Buffer,
-    /// A meter dispatch is in the frame the fence just waited for.
-    meter_pending: bool,
-    /// The meter has stored one luma half, so the next pass can compare.
-    meter_has_prev: bool,
-    /// Which luma half holds the previous frame. The dispatch flips it.
-    meter_ping: u32,
+    /// GPU histogram and the luma halves, one buffer per frame in flight.
+    /// The header is the bin counts. Both frames used to fill and copy one
+    /// buffer: on mailbox that is a WRITE_AFTER_WRITE. Each slot compares its
+    /// own previous half. The byte count comes from the post chain.
+    meter_dev: [Buffer; 2],
+    /// Host copy of the meter header, one buffer per frame in flight.
+    /// Both frames used to copy into one buffer: the second `vkCmdCopyBuffer`
+    /// was a WRITE_AFTER_WRITE. Read the slot whose fence just waited.
+    meter_host: [Buffer; 2],
+    /// A meter dispatch is in the frame the fence just waited for, per slot.
+    meter_pending: [bool; 2],
+    /// The meter has stored one luma half in this slot, so the next pass can compare.
+    meter_has_prev: [bool; 2],
+    /// Which luma half holds this slot's previous sample. The dispatch flips it.
+    meter_ping: [u32; 2],
+    /// Bin count of the meter dispatch `take_meter` reads. Zero when that pass did not run.
+    meter_bins: u32,
+    /// [`crate::hdr_output::post_signature`] of the buffers `make_lighting_targets` built.
+    post_sig: u64,
+    /// `layout_post` is measuring the chain. Potato's GI size must not force SDR.
+    budget_hdr: bool,
+    /// Preset the budget measurement classifies. High keeps a potato-shaped grade off Potato.
+    budget_preset: genos_scene::LightingPreset,
+    /// Panel the budget measurement classifies. Desktop is the 1440p gate.
+    budget_panel: crate::hdr_output::DeckPanel,
+    /// Whether the budget measurement saw an HDR10 pair. The 1440p gate does not.
+    budget_hdr10_listed: bool,
+    /// The display pass writes the bloom tent and lattice samples into the encode buffer.
+    bloom_probe: bool,
     /// EV100 from the last GPU histogram. Empty until a frame had samples.
     meter_ev: Option<f64>,
     hdr: genos_scene::HdrSettings,
@@ -161,6 +265,8 @@ pub(crate) struct Lighting {
     histogram_counts: Vec<u32>,
     cache_keys: Buffer,
     cache: Buffer,
+    /// Host copy of this frame's dirty-compose list length (one u32).
+    compose_host: Buffer,
     /// The cache buffers are new and get zeroed before the next frame's passes.
     cache_clear: bool,
     /// The G-buffer is new and gets filled with empty records first.
@@ -170,6 +276,10 @@ pub(crate) struct Lighting {
     /// The picture in the output buffer was drawn for this size. A new buffer
     /// has no picture yet, so the next compose covers every pixel.
     compose_valid: bool,
+    /// Frames since the cache was cleared, capped at [`BOUNCE_FILL_FRAMES`].
+    /// Below that, compose covers the picture and the bounce slice is zero,
+    /// so the shader walks instead of reusing the empty store.
+    bounce_fill: u32,
     /// The traced world as of the last frame's passes: the scene block (its
     /// occluder list is compared, lighting_changes) and the key of what else is traced
     /// (meshes, floor, roof); a change of the key drops every kept stratum.
@@ -188,6 +298,9 @@ pub(crate) struct Lighting {
     /// it has stayed the same.
     scene_hash: u64,
     still: u32,
+    /// Frame the host hash last changed. The hold reads it for LIGHTING_HOLD_CATCH
+    /// frames (shader LIGHTING_LAMP_CATCH_AT). 0 until the first change.
+    scene_catch: u32,
     /// Hash of this frame's draw instances (poses, colours, emission).
     pub(crate) draw_key: u64,
     /// Frames in a row drawn from held light (settled): the picture no longer changes.
@@ -206,9 +319,12 @@ pub(crate) struct Lighting {
     live: u32,
     dims: [u32; 4],
     /// The light cache's passes (compact, its rays' trace and light, relight) run on
-    /// the async compute queue (GENOS_LIGHTING_ASYNC=0 keeps them in the frame): at most
-    /// one submission in flight, skipped while the last is still running.
+    /// the async compute queue (`experiments.cache_async`; off keeps them in the frame):
+    /// at most one submission in flight, skipped while the last is still running.
+    /// Copied from the settings each frame unless `async_failed`.
     async_on: bool,
+    /// The async queue failed once: it stays off for the rest of the run.
+    async_failed: bool,
     world_cmd: Handle,
     world_fence: Handle,
     world_set: Handle,
@@ -232,6 +348,13 @@ pub(crate) struct Lighting {
     /// Rounds in a row, since that last changed, whose mature patches all stayed
     /// within LIGHTING_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
     light_quiet: u32,
+    /// The last cache round's WRC samples still differ from the held light by
+    /// more than LIGHTING_DRAIN_GAP: the bounce is draining or filling, not settled.
+    draining: bool,
+    /// The last read cache round's batch entries, 16 rays each (stats word 147).
+    round_entries: u32,
+    /// Cache rays that round actually traced (stats word 16). Scouts are not in this.
+    cache_rays: u32,
     /// Occluders (index in the scene's list) that moved in the last
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
@@ -241,7 +364,6 @@ pub(crate) struct Lighting {
     mesh_poses: Vec<[f32; 16]>,
     mesh_movers: std::collections::BTreeMap<usize, u32>,
     mesh_spheres: Vec<[f32; 4]>,
-    young_ok: bool,
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
     stats_light: [u64; 2],
@@ -253,9 +375,8 @@ pub(crate) struct Lighting {
     dump: Vec<(u64, Vec<(&'static str, Buffer)>)>,
     world_light: u64,
     world_young: bool,
-    /// Light cache rounds per second of wall time (GENOS_LIGHTING_CACHE_HZ; 0: one every
-    /// frame), when the last began, and whether each frame slot ran one.
-    cache_hz: f64,
+    /// When the last light cache round began (`experiments.cache_hz` caps them), and
+    /// whether each frame slot ran one.
     last_round: Option<Instant>,
     stats_round: [bool; 2],
     /// Last frame this slot counted unfilled pixels. Read at the next begin.
@@ -295,6 +416,16 @@ pub(crate) struct Lighting {
     meter_pipe: Handle,
     /// Compose with the scene image and bloom. The plain pipe stays free of them.
     compose_hdr_pipe: Handle,
+    /// #142: compose's surface-cache writes (claims, stamps, fills, seeds,
+    /// offers), dispatched over compose's blocks just before it. Null when the
+    /// kill switch keeps them in compose.
+    compose_maint_pipe: Handle,
+    /// Same-frame gather of the bins and lattices maintenance just wrote.
+    /// Null when the kill switch keeps the writes inside compose.
+    sh_drain_pipe: Handle,
+    /// #142 kill switch (GENOS_COMPOSE_SC_WRITES=1): compose's specialization
+    /// constant 0, writes compiled into compose and no maintenance pass.
+    compose_writes: bool,
     /// Sun compose with the scene image and bloom.
     sun_hdr_pipe: Handle,
     /// The linear-bounce slice was cleared for this sun run. The first frame
@@ -304,6 +435,9 @@ pub(crate) struct Lighting {
     compose_kind: u8,
     /// Compose dispatches recorded for that frame. The sun path is one.
     compose_dispatches: u32,
+    /// Maintenance and the lattice drain ran this frame. A held camera skips
+    /// both except on frame 32. The picture compile still runs.
+    maint_ran: bool,
     /// Point lamps only. `None` until the first frame, so a still open does not
     /// look like a lamp that just stopped.
     lamp_key: Option<u64>,
@@ -311,6 +445,12 @@ pub(crate) struct Lighting {
     catch_left: u32,
     /// The million-slot cache is allocated. Off, a small dummy stands in.
     cache_full: bool,
+    /// Pixel count the key buffer was sized for. A larger frame rebuilds it
+    /// so the fill tail is not written past the allocation.
+    cache_key_pixels: u64,
+    /// Previous frame's submit, for the look-ahead step. Empty on the first frame.
+    fill_clock: Option<std::time::Instant>,
+    fill_dt: f32,
     /// Last buffer class. A live edit rebuilds only when this changes.
     alloc_key: (u32, u32, u32, u32, u32, u32, u32),
     /// Ping-pong reservoirs. 64 bytes unless the mode is reuse.
@@ -319,8 +459,33 @@ pub(crate) struct Lighting {
     lamp_res_clear: bool,
     /// Noise-gate shade. Production stays [`LampShadeGate::Product`].
     shade_gate: LampShadeGate,
-    /// Positive point lamps in the uploaded scene. The sun is not counted.
-    point_lamps: u32,
+    /// ReSTIR DI reservoirs. A 256-byte stand-in while the flag is off.
+    restir_buf: Buffer,
+    restir_pipe: Handle,
+    /// Product spatial pass. Four neighbours, scalar slots, no light tree.
+    restir_spatial_pipe: Handle,
+    /// Spatial pass when the neighbour knob is above 4. The 17-wide lists stay here.
+    restir_spatial_wide: Handle,
+    /// Last spatial bind: 1 is `restir-spatial`, 2 is `restir-spatial-wide`. 0 before either.
+    restir_spatial_bound: u8,
+    restir_direct: Handle,
+    /// This frame shades screen pixels from the reservoir.
+    restir_frame: bool,
+    restir_slot: u32,
+    restir_prev: crate::restir_live::RestirCam,
+    restir_have_prev: bool,
+    /// Timestamp query of the three ReSTIR passes. `u32::MAX` if this slot skipped them.
+    restir_query: [u32; 2],
+    restir_lamps: Vec<crate::pack::GpuLamp>,
+    restir_prev_lamps: Vec<crate::pack::GpuLamp>,
+    restir_view: crate::restir_live::RestirCam,
+    restir_w: u32,
+    restir_h: u32,
+    restir_clear: bool,
+    /// Product frames whose reservoir upload failed and shaded the labelled sum.
+    restir_prepare_failures: u32,
+    /// Test hook. The next product prepare returns the labelled exact path.
+    restir_force_fail: bool,
     /// Per flight slot: bucket tag of each lighting dispatch, in order.
     frame_tags: [Vec<u8>; 2],
     frame_counts: [[u32; BUCKETS]; 2],
@@ -331,6 +496,25 @@ pub(crate) struct Lighting {
     /// Last collected frame (one frame behind the one just submitted).
     last_ms: [f64; BUCKETS],
     last_dispatches: [u32; BUCKETS],
+    /// Sum of ReSTIR pass milliseconds, and how many frames that sum holds.
+    /// Order: initial, temporal, spatial, prepare, shade. Shade is the direct
+    /// dispatch, so its visibility ray is inside that number.
+    restir_ms_sum: [f64; 5],
+    restir_ms_frames: u32,
+    /// Last collected frame, same order as `restir_ms_sum`. Zero until one lands.
+    restir_ms_last: [f64; 5],
+    /// How many frames have written `last_ms`. The CSV writes one row per step.
+    pass_samples: u32,
+    /// Last collected frame by dispatch pass id. Index 6 is the cache relight,
+    /// index 9 is the SH prep. The cache bucket sums both. The `LIGHTING_MS`
+    /// line is nine pass ids, so pass 9 is not in that total.
+    pass_id_ms: [f64; 10],
+    /// Bottom-of-pipe lighting span of the last collected frame, the `lighting`
+    /// column of `GPU_MS`. Pass 9 and the prepare stamp sit in this span and
+    /// outside the nine-wide `LIGHTING_MS` total.
+    span_ms: f64,
+    /// Flight slot whose host stats were copied on the last submitted frame.
+    stats_slot: usize,
     /// Bloom plus the display pass. Zero when timestamps are off.
     hdr_ms: f64,
     /// Query index of that pair. `u32::MAX` means this slot did not stamp it.
@@ -359,25 +543,67 @@ pub struct LightingAtrousStats {
     pub coarse_pixels: u32,
     /// Fine pixels whose input moved more than 2% from the stored field.
     pub changed_pixels: u32,
+    /// Variance kernels that did not take the dirty early-out. A held camera
+    /// leaves a texel with 16 sets out of this count until the 32-frame
+    /// backstop. The count is the texels still being filtered.
+    pub filter_heavy: u32,
+    /// Screen-list cells written by a full rebuild this frame. Zero when the
+    /// held list was reused.
+    pub list_rebuilt: u32,
+    /// Cells appended onto a reused screen list this frame.
+    pub list_appended: u32,
+    /// Pixels whose compose walked the world cache (`diag[0]`). A held frame
+    /// reuses the stored bounce and this stays near zero.
+    pub cache_walks: u32,
 }
 
-/// Shadow rays traced last frame, spatial reservoir merges, and how pixels shaded.
+/// Shadow rays traced last frame, and how pixels shaded.
 ///
 /// `pixels` is primary pixels, `kept` probe hits, `fills` probe fills, `cache`
-/// light-cache rays. `copied` reused a reprojected colour, `exact` shaded the
-/// sum, `restir` shaded one pairwise sample. Counts stay zero unless the diag
-/// push bit was set. `copied` / `exact` / `restir` are `diag[57..59]` (the
-/// surface-cache trace already uses 53..55).
+/// light-cache rays. `exact` shaded the labelled sum, `restir` shaded one
+/// ReSTIR DI sample. Counts stay zero unless the diag push bit was set.
+/// `exact` / `restir` are `diag[58]` and `diag[59]`. `diag[52]` is the
+/// gradient-budget overflow in compact. `diag[57]`
+/// (`LIGHTING_DIAG_UNDER_TRUSTED`, stats word 81) counts displaying picture
+/// pixels whose fine read was under a full set count. The pairwise spatial
+/// merge and the trusted-colour copy are gone, and the later words are not
+/// shifted.
+/// `history_accepts` / `history_rejects` are restir header words 43 and 44:
+/// the live temporal reprojection kept or rejected a surfaced pixel. A history
+/// reset counts neither. `restir_point_adds` is header word 45: near point
+/// lamps the direct loop added on a ReSTIR pixel. It stays 0 while that loop
+/// skips them. The host reads a copy at the tail of the stats readback. Compact
+/// keeps `gstats.diag` 5, 6, and 13 when `LIGHTING_DIAG` is on.
+/// The kept/fill gate counts are `diag[53..56]` and `diag[60]`: hit threads
+/// launched with a live hit (`kept_live`, `fill_live`), kept hits in this
+/// frame's strata (`kept_due`), and hits that reach the lamp list (`kept_shade`,
+/// `fill_shade`). `near_tests` is non-due kept hits that ran the near-change
+/// walk, `px_lamps` / `hit_lamps` the lamp-list entries at shaded pixels and
+/// shaded hits (`diag[34]`, `diag[38]`, `diag[39]`). A `LIGHTING_DIAG` shader
+/// build also writes these words from the surface-cache trace, so read them
+/// from a default build.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LampPickCounts {
     pub pixels: u32,
     pub kept: u32,
     pub fills: u32,
     pub cache: u32,
-    pub spatial: u32,
-    pub copied: u32,
     pub exact: u32,
     pub restir: u32,
+    pub kept_live: u32,
+    pub kept_due: u32,
+    pub kept_shade: u32,
+    pub fill_live: u32,
+    pub fill_shade: u32,
+    pub near_tests: u32,
+    pub px_lamps: u32,
+    pub hit_lamps: u32,
+    /// Surfaced pixels whose live temporal reprojection kept history.
+    pub history_accepts: u32,
+    /// Surfaced pixels whose live temporal reprojection rejected history.
+    pub history_rejects: u32,
+    /// Near point lamps added by the direct loop on a ReSTIR pixel.
+    pub restir_point_adds: u32,
 }
 
 fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats {
@@ -392,6 +618,13 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         changed_pixels: w[85],
         screen_pixels: w[86],
         coarse_pixels: w[87],
+        // diag[60] is word 84 (diag[0] is word 24).
+        filter_heavy: w[84],
+        // diag[40] and diag[41]: the screen list rebuilt this frame, and the cells appended.
+        list_rebuilt: w[64],
+        list_appended: w[65],
+        // diag[0] is word 24.
+        cache_walks: w[24],
     }
 }
 
@@ -402,13 +635,17 @@ pub struct SettleStats {
     pub settled: bool,
     /// Frames in a row the scene has not changed.
     pub still_frames: u32,
+    /// The surface cache's drain flag as the host last read it (a few frames
+    /// old): its samples still differ from the held light, so it keeps relighting.
+    pub draining: bool,
+    /// The last read cache round's batch entries (16 rays each), a few frames old.
+    pub round_entries: u32,
+    /// Cache rays traced that round (texels and world cells, not scouts), a few
+    /// frames old. Zero means the round dispatched no cache rays.
+    pub cache_rays: u32,
 }
 
 impl Default for Lighting {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-    )]
     fn default() -> Self {
         Self {
             ready: false,
@@ -418,7 +655,6 @@ impl Default for Lighting {
             sets: [std::ptr::null_mut(); 2],
             pipes: [std::ptr::null_mut(); 9],
             atrous_plain: std::ptr::null_mut(),
-            direct_plain: std::ptr::null_mut(),
             screen_pipe: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
@@ -428,14 +664,20 @@ impl Default for Lighting {
             scene_host: Buffer::empty(),
             hdr_params: Buffer::empty(),
             hdr_encode: Buffer::empty(),
-            agx_lut: Buffer::empty(),
             bloom: Buffer::empty(),
             still_pop: 0.0,
-            meter_dev: Buffer::empty(),
-            meter_host: Buffer::empty(),
-            meter_pending: false,
-            meter_has_prev: false,
-            meter_ping: 0,
+            meter_dev: [Buffer::empty(), Buffer::empty()],
+            meter_host: [Buffer::empty(), Buffer::empty()],
+            meter_pending: [false, false],
+            meter_has_prev: [false, false],
+            meter_ping: [0, 0],
+            meter_bins: 0,
+            post_sig: 0,
+            budget_hdr: false,
+            budget_preset: genos_scene::LightingPreset::High,
+            budget_panel: crate::hdr_output::DeckPanel::Desktop,
+            budget_hdr10_listed: false,
+            bloom_probe: false,
             meter_ev: None,
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             exposure_scale: 1.0,
@@ -444,10 +686,12 @@ impl Default for Lighting {
             histogram_counts: Vec::new(),
             cache_keys: Buffer::empty(),
             cache: Buffer::empty(),
+            compose_host: Buffer::empty(),
             cache_clear: false,
             gbuf_clear: false,
             work_clear: false,
             compose_valid: false,
+            bounce_fill: 0,
             kept_bytes: Vec::new(),
             kept_key: 0,
             trace_key: 0,
@@ -459,13 +703,15 @@ impl Default for Lighting {
             draw_key: 0,
             held: 0,
             still: 0,
+            scene_catch: 0,
             stats: [Buffer::empty(), Buffer::empty()],
             stats_dev: [Buffer::empty(), Buffer::empty()],
             quiet: 0,
             stats_still: [0; 2],
             live: 0,
             dims: [0; 4],
-            async_on: genos_scene::lighting_env("GENOS_LIGHTING_ASYNC").is_ok_and(|v| v == "1"),
+            async_on: false,
+            async_failed: false,
             world_cmd: std::ptr::null_mut(),
             world_fence: std::ptr::null_mut(),
             world_set: std::ptr::null_mut(),
@@ -480,20 +726,18 @@ impl Default for Lighting {
             light_scene: 0,
             light_hash: 0,
             light_quiet: 0,
+            draining: false,
+            round_entries: 0,
+            cache_rays: 0,
             movers: std::collections::BTreeMap::new(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
-            young_ok: genos_scene::lighting_env("GENOS_LIGHTING_YOUNG_ONLY").map_or(true, |v| v != "0"),
             stats_light: [0; 2],
             stats_young: [false; 2],
             dump: Vec::new(),
             world_light: 0,
             world_young: false,
-            cache_hz: genos_scene::lighting_env("GENOS_LIGHTING_CACHE_HZ")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.0),
             last_round: None,
             stats_round: [false; 2],
             unfilled_slot: [UnfilledSlot::default(); 2],
@@ -519,25 +763,58 @@ impl Default for Lighting {
             bloom_pipe: std::ptr::null_mut(),
             meter_pipe: std::ptr::null_mut(),
             compose_hdr_pipe: std::ptr::null_mut(),
+            compose_maint_pipe: std::ptr::null_mut(),
+            sh_drain_pipe: std::ptr::null_mut(),
+            compose_writes: genos_scene::lighting_env("GENOS_COMPOSE_SC_WRITES")
+                .is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
             sun_bounce_live: false,
             compose_kind: 0,
             compose_dispatches: 0,
+            maint_ran: false,
             lamp_key: None,
             lamp_moving: false,
             catch_left: 0,
             cache_full: false,
+            cache_key_pixels: 0,
+            fill_clock: None,
+            fill_dt: 0.0,
             alloc_key: (0, 0, 0, 0, 0, 0, 0),
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
             shade_gate: LampShadeGate::Product,
-            point_lamps: 0,
+            restir_buf: Buffer::empty(),
+            restir_pipe: std::ptr::null_mut(),
+            restir_spatial_pipe: std::ptr::null_mut(),
+            restir_spatial_wide: std::ptr::null_mut(),
+            restir_spatial_bound: 0,
+            restir_direct: std::ptr::null_mut(),
+            restir_frame: false,
+            restir_slot: 0,
+            restir_prev: crate::restir_live::RestirCam::default(),
+            restir_have_prev: false,
+            restir_query: [u32::MAX; 2],
+            restir_lamps: Vec::new(),
+            restir_prev_lamps: Vec::new(),
+            restir_view: crate::restir_live::RestirCam::default(),
+            restir_w: 0,
+            restir_h: 0,
+            restir_clear: false,
+            restir_prepare_failures: 0,
+            restir_force_fail: false,
             frame_tags: [Vec::new(), Vec::new()],
             frame_counts: [[0; BUCKETS]; 2],
             frame_shadow: [false; 2],
             frame_prefill: [false; 2],
             last_ms: [0.0; BUCKETS],
             last_dispatches: [0; BUCKETS],
+            restir_ms_sum: [0.0; 5],
+            restir_ms_frames: 0,
+            restir_ms_last: [0.0; 5],
+            pass_samples: 0,
+            pass_id_ms: [0.0; 10],
+            span_ms: 0.0,
+            stats_slot: 0,
             hdr_ms: 0.0,
             hdr_query: [u32::MAX; 2],
             ctrl_bytes: [0; 64],
@@ -550,6 +827,10 @@ const LIGHTING_ARGS: u32 = 1 << 30;
 const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
+/// Parallel fill schedule. Bit 4 stays clear. The shader reads bits 1 and 2.
+const LIGHTING_FILL_HIST: u32 = LIGHTING_ARGS + 4;
+const LIGHTING_FILL_EMIT_ON: u32 = LIGHTING_ARGS + 5;
+const LIGHTING_FILL_EMIT_OFF: u32 = LIGHTING_ARGS + 6;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
 /// A-trous list metadata (lighting_cache.glsl LIGHTING_ATROUS_*). The threshold
@@ -590,6 +871,8 @@ const LIGHTING_SUN_IRR: f32 = 0.02;
 /// Stats words 142 and 143 (the unfilled pads). Bit 0 of the mark is the sun path.
 const LIGHTING_SUN_MARK: usize = 142;
 const LIGHTING_SUN_SLICE_WORD: usize = 143;
+/// `gstats.diag[0]` is stats word 24. `diag[3]` counts sun-compose world-cache walks.
+const LIGHTING_SUN_WALK: usize = 27;
 
 fn lighting_sun_at() -> u64 {
     lighting_atrous_ppm_at() + LIGHTING_ATROUS_META_WORDS
@@ -605,6 +888,15 @@ const LIGHTING_PASS_NAMES: [&str; 9] = [
     "lighting compose",
     "lighting atrous",
 ];
+
+fn copy_gpu_lamp(lamp: &crate::pack::GpuLamp) -> crate::pack::GpuLamp {
+    crate::pack::GpuLamp {
+        pos: lamp.pos,
+        color: lamp.color,
+        directional: lamp.directional,
+        range: lamp.range,
+    }
+}
 
 impl Gpu {
     /// Track which traced mesh instances move (surface cache movers).
@@ -636,7 +928,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -725,7 +1017,7 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 45 };
+            let size = Size { kind: 7, count: 48 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -777,8 +1069,29 @@ impl Gpu {
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
-            self.lighting.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, LIGHTING_PASS_NAMES[k])?;
+            // Pass 7 is compose. Specialization constant 0 is the surface-cache
+            // writes. The picture compile stays read-only unless
+            // GENOS_COMPOSE_SC_WRITES=1. Maintenance requests the lattice and
+            // enqueues texels; the drain fills them before this compile loads.
+            let spec = (k == 7).then_some(u32::from(self.lighting.compose_writes));
+            self.lighting.pipes[k] = self.make_compute_pipe_spec(code, self.lighting.layout, LIGHTING_PASS_NAMES[k], spec)?;
             self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
+        }
+        if !self.lighting.compose_writes {
+            let start = Instant::now();
+            self.lighting.compose_maint_pipe = self.make_compute_pipe(
+                LIGHTING_COMPOSE_MAINT_SPV,
+                self.lighting.layout,
+                "compose-maint",
+            )?;
+            self.note_pipeline_time("compose-maint", start);
+            let start = Instant::now();
+            self.lighting.sh_drain_pipe = self.make_compute_pipe(
+                LIGHTING_SH_DRAIN_SPV,
+                self.lighting.layout,
+                "sh-drain",
+            )?;
+            self.note_pipeline_time("sh-drain", start);
         }
         let start = Instant::now();
         self.lighting.atrous_plain = self.make_compute_pipe(
@@ -787,13 +1100,6 @@ impl Gpu {
             "atrous-plain",
         )?;
         self.note_pipeline_time("atrous-plain", start);
-        let start = Instant::now();
-        self.lighting.direct_plain = self.make_compute_pipe(
-            LIGHTING_DIRECT_PLAIN_SPV,
-            self.lighting.layout,
-            "direct-plain",
-        )?;
-        self.note_pipeline_time("direct-plain", start);
         let start = Instant::now();
         self.lighting.screen_pipe = self.make_compute_pipe(
             LIGHTING_SCREEN_SPV,
@@ -832,6 +1138,7 @@ impl Gpu {
         }
         if self.compute_pool.is_null() {
             self.lighting.async_on = false;
+            self.lighting.async_failed = true;
             return Ok(());
         }
         let alloc = AllocInfo {
@@ -879,6 +1186,12 @@ impl Gpu {
     /// wait (`vkDeviceWaitIdle` in `Drop`); that one ends when the picture
     /// shader does not walk the occluder grid.
     fn wait_lighting_world(&mut self) {
+        // Shutdown polls this fence from the event loop. Waiting here would
+        // block that loop inside device destruction.
+        if self.lifecycle_release {
+            self.lighting.world_busy = false;
+            return;
+        }
         if !self.lighting.world_busy || self.lighting.world_fence.is_null() {
             return;
         }
@@ -887,7 +1200,39 @@ impl Gpu {
     }
 
     fn make_compute_pipe(&self, code: &[u8], layout: Handle, what: &str) -> Result<Handle, String> {
+        self.make_compute_pipe_spec(code, layout, what, None)
+    }
+
+    /// `spec` is the 32-bit value of specialization constant 0 (a GLSL bool is
+    /// a VkBool32), or none.
+    fn make_compute_pipe_spec(&self, code: &[u8], layout: Handle, what: &str, spec: Option<u32>) -> Result<Handle, String> {
         let module = self.shader(code)?;
+        #[repr(C)]
+        struct MapEntry {
+            id: u32,
+            offset: u32,
+            size: usize,
+        }
+        #[repr(C)]
+        struct SpecInfo {
+            count: u32,
+            entries: *const MapEntry,
+            size: usize,
+            data: *const c_void,
+        }
+        let value = spec.unwrap_or(0);
+        let entry = MapEntry { id: 0, offset: 0, size: 4 };
+        let spec_info = SpecInfo {
+            count: 1,
+            entries: &entry,
+            size: 4,
+            data: &value as *const u32 as *const c_void,
+        };
+        let spec_ptr = if spec.is_some() {
+            &spec_info as *const SpecInfo as *const c_void
+        } else {
+            std::ptr::null()
+        };
         #[repr(C)]
         struct Stage {
             s_type: i32,
@@ -919,7 +1264,7 @@ impl Gpu {
                 stage: 0x20,
                 module,
                 name: b"main\0".as_ptr() as *const i8,
-                spec: std::ptr::null(),
+                spec: spec_ptr,
             },
             layout,
             base: std::ptr::null_mut(),
@@ -939,6 +1284,20 @@ impl Gpu {
             check(result, what)?;
         }
         Ok(pipeline)
+    }
+
+    /// Size the first buffers from the process launch, not from the High default.
+    ///
+    /// Device creation runs before a scene exists. The High default would
+    /// allocate the million-slot cache and free it once the launch preset is
+    /// potato. lavapipe keeps those pages until `vkDestroyDevice`, and that
+    /// release misses the quit budget. `--preset` wins over
+    /// `GENOS_LIGHTING_PRESET`.
+    pub(crate) fn apply_launch_preset(&mut self) -> Result<(), String> {
+        let mut launch = genos_scene::LightingSettings::default();
+        launch.apply_env()?;
+        self.lighting.settings = launch;
+        Ok(())
     }
 
     /// Size the G-buffer, work and output buffers for the picture and point every
@@ -998,6 +1357,7 @@ impl Gpu {
             + kept / 4
             + pixels.div_ceil(2) // S78J: per-pixel direct light reuse (signature, light)
             + 2 * probes + rays * probes // S78Q: held-probe gather (stamps, raw cells)
+            + pixels * 6 // probe-seed scratch, two vec4 per pixel, stride 6
         } else {
             0
         };
@@ -1009,10 +1369,15 @@ impl Gpu {
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
         let mut hdr_encode = std::mem::replace(&mut self.lighting.hdr_encode, Buffer::empty());
-        let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
-        let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
-        let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
+        let mut meter_dev = std::mem::replace(
+            &mut self.lighting.meter_dev,
+            [Buffer::empty(), Buffer::empty()],
+        );
+        let mut meter_host = std::mem::replace(
+            &mut self.lighting.meter_host,
+            [Buffer::empty(), Buffer::empty()],
+        );
         self.destroy_buffer(&mut gbuf);
         self.destroy_buffer(&mut work);
         self.destroy_buffer(&mut out);
@@ -1020,10 +1385,13 @@ impl Gpu {
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
         self.destroy_buffer(&mut hdr_encode);
-        self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
-        self.destroy_buffer(&mut meter_dev);
-        self.destroy_buffer(&mut meter_host);
+        for dev in &mut meter_dev {
+            self.destroy_buffer(dev);
+        }
+        for host in &mut meter_host {
+            self.destroy_buffer(host);
+        }
         // Both queues use the light cache and the work buffer's ray slots.
         let share = self.light_families();
         if self.lighting.stats[0].buffer.is_null() {
@@ -1045,7 +1413,8 @@ impl Gpu {
             self.write_buffer(&self.lighting.world_scene, &vec![0u8; crate::pack::SCENE_TAIL])?;
         }
         let want_cache = settings.allocates_cache();
-        if want_cache != self.lighting.cache_full || self.lighting.cache.buffer.is_null() {
+        let keys_small = want_cache && self.lighting.cache_full && pixels > self.lighting.cache_key_pixels;
+        if want_cache != self.lighting.cache_full || self.lighting.cache.buffer.is_null() || keys_small {
             let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
             let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
             self.destroy_buffer(&mut keys);
@@ -1054,23 +1423,19 @@ impl Gpu {
                 // The compose words and the a-trous meta must not alias the a-trous lists.
                 assert!(lighting_compose_at() >= LIGHTING_ATROUS_LIST_AT + 5 * (LIGHTING_ATROUS_LIST_CAP + 1) + 6 * 65536 + 16);
                 assert!(lighting_atrous_ppm_at() >= lighting_compose_minx() + 4 * LIGHTING_CACHE_SLOTS);
-                // +SLOTS: screen-owner election, past the sun block. See
-                // LIGHTING_SCREEN_OWNER_AT. Another SLOTS plus a 3-word header:
-                // the screen launch's tap-list dedup (LIGHTING_SCREEN_LIST_AT).
+                // Through the lattice, then the lit-from offer and the seed
+                // election (lighting_sh_keys_words). Eight words per pixel
+                // after that: the seed winner's payload, four corners.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    (lighting_atrous_ppm_at()
-                        + LIGHTING_ATROUS_META_WORDS
-                        + LIGHTING_SUN_WORDS
-                        + LIGHTING_CACHE_SLOTS
-                        + 3
-                        + LIGHTING_CACHE_SLOTS)
-                        * 4,
+                    lighting_fill_keys_words(pixels) * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
                 )?;
+                // 23 vec4 regions a slot, plus ADR 0039 stage 2's SH-L1
+                // (LIGHTING_SH_AT.. in lighting_cache.glsl, LIGHTING_SH_HALF).
                 self.lighting.cache = self.make_buffer_queues(
-                    LIGHTING_CACHE_SLOTS * 368,
+                    LIGHTING_CACHE_SLOTS * LIGHTING_CACHE_SLOT_BYTES,
                     0x20 | 0x2 | 0x1,
                     Memory::Device,
                     &share,
@@ -1085,17 +1450,23 @@ impl Gpu {
                 self.lighting.cache_clear = false;
             }
             self.lighting.cache_full = want_cache;
+            self.lighting.cache_key_pixels = if want_cache { pixels } else { 0 };
         }
-        self.lighting.gbuf = self.make_buffer(16 + pixels * 16, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        if want_cache && self.lighting.compose_host.buffer.is_null() {
+            // One word: the dirty-compose list length, copied after the passes.
+            self.lighting.compose_host = self.make_buffer(256, 0x2, Memory::Readback)?;
+        }
+        self.lighting.gbuf = self.make_buffer(16 + pixels * 20, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4.max(1) * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
         // Picture, emitted light, and (when direct refresh is slower than every
         // frame) one stored direct value per pixel. High stays at pixels * 8.
         let hist = u64::from(settings.direct.refresh_frames > 1);
-        // One extra slice holds linear bounce for a sun direct-patch. The
-        // default compose does not write it. High (refresh every frame) is
-        // picture + glow + that slice. The screen wavelet appends two vec4
-        // slices (32 bytes a pixel) after that, so it does not alias the bounce.
+        // One extra slice holds linear bounce. Picture compose stores the last
+        // full walk there and a held frame reads it. A cache clear zeros it
+        // for BOUNCE_FILL_FRAMES. High (refresh every frame) is picture + glow
+        // + that slice. The screen wavelet appends two vec4 slices (32 bytes
+        // a pixel) after that, so it does not alias the bounce.
         // Hash keeps the GI buffer. Preset high uses the screen slices.
         let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
         self.lighting.out = self.make_buffer(
@@ -1103,31 +1474,52 @@ impl Gpu {
             0x20 | 0x1 | 0x2,
             Memory::Device,
         )?;
-        let scene_bytes = pixels.saturating_mul(16).max(16);
-        self.lighting.scene_lin = self.make_buffer(scene_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
-        self.lighting.scene_host = self.make_buffer(scene_bytes, 0x2, Memory::Readback)?;
+        let encode_full = self.post_encode_full();
+        let probe = self.lighting.bloom_probe && !encode_full;
+        let chain = crate::hdr_output::post_chain(w, h, &self.lighting.hdr, encode_full);
+        self.lighting.scene_lin =
+            self.make_buffer(chain.scene_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
         // Transfer-dst so the pyramid can write the bloom intensity word.
-        // Eight floats: scale, mode, bloom, output, white, peak, format, pad.
-        self.lighting.hdr_params = self.make_buffer(32, 0x20 | 0x2, Memory::Upload)?;
-        let mut encode_bytes = scene_bytes;
-        if self.format == crate::hdr_output::FORMAT_R16F {
-            encode_bytes = encode_bytes.saturating_add(scene_bytes / 2);
-        }
-        // Storage for the encode pass, transfer-src when the fp16 tail is copied.
-        self.lighting.hdr_encode = self.make_buffer(encode_bytes, 0x20 | 0x1, Memory::Upload)?;
-        self.lighting.agx_lut = self.make_buffer(crate::hdr_output::AGX_LUT_BYTES, 0x20, Memory::Upload)?;
-        self.write_agx_lut();
-        // The second half holds the mip chain and two upsample scratches.
-        self.lighting.bloom = self.make_buffer(scene_bytes.saturating_mul(2), 0x20, Memory::Upload)?;
-        let meter_slots = still_sample_slots(pixels);
-        let meter_bytes = METER_HEADER_BYTES.saturating_add(meter_slots.saturating_mul(8));
+        // Eight floats: scale, mode, bloom, output, white, peak, format, bloom divisor.
+        self.lighting.hdr_params = self.make_buffer(chain.params_bytes, 0x20 | 0x2, Memory::Upload)?;
+        let encode_bytes = if probe {
+            pixels.saturating_mul(12)
+        } else {
+            chain.encode_bytes
+        };
+        self.lighting.hdr_encode = if encode_bytes == 0 {
+            Buffer::empty()
+        } else {
+            // Storage for the encode pass, transfer-src when the fp16 image is copied.
+            self.make_buffer(encode_bytes, 0x20 | 0x1, Memory::Upload)?
+        };
+        self.lighting.bloom = if chain.bloom_bytes == 0 {
+            Buffer::empty()
+        } else {
+            self.make_buffer(chain.bloom_bytes, 0x20, Memory::Upload)?
+        };
         // Storage for the histogram, transfer so the header can be cleared and copied.
-        self.lighting.meter_dev =
-            self.make_buffer(meter_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?;
-        self.lighting.meter_host = self.make_buffer(METER_HEADER_BYTES, 0x2, Memory::Readback)?;
-        self.lighting.meter_pending = false;
-        self.lighting.meter_has_prev = false;
-        self.lighting.meter_ping = 0;
+        // One device buffer per flight. Mailbox used to fill one buffer from
+        // both frames: that copy is a WRITE_AFTER_WRITE. Each slot compares
+        // its own previous half. The byte count comes from the post chain.
+        for slot in 0..2 {
+            self.lighting.meter_dev[slot] = if chain.meter_bytes == 0 {
+                Buffer::empty()
+            } else {
+                self.make_buffer(chain.meter_bytes, 0x20 | 0x1 | 0x2, Memory::Device)?
+            };
+            self.lighting.meter_host[slot] = if chain.meter_host_bytes == 0 {
+                Buffer::empty()
+            } else {
+                self.make_buffer(chain.meter_host_bytes, 0x2, Memory::Readback)?
+            };
+        }
+        self.lighting.post_sig =
+            crate::hdr_output::post_signature(&self.lighting.hdr, encode_full, probe);
+        self.lighting.meter_pending = [false, false];
+        self.lighting.meter_bins = 0;
+        self.lighting.meter_has_prev = [false, false];
+        self.lighting.meter_ping = [0, 0];
         self.lighting.meter_ev = None;
         self.lighting.still_pop = 0.0;
         self.lighting.histogram_counts.clear();
@@ -1146,9 +1538,26 @@ impl Gpu {
         };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
+        // ReSTIR reservoirs are sized here, after the frames in flight have
+        // finished. A resize inside a recording frame is not this path.
+        let mut restir_old = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
+        self.destroy_buffer(&mut restir_old);
+        let restir_bytes = if settings.restir_di {
+            crate::restir_live::buffer_bytes(pixels)
+        } else {
+            256
+        };
+        self.lighting.restir_buf = self.make_buffer(restir_bytes, 0x20 | 0x2 | 0x1, Memory::Device)?;
+        self.lighting.restir_w = if settings.restir_di { w } else { 0 };
+        self.lighting.restir_h = if settings.restir_di { h } else { 0 };
+        self.lighting.restir_clear = true;
+        self.lighting.restir_have_prev = false;
+        self.lighting.restir_slot = 0;
+        self.lighting.restir_frame = false;
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
+        self.lighting.bounce_fill = 0;
         self.lighting.sun_bounce_live = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = gi;
@@ -1177,17 +1586,19 @@ impl Gpu {
             texel: *const c_void,
         }
         for slot in 0..3 {
-            let (scene, stats, set) = if slot < 2 {
+            let (scene, stats, set, meter) = if slot < 2 {
                 (
                     self.frame_scene[slot].buffer,
                     self.lighting.stats_dev[slot].buffer,
                     self.lighting.sets[slot],
+                    self.lighting.meter_dev[slot].buffer,
                 )
             } else {
                 (
                     self.lighting.world_scene.buffer,
                     self.lighting.world_stats.buffer,
                     self.lighting.world_set,
+                    self.lighting.meter_dev[0].buffer,
                 )
             };
             if set.is_null() {
@@ -1201,14 +1612,14 @@ impl Gpu {
                 (8, self.lighting.out.buffer),
                 (13, self.lighting.scene_lin.buffer),
                 (14, self.lighting.hdr_params.buffer),
-                (15, self.lighting.agx_lut.buffer),
-                (16, self.lighting.bloom.buffer),
-                (17, self.lighting.hdr_encode.buffer),
-                (18, self.lighting.meter_dev.buffer),
+                (16, self.bound_or_standin(&self.lighting.bloom)),
+                (17, self.bound_or_standin(&self.lighting.hdr_encode)),
+                (18, if meter.is_null() { self.lighting.hdr_params.buffer } else { meter }),
                 (9, self.lighting.cache_keys.buffer),
                 (10, self.lighting.cache.buffer),
                 (11, stats),
                 (12, self.lighting.lamp_res.buffer),
+                (19, self.lighting.restir_buf.buffer),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -1249,10 +1660,6 @@ impl Gpu {
 
     /// Settle state for the debug tools, in the tier's terms: one "brick", settled
     /// once the scene (camera included) has not changed for LIGHTING_SETTLE_FRAMES.
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-    )]
     pub(crate) fn lighting_stats(&self) -> SettleStats {
         let sweep = self.lighting.live.div_ceil(LIGHTING_CACHE_BATCH).max(1) + 1;
         // World cells on (GENOS_LIGHTING_WORLD=2): their running means (cap frames) have
@@ -1260,20 +1667,25 @@ impl Gpu {
         let world_mode = self.lighting.settings.world_mode();
         let world_wait = match world_mode {
             2 => {
-                4 * genos_scene::lighting_env("GENOS_LIGHTING_WORLD_CAP").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(32)
+                4 * match self.lighting.settings.experiments.world_cap {
+                    0 => 32,
+                    cap => cap,
+                }
             }
-            // Surface cache: GENOS_LIGHTING_SC_SETTLE frames still (experiment: how long
+            // Surface cache: `experiments.sc_settle` frames still (experiment: how long
             // its texels take to take in the bounced light).
-            3 => genos_scene::lighting_env("GENOS_LIGHTING_SC_SETTLE").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0),
+            3 => self.lighting.settings.experiments.sc_settle,
             _ => 0,
         };
         // Surface cache with flag 8192: texels at the cap keep relighting (their
         // change never drops under LIGHTING_SETTLE_CHANGE), so it settles on frames still
-        // (GENOS_LIGHTING_SC_SETTLE, default 300) and the light having held.
+        // (`experiments.sc_settle`, default 300) and the light having held.
         let sc_relit = world_wait != 0
-            || (world_mode == 3 && lighting_sc_flags_env() & 8192 != 0);
+            || (world_mode == 3 && self.lighting.settings.experiments.sc_flags & 8192 != 0);
         let settled = if world_mode == 3 && sc_relit {
-            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 }) && self.lighting.light_quiet >= 2
+            self.lighting.still >= LIGHTING_SETTLE_FRAMES.max(if world_wait != 0 { world_wait } else { 300 })
+                && self.lighting.light_quiet >= 2
+                && !self.lighting.draining
         } else if probe_only(&self.lighting.settings) {
             // Probe-only keeps relighting its batch, so the change counter never
             // drops. Settle on frames still and the light having held, the same
@@ -1285,6 +1697,9 @@ impl Gpu {
         SettleStats {
             settled,
             still_frames: self.lighting.still,
+            draining: self.lighting.draining,
+            round_entries: self.lighting.round_entries,
+            cache_rays: self.lighting.cache_rays,
         }
     }
 
@@ -1300,24 +1715,70 @@ impl Gpu {
             .map_or(self.lighting.probe_samples, |w| [w[6], w[7]])
     }
 
-    /// Shadow rays the last frame actually traced, by consumer, plus spatial
-    /// merges. Zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set for that frame.
-    /// Waits for that frame.
+    /// Shadow rays the last frame actually traced, by consumer. Zero unless
+    /// `GENOS_LIGHTING_LAMP_PICK_DIAG` was set for that frame. Waits for that frame.
     pub(crate) fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
         self.idle_device();
         let slot = self.lighting.last_slot;
+        let restir_diag = self.read_restir_diag(self.lighting.stats[slot].memory);
         self.read_stats16(self.lighting.stats[slot].memory)
-            .map(|w| LampPickCounts {
+            .map_or_else(|_| LampPickCounts::default(), |w| LampPickCounts {
                 pixels: w[LAMP_PICK_DIAG_WORD],
                 kept: w[LAMP_PICK_DIAG_WORD + 1],
                 fills: w[LAMP_PICK_DIAG_WORD + 2],
                 cache: w[LAMP_PICK_DIAG_WORD + 3],
-                spatial: w[LAMP_PICK_DIAG_WORD + 4],
-                copied: w[LAMP_PICK_DIAG_WORD + 9],
                 exact: w[LAMP_PICK_DIAG_WORD + 10],
                 restir: w[LAMP_PICK_DIAG_WORD + 11],
+                kept_live: w[LAMP_PICK_DIAG_WORD + 5],
+                kept_due: w[LAMP_PICK_DIAG_WORD + 6],
+                kept_shade: w[LAMP_PICK_DIAG_WORD + 7],
+                fill_live: w[LAMP_PICK_DIAG_WORD + 8],
+                fill_shade: w[LAMP_PICK_DIAG_WORD + 12],
+                near_tests: w[LAMP_PICK_DIAG_WORD - 14],
+                px_lamps: w[LAMP_PICK_DIAG_WORD - 10],
+                hit_lamps: w[LAMP_PICK_DIAG_WORD - 9],
+                history_accepts: restir_diag[0],
+                history_rejects: restir_diag[1],
+                restir_point_adds: restir_diag[2],
             })
-            .unwrap_or_default()
+    }
+
+    /// Displaying picture pixels whose fine world-cache read was under a full
+    /// set count last frame. Stats word 81 (`gstats.diag[57]`). Waits.
+    pub(crate) fn lighting_under_trusted_pixels(&mut self) -> u32 {
+        self.idle_device();
+        const WORD: usize = 24 + 57;
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map_or(0, |w| w[WORD])
+    }
+
+    /// Serial plan iterations (`gstats.pad2`, stats word 20) and the histogram
+    /// dispatch's group count (`gstats.pad3`, word 21) from the last frame.
+    /// A slot-table scan is hundreds of thousands of iterations and a dispatch
+    /// over every cache slot. Waits for that frame.
+    pub(crate) fn lighting_fill_compact_work(&mut self) -> [u32; 2] {
+        self.idle_device();
+        const SERIAL: usize = 20;
+        const GROUPS: usize = 21;
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map_or([0, 0], |w| [w[SERIAL], w[GROUPS]])
+    }
+
+    /// Last frame: rays, on-screen, remainder, checks, cells committed, live.
+    pub(crate) fn lighting_fill_ray_split(&mut self) -> [u32; 6] {
+        self.idle_device();
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map_or([0; 6], |w| [w[16], w[17], w[19], w[22], w[1], w[2]])
+    }
+
+    /// Product frames that missed the reservoir and shaded the labelled exact sum.
+    pub(crate) fn lighting_restir_prepare_failures(&self) -> u32 {
+        self.lighting.restir_prepare_failures
+    }
+
+    /// The next product prepare shades the labelled exact sum and counts a failure.
+    pub(crate) fn force_restir_prepare_failure(&mut self, on: bool) {
+        self.lighting.restir_force_fail = on;
     }
 
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
@@ -1326,8 +1787,7 @@ impl Gpu {
         self.idle_device();
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
-            .map(|w| lighting_atrous_from(&w))
-            .unwrap_or_default()
+            .map_or_else(|_| LightingAtrousStats::default(), |w| lighting_atrous_from(&w))
     }
 
     /// Build the sun compose pipeline the first time a small step needs it.
@@ -1396,10 +1856,11 @@ impl Gpu {
             return Ok(());
         }
         let start = Instant::now();
-        self.lighting.compose_hdr_pipe = self.make_compute_pipe(
+        self.lighting.compose_hdr_pipe = self.make_compute_pipe_spec(
             LIGHTING_COMPOSE_HDR_SPV,
             self.lighting.layout,
             "lighting compose hdr",
+            Some(1u32),
         )?;
         self.note_pipeline_time("lighting compose hdr", start);
         Ok(())
@@ -1423,10 +1884,6 @@ impl Gpu {
     /// arms the corner catch-up for the frame the lamps stop.
     pub(crate) fn note_lighting_sun(&mut self, pack: &crate::pack::Pack) {
         self.lighting.view_content_key = lighting_view_content_key(pack);
-        self.lighting.point_lamps = u32::try_from(
-            pack.lamps.iter().filter(|lamp| !lamp.directional).count(),
-        )
-        .unwrap_or(u32::MAX);
         let (dir, light, n) = lighting_sun_live(pack);
         self.lighting.sun_live_dir = dir;
         self.lighting.sun_live_light = light;
@@ -1445,6 +1902,17 @@ impl Gpu {
             }
             _ => {}
         }
+        self.lighting.restir_lamps.clear();
+        self.lighting.restir_lamps.extend(pack.lamps.iter().map(copy_gpu_lamp));
+        self.lighting.restir_view = crate::restir_live::RestirCam {
+            eye: pack.eye,
+            right: pack.view_right,
+            up: pack.view_up,
+            forward: pack.view_forward,
+            tan: pack.view_tan,
+            aspect: pack.view_aspect,
+            valid: true,
+        };
     }
 
     /// True when this frame's sun step is inside the staleness budget and the
@@ -1481,21 +1949,36 @@ impl Gpu {
     pub(crate) fn lighting_sun_stats(&mut self) -> LightingSunStats {
         self.idle_device();
         let slot = self.lighting.last_slot;
+        let mut walks = 0u32;
         if let Ok(words) = self.read_stats16(self.lighting.stats[slot].memory) {
             self.lighting.sun_gpu_mark = words[LIGHTING_SUN_MARK];
             self.lighting.sun_gpu_slice = words[LIGHTING_SUN_SLICE_WORD];
+            walks = words[LIGHTING_SUN_WALK];
         }
         self.publish_sun_counter(false);
         LightingSunStats {
             gpu_sun: self.lighting.sun_gpu_mark & 1 != 0,
             gpu_catch: self.lighting.sun_gpu_mark & 2 != 0,
             slice: self.lighting.sun_gpu_slice,
+            walks,
             host_frames: self.lighting.sun_frames,
             catch_left: self.lighting.catch_left,
             full_effort: sun_controls().full_effort,
             compose: self.lighting.compose_kind,
             dispatches: self.lighting.compose_dispatches,
+            blocks: self.read_compose_blocks(),
+            maint_ran: self.lighting.maint_ran,
         }
+    }
+
+    /// Dirty-list length copied at the end of the last submitted frame.
+    /// Zero when that copy was not recorded. Not a frame-loop sync: the caller
+    /// has already waited.
+    fn read_compose_blocks(&self) -> u32 {
+        if self.lighting.compose_host.memory.is_null() {
+            return 0;
+        }
+        self.read_stats_word(self.lighting.compose_host.memory, 0).unwrap_or(0)
     }
 
     /// The counter is the proof that full effort changed the work. A still or
@@ -1552,7 +2035,7 @@ impl Gpu {
 
     /// Before the raster: the G-buffer size header, and the last frame's passes done
     /// with the buffers this frame's raster writes.
-    fn lighting_begin(&mut self, slot: usize) {
+    fn lighting_begin(&mut self, slot: usize) -> Result<(), String> {
         let header = [self.lighting.dims[0], self.lighting.dims[1], 0, 0];
         let world = self.lighting.async_on;
         if world {
@@ -1585,7 +2068,36 @@ impl Gpu {
         // and young-only rounds come from what the CPU already knows (frames still,
         // rounds since the light changed), so its counters are read only for the
         // debug output or the older world modes that settle on them.
-        let read = lighting_stats_wanted(self.lighting.settings.world_mode());
+        // The drain flag is the one exception, and it is not a sync read: the
+        // GPU decides draining itself (args pass, LIGHTING_DRAIN_FLAG_AT keeps
+        // the settle rounds going); the host only needs it so it does not idle
+        // the cache meanwhile. It is one word of this slot's stats ring buffer,
+        // whose fence the frame loop already waited (frames in flight), so the
+        // value is a few frames old and nothing waits on the GPU for it.
+        if self.lighting.settings.world_mode() == 3 {
+            if self.lighting.stats_round[slot] {
+                if let Ok(flag) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 2) {
+                    self.lighting.draining = flag != 0;
+                }
+                if let Ok(e) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_DRAIN_WORD + 3) {
+                    self.lighting.round_entries = e;
+                }
+                if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
+                    self.lighting.cache_rays = rays;
+                }
+            } else if !self.lighting.async_on {
+                // That slot did not dispatch a cache round. The stats buffer was
+                // cleared and never counted, so the probe is zero, not the
+                // previous round's leftover. The async queue reports its own
+                // round from poll_lighting_world.
+                self.lighting.cache_rays = 0;
+                self.lighting.round_entries = 0;
+            }
+        }
+        let read = lighting_stats_wanted(
+            self.lighting.settings.world_mode(),
+            self.lighting.settings.experiments.sc_flags,
+        );
         if !read {
         } else if let Ok(words) = self.read_lighting_stats(slot) {
             self.lighting.probe_samples = [words[6], words[7]];
@@ -1635,6 +2147,11 @@ impl Gpu {
             }
             if self.lighting.cache_clear {
                 self.lighting.cache_clear = false;
+                // The picture still holds the previous view, and the bounce
+                // slice may hold an empty store from that view. The fill
+                // window composes the whole picture and zeros the slice.
+                self.lighting.bounce_fill = 0;
+                self.lighting.compose_valid = false;
                 // The async queue starts once this frame (its slot) is surely done.
                 self.lighting.world_hold = 2;
                 (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, 0, u64::MAX, 0);
@@ -1655,6 +2172,9 @@ impl Gpu {
                 self.lighting.gbuf.size,
                 u32::MAX,
             );
+            // The whole-buffer clears land before the count and header writes.
+            // A subrange fill of the key table is the same buffer as the clear above.
+            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // Quiet-compose indirect args: group count x starts at 0, y and z stay 1.
             // The key table is absent while GI is off; those offsets would be past the dummy.
             if self.lighting.cache_full {
@@ -1666,29 +2186,26 @@ impl Gpu {
                     4,
                     0,
                 );
-                (self.fns.cmd_update_buffer)(
-                    self.cmd,
-                    self.lighting.cache_keys.buffer,
-                    (lighting_compose_at() + 1) * 4,
-                    8,
-                    yz.as_ptr() as *const c_void,
-                );
+                let cmd = self.cmd;
+                let dst = self.lighting.cache_keys.buffer;
+                self.write_device(cmd, dst, (lighting_compose_at() + 1) * 4, pod_bytes(&yz))?;
             }
-            // The whole-buffer clears land before the count and header writes.
-            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             // The mature and young patch counts, rebuilt by the compact pass.
             if !world && self.lighting.cache_full {
                 for at in [LIGHTING_CACHE_SLOTS, 2 * LIGHTING_CACHE_SLOTS + 1, LIGHTING_WRC_COUNTS_AT, LIGHTING_WRC_COUNTS_AT + 1, LIGHTING_WRC_COUNTS_AT + 4, LIGHTING_WRC_COUNTS_AT + 5, LIGHTING_WRC_COUNTS_AT + 6, LIGHTING_WRC_COUNTS_AT + 7] {
                     (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, at * 4, 4, 0);
                 }
             }
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.gbuf.buffer,
-                0,
-                16,
-                header.as_ptr() as *const c_void,
-            );
+            // Settled: the cache holds its light and runs no rounds, so the drain
+            // flag would keep the last value its args pass wrote. The host settled
+            // on a flag a few frames old, and the GPU may have re-armed it since;
+            // left set, every pixel's direct pass keeps gathering strictly at rest.
+            if self.lighting.cache_full && self.lighting.settings.world_mode() == 3 && self.lighting_stats().settled {
+                (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, LIGHTING_DRAIN_FLAG_AT * 4, 4, 0);
+            }
+            let cmd = self.cmd;
+            let dst = self.lighting.gbuf.buffer;
+            self.write_device(cmd, dst, 0, pod_bytes(&header))?;
             if self.lighting.lamp_res_clear && !self.lighting.lamp_res.buffer.is_null() {
                 self.lighting.lamp_res_clear = false;
                 (self.fns.cmd_fill_buffer)(
@@ -1707,6 +2224,7 @@ impl Gpu {
             0x20 | 0x40 | 0x1000,
             0x20 | 0x40,
         );
+        Ok(())
     }
 
     /// Count one light cache round's counters toward settling (or not): a round
@@ -1715,6 +2233,7 @@ impl Gpu {
     /// from its light as it is now; `young_only`: the round took young patches only,
     /// so one that relit nothing found nothing left to light.
     fn note_lighting_round(&mut self, words: [u32; 8], current: bool, light: bool, young_only: bool) {
+
         if !current {
             self.lighting.quiet = 0;
         } else if words[1] > 0 {
@@ -1778,6 +2297,9 @@ impl Gpu {
             let light = self.lighting.world_light == self.lighting.light_hash;
             let mut head = [0u32; 8];
             head.copy_from_slice(&words[..8]);
+            self.lighting.draining = words[LIGHTING_DRAIN_WORD + 2] != 0;
+            self.lighting.round_entries = words[LIGHTING_DRAIN_WORD + 3];
+            self.lighting.cache_rays = words[LIGHTING_CACHE_RAYS_WORD];
             self.note_lighting_round(head, current, light, self.lighting.world_young);
         }
         if self.gpu_times.is_some() && !self.lighting.world_qp.is_null() {
@@ -1823,17 +2345,63 @@ impl Gpu {
         }
     }
 
-    /// Reservoir shade, or the pre-reservoir sum when that sum is what reuse would do.
-    fn direct_pipe(&self) -> Handle {
-        if direct_shade_plain(
-            self.lighting.settings.lamp_pick.mode,
-            self.lighting.point_lamps,
-            self.lighting.shade_gate,
-        ) {
-            self.lighting.direct_plain
-        } else {
-            self.lighting.pipes[3]
+    /// Clear the distance bins, run maintenance, then gather what it enqueued.
+    /// The sun path and the compose-writes kill switch leave this empty.
+    /// The gather stays on the cache timestamp, not in compose.
+    fn dispatch_sh_prep(&mut self, sun_compose: bool, compose_full: bool, gx: u32, gy: u32) {
+        self.lighting.maint_ran = false;
+        let maint = self.lighting.compose_maint_pipe;
+        let drain = self.lighting.sh_drain_pipe;
+        if sun_compose || maint.is_null() || drain.is_null() {
+            return;
         }
+        // The walk is four world-cache finds per pixel of every dirty block,
+        // and the colour is thrown away. The drain then fills the lattice the
+        // picture compile reads. On a held camera that lattice is already
+        // filled. Frame 32 (and a camera move, which takes the full grid)
+        // requests it again.
+        let refresh = self.lighting.frame != 0
+            && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
+        if self.lighting.still > 0 && !compose_full && !refresh {
+            return;
+        }
+        self.lighting.maint_ran = true;
+        const BINS: u64 = 16;
+        const LATTICE_CAP: u32 = 16384;
+        // SAFETY: the command buffer, the key buffer, and both pipelines are the
+        // lighting frame's live handles. The fill, the dispatches, and the
+        // barriers are the same calls the compose loop already records.
+        unsafe {
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                lighting_sh_bin_count_at() * 4,
+                BINS * 4,
+                0,
+            );
+            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, maint);
+            if compose_full {
+                (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
+            } else {
+                (self.fns.cmd_dispatch_indirect)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    lighting_compose_at() * 4,
+                );
+            }
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, drain);
+            (self.fns.cmd_dispatch)(self.cmd, LATTICE_CAP / 64, 1, 1);
+        }
+    }
+
+    /// Reservoir shade, the ReSTIR module, or the pre-reservoir sum.
+    fn direct_pipe(&self) -> Handle {
+        if self.lighting.restir_frame && !self.lighting.restir_direct.is_null() {
+            return self.lighting.restir_direct;
+        }
+        self.lighting.pipes[3]
     }
 
     /// Record and submit one light cache round on the async compute queue: list
@@ -1859,13 +2427,6 @@ impl Gpu {
         let cmd = self.lighting.world_cmd;
         let fences = [self.lighting.world_fence];
         #[repr(C)]
-        struct BeginInfo {
-            s_type: i32,
-            next: *const c_void,
-            flags: u32,
-            inherit: *const c_void,
-        }
-        #[repr(C)]
         struct Submit {
             s_type: i32,
             next: *const c_void,
@@ -1886,16 +2447,7 @@ impl Gpu {
         ];
         unsafe {
             check((self.fns.reset_cmd)(cmd, 0), "reset lighting world cmd")?;
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
-                "begin lighting world",
-            )?;
+            self.begin_reused(cmd)?;
             let qp = self.lighting.world_qp;
             if !qp.is_null() {
                 (self.fns.cmd_reset_query)(cmd, qp, 0, 6);
@@ -1903,13 +2455,9 @@ impl Gpu {
             }
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.world_stats.buffer, 0, LIGHTING_STATS_BYTES, 0);
             self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
-            (self.fns.cmd_update_buffer)(
-                cmd,
-                self.lighting.world_stats.buffer,
-                LIGHTING_CTRL_WORD * 4,
-                self.lighting.ctrl_bytes.len() as u64,
-                self.lighting.ctrl_bytes.as_ptr() as *const c_void,
-            );
+            let ctrl = self.lighting.ctrl_bytes;
+            let dst = self.lighting.world_stats.buffer;
+            self.write_device(cmd, dst, LIGHTING_CTRL_WORD * 4, &ctrl)?;
             // The mature and young counts, rebuilt by the compact pass.
             (self.fns.cmd_fill_buffer)(cmd, self.lighting.cache_keys.buffer, LIGHTING_CACHE_SLOTS * 4, 4, 0);
             // The WRC refresh lists' counts (change, background; lighting_cache.glsl).
@@ -2006,7 +2554,10 @@ impl Gpu {
                     "lightingsc {queue} frame {} still {} relit {} claimed {} restarted {} freed {} atcap {} live {} thr {} extra {} partial {} sets {} rays {} due {} waiting {} scouts {} trickle {} boost {} checks {} changed {}",
                     self.lighting.frame, self.lighting.still, w[1], w[8], w[9], w[10], w[11], w[2], w[12], w[13], w[14], w[15], w[16], w[17], w[18], w[19], w[20], w[21], w[22], w[23]
                 );
+                let hist = crate::shown_age::AgeHist::from_diag(&w[24..88]);
+                eprintln!("{}", crate::shown_age::line(queue, self.lighting.frame, &hist));
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
+                eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
             }
             let mode_word = w[LIGHTING_ATROUS_STAT + 1];
@@ -2079,6 +2630,51 @@ impl Gpu {
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(words)
+    }
+
+    /// Header words 43, 44, and 45, copied to the tail of this slot's stats
+    /// readback. Three zeros when the copy did not run.
+    fn read_restir_diag(&self, memory: Handle) -> [u32; 3] {
+        if memory.is_null() {
+            return [0; 3];
+        }
+        let mut words = [0u32; 3];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if check(
+                (self.fns.map_mem)(
+                    self.device,
+                    memory,
+                    restir_diag_tail_offset(),
+                    RESTIR_DIAG_TAIL_BYTES,
+                    0,
+                    &mut mapped,
+                ),
+                "map restir diag",
+            )
+            .is_err()
+            {
+                return [0; 3];
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), words.as_mut_ptr(), 3);
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        words
+    }
+
+    /// One word of a stats ring buffer whose fence was already waited.
+    fn read_stats_word(&self, memory: Handle, word: usize) -> Result<u32, String> {
+        let value;
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, memory, (word * 4) as u64, 4, 0, &mut mapped),
+                "map lighting stats word",
+            )?;
+            value = std::ptr::read_unaligned(mapped as *const u32);
+            (self.fns.unmap_mem)(self.device, memory);
+        }
+        Ok(value)
     }
 
     fn read_words(&self, memory: Handle, count: usize) -> Result<Vec<u32>, String> {
@@ -2203,10 +2799,16 @@ impl Gpu {
             .override_settings
             .clone()
             .unwrap_or_else(|| scene.lighting.clone());
-        desired.apply_env();
+        desired.apply_env()?;
         desired.sanitize();
         let debug = scene.debug.effective(self.out_cli.as_deref());
         self.debug_out = debug.out;
+        let async_on = desired.experiments.cache_async && !self.lighting.async_failed;
+        if self.lighting.async_on && !async_on {
+            // Let the round in flight finish before its results stop being read.
+            self.wait_lighting_world();
+        }
+        self.lighting.async_on = async_on;
         self.lighting.settings = desired;
         self.lighting.hdr = scene.hdr.effective()?;
         self.lighting.sun_height = sun_height(scene);
@@ -2215,7 +2817,12 @@ impl Gpu {
         self.refresh_hdr_surface()?;
         let key = lighting_alloc_key(&self.lighting.settings);
         let resized = self.lighting.dims[0] != self.extent_w || self.lighting.dims[1] != self.extent_h;
-        if (key != self.lighting.alloc_key || resized) && self.lighting.ready {
+        let encode_full = self.post_encode_full();
+        let probe = self.lighting.bloom_probe && !encode_full;
+        let post_sig = crate::hdr_output::post_signature(&self.lighting.hdr, encode_full, probe);
+        if (key != self.lighting.alloc_key || resized || post_sig != self.lighting.post_sig)
+            && self.lighting.ready
+        {
             self.make_lighting_targets()?;
         }
         Ok(())
@@ -2252,21 +2859,31 @@ impl Gpu {
         crate::hdr_output::pack_f32(next)
     }
 
-    /// Header from the previous frame's meter. The fence has already waited.
+    /// Header from this flight's previous meter. That slot's fence has waited.
+    /// The other flight may still be copying its own host buffer.
     fn take_meter(&mut self) {
-        if !self.lighting.meter_pending || self.lighting.meter_host.memory.is_null() {
+        let slot = self.flight;
+        if !self.lighting.meter_pending[slot] || self.lighting.meter_host[slot].memory.is_null() {
             return;
         }
-        self.lighting.meter_pending = false;
-        let words = METER_BIN_CAP + 4;
+        self.lighting.meter_pending[slot] = false;
+        let bins = usize::try_from(self.lighting.meter_bins).unwrap_or(0);
+        if bins == 0 {
+            return;
+        }
+        let words = bins.saturating_add(4);
+        let bytes = u64::try_from(words.saturating_mul(4)).unwrap_or(0);
+        if bytes == 0 || self.lighting.meter_host[slot].size < bytes {
+            return;
+        }
         let mut raw = vec![0_u32; words];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             if (self.fns.map_mem)(
                 self.device,
-                self.lighting.meter_host.memory,
+                self.lighting.meter_host[slot].memory,
                 0,
-                METER_HEADER_BYTES,
+                bytes,
                 0,
                 &mut mapped,
             ) != 0
@@ -2274,11 +2891,11 @@ impl Gpu {
                 return;
             }
             std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), raw.as_mut_ptr(), words);
-            (self.fns.unmap_mem)(self.device, self.lighting.meter_host.memory);
+            (self.fns.unmap_mem)(self.device, self.lighting.meter_host[slot].memory);
         }
-        let had_prev = self.lighting.meter_has_prev;
-        let moved = raw.get(METER_BIN_CAP).copied().unwrap_or(0);
-        let total = raw.get(METER_BIN_CAP + 1).copied().unwrap_or(0);
+        let had_prev = self.lighting.meter_has_prev[slot];
+        let moved = raw.get(bins).copied().unwrap_or(0);
+        let total = raw.get(bins.saturating_add(1)).copied().unwrap_or(0);
         if had_prev {
             self.lighting.still_pop = if total == 0 {
                 1.0
@@ -2288,13 +2905,10 @@ impl Gpu {
         } else {
             self.lighting.still_pop = 0.0;
         }
-        self.lighting.meter_has_prev = true;
+        self.lighting.meter_has_prev[slot] = true;
         if self.lighting.hdr.exposure_mode != genos_scene::ExposureMode::Auto {
             return;
         }
-        let bins = usize::try_from(self.lighting.hdr.histogram_bins)
-            .unwrap_or(256)
-            .clamp(1, METER_BIN_CAP);
         let counts = raw[..bins].to_vec();
         let occupied = counts
             .iter()
@@ -2350,75 +2964,89 @@ impl Gpu {
 
     /// Same-frame pyramid into the bloom buffer. Compose has stored `scene_lin`.
     /// The intensity word is updated after the chain so the display pass adds it.
-    fn record_gpu_bloom(&mut self, width: u32, height: u32) {
+    /// Upsamples write the finer mip in place. The display pass tents that mip to full resolution.
+    fn record_gpu_bloom(&mut self, width: u32, height: u32) -> Result<(), String> {
         if self.lighting.bloom_pipe.is_null() || width == 0 || height == 0 {
-            return;
+            return Ok(());
         }
-        let pixels = width.saturating_mul(height);
-        let levels = self.lighting.hdr.bloom_levels.min(8);
+        let levels = crate::hdr_output::bloom_level_count(&self.lighting.hdr);
         if levels == 0 {
-            return;
+            return Ok(());
         }
-        let mut mips = Vec::new();
-        let mut cursor = pixels;
-        let mut level_w = width;
-        let mut level_h = height;
-        for _ in 0..levels {
-            level_w = (level_w / 2).max(1);
-            level_h = (level_h / 2).max(1);
-            mips.push((level_w, level_h, cursor));
-            cursor = cursor.saturating_add(level_w.saturating_mul(level_h));
-        }
-        let scratch_px = mips.first().map_or(0, |(w, h, _)| w.saturating_mul(*h));
-        let scratch_a = cursor;
-        let scratch_b = cursor.saturating_add(scratch_px);
-        let end = scratch_b.saturating_add(scratch_px);
-        if u64::from(end) > self.lighting.bloom.size / 16 {
+        let mips = crate::hdr_output::bloom_mips(width, height, levels);
+        if mips.bytes > self.lighting.bloom.size {
             eprintln!("lighting: bloom chain does not fit");
-            return;
+            return Ok(());
         }
-        let Some(&(first_w, first_h, first_dst)) = mips.first() else {
-            return;
+        let Some(first) = mips.levels.first() else {
+            return Ok(());
         };
-        self.bloom_dispatch(first_w, first_h, width, height, 0, first_dst, 0, 0);
-        for index in 1..mips.len() {
-            let Some(&(src_w, src_h, src)) = mips.get(index - 1) else {
-                return;
-            };
-            let Some(&(dst_w, dst_h, dst)) = mips.get(index) else {
-                return;
-            };
-            self.bloom_dispatch(dst_w, dst_h, src_w, src_h, src, dst, 1, 0);
-        }
-        let Some(&(mut src_w, mut src_h, mut src)) = mips.last() else {
-            return;
+        let modes = crate::hdr_output::bloom_modes(levels);
+        let Some(first_mode) = modes.first().copied() else {
+            return Ok(());
         };
-        let last = mips.len().saturating_sub(1);
-        let mut ping = 0u32;
-        for finer in (0..last).rev() {
-            let Some(&(finer_w, finer_h, finer_off)) = mips.get(finer) else {
-                return;
+        self.bloom_dispatch(
+            first.width,
+            first.height,
+            width,
+            height,
+            0,
+            first.word,
+            first_mode,
+            0,
+        );
+        for index in 1..mips.levels.len() {
+            let Some(src) = mips.levels.get(index - 1) else {
+                return Ok(());
             };
-            let dst = if ping == 0 { scratch_a } else { scratch_b };
-            self.bloom_dispatch(finer_w, finer_h, src_w, src_h, src, dst, 2, finer_off);
-            src_w = finer_w;
-            src_h = finer_h;
-            src = dst;
-            ping ^= 1;
-        }
-        self.bloom_dispatch(width, height, src_w, src_h, src, 0, 3, 0);
-        let word = crate::hdr_output::pack_f32(self.lighting.hdr.bloom_intensity);
-        unsafe {
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.hdr_params.buffer,
-                8,
-                4,
-                &word as *const f32 as *const c_void,
+            let Some(dst) = mips.levels.get(index) else {
+                return Ok(());
+            };
+            let mode = modes.get(index).copied().unwrap_or(1);
+            self.bloom_dispatch(
+                dst.width,
+                dst.height,
+                src.width,
+                src.height,
+                src.word,
+                dst.word,
+                mode,
+                0,
             );
         }
+        let count = mips.levels.len();
+        if count > 1 {
+            let mut src_index = count - 1;
+            let mut mode_index = count;
+            for finer in (0..count - 1).rev() {
+                let Some(src) = mips.levels.get(src_index) else {
+                    return Ok(());
+                };
+                let Some(dst) = mips.levels.get(finer) else {
+                    return Ok(());
+                };
+                let mode = modes.get(mode_index).copied().unwrap_or(2);
+                self.bloom_dispatch(
+                    dst.width,
+                    dst.height,
+                    src.width,
+                    src.height,
+                    src.word,
+                    dst.word,
+                    mode,
+                    dst.word,
+                );
+                src_index = finer;
+                mode_index = mode_index.saturating_add(1);
+            }
+        }
+        let word = crate::hdr_output::pack_f32(self.lighting.hdr.bloom_intensity);
+        let cmd = self.cmd;
+        let dst = self.lighting.hdr_params.buffer;
+        self.write_device(cmd, dst, 8, &word.to_ne_bytes())?;
         // Display reads the chain and the new intensity. Host reads the full image after the fence.
         self.memory_barrier(0x800 | 0x1000, 0x800 | 0x4000, 0x40 | 0x1000, 0x20 | 0x2000);
+        Ok(())
     }
 
     fn bloom_dispatch(
@@ -2445,67 +3073,170 @@ impl Gpu {
                 LIGHTING_PC_BYTES,
                 pc.as_ptr() as *const c_void,
             );
-            (self.fns.cmd_dispatch)(
-                self.cmd,
-                dst_w.div_ceil(8).max(1),
-                dst_h.div_ceil(8).max(1),
-                1,
-            );
+            let texels = u64::from(dst_w).saturating_mul(u64::from(dst_h));
+            // Word 0 is the RGBA16F mip: one thread per texel, 8×8. Later mips
+            // pack two texels per thread; a group is still 64 invocations.
+            if dst == 0 {
+                (self.fns.cmd_dispatch)(
+                    self.cmd,
+                    dst_w.div_ceil(8).max(1),
+                    dst_h.div_ceil(8).max(1),
+                    1,
+                );
+            } else {
+                let pairs = u32::try_from(texels.div_ceil(2)).unwrap_or(1);
+                (self.fns.cmd_dispatch)(self.cmd, pairs.div_ceil(64).max(1), 1, 1);
+            }
         }
         self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
     }
 
-    /// Host view of the encode buffer: RGBA32F PQ or scRGB, one texel per pixel.
+    /// Host view of the encode buffer: RGBA32F unpacked from RGBA16F PQ or scRGB.
     fn read_hdr_encode_host(&self) -> Result<Vec<f32>, String> {
+        if self.lighting.bloom_probe && self.hdr_output_word() == 0.0 {
+            return Ok(Vec::new());
+        }
         let width = usize::try_from(self.extent_w).unwrap_or(0);
         let height = usize::try_from(self.extent_h).unwrap_or(0);
-        let count = width.saturating_mul(height).saturating_mul(4);
+        self.read_fp16_region(0, width.saturating_mul(height))
+    }
+
+    /// Bloom tent the display pass added, before the intensity scale. RGBA32F.
+    fn read_bloom_probe(&self) -> Result<Vec<f32>, String> {
+        let width = usize::try_from(self.extent_w).unwrap_or(0);
+        let height = usize::try_from(self.extent_h).unwrap_or(0);
+        self.read_fp16_region(0, width.saturating_mul(height))
+    }
+
+    /// `agx_eval` at the first 64 lattice inputs. RGBA32F, one sample per texel.
+    fn read_agx_probe(&self) -> Result<Vec<f32>, String> {
+        let width = usize::try_from(self.extent_w).unwrap_or(0);
+        let height = usize::try_from(self.extent_h).unwrap_or(0);
+        let pixels = width.saturating_mul(height);
+        self.read_fp16_region(pixels, 64)
+    }
+
+    /// Unpack `count` RGBA16F texels starting `texel` texels into the encode buffer.
+    fn read_fp16_region(&self, texel: usize, count: usize) -> Result<Vec<f32>, String> {
         if count == 0 || self.lighting.hdr_encode.memory.is_null() {
             return Ok(Vec::new());
         }
-        let bytes = u64::try_from(count.saturating_mul(4)).unwrap_or(0);
-        if self.lighting.hdr_encode.size < bytes {
+        let bytes = texel.saturating_add(count).saturating_mul(8);
+        if self.lighting.hdr_encode.size < u64::try_from(bytes).unwrap_or(u64::MAX) {
             return Ok(Vec::new());
         }
-        read_f32s(
-            self.fns.map_mem,
-            self.fns.unmap_mem,
-            self.device,
-            self.lighting.hdr_encode.memory,
-            count,
-        )
+        let mut raw = vec![0u8; bytes];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.lighting.hdr_encode.memory,
+                0,
+                self.lighting.hdr_encode.size,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return Ok(Vec::new());
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), raw.as_mut_ptr(), bytes);
+            (self.fns.unmap_mem)(self.device, self.lighting.hdr_encode.memory);
+        }
+        let start = texel.saturating_mul(8);
+        let end = start.saturating_add(count.saturating_mul(8));
+        let slice = raw.get(start..end).unwrap_or(&[]);
+        if slice.len() < count.saturating_mul(8) {
+            return Ok(Vec::new());
+        }
+        Ok(crate::hdr_output::rgba_f32_from_rgba16f(slice, count))
     }
 
-    /// Host view of the full-resolution bloom image. The mip chain after it is omitted.
+    /// Full-resolution bloom, reconstructed by tent-upsampling the finest stored mip.
     fn read_bloom_host(&self) -> Result<Vec<f32>, String> {
-        let width = usize::try_from(self.extent_w).unwrap_or(0);
-        let height = usize::try_from(self.extent_h).unwrap_or(0);
-        let count = width.saturating_mul(height).saturating_mul(4);
-        if count == 0 || self.lighting.bloom.memory.is_null() {
+        let levels = crate::hdr_output::bloom_level_count(&self.lighting.hdr);
+        if levels == 0 || self.lighting.bloom.memory.is_null() || self.lighting.bloom.size == 0 {
             return Ok(Vec::new());
         }
-        let bytes = u64::try_from(count.saturating_mul(4)).unwrap_or(0);
-        if self.lighting.bloom.size < bytes {
+        let size = usize::try_from(self.lighting.bloom.size).unwrap_or(0);
+        if size == 0 {
             return Ok(Vec::new());
         }
-        read_f32s(
-            self.fns.map_mem,
-            self.fns.unmap_mem,
-            self.device,
-            self.lighting.bloom.memory,
-            count,
-        )
+        let mut raw = vec![0u8; size];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.lighting.bloom.memory,
+                0,
+                self.lighting.bloom.size,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return Ok(Vec::new());
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), raw.as_mut_ptr(), size);
+            (self.fns.unmap_mem)(self.device, self.lighting.bloom.memory);
+        }
+        Ok(crate::hdr_output::bloom_rgba_from_chain(
+            &raw,
+            self.extent_w,
+            self.extent_h,
+            levels,
+        ))
+    }
+
+    /// True when the encode side buffer is the full picture. SDR does not allocate one.
+    fn post_encode_full(&self) -> bool {
+        self.hdr_output_word() > 0.0
+    }
+
+    /// Empty post bindings name the params buffer. That buffer is already in the total.
+    fn bound_or_standin(&self, buffer: &Buffer) -> Handle {
+        if buffer.buffer.is_null() {
+            self.lighting.hdr_params.buffer
+        } else {
+            buffer.buffer
+        }
+    }
+
+    /// Potato and Low stay on SDR. Low on a Deck OLED may take listed HDR10.
+    /// A higher preset with bloom off is not Potato: the encode grade uses that shape.
+    fn present_locks_sdr(&self, hdr10_listed: bool) -> bool {
+        if self.lighting.hdr.legacy_bytes {
+            return true;
+        }
+        let preset = self.lighting.settings.preset;
+        let named = matches!(
+            preset,
+            genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
+        );
+        named
+            && crate::hdr_output::post_locks_sdr(
+                &self.lighting.hdr,
+                preset,
+                crate::hdr_output::deck_panel(),
+                hdr10_listed,
+            )
     }
 
     /// 0 keeps the 8-bit picture. 1 is HDR10. 2 is scRGB. Forced SDR stays 0.
     /// A requested mode that the surface did not list still returns 1 or 2 so
     /// the side buffer can be read back.
     fn hdr_output_word(&self) -> f32 {
-        let force_sdr = self.lighting.hdr.legacy_bytes
-            || matches!(
-                self.lighting.settings.preset,
-                genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
-            );
+        let force_sdr = if self.lighting.budget_hdr {
+            crate::hdr_output::post_locks_sdr(
+                &self.lighting.hdr,
+                self.lighting.budget_preset,
+                self.lighting.budget_panel,
+                self.lighting.budget_hdr10_listed,
+            ) || !matches!(
+                self.lighting.hdr.output,
+                genos_scene::OutputMode::Hdr10 | genos_scene::OutputMode::Scrgb
+            )
+        } else {
+            self.present_locks_sdr(self.hdr_output == crate::hdr_output::HdrSwapchain::Hdr10)
+        };
         if force_sdr {
             return 0.0;
         }
@@ -2552,7 +3283,19 @@ impl Gpu {
         let white = crate::hdr_output::pack_f32(crate::hdr_output::graphics_white_linear());
         let peak = crate::hdr_output::pack_f32(crate::hdr_output::HDR_PEAK_NITS);
         let format_code = crate::hdr_output::swapchain_format_code(self.format);
-        let words = [scale, mode, 0.0_f32, output, white, peak, format_code, 0.0];
+        let mut divisor = if self.bloom_active() {
+            f32::from(u16::try_from(crate::hdr_output::bloom_divisor(
+                crate::hdr_output::bloom_level_count(&self.lighting.hdr),
+            ))
+            .unwrap_or(0))
+        } else {
+            0.0
+        };
+        // The picture gate reads the tent and the lattice from the encode buffer.
+        if self.lighting.bloom_probe && output == 0.0 {
+            divisor += 100.0;
+        }
+        let words = [scale, mode, 0.0_f32, output, white, peak, format_code, divisor];
         unsafe {
             let mut mapped = std::ptr::null_mut();
             if (self.fns.map_mem)(
@@ -2575,71 +3318,58 @@ impl Gpu {
         self.memory_barrier(0x4000, 0x800 | 0x80, 0x4000, 0x20);
     }
 
-    fn write_agx_lut(&mut self) {
-        if self.lighting.agx_lut.memory.is_null() {
-            return;
-        }
-        let words = crate::hdr_output::agx_lut_words();
-        let bytes = u64::try_from(words.len().saturating_mul(4)).unwrap_or(0);
-        unsafe {
-            let mut mapped = std::ptr::null_mut();
-            if (self.fns.map_mem)(
-                self.device,
-                self.lighting.agx_lut.memory,
-                0,
-                bytes,
-                0,
-                &mut mapped,
-            ) != 0
-            {
-                return;
-            }
-            std::ptr::copy_nonoverlapping(words.as_ptr(), mapped.cast::<f32>(), words.len());
-            (self.fns.unmap_mem)(self.device, self.lighting.agx_lut.memory);
-        }
-    }
-
-    /// Histogram of every pixel, and a stride-32 still check. The header is copied
-    /// for the next frame. Luma halves stay on the device.
-    fn record_gpu_meter(&mut self, width: u32, height: u32) {
+    /// Histogram of every pixel, and a short still check. The header is copied
+    /// for the next frame. Luma halves stay on the device. Fixed exposure skips it.
+    /// One buffer per frame in flight: both frames filling one buffer is a
+    /// WRITE_AFTER_WRITE on mailbox.
+    fn record_gpu_meter(&mut self, slot: usize, width: u32, height: u32) {
         if self.lighting.hdr.legacy_bytes
+            || self.lighting.hdr.exposure_mode != genos_scene::ExposureMode::Auto
             || self.lighting.meter_pipe.is_null()
-            || self.lighting.meter_dev.buffer.is_null()
-            || self.lighting.meter_host.buffer.is_null()
+            || self.lighting.meter_dev[slot].buffer.is_null()
+            || self.lighting.meter_host[slot].buffer.is_null()
             || width == 0
             || height == 0
         {
             return;
         }
+        let chain = crate::hdr_output::post_chain(width, height, &self.lighting.hdr, false);
+        if chain.bins == 0 || chain.meter_bytes > self.lighting.meter_dev[slot].size {
+            return;
+        }
+        let header = u64::from(chain.bins.saturating_add(4)).saturating_mul(4);
+        if header == 0 || self.lighting.meter_host[slot].size < header {
+            return;
+        }
         let pixels = u64::from(width).saturating_mul(u64::from(height));
-        if pixels == 0 || self.lighting.meter_dev.size < METER_HEADER_BYTES {
+        if pixels == 0 {
             return;
         }
         unsafe {
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
-                self.lighting.meter_dev.buffer,
+                self.lighting.meter_dev[slot].buffer,
                 0,
-                METER_HEADER_BYTES,
+                header,
                 0,
             );
         }
         self.memory_barrier(0x800 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
-        let bins = self.lighting.hdr.histogram_bins.clamp(1, 4096);
-        let do_hist = u32::from(
-            self.lighting.hdr.exposure_mode == genos_scene::ExposureMode::Auto,
-        );
-        let slots = u32::try_from(still_sample_slots(pixels)).unwrap_or(u32::MAX);
+        let stride = if chain.slots == 0 {
+            0
+        } else {
+            u32::try_from(pixels.div_ceil(u64::from(chain.slots))).unwrap_or(u32::MAX)
+        };
         let pc = [
             width,
             height,
-            bins,
-            slots,
-            u32::from(self.lighting.meter_has_prev),
-            self.lighting.meter_ping & 1,
-            STILL_STRIDE,
-            do_hist,
-            0,
+            chain.bins,
+            chain.slots,
+            u32::from(self.lighting.meter_has_prev[slot]),
+            self.lighting.meter_ping[slot] & 1,
+            stride,
+            1,
+            chain.bins.saturating_add(4),
             0,
             0,
             0,
@@ -2667,22 +3397,783 @@ impl Gpu {
         let region = Region {
             src: 0,
             dst: 0,
-            size: METER_HEADER_BYTES,
+            size: header,
         };
         unsafe {
             (self.fns.cmd_copy_buffer)(
                 self.cmd,
-                self.lighting.meter_dev.buffer,
-                self.lighting.meter_host.buffer,
+                self.lighting.meter_dev[slot].buffer,
+                self.lighting.meter_host[slot].buffer,
                 1,
                 &region as *const Region as *const u8,
             );
         }
-        self.lighting.meter_pending = true;
-        self.lighting.meter_ping ^= 1;
+        self.lighting.meter_bins = chain.bins;
+        self.lighting.meter_pending[slot] = true;
+        self.lighting.meter_ping[slot] ^= 1;
     }
 
-    fn lighting_passes(&mut self, slot: usize) {
+    /// Upload the light tree and the point lamps. Reservoirs stay on the device.
+    /// The product gate is the only shade that reads them.
+    fn prepare_restir_di(
+        &mut self,
+        width: u32,
+        height: u32,
+        changes: Option<&Vec<[f32; 4]>>,
+    ) -> bool {
+        self.lighting.restir_frame = false;
+        if !restir_product_shade(
+            self.lighting.settings.restir_di,
+            self.lighting.settings.direct.enabled,
+            self.lighting.shade_gate,
+        )
+            || width == 0
+            || height == 0
+        {
+            if !self.lighting.settings.restir_di {
+                self.lighting.restir_have_prev = false;
+            }
+            return false;
+        }
+        if self.lighting.restir_force_fail {
+            self.lighting.restir_have_prev = false;
+            eprintln!("lighting: restir prepare failed: the reservoir upload was forced off");
+            return false;
+        }
+        let scale = self.lighting.settings.restir_resolution_scale;
+        let (rw, rh) = crate::restir_live::reservoir_size(width, height, scale);
+        if rw == 0 || rh == 0 {
+            eprintln!("lighting: restir prepare failed: the pixel count does not fit");
+            return false;
+        }
+        let reservoir_pixels = u64::from(rw).saturating_mul(u64::from(rh));
+        if u32::try_from(reservoir_pixels).is_err() {
+            eprintln!("lighting: restir prepare failed: the pixel count does not fit");
+            return false;
+        }
+        let resized = self.lighting.restir_w != rw || self.lighting.restir_h != rh;
+        if self.lighting.restir_pipe.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(RESTIR_LIVE_SPV, self.lighting.layout, "restir-di") {
+                Ok(pipe) => self.lighting.restir_pipe = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-di pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-di", start);
+        }
+        if self.lighting.restir_spatial_pipe.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(RESTIR_SPATIAL_SPV, self.lighting.layout, "restir-spatial") {
+                Ok(pipe) => self.lighting.restir_spatial_pipe = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-spatial pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-spatial", start);
+        }
+        if self.lighting.restir_spatial_wide.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(
+                RESTIR_SPATIAL_WIDE_SPV,
+                self.lighting.layout,
+                "restir-spatial-wide",
+            ) {
+                Ok(pipe) => self.lighting.restir_spatial_wide = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-spatial-wide pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-spatial-wide", start);
+        }
+        if self.lighting.restir_direct.is_null() {
+            let start = Instant::now();
+            match self.make_compute_pipe(
+                LIGHTING_DIRECT_RESTIR_SPV,
+                self.lighting.layout,
+                "restir-direct",
+            ) {
+                Ok(pipe) => self.lighting.restir_direct = pipe,
+                Err(err) => {
+                    eprintln!("lighting: restir prepare failed: restir-direct pipeline: {err}");
+                    return false;
+                }
+            }
+            self.note_pipeline_time("restir-direct", start);
+        }
+        let need = crate::restir_live::buffer_bytes(reservoir_pixels);
+        if self.lighting.restir_buf.size < need {
+            eprintln!(
+                "lighting: restir prepare failed: reservoir {} bytes does not cover {} bytes at {rw}x{rh} (screen {width}x{height})",
+                self.lighting.restir_buf.size,
+                need
+            );
+            self.lighting.restir_have_prev = false;
+            return false;
+        }
+        let geom_reset = changes.is_none();
+        let previous = if self.lighting.restir_have_prev {
+            self.lighting.restir_prev
+        } else {
+            crate::restir_live::RestirCam::default()
+        };
+        let cost = crate::restir_live::RestirCost {
+            width: rw,
+            height: rh,
+            spatial_neighbors: self.lighting.settings.restir_spatial_neighbors,
+            spatial_radius: self.lighting.settings.restir_spatial_radius,
+            resolution_scale: scale,
+            checkerboard: self.lighting.settings.restir_spatial_checkerboard,
+            candidates: self.lighting.settings.restir_candidates,
+            split_passes: self.lighting.settings.restir_split_passes,
+            screen_width: width,
+            screen_height: height,
+        };
+        crate::restir_live::log_cost(rw, rh, &cost);
+        let Some(mut prefix) = crate::restir_live::prefix(
+            &self.lighting.restir_lamps,
+            &self.lighting.restir_prev_lamps,
+            &previous,
+            self.lighting.frame,
+            self.lighting.restir_slot,
+            cost,
+        ) else {
+            eprintln!("lighting: restir prepare failed: the reservoir prefix does not fit");
+            return false;
+        };
+        let reset = geom_reset || prefix.layout_changed || resized || !self.lighting.restir_have_prev;
+        crate::restir_live::set_history_reset(&mut prefix.words, reset);
+        self.lighting.restir_prev_lamps.clear();
+        self.lighting
+            .restir_prev_lamps
+            .extend(self.lighting.restir_lamps.iter().map(copy_gpu_lamp));
+        // One restir buffer, two frames in flight, and each frame waits only on
+        // its own slot fence. Frame N still has compute reads and writes in
+        // this buffer when frame N+1 records, and a transfer read of header
+        // words 43-46 (the stats copy of history_accepts, history_rejects, and
+        // restir_point_adds). On one queue a barrier's first scope is every
+        // earlier command in submission order. Source is compute and transfer,
+        // so that copy finishes before vkCmdUpdateBuffer overwrites those
+        // words. A second scratch and prefix would not remove the history
+        // dependency, and a barrier waits for the whole source stage either
+        // way, so the extra buffers do not start the next frame sooner.
+        // The world submit copies pc before bit 21 is set. Every restir_words
+        // load sits under restir_pix, which requires that bit, so the async
+        // pass does not touch this buffer.
+        self.memory_barrier(0x800 | 0x1000, 0x1000, 0x20 | 0x40 | 0x800, 0x1000);
+        if self.lighting.restir_clear {
+            self.lighting.restir_clear = false;
+            unsafe {
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    0,
+                    self.lighting.restir_buf.size,
+                    0,
+                );
+            }
+            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
+        }
+        let mut at = 0usize;
+        while at < prefix.words.len() {
+            let end = (at + 16384).min(prefix.words.len());
+            let Ok(offset) = u64::try_from(at.saturating_mul(4)) else {
+                return false;
+            };
+            let Ok(bytes) = u64::try_from(end.saturating_sub(at).saturating_mul(4)) else {
+                return false;
+            };
+            unsafe {
+                (self.fns.cmd_update_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    offset,
+                    bytes,
+                    prefix.words[at..end].as_ptr().cast::<std::ffi::c_void>(),
+                );
+            }
+            at = end;
+        }
+        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
+        self.lighting.restir_w = rw;
+        self.lighting.restir_h = rh;
+        self.lighting.restir_frame = prefix.total_words.saturating_mul(4) <= self.lighting.restir_buf.size;
+        self.lighting.restir_frame
+    }
+
+    /// `restir-spatial` for 0–4 neighbours, `restir-spatial-wide` above that.
+    /// The frame dispatch and the fixed-reservoir oracle both use this.
+    fn restir_spatial_for(&mut self, neighbors: u32) -> Handle {
+        if neighbors > 4 {
+            self.lighting.restir_spatial_bound = 2;
+            self.lighting.restir_spatial_wide
+        } else {
+            self.lighting.restir_spatial_bound = 1;
+            self.lighting.restir_spatial_pipe
+        }
+    }
+
+    fn restir_oracle_pipes(&mut self) -> Result<(), String> {
+        if self.lighting.layout.is_null() {
+            return Err("lighting layout is not ready".to_string());
+        }
+        if self.lighting.restir_spatial_pipe.is_null() {
+            let start = Instant::now();
+            let pipe = self.make_compute_pipe(RESTIR_SPATIAL_SPV, self.lighting.layout, "restir-spatial")?;
+            self.lighting.restir_spatial_pipe = pipe;
+            self.note_pipeline_time("restir-spatial", start);
+        }
+        if self.lighting.restir_spatial_wide.is_null() {
+            let start = Instant::now();
+            let pipe = self.make_compute_pipe(
+                RESTIR_SPATIAL_WIDE_SPV,
+                self.lighting.layout,
+                "restir-spatial-wide",
+            )?;
+            self.lighting.restir_spatial_wide = pipe;
+            self.note_pipeline_time("restir-spatial-wide", start);
+        }
+        Ok(())
+    }
+
+    fn restir_merge_oracle(
+        &mut self,
+        neighbors: u32,
+        scene: &[u32],
+        gbuf: &[u32],
+        restir: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        self.restir_oracle_pipes()?;
+        let pipe = self.restir_spatial_for(neighbors);
+        if pipe.is_null() {
+            return Err("spatial pipeline was not created".to_string());
+        }
+        self.dispatch_restir_oracle(pipe, scene, gbuf, restir)
+    }
+
+    fn oracle_words(&self, words: &[u32]) -> Result<Buffer, String> {
+        let bytes = u64::try_from(words.len().saturating_mul(4)).unwrap_or(0).max(16);
+        let buffer = self.make_buffer(bytes, 0x20, Memory::Upload)?;
+        let mut raw = Vec::with_capacity(words.len().saturating_mul(4));
+        for word in words {
+            raw.extend_from_slice(&word.to_ne_bytes());
+        }
+        self.write_buffer(&buffer, &raw)?;
+        Ok(buffer)
+    }
+
+    fn dispatch_restir_oracle(
+        &self,
+        pipe: Handle,
+        scene: &[u32],
+        gbuf: &[u32],
+        restir: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        let scene_b = self.oracle_words(scene)?;
+        let gbuf_b = self.oracle_words(gbuf)?;
+        let restir_b = self.oracle_words(restir)?;
+        let dummy = self.oracle_words(&[0u32; 4])?;
+        let read = self.record_restir_oracle(pipe, &scene_b, &gbuf_b, &restir_b, &dummy, restir);
+        self.destroy_oracle_buffers(scene_b, gbuf_b, restir_b, dummy);
+        read
+    }
+
+    fn destroy_oracle_buffers(&self, mut scene: Buffer, mut gbuf: Buffer, mut restir: Buffer, mut dummy: Buffer) {
+        self.destroy_buffer(&mut scene);
+        self.destroy_buffer(&mut gbuf);
+        self.destroy_buffer(&mut restir);
+        self.destroy_buffer(&mut dummy);
+    }
+
+    fn record_restir_oracle(
+        &self,
+        pipe: Handle,
+        scene: &Buffer,
+        gbuf: &Buffer,
+        restir: &Buffer,
+        dummy: &Buffer,
+        words: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        let width = words.get(7).copied().unwrap_or(0);
+        let height = words.get(8).copied().unwrap_or(0);
+        let pixels = width.saturating_mul(height);
+        if pixels == 0 {
+            return Err("oracle grid is empty".to_string());
+        }
+        let set = self.oracle_descriptors(scene, gbuf, restir, dummy)?;
+        let cmd = self.oracle_commands(pipe, set.1, restir, words, pixels);
+        self.destroy_oracle_sets(set.0, set.1);
+        cmd
+    }
+
+    fn oracle_descriptors(
+        &self,
+        scene: &Buffer,
+        gbuf: &Buffer,
+        restir: &Buffer,
+        dummy: &Buffer,
+    ) -> Result<(Handle, Handle), String> {
+        #[repr(C)]
+        struct Size {
+            kind: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            max_sets: u32,
+            size_count: u32,
+            sizes: *const Size,
+        }
+        let size = Size { kind: 7, count: 16 };
+        let pool_info = PoolInfo {
+            s_type: 33,
+            next: std::ptr::null(),
+            flags: 0,
+            max_sets: 1,
+            size_count: 1,
+            sizes: &size,
+        };
+        let mut pool = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_desc_pool)(
+                    self.device,
+                    &pool_info as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut pool,
+                ),
+                "oracle descriptor pool",
+            )?;
+        }
+        #[repr(C)]
+        struct Alloc {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            count: u32,
+            layouts: *const Handle,
+        }
+        let layouts = [self.lighting.desc_layout];
+        let alloc = Alloc {
+            s_type: 34,
+            next: std::ptr::null(),
+            pool,
+            count: 1,
+            layouts: layouts.as_ptr(),
+        };
+        let mut set = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.alloc_desc)(
+                    self.device,
+                    &alloc as *const Alloc as *const u8,
+                    &mut set,
+                ),
+                "oracle descriptor set",
+            )?;
+        }
+        self.write_oracle_set(set, scene, gbuf, restir, dummy)?;
+        Ok((pool, set))
+    }
+
+    fn write_oracle_set(
+        &self,
+        set: Handle,
+        scene: &Buffer,
+        gbuf: &Buffer,
+        restir: &Buffer,
+        dummy: &Buffer,
+    ) -> Result<(), String> {
+        #[repr(C)]
+        struct BufInfo {
+            buffer: Handle,
+            offset: u64,
+            range: u64,
+        }
+        #[repr(C)]
+        struct Write {
+            s_type: i32,
+            next: *const c_void,
+            set: Handle,
+            binding: u32,
+            element: u32,
+            count: u32,
+            kind: u32,
+            image: *const c_void,
+            buffer: *const BufInfo,
+            texel: *const c_void,
+        }
+        let bindings = [
+            (0u32, scene.buffer),
+            (5, dummy.buffer),
+            (6, gbuf.buffer),
+            (7, dummy.buffer),
+            (8, dummy.buffer),
+            (9, dummy.buffer),
+            (10, dummy.buffer),
+            (11, dummy.buffer),
+            (12, dummy.buffer),
+            (13, dummy.buffer),
+            (14, dummy.buffer),
+            (15, dummy.buffer),
+            (16, dummy.buffer),
+            (17, dummy.buffer),
+            (18, dummy.buffer),
+            (19, restir.buffer),
+        ];
+        let infos: Vec<BufInfo> = bindings
+            .iter()
+            .map(|(_, buffer)| BufInfo {
+                buffer: *buffer,
+                offset: 0,
+                range: u64::MAX,
+            })
+            .collect();
+        let writes: Vec<Write> = bindings
+            .iter()
+            .zip(&infos)
+            .map(|((binding, _), info)| Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
+                binding: *binding,
+                element: 0,
+                count: 1,
+                kind: 7,
+                image: std::ptr::null(),
+                buffer: info,
+                texel: std::ptr::null(),
+            })
+            .collect();
+        unsafe {
+            (self.fns.update_desc)(
+                self.device,
+                u32::try_from(writes.len()).unwrap_or(0),
+                writes.as_ptr().cast::<u8>(),
+                0,
+                std::ptr::null(),
+            );
+        }
+        Ok(())
+    }
+
+    fn destroy_oracle_sets(&self, pool: Handle, _set: Handle) {
+        if !pool.is_null() {
+            unsafe {
+                (self.fns.destroy_desc_pool)(self.device, pool, std::ptr::null());
+            }
+        }
+    }
+
+    fn oracle_commands(
+        &self,
+        pipe: Handle,
+        set: Handle,
+        restir: &Buffer,
+        words: &[u32],
+        pixels: u32,
+    ) -> Result<Vec<u32>, String> {
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            family: u32,
+        }
+        let pool_info = PoolInfo {
+            s_type: 39,
+            next: std::ptr::null(),
+            flags: 0,
+            family: self.queue_family,
+        };
+        let mut cmd_pool = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &pool_info as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut cmd_pool,
+                ),
+                "oracle command pool",
+            )?;
+        }
+        let read = self.submit_restir_oracle(pipe, set, cmd_pool, restir, words, pixels);
+        unsafe {
+            (self.fns.destroy_pool)(self.device, cmd_pool, std::ptr::null());
+        }
+        read
+    }
+
+    fn oracle_barrier(&self, cmd: Handle, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
+        #[repr(C)]
+        struct MemBar {
+            s_type: i32,
+            next: *const c_void,
+            src_access: u32,
+            dst_access: u32,
+        }
+        let bar = MemBar {
+            s_type: 46,
+            next: std::ptr::null(),
+            src_access,
+            dst_access,
+        };
+        unsafe {
+            (self.fns.cmd_barrier)(
+                cmd,
+                src_stage,
+                dst_stage,
+                0,
+                1,
+                &bar as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+        }
+    }
+
+    fn submit_restir_oracle(
+        &self,
+        pipe: Handle,
+        set: Handle,
+        cmd_pool: Handle,
+        restir: &Buffer,
+        words: &[u32],
+        pixels: u32,
+    ) -> Result<Vec<u32>, String> {
+        #[repr(C)]
+        struct AllocInfo {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            level: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        let alloc = AllocInfo {
+            s_type: 40,
+            next: std::ptr::null(),
+            pool: cmd_pool,
+            level: 0,
+            count: 1,
+        };
+        let begin = BeginInfo {
+            s_type: 42,
+            next: std::ptr::null(),
+            flags: 0,
+            inherit: std::ptr::null(),
+        };
+        let mut cmd = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.alloc_cmd)(self.device, &alloc as *const AllocInfo as *const u8, &mut cmd),
+                "oracle command",
+            )?;
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin oracle",
+            )?;
+        }
+        self.oracle_barrier(cmd, 0x4000, 0x800, 0x4000, 0x20);
+        let mut pc = [0u32; 12];
+        pc[0] = words.get(48).copied().unwrap_or(0);
+        pc[1] = words.get(49).copied().unwrap_or(0);
+        pc[9] = 2u32 << 22;
+        unsafe {
+            (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
+            (self.fns.cmd_bind_set)(cmd, 1, self.lighting.layout, 0, 1, &set, 0, std::ptr::null());
+            (self.fns.cmd_push)(
+                cmd,
+                self.lighting.layout,
+                0x20,
+                0,
+                LIGHTING_PC_BYTES,
+                pc.as_ptr().cast::<c_void>(),
+            );
+            (self.fns.cmd_dispatch)(cmd, pixels.div_ceil(64).max(1), 1, 1);
+        }
+        self.oracle_barrier(cmd, 0x800, 0x4000, 0x40, 0x2000);
+        unsafe {
+            check((self.fns.end_cmd)(cmd), "end oracle")?;
+        }
+        self.oracle_submit(cmd)?;
+        self.read_oracle(restir, words.len())
+    }
+
+    fn oracle_submit(&self, cmd: Handle) -> Result<(), String> {
+        #[repr(C)]
+        struct Submit {
+            s_type: i32,
+            next: *const c_void,
+            wait_count: u32,
+            waits: *const Handle,
+            stages: *const u32,
+            cmd_count: u32,
+            cmds: *const Handle,
+            signal_count: u32,
+            signals: *const Handle,
+        }
+        let cmds = [cmd];
+        let submit = Submit {
+            s_type: 4,
+            next: std::ptr::null(),
+            wait_count: 0,
+            waits: std::ptr::null(),
+            stages: std::ptr::null(),
+            cmd_count: 1,
+            cmds: cmds.as_ptr(),
+            signal_count: 0,
+            signals: std::ptr::null(),
+        };
+        unsafe {
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    std::ptr::null_mut(),
+                ),
+                "oracle submit",
+            )?;
+            check((self.fns.device_wait)(self.device), "oracle wait")?;
+        }
+        Ok(())
+    }
+
+    fn read_oracle(&self, buffer: &Buffer, words: usize) -> Result<Vec<u32>, String> {
+        let bytes = u64::try_from(words.saturating_mul(4)).unwrap_or(0);
+        if bytes == 0 || bytes > buffer.size {
+            return Err("oracle read does not fit".to_string());
+        }
+        let mut out = vec![0u32; words];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            check(
+                (self.fns.map_mem)(self.device, buffer.memory, 0, bytes, 0, &mut mapped),
+                "map oracle",
+            )?;
+            std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), out.as_mut_ptr(), words);
+            (self.fns.unmap_mem)(self.device, buffer.memory);
+        }
+        Ok(out)
+    }
+
+    fn dispatch_restir_pass(&mut self, pixels: u32, pass: u32, pc: &[u32; 12]) {
+        // Pass 2 and the checker copy are the spatial pipeline. The initial
+        // pipeline does not contain that pass, so the tree walk does not keep
+        // the merge lists in its live range. Four neighbours is the scalar
+        // shader. Above that, the wide shader keeps the 17-wide lists.
+        let pipe = if pass < 2 {
+            self.lighting.restir_pipe
+        } else {
+            self.restir_spatial_for(self.lighting.settings.restir_spatial_neighbors)
+        };
+        let mut base = 0u32;
+        let span = crate::restir_live::GROUP_LIMIT.saturating_mul(crate::restir_live::GROUP_SIZE);
+        while base < pixels {
+            let count = (pixels - base).min(span);
+            let groups = count.div_ceil(crate::restir_live::GROUP_SIZE).max(1);
+            let mut rpc = *pc;
+            rpc[9] = (rpc[9] & !(3 << 22)) | (pass << 22) | (1 << 21);
+            rpc[11] = base;
+            unsafe {
+                (self.fns.cmd_push)(
+                    self.cmd,
+                    self.lighting.layout,
+                    0x20,
+                    0,
+                    LIGHTING_PC_BYTES,
+                    rpc.as_ptr().cast::<std::ffi::c_void>(),
+                );
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
+                (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
+            }
+            base = base.saturating_add(span);
+        }
+    }
+
+    /// Initial, then temporal, then spatial. One dispatch covers 1440p
+    /// (`GROUP_LIMIT` groups of `GROUP_SIZE`). A larger reservoir continues
+    /// from `pc.lamp.w`. `restir_split_passes` clear runs temporal in the
+    /// initial invocation (one dispatch). The temporal stamp is then empty
+    /// and `restir_initial` is both passes. Checkerboard copies after spatial
+    /// and is included in the spatial stamp. Four queries, no fifth slot.
+    fn dispatch_restir_di(&mut self, slot: usize, pc: &[u32; 12], pool: Handle, first: u32) {
+        let width = self.lighting.restir_w;
+        let height = self.lighting.restir_h;
+        let Some(pixels) = u32::try_from(u64::from(width).saturating_mul(u64::from(height))).ok()
+        else {
+            return;
+        };
+        if self.lighting.restir_pipe.is_null()
+            || self.lighting.restir_spatial_pipe.is_null()
+            || self.lighting.restir_spatial_wide.is_null()
+            || pixels == 0
+        {
+            return;
+        }
+        let stamp = !pool.is_null();
+        if !stamp {
+            self.lighting.restir_query[slot] = u32::MAX;
+        }
+        let split = self.lighting.settings.restir_split_passes != 0;
+        let checker = self.lighting.settings.restir_spatial_checkerboard != 0;
+        let write_stamp = |this: &Self, at: u32| {
+            if stamp {
+                unsafe {
+                    (this.fns.cmd_write_timestamp)(this.cmd, 0x800, pool, first + RESTIR_STAMP_AT + at);
+                }
+            }
+        };
+        if stamp {
+            self.lighting.restir_query[slot] = first + RESTIR_STAMP_AT;
+        }
+        write_stamp(self, 0);
+        self.dispatch_restir_pass(pixels, 0, pc);
+        write_stamp(self, 1);
+        if split {
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            self.dispatch_restir_pass(pixels, 1, pc);
+        }
+        write_stamp(self, 2);
+        self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+        self.dispatch_restir_pass(pixels, 2, pc);
+        if checker {
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            self.dispatch_restir_pass(pixels, 3, pc);
+        }
+        write_stamp(self, 3);
+        unsafe {
+            (self.fns.cmd_push)(
+                self.cmd,
+                self.lighting.layout,
+                0x20,
+                0,
+                LIGHTING_PC_BYTES,
+                pc.as_ptr().cast::<std::ffi::c_void>(),
+            );
+        }
+        self.lighting.restir_prev = self.lighting.restir_view;
+        self.lighting.restir_have_prev = true;
+        self.lighting.restir_slot ^= 1;
+    }
+
+    fn lighting_passes(&mut self, slot: usize) -> Result<(), String> {
         self.lighting.hdr_query[slot] = u32::MAX;
         self.write_hdr_exposure();
         let [w, h, cols, rows] = self.lighting.dims;
@@ -2695,6 +4186,10 @@ impl Gpu {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             // Lamps, occluders and camera; the traced meshes; the drawn ones.
             self.frame_bytes.hash(&mut hasher);
+            // Fog is not in the scene bytes. A header that appears or disappears
+            // has to recompose the whole picture; a quiet reuse would keep the
+            // previous frame's fog on the pixels it does not redraw.
+            self.froxel_wrote.hash(&mut hasher);
             self.mesh_field_key.hash(&mut hasher);
             self.lighting.draw_key.hash(&mut hasher);
             hasher.finish()
@@ -2708,9 +4203,9 @@ impl Gpu {
         }
         self.lighting.stats_still[slot] = self.lighting.still;
         self.lighting.last_slot = slot;
-        // What moved in the traced world since the last frame: the probes drop the
-        // kept rays that cross it (lighting_gather.comp). Light needs nothing here: every
-        // kept hit is shaded again each frame.
+        // Bounds of what moved in the traced world since the last frame.
+        // A cache ray drops a stratum that crosses a mover. Direct light shades
+        // its samples again each frame, so it does not read this list.
         let key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2736,44 +4231,15 @@ impl Gpu {
             }
         }
         let mut block = vec![0f32; 4 * (LIGHTING_CHANGE_HEAD + LIGHTING_CHANGES)];
-        block[2] = (self.lighting.probe_runs & 1) as f32;
-        // World irradiance cells (lighting_cache.glsl, experiment): GENOS_LIGHTING_WORLD mode
-        // (1: pixels read the light cache, 2: probes average into world cells, 3:
-        // the surface cache) and GENOS_LIGHTING_WORLD_CAP frames (mode 3: ray sets a
-        // texel averages, default 16).
+        // World irradiance cells and the surface-cache flags. Head z is the
+        // probe-run bit plus twice the low flags. Head w is mode × 1000 + cap
+        // until the mover count is added below. Head 3.w is written after the
+        // last-camera copy, which shares that word.
         let world = self.lighting.settings.world_mode();
-        let cap = genos_scene::lighting_env("GENOS_LIGHTING_WORLD_CAP")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .unwrap_or(if world == 3 { LIGHTING_DEFAULT_SC_CAP } else { 32 })
-            .clamp(1, 999);
-        // Surface cache switches (lighting_cache.glsl lighting_sc_flags).
-        // Flags ride in head z above the probe-run bit (exact to 2^22); w keeps mode
-        // * 1000 + cap (flags * 100000 there lost precision past 2^24 and was capped).
-        // S72K: bits 23 and up go in head 3.w (was: capped at 2^23 - 1, so flag
-        // 16777216 and up turned every lower flag on instead).
-        // S78S debug isolate toggles (lighting_toggles): direct only rides on
-        // flag 2097152 (no cache light at hits), the rest in head 3.w bits 12-15.
-        let toggles = lighting_toggles();
-        // Bit 20 is the estimator. Bit 30 selects the older hold path.
-        // `surface_cache.blend` forces both, so GENOS_LIGHTING_SC_FLAGS cannot
-        // override them.
-        const GI_ESTIMATOR: u32 = 1 << 20;
-        const SURFACE_CACHE_HOLD: u32 = 1 << 30;
-        let mut flags_all = lighting_sc_flags_env()
-            | if toggles & LIGHTING_TOGGLE_DIRECT_ONLY != 0 {
-                2097152
-            } else {
-                0
-            };
-        flags_all |= GI_ESTIMATOR;
-        match self.lighting.settings.surface_cache.blend {
-            genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
-            genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
-        }
-        let flags = flags_all & ((1 << 23) - 1);
+        let head = lighting_change_head(&self.lighting.settings);
+        let flags = head.flags;
         block[2] = ((self.lighting.probe_runs & 1) + 2 * flags) as f32;
-        block[3] = (world * 1000 + cap) as f32;
+        block[3] = head.mode_cap as f32;
         let mut used = 0;
         // Vec4s of the block the GPU gets: head, changes and movers.
         let mut sent = LIGHTING_CHANGE_HEAD;
@@ -2786,6 +4252,17 @@ impl Gpu {
                     block[at..at + 4].copy_from_slice(b);
                 }
                 used = list.len();
+            }
+        }
+        // The shaders read this fraction as "the host hash changed". The
+        // integer count is what lighting_near_change walks. A lamp does not
+        // land in that list; the fraction is how the hold hears it this frame.
+        if self.lighting.still == 0 {
+            block[0] += LIGHTING_SCENE_CHANGED_MARK;
+            // The first frames are the fill. Arming the catch there keeps the
+            // wavelet off through the frames a still-hall gate scores.
+            if self.lighting.frame >= LIGHTING_STILL_REFRESH {
+                self.lighting.scene_catch = self.lighting.frame;
             }
         }
         sent += used;
@@ -2813,7 +4290,7 @@ impl Gpu {
             block[3] += (n * 200000) as f32;
             sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {cap} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!("lighting world {world} cap {} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", head.mode_cap % 1000, u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
             }
             // Object-local cache entries for movers (GIBS §1.5). The public
             // knob is surface_cache.attach_movers. Static geometry stays on
@@ -2838,11 +4315,10 @@ impl Gpu {
             }
             block[4 + 3] = 1.0;
         }
-        // The camera up's w (head 3.w) is unread: the flags' high bits.
-        // S72S: the budget shift (GENOS_LIGHTING_SC_BUDGET_SHIFT, 0-7: every
-        // per-round ray budget / 2^shift) rides in bits 9-11 above the high flags.
-        let budget_shift = self.lighting.settings.gi.budget_shift.min(7);
-        block[4 * 3 + 3] = (((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 15) << 12)) as f32;
+        // The camera up's w (head 3.w) is the flags' high bits, the budget
+        // shift, the isolate toggles, and the SH texel detail bit. Written
+        // after the last-camera copy, which fills this word from the basis.
+        block[4 * 3 + 3] = head.head_hi as f32;
         // A frame drawn from held light runs no probes: what it saw is still what
         // the probes last ran on.
         if !frozen {
@@ -2859,11 +4335,11 @@ impl Gpu {
         // Movers ride after the changes: upload them too (S49/S50L sent only the
         // head and changes, so every mover read zeros on the GPU).
         let used = 4 * sent;
-        let atrous_ppm = lighting_atrous_ppm(Some(
+        let atrous_ppm = lighting_atrous_ppm(
             self.lighting
                 .atrous_dirty
                 .unwrap_or(self.lighting.settings.denoiser.dirty_fraction),
-        ));
+        );
         // GI can be on while this buffer is still the 4096-byte stand-in. Probes
         // and the world cache stay off, so the alloc key does not rebuild, and the
         // changes block would start past the end (the cache-ray offset). Bounce 0
@@ -2873,56 +4349,111 @@ impl Gpu {
             && self.lighting.settings.bounce.count > 0
             && block_at + bytes <= self.lighting.work.size
         {
-            unsafe {
-                // The last frame's passes are done with the block before it is written.
-                self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
-                (self.fns.cmd_update_buffer)(
-                    self.cmd,
-                    self.lighting.work.buffer,
-                    block_at,
-                    bytes,
-                    block.as_ptr() as *const c_void,
-                );
-                if self.lighting.cache_full {
-                    // S78X: the a-trous dirty-fraction threshold (millionths). A cache
-                    // clear earlier this frame zeroed the word; the levels read it.
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        lighting_atrous_ppm_at() * 4,
-                        4,
-                        &atrous_ppm as *const u32 as *const c_void,
-                    );
-                    // MSME firefly sigma (MultiscaleMeanEstimator.hlsl, default 8).
-                    // Word 13 of the dispatch args. A zero word is sigma 0, which
-                    // tightens the clamp, so this is written every full-cache frame.
-                    let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
-                    let ray_budget = self.lighting.settings.surface_cache.ray_budget;
-                    let dormant_rays = self.lighting.settings.surface_cache.dormant_rays;
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        (LIGHTING_ARGS_AT + 11) * 4,
-                        4,
-                        &ray_budget as *const u32 as *const c_void,
-                    );
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        (LIGHTING_ARGS_AT + 12) * 4,
-                        4,
-                        &dormant_rays as *const u32 as *const c_void,
-                    );
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.lighting.cache_keys.buffer,
-                        (LIGHTING_ARGS_AT + 13) * 4,
-                        4,
-                        &firefly_sigma as *const u32 as *const c_void,
-                    );
-                }
-                self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+            // The last frame's passes are done with the block before it is written.
+            self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
+            let floats = used.min(block.len());
+            let cmd = self.cmd;
+            let work = self.lighting.work.buffer;
+            self.write_device(cmd, work, block_at, pod_slice(&block[..floats]))?;
+            if self.lighting.cache_full {
+                // S78X: the a-trous dirty-fraction threshold (millionths). A cache
+                // clear earlier this frame zeroed the word; the levels read it.
+                let keys = self.lighting.cache_keys.buffer;
+                self.write_device(
+                    cmd,
+                    keys,
+                    lighting_atrous_ppm_at() * 4,
+                    &atrous_ppm.to_ne_bytes(),
+                )?;
+                // MSME firefly sigma (MultiscaleMeanEstimator.hlsl, default 8).
+                // Word 13 of the dispatch args. A zero word is sigma 0, which
+                // tightens the clamp, so this is written every full-cache frame.
+                let firefly_sigma = self.lighting.settings.surface_cache.firefly_sigma.to_bits();
+                let ray_budget = self.lighting.settings.surface_cache.ray_budget;
+                let dormant_rays = self.lighting.settings.surface_cache.dormant_rays;
+                // Drain check noise test (ADR 0039 stage 1), word 14. A zero
+                // word is sigma 0, the 1 % gap alone.
+                let drain_sigma = self.lighting.settings.surface_cache.drain_sigma.to_bits();
+                self.write_device(
+                    cmd,
+                    keys,
+                    (LIGHTING_ARGS_AT + 11) * 4,
+                    &ray_budget.to_ne_bytes(),
+                )?;
+                self.write_device(
+                    cmd,
+                    keys,
+                    (LIGHTING_ARGS_AT + 12) * 4,
+                    &dormant_rays.to_ne_bytes(),
+                )?;
+                self.write_device(
+                    cmd,
+                    keys,
+                    (LIGHTING_ARGS_AT + 13) * 4,
+                    &firefly_sigma.to_ne_bytes(),
+                )?;
+                self.write_device(
+                    cmd,
+                    keys,
+                    (LIGHTING_ARGS_AT + 14) * 4,
+                    &drain_sigma.to_ne_bytes(),
+                )?;
+                let fill = self.lighting.settings.surface_cache.fill;
+                let now = std::time::Instant::now();
+                let measured = self.lighting.fill_clock.map_or(0.0, |then| {
+                    now.saturating_duration_since(then).as_secs_f32()
+                });
+                self.lighting.fill_clock = Some(now);
+                self.lighting.fill_dt = measured;
+                let frame_dt = if measured > 1.0e-4 && measured < 0.5 {
+                    measured
+                } else {
+                    fill.frame_dt
+                };
+                let fill_words = [
+                    fill.budget,
+                    fill.tile.max(1),
+                    fill.lod_near.to_bits(),
+                    fill.leash_scale.to_bits(),
+                    fill.look_ahead.to_bits(),
+                    fill.cell_max.to_bits(),
+                    fill.far.to_bits(),
+                    fill.far_share.to_bits(),
+                    fill.offscreen_floor.to_bits(),
+                    fill.error_target.to_bits(),
+                    fill.prox_min.to_bits(),
+                    fill.change_weight.to_bits(),
+                    fill.warmup_rays,
+                    fill.ray_cap,
+                    frame_dt.to_bits(),
+                    self.lighting.settings.world_cache.cell_metres.to_bits(),
+                    fill.check_rate.max(1),
+                    fill.max_picks.clamp(1, 8),
+                    fill.lambda_decay.to_bits(),
+                    fill.window_floor.to_bits(),
+                    fill.catchup_max.to_bits(),
+                    fill.check_sigma.to_bits(),
+                    fill.share,
+                    fill.share_min_hit.to_bits(),
+                    fill.share_cap,
+                    fill.share_plane.to_bits(),
+                    fill.share_normal.to_bits(),
+                    fill.share_w_cap.to_bits(),
+                    fill.share_cos.to_bits(),
+                    fill.share_conf.to_bits(),
+                    fill.share_receivers,
+                    fill.share_handover,
+                ];
+                let frame_pixels =
+                    u64::from(self.extent_w.max(1)).saturating_mul(u64::from(self.extent_h.max(1)));
+                self.write_device(
+                    cmd,
+                    keys,
+                    lighting_fill_param_words(frame_pixels) * 4,
+                    pod_slice(&fill_words),
+                )?;
             }
+            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
         }
         // The light alone (no camera): while it holds and a full sweep has changed
         // no mature patch, rounds relight young patches only. Any change goes back
@@ -2944,7 +4475,10 @@ impl Gpu {
         };
         let tracked = if sun_amortise { self.lighting.light_hash } else { light };
         let counters_read = self.lighting.async_on
-            || lighting_stats_wanted(self.lighting.settings.world_mode());
+            || lighting_stats_wanted(
+            self.lighting.settings.world_mode(),
+            self.lighting.settings.experiments.sc_flags,
+        );
         if tracked != self.lighting.light_hash {
             self.lighting.light_hash = tracked;
             self.lighting.light_quiet = 0;
@@ -2964,13 +4498,13 @@ impl Gpu {
         // Surface cache (mode 3): bit 10 says the light has held two rounds, and a
         // round that relights nothing has nothing left to converge.
         let sc = self.lighting.settings.world_mode() == 3;
-        let young_only = if sc { self.lighting.light_quiet >= 2 } else { self.lighting.young_ok && self.lighting.light_quiet >= sweep };
+        let young_only = if sc { self.lighting.light_quiet >= 2 } else { self.lighting.settings.experiments.young_only && self.lighting.light_quiet >= sweep };
         self.lighting.stats_light[slot] = tracked;
         self.lighting.stats_young[slot] = young_only || sc;
         // z: bgra, fills (bit 6), young-only rounds and lamp picks (lighting_common.glsl);
         // the gather and filter passes add their round (bits 1-2) below.
-        let picks = genos_scene::lighting_env("GENOS_LIGHTING_CACHE_PICKS").is_ok_and(|v| v == "1");
-        let fill = genos_scene::lighting_env("GENOS_LIGHTING_FILL").map_or(true, |v| v != "0");
+        let picks = self.lighting.settings.experiments.cache_picks;
+        let fill = self.lighting.settings.experiments.fill;
         // Moving objects (debugging.md, spinning boxes): a probe stratum traced from
         // inside a change is filled, not kept (bit 3); patches near a change are
         // relit first (bit 5); a patch not lit yet reads its lit neighbours (bit 7).
@@ -2993,6 +4527,13 @@ impl Gpu {
         };
         let mut lamp = lamp_pick_push(&self.lighting.settings);
         lamp[1] |= lamp_shade_bits(self.lighting.shade_gate);
+        if restir_off_is_exact(
+            self.lighting.settings.restir_di,
+            self.lighting.settings.lamp_pick.mode,
+            self.lighting.shade_gate,
+        ) {
+            lamp[1] |= 1 << 19;
+        }
         // The existing diag bit counts fresh shadow rays. It does not change
         // the shade. It is set only while GI metrics are recording.
         if self.gpu_times.as_ref().is_some_and(|times| times.record) {
@@ -3018,14 +4559,26 @@ impl Gpu {
         // geometry moved, the surface cache is off, or the block list cannot
         // cover the image. A small sun step, with the camera held, takes one
         // full-grid sun compose instead of that list. GENOS_LIGHTING_COMPOSE_ALL
-        // forces the full picture.
-        let compose_full = !self.lighting.compose_valid
+        // turns `compose_reuse` off in the settings, which forces the full picture.
+        let bounce_filling = self.lighting.bounce_fill < BOUNCE_FILL_FRAMES;
+        // The fill walks every frame until the first drift pass. Holding the
+        // frame-1 bounce and replacing it on frame 32 was the open-picture step.
+        let opening = self.lighting.frame != 0 && self.lighting.frame < LIGHTING_FILL_WALK;
+        // The drift pass visits every pixel. A miss that never resolved is
+        // stored then, and a block the retry list could not hold is not left
+        // black. Later held frames reuse that store.
+        let refresh = self.lighting.frame != 0
+            && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
+        let compose_full = bounce_filling
+            || opening
+            || refresh
+            || !self.lighting.compose_valid
             || !(self.lighting.still > 0 || sun_amortise)
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
-            || genos_scene::lighting_env_os("GENOS_LIGHTING_COMPOSE_ALL").is_some()
-            || blocks > LIGHTING_COMPOSE_CAP;
+            || blocks > LIGHTING_COMPOSE_CAP
+            || (self.particle_stamped && !self.lighting.hdr.legacy_bytes);
         // The raster colour as the base: pixels with no surface keep it. A held
         // frame keeps last frame's picture in the buffer instead.
         if compose_full {
@@ -3033,20 +4586,26 @@ impl Gpu {
         }
         self.memory_barrier(0x80 | 0x1000, 0x800, 0x40 | 0x1000, 0x20 | 0x40);
         let set = self.lighting.sets[slot];
-        // Settled (frozen above): the probes and the light cache hold their light,
-        // and only the pixels' direct light and the final pass run, so a still
-        // scene draws the same picture every frame (no residual cache drift) and
-        // idles cheaply.
+        // `frozen` is the host settle bit (32 still frames, then either the
+        // change counter or `sc_settle`, and the drain flag). It used to cancel
+        // the cache round. A 1440p still hall hits that bit around frame 94,
+        // and every later frame traced zero cache rays. The surface cache
+        // keeps its budget; probe-only still idles.
         self.lighting.held = if frozen { self.lighting.held.saturating_add(1) } else { 0 };
-        // A light cache round is due (GENOS_LIGHTING_CACHE_HZ caps them per second). On
-        // the async queue (GENOS_LIGHTING_ASYNC=1) it goes there, else into this frame;
+        // A light cache round is due (`experiments.cache_hz` caps them per second). On
+        // the async queue (`experiments.cache_async`) it goes there, else into this frame;
         // a frame without one runs the picture's passes only (lighting_mode 1).
-        let due = !frozen
-            && (self.lighting.cache_hz <= 0.0
+        let cache_hz = f64::from(self.lighting.settings.experiments.cache_hz);
+        let surface_budget = self.lighting.settings.world_mode() == 3
+            && self.lighting.settings.world_cache.enabled
+            && self.lighting.settings.gi.enabled
+            && self.lighting.settings.bounce.count >= 2;
+        let due = (surface_budget || !frozen)
+            && (cache_hz <= 0.0
                 || self
                     .lighting
                     .last_round
-                    .is_none_or(|t| t.elapsed().as_secs_f64() * self.lighting.cache_hz >= 1.0));
+                    .is_none_or(|t| t.elapsed().as_secs_f64() * cache_hz >= 1.0));
         let try_async = due
             && self.lighting.async_on
             && self.lighting.cache_full
@@ -3088,6 +4647,7 @@ impl Gpu {
                 Err(e) => {
                     eprintln!("lighting: async light cache off: {e}");
                     self.lighting.async_on = false;
+                    self.lighting.async_failed = true;
                 }
             }
         }
@@ -3168,14 +4728,11 @@ impl Gpu {
         self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
         let mut hdr_pool: Handle = std::ptr::null_mut();
         let mut hdr_base = None;
+        let ctrl = self.lighting.ctrl_bytes;
+        let stats = self.lighting.stats_dev[slot].buffer;
+        let cmd = self.cmd;
+        self.write_device(cmd, stats, LIGHTING_CTRL_WORD * 4, &ctrl)?;
         unsafe {
-            (self.fns.cmd_update_buffer)(
-                self.cmd,
-                self.lighting.stats_dev[slot].buffer,
-                LIGHTING_CTRL_WORD * 4,
-                self.lighting.ctrl_bytes.len() as u64,
-                self.lighting.ctrl_bytes.as_ptr() as *const c_void,
-            );
             if self.lighting.cache_full {
             (self.fns.cmd_fill_buffer)(
                 self.cmd,
@@ -3204,18 +4761,59 @@ impl Gpu {
                     0,
                 );
             }
-                (self.fns.cmd_update_buffer)(
-                    self.cmd,
-                    self.lighting.cache_keys.buffer,
-                    lighting_sun_at() * 4,
-                    32,
-                    sun_words.as_ptr() as *const c_void,
-                );
+                let keys = self.lighting.cache_keys.buffer;
+                self.write_device(cmd, keys, lighting_sun_at() * 4, pod_bytes(&sun_words))?;
+                self.write_device(
+                    cmd,
+                    keys,
+                    LIGHTING_LAMP_CATCH_AT * 4,
+                    &self.lighting.scene_catch.to_ne_bytes(),
+                )?;
             }
             // The sun words are read by compute and as indirect args: the
             // indirect read needs the draw-indirect stage
             // (VUID-vkCmdPipelineBarrier-dstAccessMask-02816).
             self.memory_barrier(0x1000, 0x800 | 0x2, 0x1000, 0x20 | 0x1);
+            let restir_wanted = restir_product_shade(
+                self.lighting.settings.restir_di,
+                self.lighting.settings.direct.enabled,
+                self.lighting.shade_gate,
+            );
+            let first = slot as u32 * LIGHTING_STAMPS;
+            let stamps = self
+                .gpu_times
+                .as_mut()
+                .filter(|t| !t.lighting_pool.is_null())
+                .map(|t| {
+                    t.lighting_ids[slot] = groups.iter().map(|g| g.0).collect();
+                    t.lighting_pool
+                });
+            if let Some(pool) = stamps {
+                (self.fns.cmd_reset_query)(self.cmd, pool, first, LIGHTING_STAMPS);
+                // GPU time of the prefix upload. The close stamp is after prepare.
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + RESTIR_PREPARE_AT);
+            }
+            let restir_on = self.prepare_restir_di(w, h, changes.as_ref());
+            if let Some(pool) = stamps {
+                (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + RESTIR_PREPARE_AT + 1);
+            }
+            if restir_on {
+                pc[9] |= 1 << 21;
+            } else {
+                self.lighting.restir_query[slot] = u32::MAX;
+                if restir_wanted {
+                    // Labelled exact. The next frame that binds the reservoir
+                    // clears this bit, and that frame does not keep the hold.
+                    pc[9] |= 1 << 19;
+                    self.lighting.restir_prepare_failures = self
+                        .lighting
+                        .restir_prepare_failures
+                        .saturating_add(1);
+                    eprintln!(
+                        "lighting: restir prepare failed; this frame shades the labelled exact sum"
+                    );
+                }
+            }
             (self.fns.cmd_bind_set)(
                 self.cmd,
                 1,
@@ -3235,17 +4833,47 @@ impl Gpu {
                 pc.as_ptr() as *const c_void,
             );
             // GENOS_GPU_TIMES: a stamp before the passes and after each (full frames).
-            let stamps = self
-                .gpu_times
-                .as_mut()
-                .filter(|t| !t.lighting_pool.is_null())
-                .map(|t| {
-                    t.lighting_ids[slot] = groups.iter().map(|g| g.0).collect();
-                    t.lighting_pool
-                });
-            let first = slot as u32 * LIGHTING_STAMPS;
+            // The query reset and the prepare-open stamp are above prepare.
+            if restir_on {
+                let pool = stamps.unwrap_or(std::ptr::null_mut());
+                // Frame N wrote the history slot this frame reads, and wrote the
+                // scratch this frame overwrites. The prefix barrier above makes
+                // those writes available. This one makes them visible to the
+                // passes' reads and writes.
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                self.dispatch_restir_di(slot, &pc, pool, first);
+                // Shade reads the spatial store (header word 6). A 1440p pass is
+                // one dispatch; without this barrier the 4070 starts the direct
+                // shade while that store is still in flight, and the picture
+                // changes with the overlap. Lavapipe runs the dispatches in
+                // order, so the race does not show there. This is intra-frame:
+                // the two barriers above order the other frame.
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20);
+            }
+            if round
+                && self.lighting.cache_full
+                && self.lighting.settings.surface_cache.fill.budget > 0
+            {
+                let pixels = u64::from(w) * u64::from(h);
+                let scratch =
+                    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS;
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    scratch * 4,
+                    FILL_HEADER_WORDS * 4,
+                    0,
+                );
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    lighting_fill_tile_at(pixels) * 4,
+                    FILL_TILE_WORDS * 4,
+                    0,
+                );
+                self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+            }
             if let Some(pool) = stamps {
-                (self.fns.cmd_reset_query)(self.cmd, pool, first, LIGHTING_STAMPS);
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
             let mut filter_round = 0u32;
@@ -3308,11 +4936,23 @@ impl Gpu {
                 let kind = if gy >= LIGHTING_ARGS { gy } else { 0 };
                 if kind != 0 {
                     let mut k_pc = cur_pc;
-                    k_pc[6] |= 1 << 4;
-                    if kind == LIGHTING_MODE1 {
-                        k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
-                    } else if kind == LIGHTING_DENSE_RAYS {
-                        k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                    // Bits 1 and 2 select the parallel fill passes. Bit 4 is the
+                    // one-thread plan. The three fill passes leave bit 4 clear.
+                    let fill_bits = match kind {
+                        LIGHTING_FILL_HIST => Some(4),
+                        LIGHTING_FILL_EMIT_ON => Some(2),
+                        LIGHTING_FILL_EMIT_OFF => Some(6),
+                        _ => None,
+                    };
+                    if let Some(bits) = fill_bits {
+                        k_pc[6] = (cur_pc[6] & !0x16) | bits;
+                    } else {
+                        k_pc[6] |= 1 << 4;
+                        if kind == LIGHTING_MODE1 {
+                            k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
+                        } else if kind == LIGHTING_DENSE_RAYS {
+                            k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                        }
                     }
                     (self.fns.cmd_push)(
                         self.cmd,
@@ -3322,6 +4962,21 @@ impl Gpu {
                         LIGHTING_PC_BYTES,
                         k_pc.as_ptr() as *const c_void,
                     );
+                }
+                // Pass 9 is the same-frame gather. It is not one of the nine pipes.
+                // Maintenance enqueues, then the drain fills, then compose loads.
+                if pass == SH_PREP_PASS {
+                    self.dispatch_sh_prep(sun_compose, compose_full, gx, gy);
+                    self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
+                    if let Some(pool) = stamps {
+                        let at = first
+                            .saturating_add(1)
+                            .saturating_add(u32::try_from(k).unwrap_or(u32::MAX));
+                        if at < first + RESTIR_STAMP_AT {
+                            (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, at);
+                        }
+                    }
+                    continue;
                 }
                 // Pass 7 is compose: the sun path binds its own pipeline.
                 // Pass 8 is a-trous: the plain kernel has no adaptive branch.
@@ -3343,9 +4998,32 @@ impl Gpu {
                 } else {
                     self.lighting.pipes[pass]
                 };
+                let maint_pipe = self.lighting.compose_maint_pipe;
+                // World mode 3 gathered in pass 9. Other modes still write here.
+                if pass == 7 && !sun_compose && !maint_pipe.is_null() && self.lighting.settings.world_mode() != 3 {
+                    // #142: the cache writes compose used to make, over the same
+                    // pixels, before compose reads the cache (and clears the
+                    // G-buffer record this pass reads).
+                    (self.fns.cmd_bind_pipe)(self.cmd, 1, maint_pipe);
+                    if compose_full {
+                        (self.fns.cmd_dispatch)(self.cmd, gx.max(1), gy.max(1), 1);
+                    } else {
+                        (self.fns.cmd_dispatch_indirect)(
+                            self.cmd,
+                            self.lighting.cache_keys.buffer,
+                            lighting_compose_at() * 4,
+                        );
+                    }
+                    self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 if pass == 7 {
                     self.lighting.compose_dispatches = 1;
+                }
+                if pass == 7 && self.lighting.bounce_fill < BOUNCE_FILL_FRAMES {
+                    // The clear frame stores an empty bounce. Zero the slice
+                    // so this frame's walk is what the picture shows.
+                    self.clear_bounce_slice(w, h);
                 }
                 if pass == 7 && sun_compose {
                     // One dispatch. The old path indirect-dispatched the dirty
@@ -3355,18 +5033,8 @@ impl Gpu {
                     // the first frame stores bounce everywhere; later frames
                     // walk only the band.
                     if !self.lighting.sun_bounce_live {
-                        let hist = u64::from(self.lighting.settings.direct.refresh_frames > 1);
-                        let pixels = u64::from(w) * u64::from(h);
-                        let at = (2 + hist) * pixels * 4;
-                        (self.fns.cmd_fill_buffer)(
-                            self.cmd,
-                            self.lighting.out.buffer,
-                            at,
-                            pixels * 4,
-                            0,
-                        );
+                        self.clear_bounce_slice(w, h);
                         self.lighting.sun_bounce_live = true;
-                        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
                     }
                     (self.fns.cmd_dispatch)(self.cmd, w.div_ceil(8).max(1), h.div_ceil(8).max(1), 1);
                 } else if pass == 7 && !compose_full {
@@ -3390,7 +5058,10 @@ impl Gpu {
                 // The args pass's sizes are read as indirect commands (stage 0x2, access 0x1).
                 self.memory_barrier(0x800, 0x800 | 0x1000 | 0x2, 0x40, 0x20 | 0x40 | 0x800 | 0x1);
                 if let Some(pool) = stamps {
-                    (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first + 1 + k as u32);
+                    let at = first + 1 + k as u32;
+                    if at < first + RESTIR_STAMP_AT {
+                        (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, at);
+                    }
                 }
             }
             if agx_display {
@@ -3410,8 +5081,26 @@ impl Gpu {
             // pass replaces the 8-bit picture. The lattice sample is not in the GI shader.
             self.stamp_hdr_time(slot, true);
             self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            // Cards go into scene_lin before bloom and AgX. A display-space
+            // blend after this pass misses exposure and the halo.
+            let scene = self.lighting.scene_lin.buffer;
+            self.composite_particles_into_scene(w, h, scene)?;
+            // The card composite binds its own set. Bloom and AgX use this one.
+            unsafe {
+                (self.fns.cmd_bind_set)(
+                    self.cmd,
+                    1,
+                    self.lighting.layout,
+                    0,
+                    1,
+                    &set,
+                    0,
+                    std::ptr::null(),
+                );
+            }
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
             if gpu_bloom {
-                self.record_gpu_bloom(w, h);
+                self.record_gpu_bloom(w, h)?;
             }
             unsafe {
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.agx_pipe);
@@ -3445,8 +5134,8 @@ impl Gpu {
         }
         self.image_barrier(image, 6, 7, 0x1000, 0x1000, 0x800, 0x1000);
         if self.format == crate::hdr_output::FORMAT_R16F {
-            let offset = u64::from(w).saturating_mul(u64::from(h)).saturating_mul(16);
-            self.copy_image_buffer(image, 7, self.lighting.hdr_encode.buffer, w, h, false, offset);
+            // The encode buffer starts with tightly packed RGBA16F. BGRA follows it.
+            self.copy_image_buffer(image, 7, self.lighting.hdr_encode.buffer, w, h, false, 0);
         } else {
             self.copy_image_buffer(image, 7, self.lighting.out.buffer, w, h, false, 0);
         }
@@ -3487,16 +5176,74 @@ impl Gpu {
                 1,
                 &region as *const Region as *const u8,
             );
+            self.lighting.stats_slot = slot;
+            // The dirty-list length. The same barrier covers the compute writes.
+            // One host buffer: read it only after the device is idle.
+            if self.lighting.cache_full && !self.lighting.compose_host.buffer.is_null() {
+                let list = Region { src: lighting_compose_at() * 4, dst: 0, size: 4 };
+                (self.fns.cmd_copy_buffer)(
+                    self.cmd,
+                    self.lighting.cache_keys.buffer,
+                    self.lighting.compose_host.buffer,
+                    1,
+                    &list as *const Region as *const u8,
+                );
+            }
+            // History counters live in the restir header, past the prefix fields.
+            // The tail sits after the unfilled mask so diag[], chg[], and the
+            // mask keep their words. A frame that did not run ReSTIR stores zeros.
+            let tail = Region {
+                src: (crate::restir_live::HIST_ACCEPT_WORD as u64).saturating_mul(4),
+                dst: restir_diag_tail_offset(),
+                size: RESTIR_DIAG_TAIL_BYTES,
+            };
+            let restir_ready = self.lighting.restir_frame
+                && self.lighting.restir_buf.size
+                    >= tail.src.saturating_add(RESTIR_DIAG_TAIL_BYTES);
+            if restir_ready {
+                (self.fns.cmd_copy_buffer)(
+                    self.cmd,
+                    self.lighting.restir_buf.buffer,
+                    self.lighting.stats[slot].buffer,
+                    1,
+                    &tail as *const Region as *const u8,
+                );
+            } else {
+                (self.fns.cmd_fill_buffer)(
+                    self.cmd,
+                    self.lighting.stats[slot].buffer,
+                    tail.dst,
+                    RESTIR_DIAG_TAIL_BYTES,
+                    0,
+                );
+            }
         }
         if hdr_compose {
             if let Err(err) = self.ensure_meter_pipe() {
                 eprintln!("lighting: gpu meter off: {err}");
             } else {
-                self.record_gpu_meter(w, h);
+                self.record_gpu_meter(slot, w, h);
             }
         }
         self.memory_barrier(0x1000, 0x800 | 0x1000 | 0x4000, 0x1000, 0x20 | 0x40 | 0x800 | 0x2000);
         self.lighting_dump_copy();
+        if self.lighting.bounce_fill < BOUNCE_FILL_FRAMES {
+            self.lighting.bounce_fill = self.lighting.bounce_fill.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    /// Zero the linear-bounce slice. `0` means empty; a real black bounce is
+    /// stored as `pack + 1`. The slice sits after the picture and the glow,
+    /// and before the screen-wavelet slices.
+    fn clear_bounce_slice(&mut self, w: u32, h: u32) {
+        let hist = u64::from(self.lighting.settings.direct.refresh_frames > 1);
+        let pixels = u64::from(w) * u64::from(h);
+        let at = (2 + hist) * pixels * 4;
+        unsafe {
+            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.out.buffer, at, pixels * 4, 0);
+        }
+        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
     }
 
     /// S78S: frames N and N + 1 (GENOS_LIGHTING_DUMP): copy the lighting buffers
@@ -3629,6 +5376,10 @@ impl Gpu {
     }
 
     fn destroy_lighting(&mut self) {
+        // First GPU free of teardown. `wait_lighting_world` returns without
+        // waiting once `lifecycle_release` is set, and the 48 ms drain may
+        // have given up while this frame and the world submission are queued.
+        self.drain_for_teardown();
         self.wait_lighting_world();
         self.lighting.world_busy = false;
         let mut world_stats = std::mem::replace(&mut self.lighting.world_stats, Buffer::empty());
@@ -3659,13 +5410,20 @@ impl Gpu {
         let mut scene_host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         let mut hdr_params = std::mem::replace(&mut self.lighting.hdr_params, Buffer::empty());
         let mut hdr_encode = std::mem::replace(&mut self.lighting.hdr_encode, Buffer::empty());
-        let mut agx_lut = std::mem::replace(&mut self.lighting.agx_lut, Buffer::empty());
         let mut bloom = std::mem::replace(&mut self.lighting.bloom, Buffer::empty());
-        let mut meter_dev = std::mem::replace(&mut self.lighting.meter_dev, Buffer::empty());
-        let mut meter_host = std::mem::replace(&mut self.lighting.meter_host, Buffer::empty());
+        let mut meter_dev = std::mem::replace(
+            &mut self.lighting.meter_dev,
+            [Buffer::empty(), Buffer::empty()],
+        );
+        let mut meter_host = std::mem::replace(
+            &mut self.lighting.meter_host,
+            [Buffer::empty(), Buffer::empty()],
+        );
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
+        let mut restir_buf = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
+        let mut compose_host = std::mem::replace(&mut self.lighting.compose_host, Buffer::empty());
         for k in 0..2 {
             let mut stats_dev = std::mem::replace(&mut self.lighting.stats_dev[k], Buffer::empty());
             self.destroy_buffer(&mut stats_dev);
@@ -3679,20 +5437,28 @@ impl Gpu {
         self.destroy_buffer(&mut scene_host);
         self.destroy_buffer(&mut hdr_params);
         self.destroy_buffer(&mut hdr_encode);
-        self.destroy_buffer(&mut agx_lut);
         self.destroy_buffer(&mut bloom);
-        self.destroy_buffer(&mut meter_dev);
-        self.destroy_buffer(&mut meter_host);
+        for dev in &mut meter_dev {
+            self.destroy_buffer(dev);
+        }
+        for host in &mut meter_host {
+            self.destroy_buffer(host);
+        }
         self.destroy_buffer(&mut lamp_res);
+        self.destroy_buffer(&mut restir_buf);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
+        self.destroy_buffer(&mut compose_host);
         unsafe {
             for pipe in self
                 .lighting
                 .pipes
                 .iter_mut()
                 .chain(std::iter::once(&mut self.lighting.atrous_plain))
-                .chain(std::iter::once(&mut self.lighting.direct_plain))
+                .chain(std::iter::once(&mut self.lighting.restir_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_spatial_pipe))
+                .chain(std::iter::once(&mut self.lighting.restir_spatial_wide))
+                .chain(std::iter::once(&mut self.lighting.restir_direct))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
@@ -3700,6 +5466,8 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.bloom_pipe))
                 .chain(std::iter::once(&mut self.lighting.meter_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
+                .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
+                .chain(std::iter::once(&mut self.lighting.sh_drain_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {
@@ -3725,8 +5493,8 @@ impl Gpu {
 }
 
 /// S70B: the frame's counters are read back only where something uses them.
-fn lighting_stats_wanted(world: u32) -> bool {
-    lighting_debug_on() || !(world == 3 && lighting_sc_flags_env() & 8192 != 0)
+fn lighting_stats_wanted(world: u32, sc_flags: u32) -> bool {
+    lighting_debug_on() || !(world == 3 && sc_flags & 8192 != 0)
 }
 
 /// Frames since the light last changed, counted on the CPU. The default surface
@@ -3741,26 +5509,108 @@ fn lighting_counts_light_on_cpu(world_mode: u32, probe_only: bool, counters_read
 // Defaults with no env set (S54K): GI, the surface cache, cap 64, the
 // S49 flag set and object-local texels. Each env var still overrides.
 const LIGHTING_DEFAULT_SC_CAP: u32 = 64;
-const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6007050;
+
+/// The change-block words `lighting_passes` uploads from the settings.
+/// `flags` is the low 23 surface-cache bits (head z, above the probe-run bit).
+/// `mode_cap` is world mode × 1000 + cap (head w, before mover counts).
+/// `head_hi` is head 3.w: high flags, the budget shift, the isolate toggles,
+/// ADR 0039 stage 3 bit 17 (`surface_cache.sh_texel_detail`), stage 4
+/// bit 18 (`surface_cache.sh_texel_ray_cut`), and the stage 5 slice
+/// bit 19 (`surface_cache.sh_probe_retire`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightingChangeHead {
+    pub flags: u32,
+    pub mode_cap: u32,
+    pub head_hi: u32,
+}
+
+pub fn lighting_change_head(settings: &genos_scene::LightingSettings) -> LightingChangeHead {
+    let world = settings.world_mode();
+    let cap = match settings.experiments.world_cap {
+        0 if world == 3 => LIGHTING_DEFAULT_SC_CAP,
+        0 => 32,
+        cap => cap,
+    }
+    .clamp(1, 999);
+    let mut toggles = settings.experiments.toggles;
+    // Test-only. A shipping build's guard is always on, so this bit stays
+    // whatever the settings asked for. The knockout feature with
+    // GENOS_KNOCKOUT=cache_fill freezes cache value writes. The dispatches
+    // stay: dropping them faults lavapipe.
+    if !crate::gate::guard(crate::gate::CACHE_FILL) {
+        toggles |= genos_scene::LIGHTING_TOGGLE_FREEZE_CACHE;
+    }
+    const GI_ESTIMATOR: u32 = 1 << 20;
+    const SURFACE_CACHE_HOLD: u32 = 1 << 30;
+    const SH_CELLS: u32 = 1 << 23;
+    const SH_TEXEL_DETAIL: u32 = 1 << 17;
+    const SH_TEXEL_RAY_CUT: u32 = 1 << 18;
+    const SH_PROBE_RETIRE: u32 = 1 << 19;
+    let mut flags_all = settings.experiments.sc_flags
+        | if toggles & genos_scene::LIGHTING_TOGGLE_DIRECT_ONLY != 0 {
+            2097152
+        } else {
+            0
+        };
+    flags_all |= GI_ESTIMATOR;
+    match settings.surface_cache.blend {
+        genos_scene::SurfaceCacheBlend::Msme => flags_all &= !SURFACE_CACHE_HOLD,
+        genos_scene::SurfaceCacheBlend::Hold => flags_all |= SURFACE_CACHE_HOLD,
+    }
+    if settings.surface_cache.sh_cells {
+        flags_all |= SH_CELLS;
+    } else {
+        // Bit 23 of sc_flags is the same word. Leaving it set keeps sh_cells
+        // on after the setting is turned off: head_hi bit 0 is that bit.
+        flags_all &= !SH_CELLS;
+    }
+    let budget_shift = settings.gi.budget_shift.min(7);
+    let mut head_hi = ((flags_all >> 23) & 511) | (budget_shift << 9) | ((toggles & 31) << 12);
+    if settings.surface_cache.sh_texel_detail {
+        head_hi |= SH_TEXEL_DETAIL;
+    }
+    if settings.surface_cache.sh_texel_ray_cut {
+        head_hi |= SH_TEXEL_RAY_CUT;
+    }
+    if settings.surface_cache.sh_probe_retire {
+        head_hi |= SH_PROBE_RETIRE;
+    }
+    LightingChangeHead {
+        flags: flags_all & ((1 << 23) - 1),
+        mode_cap: world * 1000 + cap,
+        head_hi,
+    }
+}
 /// Lighting stats buffer: 24 words, diag[64], chg[32], the a-trous fallback
 /// (fraction, mode, threshold, filtered texels) at `LIGHTING_ATROUS_STAT`, the
 /// control block at word 124 (16 words), then the unfilled-pixel count and the
 /// shaded-pixel count. Two pad words keep the mask on a 144-word boundary. The
 /// mask follows, one bit per composed pixel, and is not part of this header.
-/// The change-counter enable word stays chg[31] (word 119).
-const LIGHTING_STATS_WORDS: usize = 144;
+/// The change-counter enable word stays chg[31] (word 119). Sixteen bytes
+/// after the mask cap hold the restir history counters. They are not diag words.
+const LIGHTING_STATS_WORDS: usize = 148;
 /// `gstats.diag[48]` (pixel shadow rays). The header is 24 words.
 const LAMP_PICK_DIAG_WORD: usize = 24 + 48;
 const _: () = assert!(LAMP_PICK_DIAG_WORD + 12 < LIGHTING_STATS_WORDS);
 const LIGHTING_STATS_BYTES: u64 = LIGHTING_STATS_WORDS as u64 * 4;
+/// Three header words plus one pad, after the unfilled mask.
+const RESTIR_DIAG_TAIL_BYTES: u64 = 16;
 /// Words 140 and 141. The control block occupies 124..140.
 const LIGHTING_UNFILLED_WORD: usize = 140;
 const LIGHTING_SHADED_WORD: usize = 141;
 /// Word 0 of the mask. Matches lighting_cache.glsl.
-const LIGHTING_UNFILLED_MASK_AT: usize = 144;
+const LIGHTING_UNFILLED_MASK_AT: usize = 148;
+/// Words 144 and 145: the cache round's WRC sample and held luminance sums (x256).
+/// Word 146: 1 while the cache is draining or filling (lighting_cache.glsl
+/// LIGHTING_DRAIN_FLAG_AT): the samples still differ from the held light.
+/// Word 147: the round's batch entries (16 rays each).
+const LIGHTING_DRAIN_WORD: usize = 144;
+/// Word 16: cache rays traced this round (`CacheStats.rays`). Scouts are word 19.
+const LIGHTING_CACHE_RAYS_WORD: usize = 16;
 /// (4096/32) * 2160. A larger picture clamps the mask.
 const LIGHTING_UNFILLED_MASK_CAP: u32 = 276480;
 const _: () = assert!(LIGHTING_UNFILLED_MASK_AT == LIGHTING_STATS_WORDS);
+const _: () = assert!(LIGHTING_CACHE_RAYS_WORD < LIGHTING_STATS_WORDS);
 const _: () = assert!(LIGHTING_CTRL_WORD as usize + 16 == LIGHTING_UNFILLED_WORD);
 const LIGHTING_CHG_ENABLE_WORD: u64 = 24 + 64 + 31;
 
@@ -3789,8 +5639,12 @@ fn unfilled_mask_bytes(width: u32, height: u32) -> u64 {
     u64::from(unfilled_mask_words(width, height)) * 4
 }
 
-fn lighting_stats_storage_bytes() -> u64 {
+fn restir_diag_tail_offset() -> u64 {
     LIGHTING_STATS_BYTES + u64::from(LIGHTING_UNFILLED_MASK_CAP) * 4
+}
+
+fn lighting_stats_storage_bytes() -> u64 {
+    restir_diag_tail_offset() + RESTIR_DIAG_TAIL_BYTES
 }
 const LIGHTING_CHG_ENABLE_BYTE: u64 = LIGHTING_CHG_ENABLE_WORD * 4;
 const LIGHTING_ATROUS_STAT: usize = 120;
@@ -3798,7 +5652,9 @@ const LIGHTING_ATROUS_STAT: usize = 120;
 /// `None` when those two would fall outside [`LIGHTING_STAMPS`].
 fn hdr_stamp_base(groups: usize, first: u32) -> Option<u32> {
     let used = u32::try_from(groups).unwrap_or(u32::MAX).saturating_add(1);
-    if used.saturating_add(2) > LIGHTING_STAMPS {
+    // ReSTIR owns the queries at RESTIR_STAMP_AT. A long pass list skips the
+    // bloom pair rather than sharing those queries.
+    if used.saturating_add(2) > RESTIR_STAMP_AT {
         return None;
     }
     Some(first.saturating_add(used))
@@ -3813,35 +5669,15 @@ fn lighting_chg_on() -> bool {
     genos_scene::lighting_env_os("GENOS_LIGHTING_SC_TRACE").is_some()
 }
 
-/// `GENOS_LIGHTING_ATROUS_DIRTY` in millionths. Default 0.25: levels 1-5 keep
+/// The a-trous dirty fraction (`denoise_dirty`, mirrored by
+/// `GENOS_LIGHTING_ATROUS_DIRTY`) in millionths. Default 0.25: levels 1-5 keep
 /// the work lists while the fullest level is at or under a quarter of the
 /// filtered texels, and run the dense sweep above that. `0` is always dense,
-/// `1` keeps the lists up to the storage cap. `override_frac` wins (tests).
-#[allow(
-    clippy::disallowed_methods,
-    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-)]
-fn lighting_atrous_ppm(override_frac: Option<f32>) -> u32 {
-    let frac = override_frac.unwrap_or_else(|| {
-        genos_scene::lighting_env("GENOS_LIGHTING_ATROUS_DIRTY")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(0.25)
-    });
+/// `1` keeps the lists up to the storage cap.
+fn lighting_atrous_ppm(frac: f32) -> u32 {
     (frac.clamp(0.0, 1.0) * 1_000_000.0).round() as u32
 }
 
-/// GENOS_LIGHTING_SC_FLAGS, default LIGHTING_DEFAULT_SC_FLAGS.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-)]
-fn lighting_sc_flags_env() -> u32 {
-    static V: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *V.get_or_init(|| {
-        genos_scene::lighting_env("GENOS_LIGHTING_SC_FLAGS").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(LIGHTING_DEFAULT_SC_FLAGS)
-    })
-}
 
 /// Vec4 index of the changes block in the work buffer (lighting_common.glsl
 /// lighting_change_at), for `probes` probes, `cache_rays` light cache rays and `kept`
@@ -4037,40 +5873,6 @@ pub(crate) fn lighting_scene_key(pack: &crate::pack::Pack, bytes: &[u8]) -> u64 
     hasher.finish()
 }
 
-/// S78S debug isolate toggles: attribute a change to exactly one component.
-/// GENOS_LIGHTING_TOGGLES (start) or the file named by GENOS_LIGHTING_TOGGLES_FILE
-/// (re-read every frame, so `echo direct_only > file` switches live), words:
-/// freeze_cache (no surface-cache / world-cache value writes), direct_only (no
-/// cache light at ray hits), bounce_only (no direct light at pixels or hits),
-/// freeze_probes (kept-hit lights not rewritten).
-const LIGHTING_TOGGLE_FREEZE_CACHE: u32 = 1;
-const LIGHTING_TOGGLE_DIRECT_ONLY: u32 = 2;
-const LIGHTING_TOGGLE_BOUNCE_ONLY: u32 = 4;
-const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
-#[allow(
-    clippy::disallowed_methods,
-    reason = "TODO(lint-2026-10-14): read the config struct or a CLI flag, not the environment. docs/LINT_RULES.md"
-)]
-fn lighting_toggles() -> u32 {
-    let mut text = genos_scene::lighting_env("GENOS_LIGHTING_TOGGLES").unwrap_or_default();
-    if let Ok(path) = genos_scene::lighting_env("GENOS_LIGHTING_TOGGLES_FILE") {
-        if let Ok(t) = std::fs::read_to_string(path) {
-            text = t;
-        }
-    }
-    let mut bits = 0;
-    for w in text.split(|c: char| c == ',' || c.is_whitespace()).filter(|w| !w.is_empty()) {
-        bits |= match w {
-            "freeze_cache" => LIGHTING_TOGGLE_FREEZE_CACHE,
-            "direct_only" => LIGHTING_TOGGLE_DIRECT_ONLY,
-            "bounce_only" => LIGHTING_TOGGLE_BOUNCE_ONLY,
-            "freeze_probes" => LIGHTING_TOGGLE_FREEZE_PROBES,
-            _ => 0,
-        };
-    }
-    bits
-}
-
 /// Last submitted frame's sun-path proof. `gpu_sun` is the shader's own bit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LightingSunStats {
@@ -4083,8 +5885,18 @@ pub struct LightingSunStats {
     pub full_effort: bool,
     /// 1 full picture compose, 2 dirty list, 3 sun band. 0 before any compose.
     pub compose: u8,
+    /// World-cache walks in the last sun compose. The first sun frame stores
+    /// bounce for the picture. Later frames are one tile-row band.
+    pub walks: u32,
     /// Compose dispatches in that frame. The sun path is one.
     pub dispatches: u32,
+    /// Dirty-list length at the end of that frame. The list dispatch's group
+    /// count. Zero when the key table was not copied. A full compose can still
+    /// report the marks it did not use.
+    pub blocks: u32,
+    /// Maintenance and the lattice drain were recorded. False on a held frame
+    /// that is not the 32-frame backstop.
+    pub maint_ran: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -4432,7 +6244,8 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_SPV, SUN_COMPOSE_SPV,
+        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
+        LIGHTING_COMPOSE_SPV, LIGHTING_SH_DRAIN_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
     };
 
     fn lighting_at(dir: [f32; 3], light: f32) -> Lighting {
@@ -4513,8 +6326,12 @@ mod sun_step {
     /// plus the sun words, not an occluder walk copied into both.
     #[test]
     fn compose_spirv_stays_near_the_picture_pass() {
+        // The missing-field read, the path debug view, the texels population
+        // record, the shown-mean age tally, the bounce store rule, and the
+        // retry list sit in this pass. Compose is 245_364 bytes. 248_000
+        // still rejects a second occluder walk.
         assert!(
-            LIGHTING_COMPOSE_SPV.len() < 220_000,
+            LIGHTING_COMPOSE_SPV.len() < 248_000,
             "compose SPIR-V is {} bytes",
             LIGHTING_COMPOSE_SPV.len()
         );
@@ -4526,6 +6343,682 @@ mod sun_step {
             SUN_COMPOSE_SPV.len()
         );
     }
+
+    /// Every compose specialization, including maintenance and the sun and HDR
+    /// compiles. Flags on and off are this same module: the walk is not in it.
+    #[test]
+    fn default_compose_does_not_call_the_neighbour_walk() {
+        for (name, words) in [
+            ("compose", LIGHTING_COMPOSE_SPV),
+            ("compose maint", LIGHTING_COMPOSE_MAINT_SPV),
+            ("compose hdr", LIGHTING_COMPOSE_HDR_SPV),
+            ("sun compose", SUN_COMPOSE_SPV),
+            ("sun compose hdr", SUN_COMPOSE_HDR_SPV),
+        ] {
+            assert_spirv_1(name, words);
+            let reached = reachable_from_main(words);
+            for prefix in ["lighting_sh_gather(", "lighting_sh_read("] {
+                assert!(
+                    !reached.iter().any(|got| got.starts_with(prefix)),
+                    "{name} still reaches {prefix}: {reached:?}"
+                );
+            }
+            let text = String::from_utf8_lossy(words);
+            assert!(
+                !text.contains("lighting_sh_gather") && !text.contains("lighting_sh_read"),
+                "{name} still names the neighbour walk"
+            );
+        }
+        assert_spirv_1("sh drain", LIGHTING_SH_DRAIN_SPV);
+        let drain = reachable_from_main(LIGHTING_SH_DRAIN_SPV);
+        assert!(
+            drain.iter().any(|got| got.starts_with("lighting_sh_gather(")),
+            "the gather dispatch lost the neighbour walk: {drain:?}"
+        );
+    }
+
+    #[test]
+    fn sh_cells_off_clears_flag_bit_23() {
+        let mut settings = genos_scene::LightingSettings::preset(genos_scene::LightingPreset::High);
+        settings.experiments.sc_flags |= 1 << 23;
+        settings.surface_cache.sh_cells = false;
+        let off = super::lighting_change_head(&settings);
+        assert_eq!(off.head_hi & 1, 0, "bit 23 stayed set in head_hi");
+        settings.surface_cache.sh_cells = true;
+        let on = super::lighting_change_head(&settings);
+        assert_eq!(on.head_hi & 1, 1, "sh_cells did not set head_hi bit 0");
+    }
+
+    fn assert_spirv_1(name: &str, words: &[u8]) {
+        assert!(words.len() >= 8, "{name} is not SPIR-V");
+        let version = u32::from_le_bytes([words[4], words[5], words[6], words[7]]);
+        assert_eq!(version, 0x0001_0000, "{name} SPIR-V {version:#x}");
+    }
+
+fn reachable_from_main(bytes: &[u8]) -> Vec<String> {
+    let words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .collect();
+    let mut names = std::collections::HashMap::<u32, String>::new();
+    let mut calls = Vec::<(u32, u32)>::new();
+    let mut i = 5usize;
+    let mut current = 0u32;
+    while i < words.len() {
+        let word = words[i];
+        let count = (word >> 16) as usize;
+        let op = word & 0xffff;
+        if count == 0 || i + count > words.len() {
+            break;
+        }
+        if op == 5 {
+            let mut raw = Vec::new();
+            for piece in &words[i + 2..i + count] {
+                raw.extend_from_slice(&piece.to_le_bytes());
+            }
+            let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+            if let Ok(name) = std::str::from_utf8(&raw[..end]) {
+                names.insert(words[i + 1], name.to_string());
+            }
+        } else if op == 54 && count >= 4 {
+            current = words[i + 2];
+        } else if op == 57 && count >= 4 {
+            calls.push((current, words[i + 3]));
+        }
+        i += count;
+    }
+    let Some(root) = names.iter().find(|(_, name)| *name == "main").map(|(id, _)| *id) else {
+        return Vec::new();
+    };
+    let mut seen = vec![root];
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        for (caller, callee) in &calls {
+            if *caller == id && !seen.contains(callee) {
+                seen.push(*callee);
+                stack.push(*callee);
+            }
+        }
+    }
+    let mut reached = Vec::new();
+    for id in seen {
+        if let Some(name) = names.get(&id) {
+            reached.push(name.clone());
+        }
+    }
+    reached
+}
 }
 
 include!("lighting_dispatch.rs");
+
+/// One frame of surface-cache scheduling counters (`gstats`).
+#[derive(Clone, Copy, Debug)]
+pub struct CacheRound {
+    /// Occupied cache slots.
+    pub live: u32,
+    /// Cells claimed this round.
+    pub claimed: u32,
+    /// Histogram bucket the scheduler cut below. Zero means nothing was cut.
+    pub thr: u32,
+    /// Cache rays traced (texels and world cells, not the scout count).
+    pub rays: u32,
+    /// Entries the ranking marked due.
+    pub due: u32,
+    /// Entries that waited (not due, or a settle turn).
+    pub waiting: u32,
+    /// Scout rays scheduled this round. Zero when the scout was not due.
+    pub scouts: u32,
+}
+
+impl CacheRound {
+    fn from_words(words: &[u32; LIGHTING_STATS_WORDS]) -> Self {
+        Self {
+            live: words[2],
+            claimed: words[8],
+            thr: words[12],
+            rays: words[16],
+            due: words[17],
+            waiting: words[18],
+            scouts: words[19],
+        }
+    }
+}
+
+/// The shade's chosen reservoir and the visibility mean for one pixel.
+///
+/// `mean_kind` 3 is the product mean (`LAMP_GEO_RESTIR_MEAN`). `mean_rgb` is
+/// that mean's irradiance. `restir_w` is `w_sum / (M * target)` from the
+/// spatial scratch the shade reads.
+#[derive(Clone, Copy, Debug)]
+pub struct DirectSample {
+    pub pixel: u32,
+    pub restir_lamp: u32,
+    pub restir_w: f32,
+    pub restir_m: u32,
+    pub restir_target: f32,
+    pub mean_kind: u32,
+    pub mean_m: u32,
+    pub mean_lamp: u32,
+    pub mean_vis: bool,
+    pub mean_rgb: [f32; 3],
+}
+
+impl DirectSample {
+    fn empty(pixel: u32) -> Self {
+        Self {
+            pixel,
+            restir_lamp: 0,
+            restir_w: 0.0,
+            restir_m: 0,
+            restir_target: 0.0,
+            mean_kind: 0,
+            mean_m: 0,
+            mean_lamp: 0,
+            mean_vis: false,
+            mean_rgb: [0.0; 3],
+        }
+    }
+}
+
+/// `LAMP_GEO_RESTIR_MEAN` in `lighting_lamp_pick.glsl`.
+const LAMP_GEO_RESTIR_MEAN: u32 = 3;
+
+fn f32_from_u32(v: u32) -> f32 {
+    let mut acc = 0.0f32;
+    let mut bit = 1.0f32;
+    let mut n = v;
+    while n != 0 {
+        if n & 1 == 1 {
+            acc += bit;
+        }
+        bit += bit;
+        n >>= 1;
+    }
+    acc
+}
+
+impl Gpu {
+    /// Hash lookup of the surface-cache cells under `queries`, after the device is idle.
+    pub(crate) fn read_cache_cells(
+        &mut self,
+        queries: &[crate::cache_probe::CacheQuery],
+    ) -> Result<Vec<crate::cache_probe::StoredCell>, String> {
+        if queries.len() > 32 {
+            return Err("cache cell read is limited to 32 points".to_string());
+        }
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.lighting.cache_full || self.lighting.cache.buffer.is_null() {
+            return Err("surface cache is not allocated".to_string());
+        }
+        self.idle_device();
+        let key_bytes = LIGHTING_CACHE_SLOTS.saturating_mul(4);
+        if self.lighting.cache_keys.size < key_bytes || self.lighting.cache_keys.buffer.is_null() {
+            return Err("cache key table is shorter than the slot count".to_string());
+        }
+        let raw_keys = self.copy_device_range(self.lighting.cache_keys.buffer, 0, key_bytes)?;
+        let keys = u32_words(&raw_keys);
+        let mut hits = Vec::with_capacity(queries.len());
+        let mut regions = Vec::new();
+        for query in queries {
+            let key = crate::cache_probe::cache_key(query.position, query.normal, query.size);
+            let hit = crate::cache_probe::classify_window(&keys, key);
+            if let Some(slot) = hit.slot {
+                let base = regions.len();
+                self.push_cell_regions(slot, &mut regions)?;
+                hits.push((query, hit, Some(base)));
+            } else {
+                hits.push((query, hit, None));
+            }
+        }
+        let packed = if regions.is_empty() {
+            Vec::new()
+        } else {
+            self.copy_device_regions(self.lighting.cache.buffer, &regions)?
+        };
+        let words = f32_vec4s(&packed);
+        let mut out = Vec::with_capacity(hits.len());
+        for (query, hit, base) in hits {
+            let records = base.and_then(|at| seven_vec4s(&words, at));
+            out.push(crate::cache_probe::stored_cell(*query, hit, records));
+        }
+        Ok(out)
+    }
+
+    /// Last collected ReSTIR frame, same order as [`Self::lighting_restir_ms`].
+    ///
+    /// One frame behind the draw that just returned. Zeros until a timestamped
+    /// frame lands. Shade includes that dispatch's visibility ray.
+    pub(crate) fn lighting_restir_last_ms(&self) -> [f64; 5] {
+        self.lighting.restir_ms_last
+    }
+
+    /// Bottom-of-pipe lighting span of the last collected frame.
+    ///
+    /// The same window as the `lighting` column of `GPU_MS`. One frame behind
+    /// the draw that just returned.
+    pub(crate) fn lighting_span_ms(&self) -> f64 {
+        self.lighting.span_ms
+    }
+
+    /// Mean of the collected ReSTIR stamps. Zeros until a timestamped frame lands.
+    pub(crate) fn lighting_restir_ms(&self) -> [f64; 5] {
+        let frames = self.lighting.restir_ms_frames;
+        if frames == 0 {
+            return [0.0; 5];
+        }
+        let denom = f64::from(frames);
+        let mut out = [0.0; 5];
+        for (i, sum) in self.lighting.restir_ms_sum.into_iter().enumerate() {
+            out[i] = sum / denom;
+        }
+        out
+    }
+
+    /// Latest cache-round counters. The world round wins when it wrote rays or
+    /// scouts; otherwise the frame copy from the last submitted slot.
+    pub(crate) fn lighting_cache_round(&mut self) -> Result<CacheRound, String> {
+        self.idle_device();
+        let mut best: Option<CacheRound> = None;
+        let mut take = |words: [u32; LIGHTING_STATS_WORDS]| {
+            let round = CacheRound::from_words(&words);
+            let rank = round.rays.saturating_add(round.scouts);
+            let prev = best.map_or(0, |item| item.rays.saturating_add(item.scouts));
+            if best.is_none() || rank > prev {
+                best = Some(round);
+            }
+        };
+        if !self.lighting.world_stats.memory.is_null() {
+            if let Ok(words) = self.read_stats16(self.lighting.world_stats.memory) {
+                take(words);
+            }
+        }
+        if let Some(buf) = self.lighting.stats.get(self.lighting.stats_slot) {
+            if !buf.memory.is_null() {
+                if let Ok(words) = self.read_stats16(buf.memory) {
+                    take(words);
+                }
+            }
+        }
+        best.ok_or_else(|| "lighting stats were not readable".to_string())
+    }
+
+    /// Scratch reservoir and the visibility mean for each pixel.
+    pub(crate) fn read_direct_samples(
+        &mut self,
+        pixels: &[u32],
+    ) -> Result<Vec<DirectSample>, String> {
+        if pixels.is_empty() {
+            return Ok(Vec::new());
+        }
+        if pixels.len() > 8 {
+            return Err("direct sample read is limited to 8 pixels".to_string());
+        }
+        self.idle_device();
+        let width = self.lighting.restir_w;
+        let height = self.lighting.restir_h;
+        let count = width.saturating_mul(height);
+        if count == 0
+            || self.lighting.restir_buf.buffer.is_null()
+            || self.lighting.lamp_res.buffer.is_null()
+        {
+            return Err("direct reservoirs are not allocated".to_string());
+        }
+        let header = self.copy_device_range(self.lighting.restir_buf.buffer, 0, 256)?;
+        let words = u32_words(&header);
+        let scratch = words.get(6).copied().unwrap_or(0);
+        let mut out = Vec::with_capacity(pixels.len());
+        for &pixel in pixels {
+            if pixel >= count {
+                return Err(format!("pixel {pixel} is outside {width}x{height}"));
+            }
+            out.push(self.read_one_direct(pixel, scratch, count)?);
+        }
+        Ok(out)
+    }
+
+    fn read_one_direct(&self, pixel: u32, scratch: u32, count: u32) -> Result<DirectSample, String> {
+        let mut sample = DirectSample::empty(pixel);
+        let scratch_at = u64::from(scratch)
+            .saturating_mul(4)
+            .saturating_add(u64::from(pixel).saturating_mul(16));
+        if scratch != 0 && scratch_at.saturating_add(16) <= self.lighting.restir_buf.size {
+            let bytes = self.copy_device_range(self.lighting.restir_buf.buffer, scratch_at, 16)?;
+            let words = u32_words(&bytes);
+            if words.len() >= 4 && words[2] > 0 {
+                let target = f32::from_bits(words[3]);
+                sample.restir_lamp = words[0];
+                sample.restir_m = words[2];
+                sample.restir_target = target;
+                if target > 0.0 {
+                    let sum = f32::from_bits(words[1]);
+                    let denom = f32_from_u32(words[2]) * target;
+                    if denom > 0.0 {
+                        sample.restir_w = sum / denom;
+                    }
+                }
+            }
+        }
+        let stride = u64::from(count).saturating_mul(32);
+        let mut best_m = 0u32;
+        let mut found = false;
+        for slot in 0..2u32 {
+            let at = u64::from(slot)
+                .saturating_mul(stride)
+                .saturating_add(u64::from(pixel).saturating_mul(32));
+            if at.saturating_add(32) > self.lighting.lamp_res.size {
+                break;
+            }
+            let bytes = self.copy_device_range(self.lighting.lamp_res.buffer, at, 32)?;
+            let words = u32_words(&bytes);
+            if words.len() < 8 {
+                continue;
+            }
+            let kind = words[6];
+            if kind != LAMP_GEO_RESTIR_MEAN {
+                if !found {
+                    sample.mean_kind = kind;
+                }
+                continue;
+            }
+            let mean_m = words[2];
+            if found && mean_m < best_m {
+                continue;
+            }
+            found = true;
+            best_m = mean_m;
+            let pack = words[0];
+            sample.mean_kind = kind;
+            sample.mean_m = mean_m;
+            sample.mean_lamp = pack & 0xffff;
+            sample.mean_vis = (pack & 0x1_0000) != 0;
+            sample.mean_rgb = [
+                f32::from_bits(words[1]),
+                f32::from_bits(words[3]),
+                f32::from_bits(words[7]),
+            ];
+        }
+        Ok(sample)
+    }
+
+    fn push_cell_regions(&self, slot: u32, regions: &mut Vec<(u64, u64)>) -> Result<(), String> {
+        let slot_u = u64::from(slot);
+        let slots = LIGHTING_CACHE_SLOTS;
+        let indices = [
+            slot_u.saturating_mul(3),
+            slot_u.saturating_mul(3).saturating_add(1),
+            slot_u.saturating_mul(3).saturating_add(2),
+            slots.saturating_mul(3).saturating_add(slot_u),
+            slots.saturating_mul(6).saturating_add(slot_u),
+            slots.saturating_mul(8).saturating_add(slot_u),
+            slots.saturating_mul(10).saturating_add(slot_u),
+        ];
+        for index in indices {
+            let offset = index.saturating_mul(16);
+            if offset.saturating_add(16) > self.lighting.cache.size {
+                return Err("cache cell record sits past the cache buffer".to_string());
+            }
+            regions.push((offset, 16));
+        }
+        Ok(())
+    }
+
+    fn copy_device_range(&self, src: Handle, offset: u64, size: u64) -> Result<Vec<u8>, String> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        self.copy_device_regions(src, &[(offset, size)])
+    }
+
+    fn copy_device_regions(&self, src: Handle, regions: &[(u64, u64)]) -> Result<Vec<u8>, String> {
+        let mut total = 0u64;
+        for (_, size) in regions {
+            total = total.saturating_add(*size);
+        }
+        if total == 0 {
+            return Ok(Vec::new());
+        }
+        let mut dst = self.make_buffer(total, 0x2, Memory::Readback)?;
+        let copied = self.record_region_copy(src, dst.buffer, regions);
+        let bytes = match copied {
+            Ok(()) => map_buffer_bytes(self, &dst, total),
+            Err(err) => Err(err),
+        };
+        self.destroy_buffer(&mut dst);
+        bytes
+    }
+
+    fn record_region_copy(&self, src: Handle, dst: Handle, regions: &[(u64, u64)]) -> Result<(), String> {
+        let pool = self.cache_copy_pool()?;
+        let cmd = match self.cache_copy_cmd(pool) {
+            Ok(cmd) => cmd,
+            Err(err) => {
+                self.drop_copy_pool(pool);
+                return Err(err);
+            }
+        };
+        self.oracle_barrier(cmd, 0x1_0000, 0x1000, 0x1_8000, 0x800);
+        let mut copies = Vec::with_capacity(regions.len());
+        let mut dst_at = 0u64;
+        for (src_at, size) in regions {
+            copies.push(BufferCopy {
+                src: *src_at,
+                dst: dst_at,
+                size: *size,
+            });
+            dst_at = dst_at.saturating_add(*size);
+        }
+        unsafe {
+            (self.fns.cmd_copy_buffer)(
+                cmd,
+                src,
+                dst,
+                u32::try_from(copies.len()).unwrap_or(0),
+                copies.as_ptr().cast::<u8>(),
+            );
+        }
+        self.oracle_barrier(cmd, 0x1000, 0x4000, 0x1000, 0x2000);
+        let ended = unsafe { check((self.fns.end_cmd)(cmd), "end cache-cell copy") };
+        let submitted = ended.and_then(|()| self.oracle_submit(cmd));
+        self.drop_copy_pool(pool);
+        submitted
+    }
+
+    fn cache_copy_pool(&self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct PoolInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            family: u32,
+        }
+        let pool_info = PoolInfo {
+            s_type: 39,
+            next: std::ptr::null(),
+            flags: 1,
+            family: self.queue_family,
+        };
+        let mut pool = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_pool)(
+                    self.device,
+                    &pool_info as *const PoolInfo as *const u8,
+                    std::ptr::null(),
+                    &mut pool,
+                ),
+                "cache-cell command pool",
+            )?;
+        }
+        Ok(pool)
+    }
+
+    fn cache_copy_cmd(&self, pool: Handle) -> Result<Handle, String> {
+        #[repr(C)]
+        struct AllocInfo {
+            s_type: i32,
+            next: *const c_void,
+            pool: Handle,
+            level: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        let alloc = AllocInfo {
+            s_type: 40,
+            next: std::ptr::null(),
+            pool,
+            level: 0,
+            count: 1,
+        };
+        let begin = BeginInfo {
+            s_type: 42,
+            next: std::ptr::null(),
+            flags: 1,
+            inherit: std::ptr::null(),
+        };
+        let mut cmd = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.alloc_cmd)(self.device, &alloc as *const AllocInfo as *const u8, &mut cmd),
+                "cache-cell command",
+            )?;
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin cache-cell copy",
+            )?;
+        }
+        Ok(cmd)
+    }
+
+    fn drop_copy_pool(&self, pool: Handle) {
+        unsafe {
+            (self.fns.destroy_pool)(self.device, pool, std::ptr::null());
+        }
+    }
+}
+
+#[repr(C)]
+struct BufferCopy {
+    src: u64,
+    dst: u64,
+    size: u64,
+}
+
+fn u32_words(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut lane = [0u8; 4];
+            lane.copy_from_slice(chunk);
+            u32::from_le_bytes(lane)
+        })
+        .collect()
+}
+
+fn f32_vec4s(bytes: &[u8]) -> Vec<[f32; 4]> {
+    let mut out = Vec::new();
+    for chunk in bytes.chunks_exact(16) {
+        let mut word = [0.0f32; 4];
+        for (lane, value) in word.iter_mut().enumerate() {
+            let at = lane.saturating_mul(4);
+            let mut raw = [0u8; 4];
+            raw.copy_from_slice(&chunk[at..at + 4]);
+            *value = f32::from_le_bytes(raw);
+        }
+        out.push(word);
+    }
+    out
+}
+
+fn seven_vec4s(words: &[[f32; 4]], at: usize) -> Option<[[f32; 4]; 7]> {
+    let mut records = [[0.0f32; 4]; 7];
+    for (i, record) in records.iter_mut().enumerate() {
+        *record = *words.get(at.saturating_add(i))?;
+    }
+    Some(records)
+}
+
+fn map_buffer_bytes(gpu: &Gpu, buffer: &Buffer, size: u64) -> Result<Vec<u8>, String> {
+    if size > buffer.size {
+        return Err("cache cell copy does not fit".to_string());
+    }
+    let len = usize::try_from(size).unwrap_or(0);
+    let mut out = vec![0u8; len];
+    unsafe {
+        let mut mapped = std::ptr::null_mut();
+        check(
+            (gpu.fns.map_mem)(gpu.device, buffer.memory, 0, size, 0, &mut mapped),
+            "map cache cell",
+        )?;
+        std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), out.as_mut_ptr(), len);
+        (gpu.fns.unmap_mem)(gpu.device, buffer.memory);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod sh_knob_tests {
+    use super::*;
+
+    /// The low-spec SH storage knob is one value in two places: the shader's
+    /// layout and the buffer Rust allocates for it must agree.
+    #[test]
+    fn sh_storage_knob_matches_the_shader_and_sizes_the_cache() {
+        let glsl = include_str!("../shaders/lighting_cache_slots.glsl");
+        let line = glsl
+            .lines()
+            .find(|l| l.starts_with("const bool LIGHTING_SH_HALF"))
+            .expect("LIGHTING_SH_HALF in lighting_cache_slots.glsl");
+        assert_eq!(line.contains("true"), LIGHTING_SH_HALF, "{line}");
+        let tail = LIGHTING_CACHE_SLOT_BYTES - 23 * 16;
+        let sh_bytes = if LIGHTING_SH_HALF { 24 } else { 48 };
+        let pad = if LIGHTING_SH_HALF { 24 } else { 0 };
+        assert_eq!(tail, sh_bytes + pad + 16);
+        let rays = glsl
+            .lines()
+            .find(|l| l.starts_with("const uint LIGHTING_CACHE_RAYS"))
+            .expect("LIGHTING_CACHE_RAYS in lighting_cache_slots.glsl");
+        assert!(rays.contains(&format!("= {LIGHTING_CACHE_RAYS}u;")), "{rays}");
+        assert_eq!(u64::from(crate::cache_probe::SLOTS), LIGHTING_CACHE_SLOTS);
+    }
+}
+
+#[cfg(test)]
+mod fill_layout_tests {
+    use super::*;
+
+    #[test]
+    fn fill_lists_do_not_alias_at_262144_slots() {
+        let slots = 262_144u64;
+        let (tile, pick, end) = fill_list_end(slots);
+        let rays = u64::from(LIGHTING_CACHE_BATCH) * u64::from(LIGHTING_CACHE_RAYS);
+        assert_eq!(pick, tile + FILL_TILE_WORDS);
+        assert_eq!(end, pick + rays);
+        let old_tile = slots * 2 - FILL_TILE_WORDS;
+        let old_pick = slots + 1;
+        assert!(old_pick > old_tile && old_pick < old_tile + FILL_TILE_WORDS);
+        let old_tile_u = u32::try_from(old_tile).unwrap_or(u32::MAX);
+        let old_pick_u = u32::try_from(old_pick).unwrap_or(u32::MAX);
+        let old_cap = old_tile_u.wrapping_sub(old_pick_u);
+        let rays_u = u32::try_from(rays).unwrap_or(u32::MAX);
+        assert!(
+            old_cap > rays_u,
+            "old pick capacity underflows, got {old_cap}"
+        );
+        let (big_tile, big_pick, _) = fill_list_end(1_048_576);
+        assert_eq!(big_pick, big_tile + FILL_TILE_WORDS);
+        let (_t, _p, host_end) = fill_list_end(FILL_LOCK_WORDS);
+        assert_eq!(
+            lighting_fill_keys_words(0) - lighting_fill_param_words(0),
+            FILL_PARAM_WORDS + host_end
+        );
+    }
+}

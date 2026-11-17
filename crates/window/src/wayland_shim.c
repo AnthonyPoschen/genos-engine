@@ -13,6 +13,7 @@
 #include "pointer-constraints-unstable-v1-client-protocol.h"
 #include "relative-pointer-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
+#include "genos_pump.h"
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 1U
@@ -61,6 +62,12 @@ struct GenosWindow {
     struct wl_surface *cursor_surface;
     void *cursor_mem;
     size_t cursor_bytes;
+    /* Opaque buffer attached before the first Vulkan present, so a close
+     * reaches this toplevel before the first frame. */
+    struct wl_shm_pool *map_pool;
+    struct wl_buffer *map_buffer;
+    void *map_mem;
+    size_t map_bytes;
     uint32_t pointer_serial;
     wl_fixed_t acc_dx;
     wl_fixed_t acc_dy;
@@ -74,33 +81,27 @@ struct GenosWindow {
     int wheel_120;
 };
 
-struct GenosPump {
-    int width;
-    int height;
-    int closing;
-    int focused;
-    int mouse_dx;
-    int mouse_dy;
-    int capture_click;
-    int key_w;
-    int key_a;
-    int key_s;
-    int key_d;
-    int key_escape;
-    int resized;
-    int mouse_left;
-    uint8_t keys_down[256];
-    int pointer_locked;
-    int clicked_while_focused;
-    int fullscreen;
-    int pointer_x;
-    int pointer_y;
-    void *display;
-    void *surface;
-    double wheel_y;
-};
+int genos_window_backend_value = GENOS_BACKEND_WAYLAND;
+
+int genos_window_backend(void) {
+    return genos_window_backend_value;
+}
+
+int genos_window_copy_extra(void *window, struct GenosExtra *out) {
+    (void)window;
+    if (!out) {
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    return 0;
+}
+
+int genos_window_extra_size(void) {
+    return (int)sizeof(struct GenosExtra);
+}
 
 static void apply_cursor(struct GenosWindow *win);
+static void make_map_buffer(struct GenosWindow *win);
 static void release_pointer_lock(struct GenosWindow *win);
 static int engage_pointer_lock(struct GenosWindow *win);
 
@@ -116,6 +117,16 @@ static const struct xdg_wm_base_listener wm_listener = {
 static void xdg_surface_configure(void *data, struct xdg_surface *surface, uint32_t serial) {
     struct GenosWindow *win = data;
     xdg_surface_ack_configure(surface, serial);
+    /* The first commit must carry no buffer. Attach the map buffer on the
+     * commit that follows the first configure, so the toplevel is mapped
+     * before Vulkan presents. A later configure leaves the current buffer. */
+    if (!win->configured && win->shm && !win->map_buffer) {
+        make_map_buffer(win);
+        if (win->map_buffer) {
+            wl_surface_attach(win->surface, win->map_buffer, 0, 0);
+            wl_surface_damage(win->surface, 0, 0, win->width, win->height);
+        }
+    }
     win->configured = 1;
     wl_surface_commit(win->surface);
 }
@@ -547,6 +558,50 @@ static void make_cursor(struct GenosWindow *win) {
     win->cursor_bytes = (size_t)bytes;
 }
 
+static void make_map_buffer(struct GenosWindow *win) {
+    if (!win->shm || !win->surface || win->width <= 0 || win->height <= 0) {
+        return;
+    }
+    const int stride = win->width * 4;
+    const size_t bytes = (size_t)stride * (size_t)win->height;
+    int fd = (int)syscall(SYS_memfd_create, "genos-map", MFD_CLOEXEC);
+    if (fd < 0) {
+        return;
+    }
+    if (ftruncate(fd, (off_t)bytes) != 0) {
+        close(fd);
+        return;
+    }
+    void *mem = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mem == MAP_FAILED) {
+        close(fd);
+        return;
+    }
+    uint8_t *pixels = mem;
+    for (size_t i = 0; i < bytes; i += 4) {
+        pixels[i] = 20;
+        pixels[i + 1] = 20;
+        pixels[i + 2] = 22;
+        pixels[i + 3] = 255;
+    }
+    win->map_pool = wl_shm_create_pool(win->shm, fd, (int32_t)bytes);
+    close(fd);
+    if (!win->map_pool) {
+        munmap(mem, bytes);
+        return;
+    }
+    win->map_buffer = wl_shm_pool_create_buffer(
+        win->map_pool, 0, win->width, win->height, stride, WL_SHM_FORMAT_ARGB8888);
+    if (!win->map_buffer) {
+        wl_shm_pool_destroy(win->map_pool);
+        win->map_pool = NULL;
+        munmap(mem, bytes);
+        return;
+    }
+    win->map_mem = mem;
+    win->map_bytes = bytes;
+}
+
 static void apply_cursor(struct GenosWindow *win) {
     if (!win->pointer || win->pointer_serial == 0) {
         return;
@@ -711,6 +766,7 @@ void genos_window_pump(struct GenosWindow *win, struct GenosPump *out) {
     out->display = win->display;
     out->surface = win->surface;
     out->wheel_y = win->wheel_y;
+    out->minimized = 0;
     win->wheel_y = 0;
     win->wheel_axis = 0;
     win->wheel_120 = 0;
@@ -792,6 +848,9 @@ void genos_window_destroy(struct GenosWindow *win) {
     if (win->cursor_buffer) wl_buffer_destroy(win->cursor_buffer);
     if (win->cursor_pool) wl_shm_pool_destroy(win->cursor_pool);
     if (win->cursor_mem) munmap(win->cursor_mem, win->cursor_bytes);
+    if (win->map_buffer) wl_buffer_destroy(win->map_buffer);
+    if (win->map_pool) wl_shm_pool_destroy(win->map_pool);
+    if (win->map_mem) munmap(win->map_mem, win->map_bytes);
     if (win->constraints) zwp_pointer_constraints_v1_destroy(win->constraints);
     if (win->relative_manager) zwp_relative_pointer_manager_v1_destroy(win->relative_manager);
     if (win->shm) wl_shm_destroy(win->shm);

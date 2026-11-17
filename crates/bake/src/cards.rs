@@ -1,9 +1,27 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::many_single_char_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Surface cache cards of one mesh: six axis-aligned views of its bounds.
 //!
@@ -82,12 +100,12 @@ const FACES: [(usize, f32, usize, usize); 6] = [
     (2, -1.0, 0, 1),
 ];
 
-pub fn build(mesh: &BakeMesh, s: &BakeSettings) -> Cards {
+/// Build over a BVH already built on `mesh.triangles`.
+pub fn build_with(mesh: &BakeMesh, s: &BakeSettings, bvh: &Bvh) -> Cards {
     if mesh.triangles.is_empty() {
         return Cards::default();
     }
     let tris = &mesh.triangles;
-    let bvh = Bvh::build(tris);
     let b = mesh.bounds();
     let mut cards = Vec::new();
     for (face, &(axis, sign, u, v)) in FACES.iter().enumerate() {

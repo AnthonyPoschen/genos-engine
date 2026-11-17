@@ -36,6 +36,27 @@ fn s7_noise_gate_grades_a_on_lavapipe() {
 }
 
 #[test]
+fn s7_noise_gate_grades_a_with_direct_specular_on_lavapipe() {
+    std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
+    let out = std::env::temp_dir().join("genos-noise-gate-specular");
+    let config = Config {
+        specular: true,
+        ..Config::lavapipe(out)
+    };
+    let code = noise_gate::run(&config).expect("noise gate");
+    let metrics = std::fs::read_to_string(config.out.join("metrics.json")).expect("metrics.json");
+    assert!(
+        metrics.contains("\"grade\": \"A\""),
+        "s7 with the GGX lobe exited {code}\n{metrics}"
+    );
+    assert_eq!(code, 0, "{metrics}");
+    assert!(
+        metrics.contains("\"still_restir\":") && !metrics.contains("\"still_restir\": 0"),
+        "the random path did not shade a reservoir sample\n{metrics}"
+    );
+}
+
+#[test]
 fn s7_broken_picker_fails_on_lavapipe() {
     std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
     let out = std::env::temp_dir().join("genos-noise-gate-broken");

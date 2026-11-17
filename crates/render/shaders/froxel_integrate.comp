@@ -89,6 +89,23 @@ void main() {
     if (c.x >= fog.size.x || c.y >= fog.size.y) {
         return;
     }
+    if (froxel_f2_on()) {
+        float transmittance = 1.0;
+        vec3 inscatter = vec3(0.0);
+        uint slices = fog.size.z;
+        [[dont_unroll]] for (uint z = 0u; z < slices; z++) {
+            F2Span span = f2_span(c, z);
+            float tau = f2_tau(span.origin, span.dir, span.len);
+            float source = f2_scatter(c, z);
+            float piece = tau > F2_TAU_EPS
+                ? source * span.len * (1.0 - exp(-tau)) / tau
+                : source * span.len;
+            inscatter += transmittance * vec3(piece);
+            transmittance *= exp(-tau);
+        }
+        froxel_out.col[c.y * fog.size.x + c.x] = vec4(inscatter, transmittance);
+        return;
+    }
     vec3 dir = normalize(froxel_offset(c));
     float transmittance = 1.0;
     vec3 inscatter = vec3(0.0);

@@ -66,11 +66,12 @@ fn max_abs(left: &[f32; 5], right: &[f32; 5]) -> f32 {
     peak
 }
 
-fn open() -> Result<(Window, Renderer), String> {
+fn open() -> Result<genos_window::Lifecycle<Renderer>, String> {
     let mut window = Window::open_proof(64, 64)?;
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)?;
-    Ok((window, renderer))
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, frame.width, frame.height)?;
+    Ok(genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 #[test]
@@ -84,7 +85,8 @@ fn a_broken_media_candidate_fails_the_parity_gate() {
 
 #[test]
 fn media_glsl_matches_genos_math_on_lavapipe() {
-    let (_window, mut renderer) = open().expect("lavapipe device");
+    let mut owner = open().expect("lavapipe device");
+    let renderer = &mut *owner.device;
     let gpu = renderer.media_closed_forms().expect("media_check dispatch");
     let cpu = cpu_media();
     let err = max_abs(&gpu, &cpu);

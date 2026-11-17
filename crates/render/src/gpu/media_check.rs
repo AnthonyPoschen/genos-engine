@@ -11,7 +11,7 @@ pub(super) struct Pipe {
     set: Handle,
     layout: Handle,
     pipe: Handle,
-    cmd: Handle,
+    pub(super) cmd: Handle,
     fence: Handle,
 }
 
@@ -362,23 +362,7 @@ impl Gpu {
                 "media reset fence",
             )?;
             check((self.fns.reset_cmd)(cmd, 0), "media reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
-                "media begin",
-            )?;
+            self.begin_reused(cmd)?;
             #[repr(C)]
             struct MemBar {
                 s_type: i32,

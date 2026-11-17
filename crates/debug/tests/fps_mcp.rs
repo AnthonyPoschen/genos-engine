@@ -15,16 +15,17 @@ use genos_mcp::json::{self, Value};
 use genos_render::{Renderer, World};
 use genos_scene::{
     Camera, EngineSettings, EventLoopSettings, Floor, FogSettings, FpsCounterSettings, Light,
+    ParticleSettings,
     MenuSettings, ReflectionSettings, Scene, Vec3,
 };
 use genos_window::Window;
 
-fn open() -> (Window, Renderer) {
+fn open() -> genos_window::Lifecycle<Renderer> {
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (window, renderer)
+    genos_window::Lifecycle::new(window, renderer, permit)
 }
 
 fn room() -> World {
@@ -51,6 +52,7 @@ fn room() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -84,7 +86,9 @@ fn fps_counter_round_trips_through_config_and_mcp() {
     EngineSettings::set_key(&mut settings, "enabled", "off").unwrap();
     assert!(!settings.enabled);
 
-    let (mut window, mut renderer) = open();
+    let mut owner = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut world = room();
     let mut camera = Camera::opening();
     let mut tools = Tools::new();
@@ -109,7 +113,7 @@ fn fps_counter_round_trips_through_config_and_mcp() {
             "fps mcp round trip timed out"
         );
         tools.before_draw(&mut Ctx {
-            renderer: &mut renderer,
+            renderer,
             camera: &mut camera,
             host: &mut world.scene,
         });

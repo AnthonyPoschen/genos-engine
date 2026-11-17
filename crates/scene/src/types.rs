@@ -198,6 +198,9 @@ pub struct Scene {
     /// Height fog, local volumes, and the froxel switches. Off and density
     /// zero dispatch nothing, so an existing picture is unchanged.
     pub fog: FogSettings,
+    /// GPU particle budget and the stage-1 emitter. Off until `enabled` and
+    /// `count` are set, so an existing picture is unchanged.
+    pub particles: crate::ParticleSettings,
 }
 
 impl Scene {

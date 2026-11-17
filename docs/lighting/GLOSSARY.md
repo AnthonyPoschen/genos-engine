@@ -17,6 +17,9 @@ Literature columns: GIBS (EA SEED 2021 surfels), DDGI (Majercik 2019 probes), Lu
 Role: OUT · Literature: GIBS direct + shadow rays; Lumen direct lighting; DDGI —
 More detail: [`crates/render/shaders/lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp), `DirectSettings` in [`crates/scene/src/lighting.rs`](../../crates/scene/src/lighting.rs)
 
+**Direct specular**: pixel direct light shaded with Appendix B `fresnel_mix` (diffuse `base × (1 − metallic) / π` scaled by `1 − F`, plus GGX `D · V · F`). `direct_specular` defaults off (Lambert on irradiance) until the 4070 cost check. Indirect light stays Lambert.
+Role: OUT · Literature: glTF 2.0 Appendix B; Filament `V_SmithGGXCorrelated` · More detail: [ADR 0025](../adr/0025-pbr-brdf-cpu-reference.md), [`pbr_brdf.glsl`](../../crates/render/shaders/pbr_brdf.glsl)
+
 **GI (indirect light)**: light that arrives after one or more bounces. `gi.enabled=false` skips every GI pass.
 Role: OUT · Literature: all of them · More detail: [../systems/gi-design.md](../systems/gi-design.md)
 
@@ -68,8 +71,11 @@ Role: OUT · Literature: Academy ACES 2.0 · More detail: [hdr-output design](..
 **Legacy shoulder**: the display curve in the tree today. At or below 0.64 it is the identity. Above that it is a shoulder. The `legacy` display mode.
 Role: OUT · Literature: — · More detail: `tone_channel` in [`lighting_compose.comp`](../../crates/render/shaders/lighting_compose.comp); `linear_from_display` in [`trace.rs`](../../crates/render/src/trace.rs)
 
-**Bloom**: scene-referred scatter added before exposure. The kernel is the dual-filter pyramid.
-Role: OUT · Literature: Jimenez, SIGGRAPH 2014 · More detail: [hdr-output design](../systems/hdr-output-design.md)
+**Bloom**: scene-referred scatter added before exposure. The kernel is the dual-filter pyramid. The shipped pass adds `bloom_intensity` times that pyramid.
+Role: OUT · Literature: Jimenez, SIGGRAPH 2014 · More detail: [hdr-output design](../systems/hdr-output-design.md). [ADR 0028](../adr/0028-bloom.md) proposes an energy-conserving mix and is not the shipped pass.
+
+**Bloom scatter**: the fraction of a pixel the proposed blur replaces. `0` leaves the scene image. `1` replaces it with the blur. The sum of the image stays the sum of the scene when the blur preserves that sum. Not `bloom_intensity`.
+Role: TOOL · Literature: a normalization of Jimenez's additive intensity · More detail: [ADR 0028](../adr/0028-bloom.md)
 
 **HDR10**: a 10-bit BT.2100 swapchain image encoded with the PQ curve. Graphics white is 203 nits. The sigmoid top maps to 1000 nits when the surface reports no peak. The Linux/Wayland preference.
 Role: OUT · Literature: SMPTE ST 2084; `VK_COLOR_SPACE_HDR10_ST2084_EXT` · More detail: [hdr-output design](../systems/hdr-output-design.md)
@@ -79,25 +85,6 @@ Role: OUT · Literature: IEC 61966-2-2; `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT
 
 **SDR output**: an 8-bit UNORM swapchain image in the sRGB nonlinear color space. Used when HDR is not selected.
 Role: OUT · Literature: `VK_COLOR_SPACE_SRGB_NONLINEAR_KHR` · More detail: `create_targets` in [`gpu.rs`](../../crates/render/src/gpu.rs)
-
-### Screen probes (final gather)
-**Screen probe**: a point on the visible surface placed every *probe tile* pixels. It traces rays to gather indirect light for nearby pixels.
-Role: SAMPLE · Literature: Lumen screen probe; DDGI probe is world-space (different); GIBS — (surfels play this role) · More detail: [`lighting_place.comp`](../../crates/render/shaders/lighting_place.comp), [`lighting_trace.comp`](../../crates/render/shaders/lighting_trace.comp); [../systems/gi-design.md#final-gather-screen-probes](../systems/gi-design.md#final-gather-screen-probes)
-
-**Probe tile**: the spacing of screen probes in pixels (16 from 720p up).
-Role: STORE · Literature: Lumen probe downsample factor; GIBS 16×16 spawn tile (§1.3)
-
-**Gather**: turning a screen probe's ray results into its light estimate.
-Role: OUT · Literature: Lumen final gather · More detail: [`lighting_gather.comp`](../../crates/render/shaders/lighting_gather.comp)
-
-**Probe filter**: a spatial blur across neighbouring screen probes, then projection to SH. This is not the denoiser.
-Role: DENOISE · Literature: Lumen screen-probe spatial filter; GIBS irradiance sharing (§1.14) · More detail: [`lighting_filter.comp`](../../crates/render/shaders/lighting_filter.comp)
-
-**Kept hit**: the stored hit of a screen-probe ray, reused for up to N frames. Its light is re-read every frame, so we reuse visibility, not light.
-Role: TEMPORAL · Literature: — in GIBS/DDGI; Lumen reuses radiance instead (we diverge on purpose) · More detail: [gi-design.md, final gather](../systems/gi-design.md#final-gather-screen-probes); experiments (see [../systems/lighting/experiments/](../systems/lighting/experiments/)) S78D, S78O, E05
-
-**Stale frames**: once a kept hit or entry has gone this many frames without an update, it is treated as stale.
-Role: SCHED · Literature: — · More detail: `probe_stale`, `world_stale`
 
 ### Surface light cache
 **Surface light cache** (*world cache*, *SC*): a hash table of small world-space surface patches that store the light arriving there. Every bounce after the first reads it. It stands in for Lumen's card cache, which is not built yet.
@@ -111,6 +98,9 @@ Role: STORE · Literature: GIBS free-stack index (§1.4)
 
 **Cache cell size**: the world size of an entry: 25 cm near the eye, doubling with distance.
 Role: STORE · Literature: GIBS screen-relative surfel size (§1.6); Lumen card resolution · More detail: `world_cell`
+
+**Stale frames**: once a cache entry has gone this many frames without an update, it is treated as stale.
+Role: SCHED · Literature: — · More detail: `world_stale`
 
 **Page**: an 8×8 block of entries scheduled and denoised together.
 Role: STORE · Literature: Lumen atlas page · More detail: experiments S72J, S72K
@@ -130,7 +120,7 @@ Role: SAMPLE · Literature: GIBS surfel rays; DDGI probe rays
 **Compact**: rebuilds the live-entry list each round and frees entries nobody has read.
 Role: SCHED · Literature: GIBS recycling heuristic (§1.4) · More detail: [`lighting_compact.comp`](../../crates/render/shaders/lighting_compact.comp)
 
-**Trickle**: the lowest relight tier. Settled entries that are still slightly inconsistent get an occasional relight.
+**Trickle**: an occasional relight of a matched cell whose change is under the trickle threshold. It is one 16-ray entry on the main list when that cell is due. A cell that has not matched is not on this tier.
 Role: SCHED · Literature: GIBS variance-driven ray count (§1.12, partial) · More detail: S65A in [`lighting_compact.comp`](../../crates/render/shaders/lighting_compact.comp); S78H
 
 **Pre-fill**: gives a newly seen entry a usable value on the frame it appears (coarse-to-fine), so the picture never shows missing light. Required by rule.
@@ -144,6 +134,30 @@ Role: STORE · Literature: GIBS transform/bone-attached surfel (§1.5); Lumen mo
 
 **World radiance cache (WRC)**: a coarse world-space cache of incoming light, used for far rays and as a fallback.
 Role: STORE · Literature: Lumen WRC; DDGI volume; GIBS — (GIBS uses its grid for lookup only) · More detail: [../systems/gi-design.md#world-probes-radiance-cache](../systems/gi-design.md#world-probes-radiance-cache)
+
+**SH cells**: (ADR 0039 stage 2, `surface_cache.sh_cells`, on for High and Medium, off for Low) a 25 cm WRC cell also keeps colour SH-L1 (four RGB coefficients, fp16, 24 B) built from the relight rays it already traces. Cells stay keyed by the dominant axis. The screen and seed read is the eight-corner blend of those cells, evaluated at the true normal. The corner weight is the trilinear weight times the facing dot. Equal stored normals cancel that dot. At the cell's axis the tilt is that cell's mean. A corner is left out when it is missing, empty, stale, faces away, or sits more than half a cell off the query plane, and a left-out corner does not darken the blend. An axis-aligned ray hit still tilts the one owning cell. The read does not allocate. An empty slant keeps the probes. The six axis copies, the seam between those keys, and the same-facing leak inside half a cell are designed in [adr-0039-cell-gaps.md](../systems/lighting/adr-0039-cell-gaps.md) and are not built.
+Role: STORE · Literature: Lumen WRC (SH per probe); DDGI irradiance (octahedral, not SH) · More detail: ADR 0039 (PR #165), `crates/render/src/lighting_sh.rs`
+
+**SH texel detail**: (ADR 0039 stage 3, `surface_cache.sh_texel_detail`, on for High and Medium) an empty fine world texel takes its first light from the trilinear neighbour read of the 25 cm SH cells at the texel's true normal. The value is a low-confidence seed, not an own sample. The detail mark is a negative confidence. Parent, resample, hit, and probe seeds stay positive. Sun word z is the quarter sun scratch and is not this mark. Compose drops a marked seed whose neighbour read is empty on every `lighting_sc_seed` return, including the default High denoise path. That drop does not depend on the write-path lamp clear. The stored magnitude stays, so a read-only compose still refuses to resample over it, and a coarse miss keeps the fine world colour. The corner weight is the trilinear weight times the facing dot. Equal stored normals cancel that dot. The read does not write the cell. An empty fine texel this setting covers does not take resample or the hit patch, even when the neighbour read accepts nothing. The probe seed still runs for that miss, so a rejected cell is not copied back in as a seed. Those two stay when the texel is not a detail candidate, including when SH cells are on and this setting is off. The compose parent walk is gone. Ray hits still call `lighting_sc_parent`. A mover is not seeded. With this setting on, a mover pixel shows the same world-cell read at its current world position and true normal. That read does not allocate, does not stamp (`claim` false), and does not write a world texel or an object texel. Coverage is the read accepting a corner, so a covered mover does not read screen-probe irradiance. A rejected read, an empty slant, and a detail-off mover mix a found coarser world-cache cell by trust. A coarse miss keeps the fine world colour. A slanted pixel returns the cell read and does not run those writers. Screen-probe place, trace, gather, and filter are removed. Requires `surface_cache.sh_cells`.
+Role: STORE · Literature: Lumen card seeded from the world radiance cache · More detail: ADR 0039, `docs/systems/lighting/adr-0039-remaining.md`
+
+**SH texel ray cut**: (ADR 0039 stage 4, `surface_cache.sh_texel_ray_cut`, on for High and Medium) a fine world texel skips its own rays when the live 25 cm neighbour read is complete and the accepted corners agree within the sparse luminance ratio. The texel's own samples, when it has any, are compared with that live read. The stored seed is not. A world cell is not skipped, and the read does not write the cell. A lamp change that reaches the texel since it was sampled is a miss: the sparse ratio stays true across a small dim, so the texel keeps its rays until that ring entry expires. A noted lamp takes the new set whole. The drain flag is not a note, so a still texel keeps its blend. Compose skips the probe evaluate for a covered pixel during that settle. The picture stays one estimate: the filtered field when it is stored, and the neighbour read when it is not. A quiet stored field moves toward a later filter target on each push by α' = (1 − λ) α + λ, where α is 1/16 and λ is the block's same-seed check (noise already subtracted), and reaches it. λ of 0 keeps the sixteenth. While a lamp is noted, the settle does not skip that check. A lamp that left (`lighting_lamp_keep` is 0) takes that target on the push. A stored field the filter has left by the sparse luminance ratio takes that target on the push as well, and the first stored field marks the blocks that read the texel. There is no hold. An empty texel still shows the neighbour read. Requires `surface_cache.sh_texel_detail`. The comparison is Rec.709 luminance within that existing ratio. It is not an RGB match and it is not a match of the whole SH field.
+Role: SCHED · Literature: Lumen final gather where the world cache already agrees · More detail: ADR 0039 stage 4, `docs/systems/lighting/adr-0039-remaining.md`
+
+**SH probe retire**: (`surface_cache.sh_probe_retire`) a deprecated alias. Screen-probe passes are removed, so the key parses, warns once, and does not schedule a pass. Indirect light is the SH-L1 world cache, with texel detail as a one-way seed.
+Role: SCHED · Literature: Lumen screen probes (Wright et al., SIGGRAPH 2022) are the departure: the passes are removed · More detail: ADR 0039, `docs/systems/lighting/adr-0039-remaining.md`
+
+**Face pack** (proposed, not built): the live faces of one world cell, stored as pool records on one hash header. The key keeps the half-cell inset and does not hash the axis id. Each face keeps that hemisphere's cosine mean and colour SH-L1. The read weights every face with a positive dot by that dot and tilts from that face's axis.
+Role: STORE · Literature: Lumen WRC (one probe, many directions); the six axis copies are the current store · More detail: [adr-0039-cell-gaps.md](../systems/lighting/adr-0039-cell-gaps.md)
+
+**Cell resident** (proposed, not built): one surface inside a face of a face pack, split from the next surface by its plane offset along the face axis. The read picks the closest resident inside half a sheet. It does not blend two residents. `surface_cache.residents` is the cap (High 2 in the design).
+Role: STORE · Literature: — · More detail: [adr-0039-cell-gaps.md](../systems/lighting/adr-0039-cell-gaps.md)
+
+**Resident sheet** (proposed, not built): the plane-offset quantum that decides whether two hits on one face share a cell resident. `surface_cache.sheet_metres`, High 0.05 m in the design. It is not a hash salt.
+Role: VIS · Literature: — · More detail: [adr-0039-cell-gaps.md](../systems/lighting/adr-0039-cell-gaps.md)
+
+**Body-centred lattice** (proposed, not the default): a body-centred cubic layout of world cells whose nearest neighbour is the cell size, read with four tetrahedral weights. An A/B against the cubic face-pack gather. `surface_cache.sh_bcc`, default off.
+Role: STORE · Literature: body-centred cubic probe lattice, tetrahedral interpolation · More detail: [adr-0039-cell-gaps.md](../systems/lighting/adr-0039-cell-gaps.md)
 
 **Acceleration grid** (proposed, not built): a spatial lookup that finds entries near a point in a big world.
 Role: STORE · Literature: GIBS trapezoid grid (§1.7) · More detail: [GIBS.md §1.7](research/GIBS.md)
@@ -176,7 +190,10 @@ Role: DENOISE · Literature: variance-guided SVGF · More detail: `denoise_varia
 **Screen denoise**: the picture-sized launch of the denoiser (`denoise_launch=screen`). Preset high uses it. The other presets keep `hash`. `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
 Role: DENOISE · Literature: Lumen/GIBS screen denoise; the kernel is still SVGF (Schied 2017) · More detail: [`lighting_screen.comp`](../../crates/render/shaders/lighting_screen.comp); S80
 
-**Visibility / leak test**: stops light passing through thin walls. Today it is handled by the facing axis and the cell size. Depth moments are not used.
+**Still refresh**: on a camera that has not moved, a texel with 16 sets keeps its wavelet and its pushed field. The first 8 frames do not take that hold. Walking longer than that moved the still-hall pair that `screen_hall` scores (flicker 3.39 against a 1.5 bar). A host hash change after frame 32 (`still` is 0) drops the hold for the whole picture for 16 frames. A mover still on the keep list does the same. Per-texel walks of the lamp ring, the change list, and the mover spheres overflowed lavapipe's shader stack inside the hash wavelet, and bounce from a lamp reaches past that lamp, so the window is the picture. A direct sample is compared with the last marked value, per channel, so a ramp under one percent still marks and a dim channel cannot drop out. An unresolved miss is not stored (`lighting_pack_rgb9e5` of black is 0, and adding one used to look like a colour). A miss does not replace a colour already stored. A block that still has no colour stays on a short retry list, because the dirty list would otherwise stop visiting it. Until the first drift pass a changed field is walked through frame 8 and then every third frame. That phase leaves frames 9 and 10 on the stored bounce, which is the pair `screen_hall` scores; walking every frame moved that pair by 3.3 codes. A shadow texel is still under 16 sets while its field fills, so holding the first bounce stepped the median from 0.08 to 0.35 at frame 32. Every fourth frame a held texel that already has 16 sets, and whose field has split from its raw mean by the sparse ratio, steps a quarter of the way toward that mean. A full-trust read that is black is stored, so a sun band can skip it. Frame 32 applies the mean the hold skipped and stores a zero that never resolved. A cache clear zeros that store and composes the whole picture for three frames: the clear frame's walk is empty, and holding it leaves the previous picture on screen. A camera move does not take the hold.
+Role: DENOISE · Literature: SVGF re-filters every pixel every frame; this is the departure · More detail: [`lighting_cache.glsl`](../../crates/render/shaders/lighting_cache.glsl) `lighting_still_refresh`
+
+**Visibility / leak test**: stops light passing through thin walls. The neighbour read rejects a cell whose stored normal faces the other way and a cell more than half a cell off the query plane. A same-facing surface closer than half a cell is not rejected. Depth moments are not used.
 Role: VIS · Literature: GIBS depth moments + Chebyshev (§1.10); DDGI Chebyshev visibility · More detail: [GIBS.md §1.10](research/GIBS.md)
 
 **Change record** (proposed, ADR 0013): one frame's description of what moved: a mover's old and new bounds, a lamp's old and new position and reach, or the sun. It raises the priority of what it can affect.
@@ -198,14 +215,32 @@ Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete 
 **Lamp**: a point light. The sun is not a lamp.
 Role: LIGHTS
 
-**Lamp pick**: chooses a few lamps per shaded point, weighted by their expected contribution, instead of shading all of them. Modes: `off` (potato, day-cycle); `hits` (`gi-1bounce`, pixels stay on the full sum); `pixels`; `both`; `reuse` (low, medium, high: a reservoir per pixel). At 8 positive lamps or fewer, and on a quiet held view, `reuse` shades the sum. `reuse (experimental)` is a deprecated value and logs a warning.
-Role: LIGHTS · Literature: RIS (Talbot 2005); `reuse` = ReSTIR DI (Bitterli et al. 2020) with pairwise MIS (Bitterli et al. 2022); GIBS weighs both (§1.16) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
+**Lamp pick**: chooses a few lamps per shaded hit, weighted by their expected contribution. Modes: `off`, `hits` (`gi-1bounce`), `pixels`, `both`, `reuse`. Production screen pixels do not use this pick. They use ReSTIR DI. `reuse (experimental)` is a deprecated value and logs a warning.
+Role: LIGHTS · Literature: RIS (Talbot 2005) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
 
-**Lamp reuse**: keeps a pixel's chosen lamp in a reservoir and merges it again next frame (`lamp_pick_reuse`). Low is temporal only. Medium and High also merge one neighbour. History is the previous frame's pixel under the motion vector, rejected on depth and normal. A quiet held pixel stores the exact sum and then holds. Off fills a new reservoir each frame. The menu switch is this key.
-Role: TEMPORAL · Literature: ReSTIR DI (Bitterli et al. 2020); motion vectors with depth/normal rejection · More detail: `lamp_pick_reuse`; [toggles.md](../systems/lighting/toggles.md)
+**Lamp reuse**: the hit picker and the noise-gate sample (`lamp_pick_reuse`). Production pixels are ReSTIR DI, not this merge. The menu switch is this key.
+Role: TEMPORAL · Literature: the noise gate's fresh candidates · More detail: `lamp_pick_reuse`; [toggles.md](../systems/lighting/toggles.md)
 
-**Lamp unbiased**: the reservoir merge (`lamp_pick_unbiased`). On is pairwise MIS and does not clamp M. The shade is `light * W`. Off divides by the sum of M, clamps M, and shades with `point_total / phat`. The menu switch is this key.
-Role: LIGHTS · Literature: pairwise MIS (Bitterli et al. 2022; Wyman, SIGGRAPH 2023); the off path is Bitterli et al. 2020 section 3 and Wyman and Panteleev, Ray Tracing Gems II, 2021 · More detail: `lamp_pick_unbiased`
+**Lamp unbiased**: the noise-gate sample weight (`lamp_pick_unbiased`). On shades with `W`. The product pixel does not read it. The menu switch is this key.
+Role: LIGHTS · Literature: the noise-gate sample · More detail: `lamp_pick_unbiased`
+
+**ReSTIR DI**: `restir_di`. Screen pixels shade one reservoir sample from the C1–C5 light tree, at every point-lamp count. On by default. Off is the labelled exact sum. The graded colour is the mean of that unbiased sample, visibility included. The mean is the three floats already stored beside the sample: no extra pass. The shade's shadow ray re-traces that sample when the reservoir kept the lamp; a different lamp traces the stored one once. It resets when reprojection fails, any lamp changes, or that re-trace's visibility flips or its unshadowed target changes by a 12-bit log step, and it stops at 4096 samples so a still surface converges. A frozen mean still drops on that re-trace, so a moving shadow does not stay. The reservoir's own M cap and its per-frame candidates stay. History is one reprojected pixel, relative depth 0.02, absolute 0.05 m, normal dot 0.9. The sun, the flame, and hit shades stay. `LampShadeGate::Exact` stays the labelled sum. With `GENOS_LIGHTING_LAMP_PICK_DIAG=1`, `lighting_lamp_pick_counts` reads `history_accepts` and `history_rejects` for that reprojection (a reset counts neither) and `restir_point_adds` for a near point lamp the direct loop added on a product pixel (stays 0 while the loop skips it). The three counts are restir header words 43, 44, and 45. A lamp change is header word 39.
+Role: LIGHTS · Literature: ReSTIR DI (Bitterli et al. 2020); the light tree is Conty Estevez and Kulla, HPG 2018 · More detail: `crates/render/shaders/restir_live.comp`
+
+**ReSTIR spatial neighbours**: `restir_spatial_neighbors`. How many reservoirs the spatial pass merges. 0 skips that pass. Default 4. Header word 13. The radius is `restir_spatial_radius` (header word 14, default 2, reservoir pixels). The draw is the checker's partial shuffle of the in-bounds window.
+Role: LIGHTS · Literature: ReSTIR spatial reuse (Bitterli et al. 2020) · More detail: `restir_live.comp`
+
+**ReSTIR resolution scale**: `restir_resolution_scale`. Screen pixels along one edge of a reservoir cell. Default 1 is one reservoir per pixel. 2 is one reservoir per 2×2, and each screen pixel still traces its own shadow ray. Header word 46.
+Role: LIGHTS · Literature: ReSTIR at a coarser grid · More detail: `restir_live.comp`
+
+**ReSTIR candidates**: `restir_candidates`. Initial light-tree candidates per reservoir. Default 4. Header word 9.
+Role: SAMPLE · Literature: ReSTIR M · More detail: `restir_sample.glsl`
+
+**ReSTIR checkerboard**: `restir_spatial_checkerboard`. 1 shades an odd reservoir pixel with the even neighbour's spatial sample. Default 0. Header word 47.
+Role: LIGHTS · Literature: checkerboard ReSTIR reuse · More detail: `restir_live.comp`
+
+**ReSTIR pass split**: `restir_split_passes`. 1 keeps initial and temporal as two dispatches so each GPU stamp is one pass. Default 0 runs temporal in the initial invocation, and the temporal stamp is then empty. Header word 50.
+Role: SCHED · Literature: — · More detail: `dispatch_restir_di`
 
 **ReSTIR reference**: the CPU checker for ReSTIR direct (`restir-ref`). It resamples point lamps with RIS, reuses a reservoir in time and across a receiver grid, and shades with the balance-heuristic weight. The dump is what a later GPU stage is diffed against. It is not the live lamp-pick shader.
 Role: TOOL · Literature: RIS (Talbot, Cline, and Egbert, EGSR 2005); ReSTIR DI (Bitterli et al., TOG 2020); GRIS balance heuristic (Bitterli et al., SIGGRAPH 2022) · More detail: [ReSTIR DI plan](../systems/lighting/restir-di-plan.md)
@@ -302,6 +337,8 @@ Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../
 **Screen resolve**: gather, filter, and compose added together. The à-trous pass stays outside that sum. Role: TOOL
 **GI pass time**: GPU milliseconds of one lighting pass (`direct`, `atrous`, `compose`, `trace`, `filter`, `gather`, `resolve`) or of the lighting total. `resolve` is the screen resolve and is not added again into the lighting total. `trace` is the screen-probe trace plus cache rays. `direct` is the direct dispatch plus hit light. Role: TOOL
 **Work counter**: rays traced, cache entries refreshed, or lamps shaded (fresh shadow rays) in one recorded frame. Role: TOOL
+**App lifecycle**: the window-crate owner of shutdown. The event loop stops producers, polls GPU fences, destroys the device, unmaps, then exits. A quit that blocks the seat misses `xdg_wm_base.ping`.
+Role: TOOL · Literature: — (the seat ping is `xdg_wm_base.ping`) · More detail: [window.md](../systems/window.md)
 
 ### Specular, mirrors, portals, water
 Accepted in [ADR 0019](../adr/0019-reflections.md) (Engine bot, 2026-10-26; Anthony Poschen delegated design approval). The CPU picture grades planar mirrors, portals, and flat water. Glossy screen marches, the world cache, ray queries, and the reflection denoiser are not built. One term, one meaning.
@@ -394,9 +431,77 @@ Role: SCHED · Literature: `VK_EXT_memory_budget` heapBudget · More detail: [..
 **Dwell**: frames a mip that just became resident cannot be evicted, unless usage is over `heapBudget`.
 Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-materials-design.md](../systems/pbr-materials-design.md)
 
+### Tile fill
+
+**Tile fill**: the scheduler that spends `fill_budget` rays every world-cache round. About one need-weighted pick per screen tile, and the rest on a clipmap around the player. The world cache is the only store. Texels are its 12.5 cm detail.
+Role: SCHED · Literature: Lumen World Cache fill; SHaRC update pass · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Pick**: one ray from one world-cache entry, chosen by need, or one clipmap ray.
+Role: SAMPLE · Literature: ReSTIR candidate; Lumen's per-tile pixel · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Fill budget**: `fill_budget`, the ray count one cache round traces. It is spent in full. High starts at 100,000. `0` traces no cache rays. `surface_cache.ray_budget` stays the ceiling for the other modes.
+Role: SCHED · Literature: Lumen's fixed update budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.1
+
+**Clipmap**: player-centred cells. 25 cm inside `fill_lod_near` (8 m), then double until `fill_cell_max` (4 m), then that size out to `fill_far`. Screen texels stay 12.5 cm.
+Role: STORE · Literature: clipmap LOD · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Fill leash**: a stored cell stays until the player is `fill_leash` times its create radius past it. New cells use the create radius, shifted ahead by `fill_look_ahead`. The two radii stop a boundary from creating and dropping the same cell.
+Role: SCHED · Literature: hysteresis band · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Off-screen floor**: `fill_offscreen_floor` (0.25) is the share of `fill_budget` the screen cannot take. That share ranks resident clipmap cells by closeness times remaining error. `fill_far_share` of the budget is reserved for cells at `fill_cell_max`. Rays the resident set does not take discover surfaces.
+Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
+Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
+
+**Shared sample**: a hit reconnected to another cell in the same screen tile with the Jacobian weight, then stored with `lighting_sc_set_seed`. The colour is the clamped reconnection. The confidence is `fill_share_conf` times `max(0, 1 - own_count / fill_share_cap)`, so a cell that already has samples fades the prior instead of storing a darker one. It never increments the cell's own ray count. There is no `shared_count` field. `fill_share` 0 writes none. Ring sharing is not this sample. Its display weight is 0 once the cell's own rays reach `fill_share_handover`.
+Role: SAMPLE · Literature: ReSTIR GI reconnection shift (Ouyang et al., HPG 2021) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
+
+**Share handover**: own rays after which a fill seed's display weight is exactly 0. `fill_share_handover` defaults to `fill_warmup`. The 16-set handover stays for seeds this pass did not write. The ray cap is not this count.
+Role: TEMPORAL · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
+
+**Share gate**: a named reason a neighbour gets nothing: plane, normal, axis, near hit, own count, stamp, or the weight clamp.
+Role: VIS · Literature: ReSTIR spatial depth and normal test · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.2
+
+**Virtual tile**: an off-screen direction. The clipmap holds the cell. Water-filling ranks it with the same priority as a screen cell.
+Role: SCHED · Literature: Lumen off-screen page update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.5
+
+**Need**: closeness times (remaining error + `fill_change_weight` × the change lambda). Closeness is `1 / max(distance, fill_prox_min)`. Remaining error is the standard error over the mean, past `fill_error_target`. A cell with no rays has remaining error 1.
+Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Change lambda**: a cell's 0–1 measured change. One same-seed check ray writes it. A skipped frame multiplies it by `fill_lambda_decay`. It is not a lamp hint and it does not reset the cell.
+Role: TEMPORAL · Literature: A-SVGF eq. 6 (Schied, Peters and Dachsbacher, HPG 2018) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Water-filling**: spending `fill_budget` from the highest priority bucket down. The fair pass gives a cell at most `fill_max_picks` (4). Leftover rays are the fill pour. The total does not pass the budget. A converged screen does not stop the round.
+Role: SCHED · Literature: Lumen tile budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.3
+
+**Cold-start rank**: while a cell's shown count is under 48, a lower shown count outranks a higher one, so one slot id cannot pin the tile. At 48 and after, the rank is the priority bucket from the stored variance. It is not a second budget. The rank reads the shown count.
+Role: SCHED · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Fill pour**: leftover `fill_budget` after the fair pass, added to the cells already chosen. A screen bucket takes up to 64 rays. An off-screen bucket takes up to 16 rays. A set is 64 rays, so the off-screen cap is not one set. A cell takes one grant that round: the on-screen pour or the off-screen grant, not both.
+Role: SCHED · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.3
+
+**Fill check rate**: `fill_check_rate`, one same-seed ray per this many cells. 9 is one ray in each 3×3 block. The seed does not include the frame.
+Role: SCHED · Literature: A-SVGF gradient check · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
 ### Historical (do not reuse)
 
 **residency_mb**: a fixed High cap of 256 MB, dropped by file order. The runtime budget is the VRAM budget. The key remains a deprecated alias.
+
+**Screen probe**: removed. It was a point on the visible surface placed every probe tile, tracing rays for nearby pixels. Indirect light is the SH-L1 world cache. Texel detail is a one-way seed from those cells.
+Role: SAMPLE · Literature: Lumen screen probe (Wright et al., SIGGRAPH 2022). The departure is deletion of that gather.
+
+**Probe tile**: removed. It was the pixel spacing of screen probes (16 from 720p up). The key `probe_tile` is a deprecated alias.
+Role: STORE · Literature: Lumen probe downsample factor
+
+**Gather**: removed with screen probes. It turned a probe's ray results into its light estimate.
+Role: OUT · Literature: Lumen final gather
+
+**Probe filter**: removed with screen probes. It was a spatial blur across neighbouring probes, then a projection to SH. It is not the denoiser.
+Role: DENOISE · Literature: Lumen screen-probe spatial filter
+
+**Kept hit**: removed with screen probes. It was a stored probe-ray hit whose light was re-read. Cache rays still store a hit for the light pass.
+Role: TEMPORAL · Literature: Lumen reuses radiance; this stored visibility
 
 Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence spacing: GI v1, removed on 2026-10-12. The radiance-cascades ADR (0008) was deleted; [ADR 0012](../adr/0012-gi.md) is the live decision.
 
@@ -413,6 +518,10 @@ Radiance cascade, radiance field, v1 world probe, tier, notice band, prominence 
 - `v1 world probe`
 - `notice band`
 - `prominence spacing`
+- `screen probe`
+- `probe tile`
+- `probe filter`
+- `kept hit`
 
 ---
 ## How to compare a new technique

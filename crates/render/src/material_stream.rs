@@ -23,6 +23,9 @@ pub struct Chain {
     pub width: u32,
     pub height: u32,
     pub levels: Vec<MipLevel>,
+    /// `VkFormat` of `levels`. 37 is RGBA8. A block format's level bytes are the
+    /// compressed payload, not `width * height * 4`.
+    pub format: i32,
 }
 
 impl Chain {
@@ -30,7 +33,7 @@ impl Chain {
     pub fn level_bytes(&self) -> Vec<u64> {
         self.levels
             .iter()
-            .map(|level| u64::from(level.width) * u64::from(level.height) * 4)
+            .map(|level| u64::try_from(level.rgba.len()).unwrap_or(u64::MAX))
             .collect()
     }
 
@@ -66,6 +69,7 @@ pub fn mip_chain(width: u32, height: u32, rgba: &[u8]) -> Option<Chain> {
         width,
         height,
         levels,
+        format: 37,
     })
 }
 
@@ -119,46 +123,22 @@ pub fn frame_views(
     height: u32,
     view_proj: &[f32; 16],
 ) -> Vec<TextureView> {
-    let color = atlas_live(
-        world.color_atlas.width,
-        world.color_atlas.height,
-        &world.color_atlas.rgba,
-    );
-    let normal = atlas_live(
-        world.normal_atlas.width,
-        world.normal_atlas.height,
-        &world.normal_atlas.rgba,
-    );
+    let color = atlas_live(&world.color_atlas);
+    let normal = atlas_live(&world.normal_atlas);
     let mut views = Vec::new();
     if let Some(index) = texture_index(color, normal, true) {
         views.push(atlas_view(
-            world,
-            camera,
-            width,
-            height,
-            view_proj,
-            index,
-            true,
+            world, camera, width, height, view_proj, index, true,
         ));
     }
     if let Some(index) = texture_index(color, normal, false) {
         views.push(atlas_view(
-            world,
-            camera,
-            width,
-            height,
-            view_proj,
-            index,
-            false,
+            world, camera, width, height, view_proj, index, false,
         ));
     }
     let mut index = views.len();
     for streamed in &world.stream_textures {
-        if !atlas_live(
-            streamed.atlas.width,
-            streamed.atlas.height,
-            &streamed.atlas.rgba,
-        ) {
+        if !atlas_live(&streamed.atlas) {
             continue;
         }
         views.push(streamed_view(
@@ -212,9 +192,15 @@ fn streamed_view(
     }
 }
 
-fn atlas_live(width: u32, height: u32, rgba: &[u8]) -> bool {
-    let texels = u64::from(width) * u64::from(height) * 4;
-    width > 0 && height > 0 && u64::try_from(rgba.len()).unwrap_or(0) >= texels
+fn atlas_live(atlas: &crate::world::MaterialAtlas) -> bool {
+    if atlas.width == 0 || atlas.height == 0 {
+        return false;
+    }
+    if atlas.block_format != 0 && !atlas.block_mips.is_empty() {
+        return true;
+    }
+    let texels = u64::from(atlas.width) * u64::from(atlas.height) * 4;
+    u64::try_from(atlas.rgba.len()).unwrap_or(0) >= texels
 }
 
 fn atlas_view(
@@ -308,13 +294,9 @@ fn object_hit(object: &Object, ctx: &ViewCtx<'_>) -> Option<Hit> {
     else {
         return None;
     };
-    let rect = surface.and_then(|slot| ctx.surfaces.get(slot)).map(|item| {
-        if ctx.color {
-            item.color
-        } else {
-            item.normal
-        }
-    })?;
+    let rect = surface
+        .and_then(|slot| ctx.surfaces.get(slot))
+        .map(|item| if ctx.color { item.color } else { item.normal })?;
     if rect[2] == 0 || rect[3] == 0 {
         return None;
     }
@@ -353,9 +335,24 @@ fn triangle_derivatives(
     }
     let mut index = 0;
     while index + 2 < vertices.len() {
-        let p0 = project(view_proj, transform_pose(pose, vertices[index]), width, height);
-        let p1 = project(view_proj, transform_pose(pose, vertices[index + 1]), width, height);
-        let p2 = project(view_proj, transform_pose(pose, vertices[index + 2]), width, height);
+        let p0 = project(
+            view_proj,
+            transform_pose(pose, vertices[index]),
+            width,
+            height,
+        );
+        let p1 = project(
+            view_proj,
+            transform_pose(pose, vertices[index + 1]),
+            width,
+            height,
+        );
+        let p2 = project(
+            view_proj,
+            transform_pose(pose, vertices[index + 2]),
+            width,
+            height,
+        );
         if let (Some(s0), Some(s1), Some(s2)) = (p0, p1, p2) {
             if let Some(deriv) = screen_derivatives(
                 s0,
@@ -401,7 +398,13 @@ fn screen_derivatives(
     })
 }
 
-fn scale_to_atlas(deriv: Derivatives, rect_w: u32, rect_h: u32, atlas_w: u32, atlas_h: u32) -> Derivatives {
+fn scale_to_atlas(
+    deriv: Derivatives,
+    rect_w: u32,
+    rect_h: u32,
+    atlas_w: u32,
+    atlas_h: u32,
+) -> Derivatives {
     let across = u32_to_f32(rect_w) / u32_to_f32(atlas_w.max(1));
     let down = u32_to_f32(rect_h) / u32_to_f32(atlas_h.max(1));
     Derivatives {
@@ -510,6 +513,7 @@ mod tests {
             width: 0,
             height: 0,
             levels: Vec::new(),
+            format: 37,
         });
         assert_eq!(chain.levels.len(), 2);
         assert_eq!(chain.levels[1].rgba, vec![10, 20, 30, 255]);

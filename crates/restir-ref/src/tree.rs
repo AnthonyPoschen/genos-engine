@@ -33,7 +33,52 @@ use crate::shade::{luminance, Lamp, Receiver};
 pub const NODE_WORDS: usize = 12;
 
 /// Distance floor (metres) when the shading point sits inside a cluster sphere.
-const MIN_DIST: f32 = 1.0e-3;
+/// `lamp_light` clamps distance to `LAMP_RADIUS`: no lamp gives more than at 0.1 m.
+const MIN_DIST: f32 = 0.1;
+/// `restir_phat` measures range from the lifted origin, up to this far from the receiver.
+const RANGE_SLACK: f32 = 0.02;
+
+/// Steps of `next_f32` (16 bits). The GPU copy is `TREE_STEPS`.
+const STEPS: f32 = 65536.0;
+
+/// Weight of the power-only share in each split's defensive mixture.
+/// The GPU copy is `TREE_DEFENSIVE`.
+pub const DEFENSIVE: f32 = 0.1;
+
+/// Left share of a split in `next_f32` steps, rounded: the defensive mixture
+/// `(1 - a) * bound share + a * power share` when both sides have importance.
+/// The bound is only an upper bound: a box that holds the receiver (a ring of
+/// lamps around the room) floors its distance and outweighs a bright lamp next
+/// to the receiver by 300x. The power share keeps every lit lamp at least `a`
+/// times its share of power per split, and the pdf is still the exact pick
+/// probability. A zero side (range, back face) stays culled.
+/// The GPU copy is `tree_split_steps_mixed`.
+#[must_use]
+pub fn split_steps_mixed(left_i: f32, right_i: f32, left_p: f32, right_p: f32) -> f32 {
+    if right_i <= 0.0 {
+        return STEPS;
+    }
+    if left_i <= 0.0 {
+        return 0.0;
+    }
+    let bound = left_i / (left_i + right_i);
+    let power = left_p / (left_p + right_p);
+    let share = (1.0 - DEFENSIVE) * bound + DEFENSIVE * power;
+    (share * STEPS + 0.5).floor().clamp(1.0, STEPS - 1.0)
+}
+
+/// Left share of a split in `next_f32` steps, rounded. 0 or `STEPS` when a
+/// side has no importance. The GPU copy is `tree_split_steps`.
+#[must_use]
+pub fn split_steps(left_i: f32, right_i: f32, sum: f32) -> f32 {
+    if right_i <= 0.0 {
+        return STEPS;
+    }
+    if left_i <= 0.0 {
+        return 0.0;
+    }
+    (left_i / sum * STEPS + 0.5).floor().clamp(1.0, STEPS - 1.0)
+}
 
 /// Fault injected into the node importance. The walk still covers every lamp
 /// with positive power, so the RIS weight stays unbiased. The draws change.
@@ -77,6 +122,8 @@ pub struct Node {
     pub max: Vec3,
     pub power: f32,
     pub radius: f32,
+    /// Largest lamp range under the node; 0 when any lamp is unbounded.
+    pub range: f32,
     pub left: u32,
     pub right: u32,
     pub lamp: u32,
@@ -89,18 +136,20 @@ impl Node {
             max: Vec3::ZERO,
             power: 0.0,
             radius: 0.0,
+            range: 0.0,
             left: LAMP_EMPTY,
             right: LAMP_EMPTY,
             lamp: LAMP_EMPTY,
         }
     }
 
-    fn leaf(position: Vec3, power: f32, lamp: u32) -> Self {
+    fn leaf(position: Vec3, power: f32, range: f32, lamp: u32) -> Self {
         Self {
             min: position,
             max: position,
             power,
             radius: 0.0,
+            range,
             left: LAMP_EMPTY,
             right: LAMP_EMPTY,
             lamp,
@@ -122,12 +171,20 @@ struct Prim {
     lamp: u32,
     position: Vec3,
     power: f32,
+    range: f32,
 }
 
 impl LightTree {
     /// Median split on the longest axis of the lamp positions. Lamp index breaks ties.
     #[must_use]
     pub fn build(lamps: &[Lamp]) -> Self {
+        Self::build_ranged(lamps, &[])
+    }
+
+    /// `build` with each lamp's range (`lamp_reaches`: 0 or less is unbounded).
+    /// A lamp past the end of `ranges` is unbounded.
+    #[must_use]
+    pub fn build_ranged(lamps: &[Lamp], ranges: &[f32]) -> Self {
         let mut prims = Vec::with_capacity(lamps.len());
         for (index, lamp) in lamps.iter().enumerate() {
             let Some(lamp_id) = u32::try_from(index).ok() else {
@@ -138,6 +195,11 @@ impl LightTree {
                 lamp: lamp_id,
                 position: lamp.position,
                 power,
+                range: ranges
+                    .get(index)
+                    .copied()
+                    .filter(|r| *r > 0.0)
+                    .unwrap_or(0.0),
             });
         }
         let mut nodes = Vec::new();
@@ -158,7 +220,7 @@ impl LightTree {
     }
 
     /// std430-friendly words. Twelve words per node:
-    /// min.xyz, power, max.xyz, radius, left, right, lamp, pad.
+    /// min.xyz, power, max.xyz, radius, left, right, lamp, range (f32 bits; 0 = unbounded).
     #[must_use]
     pub fn pack_words(&self) -> Vec<u32> {
         let mut words = Vec::with_capacity(self.nodes.len().saturating_mul(NODE_WORDS));
@@ -174,7 +236,7 @@ impl LightTree {
             words.push(node.left);
             words.push(node.right);
             words.push(node.lamp);
-            words.push(0);
+            push_f32(&mut words, node.range);
         }
         words
     }
@@ -187,6 +249,19 @@ impl LightTree {
         receiver: &Receiver,
         fault: TreeFault,
         rng: &mut Rng,
+    ) -> Option<(usize, f32)> {
+        self.sample_sided(receiver, fault, rng, false)
+    }
+
+    /// `sample` for a receiver lit from both sides (`|n.l|`) when `two_sided`:
+    /// the cosine bound takes `|cos|`, so lamps behind the normal keep support.
+    #[must_use]
+    pub fn sample_sided(
+        &self,
+        receiver: &Receiver,
+        fault: TreeFault,
+        rng: &mut Rng,
+        two_sided: bool,
     ) -> Option<(usize, f32)> {
         if self.nodes.is_empty() {
             return None;
@@ -206,19 +281,26 @@ impl LightTree {
                 let _ = rng.next_f32();
                 return None;
             }
-            let left_i = self.importance(left, receiver, fault);
-            let right_i = self.importance(right, receiver, fault);
+            let left_i = self.importance_sided(left, receiver, fault, two_sided);
+            let right_i = self.importance_sided(right, receiver, fault, two_sided);
             let sum = left_i + right_i;
             if sum <= 0.0 {
                 let _ = rng.next_f32();
                 return None;
             }
-            let mark = rng.next_f32() * sum;
-            if right_i <= 0.0 || mark < left_i {
-                pdf *= left_i / sum;
+            // next_f32 has 65536 steps. Quantize the left share to the same
+            // steps and charge the pdf that share, so the pdf is the real
+            // probability: a branch below one step was picked 1/65536 of the
+            // time while its pdf said far less, and phat/pdf blew up.
+            let left_p = self.node_at(left).map_or(0.0, |n| n.power);
+            let right_p = self.node_at(right).map_or(0.0, |n| n.power);
+            let left_q = split_steps_mixed(left_i, right_i, left_p, right_p);
+            let draw = rng.next_f32() * STEPS;
+            if draw < left_q {
+                pdf *= left_q / STEPS;
                 node_index = left;
             } else {
-                pdf *= right_i / sum;
+                pdf *= (STEPS - left_q) / STEPS;
                 node_index = right;
             }
         }
@@ -228,10 +310,20 @@ impl LightTree {
     /// Conservative importance of one node at `receiver`.
     #[must_use]
     pub fn importance(&self, index: u32, receiver: &Receiver, fault: TreeFault) -> f32 {
+        self.importance_sided(index, receiver, fault, false)
+    }
+
+    fn importance_sided(
+        &self,
+        index: u32,
+        receiver: &Receiver,
+        fault: TreeFault,
+        two_sided: bool,
+    ) -> f32 {
         let Some(node) = self.node_at(index) else {
             return 0.0;
         };
-        node_importance(node, receiver, fault)
+        node_importance_sided(node, receiver, fault, two_sided)
     }
 
     fn node_at(&self, index: u32) -> Option<Node> {
@@ -251,6 +343,25 @@ impl LightTree {
 )]
 #[must_use]
 pub fn node_importance(node: Node, receiver: &Receiver, fault: TreeFault) -> f32 {
+    node_importance_sided(node, receiver, fault, false)
+}
+
+/// `node_importance` with `|cos|` for a two-sided receiver.
+#[must_use]
+#[allow(
+    clippy::manual_midpoint,
+    reason = "the lavapipe walk uses 0.5 * (min + max), and midpoint is a different rounding"
+)]
+#[allow(
+    clippy::similar_names,
+    reason = "the three box gaps are the x y z components of one vector"
+)]
+pub fn node_importance_sided(
+    node: Node,
+    receiver: &Receiver,
+    fault: TreeFault,
+    two_sided: bool,
+) -> f32 {
     if node.power <= 0.0 {
         return 0.0;
     }
@@ -269,6 +380,27 @@ pub fn node_importance(node: Node, receiver: &Receiver, fault: TreeFault) -> f32
     let gap_y = axis_gap(receiver.position.y, node.min.y, node.max.y);
     let gap_z = axis_gap(receiver.position.z, node.min.z, node.max.z);
     let mut box_dist2 = 0.0 + gap_x * gap_x + gap_y * gap_y + gap_z * gap_z;
+    // Range: every lamp under the node is out of reach of the whole box.
+    if node.range > 0.0 {
+        let reach = node.range + RANGE_SLACK;
+        if box_dist2 > reach * reach {
+            return 0.0;
+        }
+    }
+    // Orientation (Conty Estevez and Kulla 2018): the box must have a point in
+    // front of the receiver's plane, or n.l <= 0 for every lamp in it.
+    if !two_sided {
+        let front = 0.0
+            + receiver.normal.x * dx
+            + receiver.normal.y * dy
+            + receiver.normal.z * dz
+            + receiver.normal.x.abs() * (0.5 * (node.max.x - node.min.x))
+            + receiver.normal.y.abs() * (0.5 * (node.max.y - node.min.y))
+            + receiver.normal.z.abs() * (0.5 * (node.max.z - node.min.z));
+        if front <= 0.0 {
+            return 0.0;
+        }
+    }
     let floor2 = MIN_DIST * MIN_DIST;
     if box_dist2 < floor2 {
         box_dist2 = floor2;
@@ -277,22 +409,29 @@ pub fn node_importance(node: Node, receiver: &Receiver, fault: TreeFault) -> f32
         TreeFault::IgnoreDistance => 1.0,
         TreeFault::None => 1.0 / box_dist2,
     };
+    // cos(max(alpha - theta_u, 0)): theta_u is the half-angle of the node's
+    // bounding sphere, pi inside it, so the max cosine there is 1.
     let radius2 = node.radius * node.radius;
-    if dist2 <= radius2 {
-        return node.power * geom;
+    let mut cos_bound = 1.0;
+    if dist2 > radius2 {
+        let inv = 1.0 / dist;
+        let mut cos_alpha = 0.0
+            + receiver.normal.x * (dx * inv)
+            + receiver.normal.y * (dy * inv)
+            + receiver.normal.z * (dz * inv);
+        if two_sided {
+            cos_alpha = cos_alpha.abs();
+        }
+        let mut sin_theta = node.radius * inv;
+        if sin_theta > 1.0 {
+            sin_theta = 1.0;
+        }
+        let cos_theta = sqrt_f32(1.0 - sin_theta * sin_theta);
+        if cos_alpha < cos_theta {
+            let sin_alpha = sqrt_f32(1.0 - cos_alpha * cos_alpha);
+            cos_bound = cos_alpha * cos_theta + sin_alpha * sin_theta;
+        }
     }
-    let inv = 1.0 / dist;
-    let cos_alpha = 0.0
-        + receiver.normal.x * (dx * inv)
-        + receiver.normal.y * (dy * inv)
-        + receiver.normal.z * (dz * inv);
-    let mut sin_theta = node.radius * inv;
-    if sin_theta > 1.0 {
-        sin_theta = 1.0;
-    }
-    let cos_theta = sqrt_f32(1.0 - sin_theta * sin_theta);
-    let sin_alpha = sqrt_f32(1.0 - cos_alpha * cos_alpha);
-    let cos_bound = cos_alpha * cos_theta + sin_alpha * sin_theta;
     if cos_bound <= 0.0 {
         return 0.0;
     }
@@ -338,7 +477,7 @@ fn build_range(prims: &mut [Prim], nodes: &mut Vec<Node>) -> u32 {
         if let Some(prim) = prims.first() {
             let slot = usize::try_from(index).unwrap_or(0);
             if let Some(place) = nodes.get_mut(slot) {
-                *place = Node::leaf(prim.position, prim.power, prim.lamp);
+                *place = Node::leaf(prim.position, prim.power, prim.range, prim.lamp);
             }
         }
         return index;
@@ -383,6 +522,11 @@ fn join(nodes: &[Node], left: u32, right: u32) -> Node {
         max,
         power: left_node.power + right_node.power,
         radius,
+        range: if left_node.range > 0.0 && right_node.range > 0.0 {
+            max2(left_node.range, right_node.range)
+        } else {
+            0.0
+        },
         left,
         right,
         lamp: LAMP_EMPTY,
@@ -503,8 +647,8 @@ mod tests {
 
     #[test]
     fn near_equal_flux_outranks_far_and_ignore_distance_flattens_that() {
-        let near = Node::leaf(Vec3::new(0.0, 1.0, 0.0), 1.0, 0);
-        let far = Node::leaf(Vec3::new(0.0, 8.0, 0.0), 1.0, 1);
+        let near = Node::leaf(Vec3::new(0.0, 1.0, 0.0), 1.0, 0.0, 0);
+        let far = Node::leaf(Vec3::new(0.0, 8.0, 0.0), 1.0, 0.0, 1);
         let shading = receiver();
         let near_i = node_importance(near, &shading, TreeFault::None);
         let far_i = node_importance(far, &shading, TreeFault::None);
@@ -521,7 +665,7 @@ mod tests {
 
     #[test]
     fn a_lamp_behind_the_receiver_has_zero_importance() {
-        let below = Node::leaf(Vec3::new(0.0, -2.0, 0.0), 5.0, 0);
+        let below = Node::leaf(Vec3::new(0.0, -2.0, 0.0), 5.0, 0.0, 0);
         let importance = node_importance(below, &receiver(), TreeFault::None);
         assert_eq!(importance, 0.0);
     }

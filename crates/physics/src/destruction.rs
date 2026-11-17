@@ -19,7 +19,7 @@ const DEBRIS_SLEEP_SPEED: f32 = 0.4;
 #[derive(Clone, Debug)]
 pub struct Breakable {
     pub asset: Asset,
-    intact: Option<usize>,
+    pub(crate) intact: Option<usize>,
     chunk_bodies: Vec<Option<usize>>,
     sleep: Vec<f32>,
     pub debris_budget: u32,

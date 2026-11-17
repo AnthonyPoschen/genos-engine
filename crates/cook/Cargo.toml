@@ -1,0 +1,16 @@
+[package]
+name = "genos-cook"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+genos-bake = { path = "../bake" }
+genos-load = { path = "../load" }
+intel_tex_2 = "0.5"
+
+[dev-dependencies]
+bcdec_rs = "0.2"

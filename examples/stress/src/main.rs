@@ -1,16 +1,55 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::redundant_closure, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::semicolon_if_nothing_returned, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::similar_names, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::redundant_closure,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::semicolon_if_nothing_returned,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::similar_names,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! Lighting stress test: a big, fairly open building with windows, skylights and wide
 //! doorways, still and moving lamps, a sun on a day/night cycle, and coloured boxes
@@ -22,7 +61,7 @@
 //! `GENOS_STRESS_LIGHTS`, `GENOS_STRESS_DYNAMIC`, `GENOS_STRESS_LAYOUT`,
 //! `GENOS_STRESS_DAY_SECONDS`, `GENOS_STRESS_STEP`, `GENOS_STRESS_FIXED_DT`); a flag
 //! wins over the variable. Lighting launch flags (`--preset`, `--bounces`,
-//! `--ambient`, `--time-of-day`, `--gpu-times`) win the same way: each
+//! `--ambient`, `--time-of-day`, `--gpu-times`, `--profile-passes`) win the same way: each
 //! `GENOS_LIGHTING_*` or `GENOS_GPU_TIMES` mirror applies only when that
 //! argument was omitted. The panel switches lamps, dynamic share, scale and the sun
 //! live.
@@ -33,15 +72,17 @@ mod gi_check;
 mod knobs;
 mod stage;
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use genos_debug::{png, Host};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
 use genos_render::{Renderer, ScreenLine, ScreenRect, World};
 use genos_scene::{
     look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor, FogSettings,
-    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ReflectionSettings, Scene,
+    FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ParticleSettings,
+    ReflectionSettings, Scene,
     Sky, Vec3, PITCH_LIMIT,
 };
 use genos_ui::{button_panel, Action, PanelButton, PanelRow, PanelSlider, Pointer, State};
@@ -52,7 +93,7 @@ use stage::{Scale, Stage};
 
 const USAGE: &str = "genos-stress [options]
 genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
-                          [--lamps N] [--broken] [--out DIR]
+                          [--lamps N] [--broken] [--specular] [--out DIR]
                           s7 direct-light noise grade. noise-gate --help lists it.
   --scale small|big|N|NxM   building size: small = 1 section (25 m), big = 4x4 (100 m)
   --lights N                lamps in the whole building (panel: 5/25/50/100)
@@ -84,6 +125,10 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
   --proof                   open the proof window (floats, takes no focus; --bench
                             always uses it, so the compositor keeps its size)
   --display NAME            Wayland display name. Omit it to use the session compositor.
+  --lifecycle-block-ms N    stall shutdown once, for the quit-gap test.
+                            GENOS_LIFECYCLE_BLOCK_MS applies only when this is omitted
+  --lifecycle-close-early   quit before the first frame. GENOS_LIFECYCLE_CLOSE_EARLY
+                            applies only when this is omitted
   --frames N                quit after N frames; frames step 1/60 s of scene time
   --fixed-dt SECONDS        scene step per frame (wall clock otherwise; 1/60 with --step)
   --step                    pause; Space or the MCP step command advances one fixed step
@@ -139,13 +184,21 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             0 keeps the 0.1 floor
   --surface-cache-ray-budget N
                             cap on cache-round rays; 0 keeps the existing lists
-                            (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+                            (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET).
+                            World mode 3 spends surface_cache.fill_budget
+                            (GENOS_LIGHTING_FILL_BUDGET, High 100000). 0 traces
+                            no cache rays. The other fill knobs are
+                            surface_cache.fill_* with GENOS_LIGHTING_FILL_*.
+                            fill_share 1 seeds the rest of the tile. 0 is off.
   --surface-cache-dormant-rays N
                             fresh rays per frame for a dormant cache entry, 0..16.
                             0 keeps one sweep in eight. 1..16 traces one new
                             16-ray entry every ceil(16 / N) frames
                             (GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS)
   --bounces 0|1|2|unlimited bounce count (GENOS_LIGHTING_BOUNCES)
+  --lighting-direct-specular on|off
+                            Appendix B shade on pixel direct (default off)
+                            (GENOS_LIGHTING_DIRECT_SPECULAR; the argument wins)
   --ambient MODE            off, constant, hemisphere, day, or curve
                             (GENOS_LIGHTING_AMBIENT)
   --denoise-iters 1|3|5     wavelet iterations (GENOS_LIGHTING_DENOISE_ITERS)
@@ -158,6 +211,13 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             variable override the preset
   --denoise-screen on|off   alias of --denoise-launch (on is screen, off is hash)
   --gpu-times N             print GPU times every N frames (GENOS_GPU_TIMES)
+  --profile-passes FILE     write GPU pass times as CSV (GENOS_PROFILE_PASSES).
+                            The argument wins. When --gpu-times was omitted
+                            this turns timestamps on every frame. One row per
+                            collected timestamp frame, one frame behind the
+                            draw. The first two draws have no sample. Shade
+                            includes its visibility ray. Lavapipe milliseconds
+                            are not a 4070 result
   --lamp-pick MODE          off, hits, pixels, both, or reuse
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
   --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
@@ -169,6 +229,39 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
   --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
+  --restir-di on|off        screen-pixel ReSTIR DI (GENOS_RESTIR_DI). On by default. Off is the exact sum.
+                            The argument wins. The picture is the mean of the unbiased sample.
+  --restir-spatial-neighbors N
+                            spatial reservoirs merged per pixel, 0..16 (GENOS_RESTIR_SPATIAL_NEIGHBORS).
+                            0 skips the spatial pass. Default 4
+  --restir-spatial-radius N
+                            Chebyshev radius of that window, in reservoir pixels, 0..8
+                            (GENOS_RESTIR_SPATIAL_RADIUS). Default 2
+  --restir-resolution-scale N
+                            screen pixels along one edge of a reservoir cell, 1..4
+                            (GENOS_RESTIR_RESOLUTION_SCALE). Default 1 is one reservoir per pixel.
+                            2 is one reservoir per 2×2. Each screen pixel still traces its own shadow ray
+  --restir-candidates N     initial candidates per reservoir, 1..32 (GENOS_RESTIR_CANDIDATES).
+                            Default 4
+  --restir-spatial-checkerboard 0|1
+                            odd reservoir pixels copy the even neighbour's spatial sample
+                            (GENOS_RESTIR_SPATIAL_CHECKERBOARD). Default 0
+  --restir-split-passes 0|1 keep initial and temporal as two dispatches so each GPU stamp
+                            is one pass (GENOS_RESTIR_SPLIT_PASSES). Default 0 runs temporal
+                            in the initial invocation. restir_temporal is then empty and
+                            restir_initial is both passes
+  --lighting-cache-async on|off  light cache rounds on the async queue (GENOS_LIGHTING_ASYNC)
+  --lighting-cache-hz HZ    light cache rounds per second, 0 every frame (GENOS_LIGHTING_CACHE_HZ)
+  --lighting-cache-picks on|off  light cache rays take the lamp pick (GENOS_LIGHTING_CACHE_PICKS)
+  --lighting-fill on|off    unlit probes read lit neighbours (GENOS_LIGHTING_FILL)
+  --lighting-young-only on|off  quiet rounds relight young patches only (GENOS_LIGHTING_YOUNG_ONLY)
+  --lighting-world-cap N    world cell / texel average frames, 0 mode default (GENOS_LIGHTING_WORLD_CAP)
+  --lighting-sc-settle N    surface cache frames still to settle (GENOS_LIGHTING_SC_SETTLE)
+  --lighting-sc-flags N     surface cache switch bits (GENOS_LIGHTING_SC_FLAGS)
+  --lighting-toggles LIST   isolate toggles: freeze_cache, direct_only, bounce_only,
+                            freeze_probes, cells_only, none (GENOS_LIGHTING_TOGGLES)
+  --lighting-probe-tile N   deprecated alias, pixels 4..64, 0 auto (GENOS_LIGHTING_TILE)
+  --lighting-denoise-dirty F  a-trous work-list fraction, 0..1 (GENOS_LIGHTING_ATROUS_DIRTY)
   --lighting-full-effort    full refresh every frame (GENOS_LIGHTING_FULL_EFFORT=1)
   --lighting-sun on|off     small sun step (GENOS_LIGHTING_SUN, default on)
   --lighting-sun-bands N    indirect bands, 1..64 (GENOS_LIGHTING_SUN_BANDS, default 8)
@@ -198,7 +291,10 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_MATERIAL_DWELL_FRAMES)
   --material-residency-mb N deprecated alias. Warns once and does not set a pool
                             (GENOS_MATERIAL_RESIDENCY_MB)
-  --watch PATH              texture to reload (GENOS_MATERIAL_WATCH)";
+  --watch PATH              texture to reload (GENOS_MATERIAL_WATCH)
+  --cooked DIR              load glTF from a genos-cook directory (ADR 0035).
+                            GENOS_COOKED applies only when this is omitted.
+                            Unset keeps the glTF and PNG path";
 
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
 /// Panel ids. Each row's buttons count up from its base.
@@ -264,6 +360,8 @@ struct Options {
     denoise_launch: Option<String>,
     denoise_screen: Option<String>,
     gpu_times: Option<String>,
+    /// `--profile-passes`. The mirror applies when this stays empty.
+    profile_passes: Option<PathBuf>,
     lamp_pick: Option<String>,
     lamp_pick_samples: Option<String>,
     lamp_pick_rays: Option<String>,
@@ -272,8 +370,23 @@ struct Options {
     lamp_pick_radius: Option<String>,
     lamp_pick_history: Option<String>,
     lamp_pick_unbiased: Option<String>,
+    restir_di: Option<String>,
+    restir_spatial_neighbors: Option<String>,
+    restir_spatial_radius: Option<String>,
+    restir_resolution_scale: Option<String>,
+    restir_candidates: Option<String>,
+    restir_spatial_checkerboard: Option<String>,
+    restir_split_passes: Option<String>,
+    /// `--lifecycle-block-ms`. The mirror applies when this stays empty.
+    block_ms: Option<Duration>,
+    /// `--lifecycle-close-early`. The mirror applies when this stays false.
+    close_early: bool,
+    /// `LIGHTING_EXPERIMENT_FLAGS` passed, index and value, in order.
+    lighting_experiments: Vec<(usize, String)>,
     /// Material flags, in order, including the values. The argument wins over the environment.
     material_args: Vec<String>,
+    /// `--cooked`. The mirror applies when this stays empty.
+    cooked: Option<PathBuf>,
 }
 
 fn parse<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
@@ -409,6 +522,7 @@ fn options() -> Result<Options, String> {
         denoise_launch: None,
         denoise_screen: None,
         gpu_times: None,
+        profile_passes: None,
         lamp_pick: None,
         lamp_pick_samples: None,
         lamp_pick_rays: None,
@@ -417,7 +531,18 @@ fn options() -> Result<Options, String> {
         lamp_pick_radius: None,
         lamp_pick_history: None,
         lamp_pick_unbiased: None,
+        restir_di: None,
+        restir_spatial_neighbors: None,
+        restir_spatial_radius: None,
+        restir_resolution_scale: None,
+        restir_candidates: None,
+        restir_spatial_checkerboard: None,
+        restir_split_passes: None,
+        block_ms: None,
+        close_early: false,
+        lighting_experiments: Vec::new(),
         material_args: Vec::new(),
+        cooked: None,
     };
     let mut report: Option<PathBuf> = None;
     let mut trace = false;
@@ -500,6 +625,7 @@ fn options() -> Result<Options, String> {
                 }
             }
             "--gltf" => opts.gltf.push((PathBuf::from(value()?), gltf_at)),
+            "--cooked" => opts.cooked = Some(PathBuf::from(value()?)),
             "--report" => report = Some(PathBuf::from(value()?)),
             "--out" => {
                 // The renderer reads this from the process arguments.
@@ -518,6 +644,14 @@ fn options() -> Result<Options, String> {
             "--denoise-launch" => opts.denoise_launch = Some(value()?),
             "--denoise-screen" => opts.denoise_screen = Some(value()?),
             "--gpu-times" => opts.gpu_times = Some(value()?),
+            "--profile-passes" => opts.profile_passes = Some(PathBuf::from(value()?)),
+            arg if arg.starts_with("--profile-passes=") => {
+                let path = arg.trim_start_matches("--profile-passes=").trim();
+                if path.is_empty() {
+                    return Err("--profile-passes needs a file".into());
+                }
+                opts.profile_passes = Some(PathBuf::from(path));
+            }
             "--lamp-pick" => opts.lamp_pick = Some(value()?),
             "--lamp-pick-samples" => opts.lamp_pick_samples = Some(value()?),
             "--lamp-pick-rays" => opts.lamp_pick_rays = Some(value()?),
@@ -526,10 +660,29 @@ fn options() -> Result<Options, String> {
             "--lamp-pick-radius" => opts.lamp_pick_radius = Some(value()?),
             "--lamp-pick-history" => opts.lamp_pick_history = Some(value()?),
             "--lamp-pick-unbiased" => opts.lamp_pick_unbiased = Some(value()?),
+            "--restir-di" => opts.restir_di = Some(value()?),
+            "--restir-spatial-neighbors" => opts.restir_spatial_neighbors = Some(value()?),
+            "--restir-spatial-radius" => opts.restir_spatial_radius = Some(value()?),
+            "--restir-resolution-scale" => opts.restir_resolution_scale = Some(value()?),
+            "--restir-candidates" => opts.restir_candidates = Some(value()?),
+            "--restir-spatial-checkerboard" => opts.restir_spatial_checkerboard = Some(value()?),
+            "--restir-split-passes" => opts.restir_split_passes = Some(value()?),
+            flag if lighting_experiment_flag(flag).is_some() => {
+                if let Some(i) = lighting_experiment_flag(flag) {
+                    opts.lighting_experiments.push((i, value()?));
+                }
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
-                std::process::exit(0);
+                genos_window::exit(0);
             }
+            "--lifecycle-block-ms" => {
+                opts.block_ms = Some(genos_window::parse_block_ms(
+                    "--lifecycle-block-ms",
+                    Some(&value()?),
+                )?);
+            }
+            "--lifecycle-close-early" => opts.close_early = true,
             other if genos_load::material_flag_needs_value(other) == Some(true) => {
                 let next = value()?;
                 opts.material_args.push(other.to_string());
@@ -547,30 +700,37 @@ fn options() -> Result<Options, String> {
                         genos_scene::check_reflection_arg(other, next.as_deref())?;
                     }
                     None => match genos_scene::lighting_flag_needs_value(other) {
-                    Some(needs) => {
-                        let next = needs.then(|| value()).transpose()?;
-                        genos_scene::check_lighting_arg(other, next.as_deref())?;
-                        if let Some(hours) =
-                            genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
-                        {
-                            opts.time = knobs::day_from_hours(f64::from(hours));
+                        Some(needs) => {
+                            let next = needs.then(|| value()).transpose()?;
+                            genos_scene::check_lighting_arg(other, next.as_deref())?;
+                            if let Some(hours) =
+                                genos_scene::lighting_arg_time_of_day(other, next.as_deref())?
+                            {
+                                opts.time = knobs::day_from_hours(f64::from(hours));
+                            }
                         }
-                    }
-                    None => match genos_render::gpu_times_flag_needs_value(other) {
-                        Some(true) => {
-                            let next = value()?;
-                            genos_render::check_gpu_times_arg(other, Some(&next))?;
-                        }
-                        Some(false) => genos_render::check_gpu_times_arg(other, None)?,
-                        None => match genos_render::lighting_sun_flag_needs_value(other) {
+                        None => match genos_render::gpu_times_flag_needs_value(other) {
                             Some(true) => {
                                 let next = value()?;
-                                genos_render::check_lighting_sun_arg(other, Some(&next))?;
+                                genos_render::check_gpu_times_arg(other, Some(&next))?;
                             }
-                            Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
-                            None => return Err(format!("unknown argument {other}\n{USAGE}")),
+                            Some(false) => genos_render::check_gpu_times_arg(other, None)?,
+                            None => match genos_render::lighting_sun_flag_needs_value(other) {
+                                Some(true) => {
+                                    let next = value()?;
+                                    genos_render::check_lighting_sun_arg(other, Some(&next))?;
+                                }
+                                Some(false) => genos_render::check_lighting_sun_arg(other, None)?,
+                                None => {
+                                    if genos_window::block_ms_needs_value(other) == Some(false) {
+                                        opts.block_ms =
+                                            Some(genos_window::parse_block_ms(other, None)?);
+                                    } else {
+                                        return Err(format!("unknown argument {other}\n{USAGE}"));
+                                    }
+                                }
+                            },
                         },
-                    },
                     },
                 },
             },
@@ -617,14 +777,30 @@ fn options() -> Result<Options, String> {
             size: opts.size,
         });
     }
+    opts.block_ms = genos_window::block_ms_mirror(opts.block_ms);
+    opts.close_early = genos_window::close_early_mirror(opts.close_early);
+    if opts.profile_passes.is_none() {
+        if let Ok(path) = std::env::var("GENOS_PROFILE_PASSES") {
+            let path = path.trim();
+            if !path.is_empty() {
+                opts.profile_passes = Some(PathBuf::from(path));
+            }
+        }
+    }
     Ok(opts)
 }
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("genos-stress: {err}");
-        std::process::exit(1);
-    }
+    // Quit drops the lifecycle before `_exit`. Skip the lavapipe teardown wait.
+    genos_window::release_driver_on_process_exit();
+    let code = match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("genos-stress: {err}");
+            1
+        }
+    };
+    genos_window::exit(code);
 }
 
 /// A fly camera at `view`. It has no colliders: the stress test flies through walls,
@@ -704,6 +880,51 @@ fn settings_text(stage: &Stage) -> String {
     )
 }
 
+/// Flag, `LightingSettings` key, and the environment variable it mirrors.
+const LIGHTING_EXPERIMENT_FLAGS: [(&str, &str, &str); 11] = [
+    (
+        "--lighting-cache-async",
+        "cache_async",
+        "GENOS_LIGHTING_ASYNC",
+    ),
+    ("--lighting-cache-hz", "cache_hz", "GENOS_LIGHTING_CACHE_HZ"),
+    (
+        "--lighting-cache-picks",
+        "cache_picks",
+        "GENOS_LIGHTING_CACHE_PICKS",
+    ),
+    ("--lighting-fill", "fill", "GENOS_LIGHTING_FILL"),
+    (
+        "--lighting-young-only",
+        "young_only",
+        "GENOS_LIGHTING_YOUNG_ONLY",
+    ),
+    (
+        "--lighting-world-cap",
+        "world_cap",
+        "GENOS_LIGHTING_WORLD_CAP",
+    ),
+    (
+        "--lighting-sc-settle",
+        "sc_settle",
+        "GENOS_LIGHTING_SC_SETTLE",
+    ),
+    ("--lighting-sc-flags", "sc_flags", "GENOS_LIGHTING_SC_FLAGS"),
+    ("--lighting-toggles", "toggles", "GENOS_LIGHTING_TOGGLES"),
+    ("--lighting-probe-tile", "probe_tile", "GENOS_LIGHTING_TILE"),
+    (
+        "--lighting-denoise-dirty",
+        "denoise_dirty",
+        "GENOS_LIGHTING_ATROUS_DIRTY",
+    ),
+];
+
+fn lighting_experiment_flag(flag: &str) -> Option<usize> {
+    LIGHTING_EXPERIMENT_FLAGS
+        .iter()
+        .position(|(name, _, _)| *name == flag)
+}
+
 /// A passed flag wins over the matching environment variable. An omitted flag
 /// leaves that variable alone, so it still applies.
 fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
@@ -780,6 +1001,37 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             "lamp_pick_unbiased",
             "GENOS_LIGHTING_LAMP_PICK_UNBIASED",
         ),
+        (opts.restir_di.as_deref(), "restir_di", "GENOS_RESTIR_DI"),
+        (
+            opts.restir_spatial_neighbors.as_deref(),
+            "restir_spatial_neighbors",
+            "GENOS_RESTIR_SPATIAL_NEIGHBORS",
+        ),
+        (
+            opts.restir_spatial_radius.as_deref(),
+            "restir_spatial_radius",
+            "GENOS_RESTIR_SPATIAL_RADIUS",
+        ),
+        (
+            opts.restir_resolution_scale.as_deref(),
+            "restir_resolution_scale",
+            "GENOS_RESTIR_RESOLUTION_SCALE",
+        ),
+        (
+            opts.restir_candidates.as_deref(),
+            "restir_candidates",
+            "GENOS_RESTIR_CANDIDATES",
+        ),
+        (
+            opts.restir_spatial_checkerboard.as_deref(),
+            "restir_spatial_checkerboard",
+            "GENOS_RESTIR_SPATIAL_CHECKERBOARD",
+        ),
+        (
+            opts.restir_split_passes.as_deref(),
+            "restir_split_passes",
+            "GENOS_RESTIR_SPLIT_PASSES",
+        ),
     ];
     for (value, key, var) in keys {
         if let Some(value) = value {
@@ -787,9 +1039,20 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
             std::env::set_var(var, value);
         }
     }
+    for (i, value) in &opts.lighting_experiments {
+        let (flag, key, var) = LIGHTING_EXPERIMENT_FLAGS[*i];
+        check
+            .set_key(key, value)
+            .map_err(|e| format!("{flag}: {e}"))?;
+        std::env::set_var(var, value);
+    }
     if let Some(every) = &opts.gpu_times {
         parse::<u32>("--gpu-times", every)?;
         std::env::set_var("GENOS_GPU_TIMES", every);
+    } else if opts.profile_passes.is_some() {
+        // The CSV is one row per collected frame. Timestamps stay off unless
+        // something asks for them, and an explicit --gpu-times already won.
+        std::env::set_var("GENOS_GPU_TIMES", "1");
     }
     Ok(())
 }
@@ -797,24 +1060,25 @@ fn apply_lighting_cli(opts: &Options) -> Result<(), String> {
 fn lighting_text(renderer: &Renderer) -> String {
     let stats = renderer.settle_stats();
     format!(
-        "stable: {}\nstill_frames: {}\npicture_settled: {}\n",
+        "stable: {}\nstill_frames: {}\npicture_settled: {}\ncache_rays: {}\n",
         stats.settled,
         stats.still_frames,
         renderer.picture_settled(),
+        stats.cache_rays,
     )
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<i32, String> {
     if std::env::args().nth(1).as_deref() == Some("gi-check") {
-        return gi_check::run(std::env::args().skip(2));
+        gi_check::run(std::env::args().skip(2))?;
+        return Ok(0);
+    }
+    if std::env::args().nth(1).as_deref() == Some("room-blotch") {
+        gi_check::room_blotch::run(std::env::args().skip(2))?;
+        return Ok(0);
     }
     if std::env::args().nth(1).as_deref() == Some("lighting-ref") {
-        return match genos_stress::lighting_ref::run(std::env::args().skip(2)) {
-            Ok(code) => {
-                std::process::exit(code);
-            }
-            Err(err) => Err(err),
-        };
+        return genos_stress::lighting_ref::run(std::env::args().skip(2));
     }
     if std::env::args().nth(1).as_deref() == Some("noise-gate") {
         // The settle check reads the lamp-pick diag counters. The argument is
@@ -822,7 +1086,7 @@ fn run() -> Result<(), String> {
         std::env::set_var("GENOS_LIGHTING_LAMP_PICK_DIAG", "1");
         return match genos_stress::noise_gate::run_args(std::env::args().skip(2)) {
             Ok(code) => {
-                std::process::exit(code);
+                genos_window::exit(code);
             }
             Err(err) => Err(err),
         };
@@ -882,26 +1146,73 @@ fn run() -> Result<(), String> {
         window.set_title(&title_base);
     }
     let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    if first.closing {
+        return Ok(0);
+    }
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<genos_window::ThreadStop<bool>>,
+    ));
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    if let Some(stall) = opts.block_ms {
+        owner.plant_block(stall);
+    }
+    if opts.close_early || owner.window.pump().closing {
+        owner.quit(0);
+    }
+    {
+        let hold = std::sync::Arc::clone(&server_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(guard.take());
+            true
+        });
+    }
+    {
+        let hold = std::sync::Arc::clone(&script_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match guard.as_mut() {
+                Some(stop) => stop.release(),
+                None => true,
+            }
+        });
+    }
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     renderer.set_material_settings(stage.materials);
     stage.materials_dirty = false;
     if !opts.gltf.is_empty() {
+        let cooked = opts
+            .cooked
+            .clone()
+            .or_else(|| std::env::var_os("GENOS_COOKED").map(PathBuf::from));
         match load_gltf_pumped(
-            &mut window,
-            &mut renderer,
+            window,
+            renderer,
             &mut stage,
             &camera,
             opts.gltf.clone(),
+            cooked,
         ) {
             Ok(()) => {}
-            Err(err) if err == "window closed during load" => finish(window, renderer, 0),
+            Err(err) if err == "window closed during load" => return Ok(0),
             Err(err) => return Err(err),
         }
     }
     stage.unfilled_count = renderer.unfilled().count;
     stage.unfilled_tint = renderer.unfilled().tint;
     let host = genos_mcp::Host::new(stage.world.scene.clone(), camera.clone());
-    let _server = genos_mcp::Server::start_on(host, genos_mcp::listen_port())?;
+    let server = genos_mcp::Server::start_on(host, genos_mcp::listen_port())?;
+    *server_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(server);
     eprintln!(
         "genos-stress lighting http://127.0.0.1:{}/lighting",
         genos_mcp::listen_port()
@@ -917,20 +1228,24 @@ fn run() -> Result<(), String> {
     );
 
     if let Some(plan) = &opts.bench {
-        let text = bench::run(&mut renderer, &mut window, &mut stage, &camera, plan)?;
+        let text = bench::run(renderer, window, &mut stage, &camera, plan)?;
         println!("{text}");
         if let Some(path) = &opts.bench_out {
             std::fs::write(path, &text).map_err(|err| err.to_string())?;
         }
-        finish(window, renderer, 0);
+        return Ok(0);
     }
 
     let mut tools = genos_debug::Tools::new();
-    let mut script = opts.script.clone().map(|run| {
+    if let Some(run) = opts.script.clone() {
         tools.set_fixed_step(Some(bench::STEP));
         tools.set_out_dir(run.report_dir.clone());
-        genos_debug::script::spawn(run)
-    });
+        let handle = genos_debug::script::spawn(run);
+        *script_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(genos_window::ThreadStop::new(handle));
+    }
     if opts.step || opts.fixed_dt.is_some() {
         tools.set_fixed_step(Some(opts.fixed_dt.unwrap_or(bench::STEP)));
     }
@@ -949,6 +1264,11 @@ fn run() -> Result<(), String> {
     let keys = debug_keys()?;
     let controls = character_controller();
     let mut drawn = 0u32;
+    let mut profile = opts
+        .profile_passes
+        .as_ref()
+        .map(|path| open_pass_profile(path).map(|out| PassLog { out, samples: 0 }))
+        .transpose()?;
     let mut clock: Option<Instant> = None;
     let mut sim_time = 0.0f32;
     let run_started = Instant::now();
@@ -984,7 +1304,14 @@ fn run() -> Result<(), String> {
             }
         }
         if frame.closing {
-            finish(window, renderer, tools.quit_code().unwrap_or(0));
+            return Ok(script_exit_code(
+                &script_hold,
+                tools.quit_code().unwrap_or(0),
+            ));
+        }
+        if frame.minimized {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            continue;
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -992,13 +1319,11 @@ fn run() -> Result<(), String> {
         }
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
+        window.write_devices(&mut input, &gated);
         if opts.step && input.keyboard.pressed(InputCode::key_space) {
             tools.request_steps(1);
             dt = tools.scene_dt(bench::STEP);
         }
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
         input.poll_gamepads();
         if keys.pressed(&input, "unfilled_tint") {
             stage.unfilled_tint = !stage.unfilled_tint;
@@ -1088,7 +1413,7 @@ fn run() -> Result<(), String> {
         }
         let capture_ui = stage.world.scene.debug.ui;
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
-            renderer: &mut renderer,
+            renderer,
             camera: &mut camera,
             host: &mut stage,
         });
@@ -1127,8 +1452,16 @@ fn run() -> Result<(), String> {
             renderer.set_overlay_lines(&[]);
         }
         let draw_start = Instant::now();
+        renderer.set_particle_dt(dt);
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
+        if let Some(profile) = profile.as_mut() {
+            let samples = renderer.lighting_pass_samples();
+            if samples != profile.samples {
+                write_pass_row(&mut profile.out, drawn, renderer)?;
+                profile.samples = samples;
+            }
+        }
         if opts.step && dt > 0.0 {
             eprintln!(
                 "genos-stress: frame {drawn} sim {sim_time:.4} wall {:.3}s settled {} {}",
@@ -1138,7 +1471,7 @@ fn run() -> Result<(), String> {
             );
         }
         tools.after_draw(
-            &mut renderer,
+            renderer,
             pixels.as_deref(),
             genos_debug::FrameTiming {
                 frame_ms: real_dt as f64 * 1000.0,
@@ -1147,13 +1480,12 @@ fn run() -> Result<(), String> {
             },
         );
         if shot {
-            let png = pixels
-                .as_ref()
-                .map(|pixels| png::encode_png(renderer.width(), renderer.height(), pixels))
-                .unwrap_or_default();
+            let png = pixels.as_ref().map_or_default(|pixels| {
+                png::encode_png(renderer.width(), renderer.height(), pixels)
+            });
             genos_mcp::finish_shot(&png);
         }
-        genos_mcp::publish_lighting(&lighting_text(&renderer));
+        genos_mcp::publish_lighting(&lighting_text(renderer));
         genos_mcp::publish_settings(&settings_text(&stage));
         if let (Some(path), Some(pixels)) = (&opts.shot, pixels) {
             png::write_png(path, renderer.width(), renderer.height(), &pixels)?;
@@ -1170,33 +1502,92 @@ fn run() -> Result<(), String> {
             );
         }
         if last || tools.quit_code().is_some() {
-            let mut code = tools.quit_code().unwrap_or(0);
-            if let Some(handle) = script.as_ref() {
-                if handle.is_finished() {
-                    let passed = script
-                        .take()
-                        .and_then(|handle| handle.join().ok())
-                        .unwrap_or(false);
-                    if !passed {
-                        code = 1;
-                    }
-                }
-            }
+            let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
             println!(
                 "genos-stress frames={drawn} {}",
                 renderer.material_stats().line()
             );
-            finish(window, renderer, code);
+            return Ok(code);
         }
     }
 }
 
-fn finish(window: Window, renderer: Renderer, code: i32) -> ! {
-    Renderer::clear_blocker();
-    window.clear_seat_pump();
-    drop(window);
-    renderer.abandon();
-    std::process::exit(code);
+struct PassLog {
+    out: std::io::BufWriter<std::fs::File>,
+    samples: u32,
+}
+
+fn open_pass_profile(path: &std::path::Path) -> Result<std::io::BufWriter<std::fs::File>, String> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|err| format!("--profile-passes: {err}"))?;
+        }
+    }
+    let file = std::fs::File::create(path).map_err(|err| format!("--profile-passes: {err}"))?;
+    let mut out = std::io::BufWriter::new(file);
+    writeln!(
+        out,
+        "frame,candidates_ms,temporal_ms,spatial_ms,prepare_ms,shade_visibility_ms,cache_hit_shading_ms,cache_round_ms,sh_prep_ms,cache_rays_ms,compose_ms,filter_ms,direct_ms,compact_ms,lighting_span_ms"
+    )
+    .map_err(|err| format!("--profile-passes: {err}"))?;
+    Ok(out)
+}
+
+fn write_pass_row(
+    out: &mut impl Write,
+    frame: u32,
+    renderer: &Renderer,
+) -> Result<(), String> {
+    // One frame behind this draw. Shade is the direct dispatch, so its
+    // visibility ray is inside shade_visibility_ms. cache_round_ms is pass 6,
+    // the relight (the `cache` column of LIGHTING_MS). sh_prep_ms is pass 9;
+    // the nine-wide LIGHTING_MS total leaves it out. compact_ms is pass 0.
+    // cache_rays_ms is the ray dispatch. filter_ms is the a-trous wavelet.
+    // direct_ms is the direct bucket (the `light_px` column: candidates,
+    // temporal, spatial, and shade). lighting_span_ms is the GPU_MS lighting
+    // column for this collected frame.
+    let restir = renderer.lighting_restir_last_ms();
+    let pass = renderer.lighting_pass_ms();
+    let id = renderer.lighting_pass_id_ms();
+    writeln!(
+        out,
+        "{frame},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4}",
+        restir[0],
+        restir[1],
+        restir[2],
+        restir[3],
+        restir[4],
+        pass[10],
+        id[6],
+        id[9],
+        pass[9],
+        pass[7],
+        pass[8],
+        pass[3],
+        id[0],
+        renderer.lighting_span_ms(),
+    )
+    .map_err(|err| format!("--profile-passes: {err}"))?;
+    out.flush()
+        .map_err(|err| format!("--profile-passes: {err}"))?;
+    Ok(())
+}
+
+fn script_exit_code(
+    slot: &std::sync::Mutex<Option<genos_window::ThreadStop<bool>>>,
+    code: i32,
+) -> i32 {
+    let mut guard = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(stop) = guard.as_mut() else {
+        return code;
+    };
+    if stop.try_join() && stop.result().copied() == Some(false) {
+        1
+    } else {
+        code
+    }
 }
 
 fn loading_world() -> World {
@@ -1221,11 +1612,17 @@ fn loading_world() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }
 
-fn bake_gltf(mut world: World, models: &[(PathBuf, [f32; 4])]) -> Result<World, String> {
+fn bake_gltf(
+    mut world: World,
+    models: &[(PathBuf, [f32; 4])],
+    cooked: Option<&std::path::Path>,
+    bc: bool,
+) -> Result<World, String> {
     for (path, [x, y, z, scale]) in models {
         let model =
             genos_load::load_gltf_file(path).map_err(|err| format!("{}: {err}", path.display()))?;
@@ -1241,9 +1638,27 @@ fn bake_gltf(mut world: World, models: &[(PathBuf, [f32; 4])]) -> Result<World, 
         if std::env::var_os("GENOS_BAKE").is_none() {
             bake.mode = genos_render::bake::BakeMode::OnLoad;
         }
-        let added = world
-            .add_gltf_traced(&model, &place, &bake)
-            .map_err(|err| format!("{}: bake: {err:?}", path.display()))?;
+        let added = if let Some(dir) = cooked {
+            let report = world.add_cooked(dir, path, &place, false, bc);
+            for line in &report.fallback {
+                eprintln!("genos-stress: {line}");
+            }
+            eprintln!(
+                "genos-stress: cooked load {:.2} ms, texture bytes {}",
+                report.load_ms, report.texture_bytes
+            );
+            if report.objects.is_empty() {
+                world
+                    .add_gltf_traced(&model, &place, &bake)
+                    .map_err(|err| format!("{}: bake: {err:?}", path.display()))?
+            } else {
+                report.objects
+            }
+        } else {
+            world
+                .add_gltf_traced(&model, &place, &bake)
+                .map_err(|err| format!("{}: bake: {err:?}", path.display()))?
+        };
         eprintln!(
             "genos-stress: {} placed as {} mesh draws",
             path.display(),
@@ -1259,7 +1674,9 @@ fn load_gltf_pumped(
     stage: &mut Stage,
     camera: &Camera,
     models: Vec<(PathBuf, [f32; 4])>,
+    cooked: Option<PathBuf>,
 ) -> Result<(), String> {
+    let bc = renderer.bc_textures();
     let heavy = std::mem::replace(&mut stage.world, loading_world());
     let meter = window.stall_meter();
     let loaded = genos_window::run_pumped(
@@ -1270,10 +1687,13 @@ fn load_gltf_pumped(
             if frame.closing {
                 return genos_window::PumpStep::Close;
             }
-            let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
+            if !frame.minimized {
+                renderer.set_particle_dt(bench::STEP);
+                let _ = renderer.draw_with_overlay(&stage.world, camera, &[], false, false);
+            }
             genos_window::PumpStep::Continue
         },
-        move || bake_gltf(heavy, &models),
+        move || bake_gltf(heavy, &models, cooked.as_deref(), bc),
     )?;
     stage.world = loaded?;
     Ok(())

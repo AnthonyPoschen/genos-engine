@@ -1,0 +1,7 @@
+#version 450
+// Must trip scripts/lint-shader-hashes.py: an XOR of per-axis products.
+layout(local_size_x = 1) in;
+uint key(ivec3 c) {
+    return uint(c.x) * 73856093u ^ uint(c.y) * 19349663u ^ uint(c.z) * 83492791u;
+}
+void main() {}

@@ -5,8 +5,10 @@
 // lighting_svgf_iter, and lighting_svgf_push: the same stages the hash-slot
 // pipeline runs, including its variance, its luminance weight, and the dirty
 // hold. A screen-sized B3 of the bilinear gather is not that kernel. The
-// luminance weight is nonlinear, so it does not commute with the bilinear,
-// and this path has no hold (ADR 0012). The hash blurs a texel while its
+// luminance weight is nonlinear, so it does not commute with the bilinear.
+// ADR 0012's screen-space hold is not this path. A held camera does keep a
+// settled texel's wavelet until the drift pass (`lighting_still_refresh`),
+// except a texel a lamp or a mover reaches. The hash blurs a texel while its
 // spatial estimate is still wide and then holds that blur. Rebuilding from
 // the settled mean leaves the 12.5 cm grid, and a wider phi spreads energy
 // the hold never spread. That was the ceiling, wall, and floor blotch.
@@ -131,6 +133,15 @@ uvec3 screen_gather(uvec2 p) {
     uint slot = lighting_cache_find_sized(pos, key_n, false, LIGHTING_SC_TEXEL, pos);
     // Nested, not `||`: a miss is ~0u, and the other side would index the cache
     // with it. glslc does not leave that read out.
+    uint age_slot = ~0u;
+    if (slot < LIGHTING_CACHE_SLOTS) {
+        if (ckeys.key[slot] != 0u && cache.v[3u * slot + 1u].w > 0.0) {
+            age_slot = slot;
+        }
+    }
+    if (lighting_shown_age()) {
+        lighting_shown_age_tally(pos, n, albedo, age_slot);
+    }
     if (slot >= LIGHTING_CACHE_SLOTS) {
         return uvec3(0u);
     }
@@ -202,8 +213,8 @@ bool screen_list_add(uint slot) {
         return false;
     }
     uint at = screen_appending
-        ? screen_list_base() + atomicAdd(gstats.diag[41], 1u)
-        : atomicAdd(gstats.diag[40], 1u);
+        ? screen_list_base() + atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_LIST_FINE], 1u)
+        : atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_LIST_COARSE], 1u);
     if (at < screen_pixels()) {
         outc.px[screen_at(1u, at)] = slot;
     }
@@ -235,8 +246,8 @@ void screen_list_from(uint slot) {
 }
 
 void screen_publish() {
-    uint fine = gstats.diag[62];
-    uint changed = gstats.diag[61];
+    uint fine = gstats.diag[LIGHTING_DIAG_SCREEN_FINE];
+    uint changed = gstats.diag[LIGHTING_DIAG_SCREEN_CHANGED];
     uint frac = 0u;
     if (fine > 0u) {
         frac = uint(min(1000000.0, 1000000.0 * float(changed) / float(fine)));
@@ -249,9 +260,9 @@ void screen_publish() {
 
 uint screen_list_n() {
     if (screen_list_reuse()) {
-        return screen_list_base() + gstats.diag[41];
+        return screen_list_base() + gstats.diag[LIGHTING_DIAG_SCREEN_LIST_FINE];
     }
-    return gstats.diag[40];
+    return gstats.diag[LIGHTING_DIAG_SCREEN_LIST_COARSE];
 }
 
 // Writes this frame's count word. Readers of the list length use the other
@@ -283,13 +294,13 @@ void main() {
         uint changed = screen_wg_sum(bits.z);
         if (gl_LocalInvocationIndex == 0u) {
             if (fine != 0u) {
-                atomicAdd(gstats.diag[62], fine);
+                atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_FINE], fine);
             }
             if (coarse != 0u) {
-                atomicAdd(gstats.diag[63], coarse);
+                atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_COARSE], coarse);
             }
             if (changed != 0u) {
-                atomicAdd(gstats.diag[61], changed);
+                atomicAdd(gstats.diag[LIGHTING_DIAG_SCREEN_CHANGED], changed);
             }
         }
         // The workgroup sums above are the barrier. The list walk is after it.

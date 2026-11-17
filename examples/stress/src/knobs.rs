@@ -15,8 +15,8 @@
 use genos_debug::{Host, Knob};
 use genos_load::{MaterialSettings, TextureQuality};
 use genos_scene::{
-    AmbientMode, FogInspect, FogSettings, LampPickMode, LightingPreset, LightingSettings, Scene,
-    ShadowFilter, SurfaceCacheBlend,
+    AmbientMode, FogInspect, FogSettings, LampPickMode, LightingPreset, LightingSettings,
+    ParticleSettings, Scene, ShadowFilter, SurfaceCacheBlend, HIGH_MAX_PARTICLES,
 };
 
 use crate::building::{self, Layout};
@@ -119,7 +119,8 @@ impl Host for Stage {
                 "Lamp power",
                 self.power as f64,
                 (0.0, 4.0),
-                0.05,
+                // A 1.5% dim (0.985) has to land on a step. 0.05 snapped it back to 1.
+                0.005,
                 "",
             ),
             Knob::choice(
@@ -138,10 +139,14 @@ impl Host for Stage {
         knobs.extend(material_knobs(&self.materials));
         knobs.extend(lighting_knobs(lighting));
         knobs.extend(fog_knobs(&self.world.scene.fog));
+        knobs.extend(particle_knobs(&self.world.scene.particles));
         knobs
     }
 
     fn set_knob(&mut self, name: &str, v: f64) -> Result<(), String> {
+        if apply_particle_knob(&mut self.world.scene.particles, name, v)? {
+            return Ok(());
+        }
         if apply_fog_knob(&mut self.world.scene.fog, name, v)? {
             return Ok(());
         }
@@ -345,6 +350,11 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             1.0,
             "",
         ),
+        Knob::switch(
+            "lighting_direct_specular",
+            "Direct specular",
+            lighting.direct.specular,
+        ),
         Knob::choice(
             "lighting_lamp_pick",
             "Lamp pick",
@@ -393,6 +403,49 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "Lamp unbiased",
             lighting.lamp_pick.unbiased,
         ),
+        Knob::switch("lighting_restir_di", "ReSTIR DI", lighting.restir_di),
+        Knob::number(
+            "lighting_restir_spatial_neighbors",
+            "ReSTIR neighbours",
+            lighting.restir_spatial_neighbors as f64,
+            (0.0, 16.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_restir_spatial_radius",
+            "ReSTIR radius",
+            lighting.restir_spatial_radius as f64,
+            (0.0, 8.0),
+            1.0,
+            " px",
+        ),
+        Knob::number(
+            "lighting_restir_resolution_scale",
+            "ReSTIR scale",
+            lighting.restir_resolution_scale as f64,
+            (1.0, 4.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_restir_candidates",
+            "ReSTIR candidates",
+            lighting.restir_candidates as f64,
+            (1.0, 32.0),
+            1.0,
+            "",
+        ),
+        Knob::switch(
+            "lighting_restir_spatial_checkerboard",
+            "ReSTIR checkerboard",
+            lighting.restir_spatial_checkerboard != 0,
+        ),
+        Knob::switch(
+            "lighting_restir_split_passes",
+            "ReSTIR split passes",
+            lighting.restir_split_passes != 0,
+        ),
         Knob::switch("lighting_shadows", "Shadows", lighting.shadows.enabled),
         Knob::choice(
             "lighting_shadow_filter",
@@ -421,6 +474,21 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "lighting_surface_cache_attach_movers",
             "Attach movers",
             lighting.surface_cache.attach_movers,
+        ),
+        Knob::switch(
+            "lighting_surface_cache_sh_cells",
+            "SH cells (ADR 0039)",
+            lighting.surface_cache.sh_cells,
+        ),
+        Knob::switch(
+            "lighting_surface_cache_sh_texel_detail",
+            "SH texel detail (ADR 0039)",
+            lighting.surface_cache.sh_texel_detail,
+        ),
+        Knob::switch(
+            "lighting_surface_cache_sh_texel_ray_cut",
+            "SH texel ray cut (ADR 0039)",
+            lighting.surface_cache.sh_texel_ray_cut,
         ),
         Knob::choice(
             "lighting_surface_cache_blend",
@@ -452,22 +520,253 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             1.0,
             "",
         ),
-        Knob::switch("lighting_probes", "Probes", lighting.probes.enabled),
         Knob::number(
-            "lighting_probe_rays",
-            "Probe rays",
-            lighting.probes.rays as f64,
-            (4.0, 64.0),
-            4.0,
+            "lighting_fill_budget",
+            "Fill budget",
+            f64::from(lighting.surface_cache.fill.budget),
+            (0.0, 1_572_864.0),
+            1000.0,
             "",
         ),
         Knob::number(
-            "lighting_probe_stale",
-            "Probe stale",
-            lighting.probes.staleness_frames as f64,
-            (1.0, 900.0),
+            "lighting_fill_tile",
+            "Fill tile",
+            f64::from(lighting.surface_cache.fill.tile),
+            (1.0, 64.0),
             1.0,
-            " frames",
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_lod_near",
+            "Fill near",
+            f64::from(lighting.surface_cache.fill.lod_near),
+            (0.25, 64.0),
+            0.25,
+            " m",
+        ),
+        Knob::number(
+            "lighting_fill_cell_max",
+            "Fill cell max",
+            f64::from(lighting.surface_cache.fill.cell_max),
+            (0.25, 16.0),
+            0.25,
+            " m",
+        ),
+        Knob::number(
+            "lighting_fill_leash",
+            "Fill leash",
+            f64::from(lighting.surface_cache.fill.leash_scale),
+            (1.0, 4.0),
+            0.1,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_look_ahead",
+            "Fill look ahead",
+            f64::from(lighting.surface_cache.fill.look_ahead),
+            (0.0, 2.0),
+            0.05,
+            " s",
+        ),
+        Knob::number(
+            "lighting_fill_far",
+            "Fill far",
+            f64::from(lighting.surface_cache.fill.far),
+            (1.0, 400.0),
+            1.0,
+            " m",
+        ),
+        Knob::number(
+            "lighting_fill_offscreen_floor",
+            "Fill off-screen",
+            f64::from(lighting.surface_cache.fill.offscreen_floor),
+            (0.0, 1.0),
+            0.05,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_error_target",
+            "Fill error",
+            f64::from(lighting.surface_cache.fill.error_target),
+            (0.001, 1.0),
+            0.005,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_far_share",
+            "Fill far share",
+            f64::from(lighting.surface_cache.fill.far_share),
+            (0.0, 1.0),
+            0.01,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_prox_min",
+            "Fill prox min",
+            f64::from(lighting.surface_cache.fill.prox_min),
+            (0.05, 8.0),
+            0.05,
+            " m",
+        ),
+        Knob::number(
+            "lighting_fill_change_weight",
+            "Fill change weight",
+            f64::from(lighting.surface_cache.fill.change_weight),
+            (0.0, 4.0),
+            0.1,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_check_rate",
+            "Fill check rate",
+            f64::from(lighting.surface_cache.fill.check_rate),
+            (1.0, 64.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_max_picks",
+            "Fill max picks",
+            f64::from(lighting.surface_cache.fill.max_picks),
+            (1.0, 8.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_lambda_decay",
+            "Fill lambda decay",
+            f64::from(lighting.surface_cache.fill.lambda_decay),
+            (0.0, 1.0),
+            0.05,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_window_floor",
+            "Fill window floor",
+            f64::from(lighting.surface_cache.fill.window_floor),
+            (0.0, 1.0),
+            0.05,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_catchup_max",
+            "Fill catch-up",
+            f64::from(lighting.surface_cache.fill.catchup_max),
+            (0.0, 1.0),
+            0.05,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_check_sigma",
+            "Fill check sigma",
+            f64::from(lighting.surface_cache.fill.check_sigma),
+            (0.0, 0.25),
+            0.01,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_warmup",
+            "Fill warm-up",
+            f64::from(lighting.surface_cache.fill.warmup_rays),
+            (1.0, 256.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_ray_cap",
+            "Fill ray cap",
+            f64::from(lighting.surface_cache.fill.ray_cap),
+            (1.0, 4096.0),
+            16.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_frame_dt",
+            "Fill frame dt",
+            f64::from(lighting.surface_cache.fill.frame_dt),
+            (1.0 / 240.0, 0.1),
+            1.0 / 240.0,
+            " s",
+        ),
+        Knob::number(
+            "lighting_fill_share",
+            "Fill share",
+            f64::from(lighting.surface_cache.fill.share),
+            (0.0, 1.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_share_min_hit",
+            "Fill share min hit",
+            f64::from(lighting.surface_cache.fill.share_min_hit),
+            (0.25, 16.0),
+            0.25,
+            " m",
+        ),
+        Knob::number(
+            "lighting_fill_share_cap",
+            "Fill share cap",
+            f64::from(lighting.surface_cache.fill.share_cap),
+            (1.0, 512.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_share_plane",
+            "Fill share plane",
+            f64::from(lighting.surface_cache.fill.share_plane),
+            (0.001, 0.2),
+            0.001,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_share_normal",
+            "Fill share normal",
+            f64::from(lighting.surface_cache.fill.share_normal),
+            (0.9, 1.0),
+            0.01,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_share_w_cap",
+            "Fill share weight",
+            f64::from(lighting.surface_cache.fill.share_w_cap),
+            (0.5, 8.0),
+            0.1,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_share_cos",
+            "Fill share cosine",
+            f64::from(lighting.surface_cache.fill.share_cos),
+            (0.01, 0.5),
+            0.01,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_share_conf",
+            "Fill share confidence",
+            f64::from(lighting.surface_cache.fill.share_conf),
+            (0.05, 1.0),
+            0.05,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_share_receivers",
+            "Fill share receivers",
+            f64::from(lighting.surface_cache.fill.share_receivers),
+            (0.0, 8.0),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "lighting_fill_share_handover",
+            "Fill share handover",
+            f64::from(lighting.surface_cache.fill.share_handover),
+            (1.0, 512.0),
+            1.0,
+            "",
         ),
         Knob::switch(
             "lighting_world_cache",
@@ -611,6 +910,7 @@ pub fn apply_lighting_knob(
         "lighting_direct_lights" => ("direct_lights", whole.to_string()),
         "lighting_direct_refresh" => ("direct_refresh", whole.max(1).to_string()),
         "lighting_direct_scale" => ("direct_scale", whole.to_string()),
+        "lighting_direct_specular" => ("direct_specular", on_off(v)),
         "lighting_lamp_pick" => (
             "lamp_pick",
             ["off", "hits", "pixels", "both", "reuse"]
@@ -625,6 +925,17 @@ pub fn apply_lighting_knob(
         "lighting_lamp_pick_radius" => ("lamp_pick_radius", whole.to_string()),
         "lighting_lamp_pick_history" => ("lamp_pick_history", whole.max(1).to_string()),
         "lighting_lamp_pick_unbiased" => ("lamp_pick_unbiased", on_off(v)),
+        "lighting_restir_di" => ("restir_di", on_off(v)),
+        "lighting_restir_spatial_neighbors" => ("restir_spatial_neighbors", whole.to_string()),
+        "lighting_restir_spatial_radius" => ("restir_spatial_radius", whole.to_string()),
+        "lighting_restir_resolution_scale" => {
+            ("restir_resolution_scale", whole.clamp(1, 4).to_string())
+        }
+        "lighting_restir_candidates" => ("restir_candidates", whole.max(1).to_string()),
+        "lighting_restir_spatial_checkerboard" => {
+            ("restir_spatial_checkerboard", u32::from(v >= 0.5).to_string())
+        }
+        "lighting_restir_split_passes" => ("restir_split_passes", u32::from(v >= 0.5).to_string()),
         "lighting_shadows" => ("shadows", on_off(v)),
         "lighting_shadow_filter" => (
             "shadow_filter",
@@ -634,6 +945,9 @@ pub fn apply_lighting_knob(
         "lighting_gi_refresh" => ("gi_refresh", whole.max(1).to_string()),
         "lighting_budget_shift" => ("budget_shift", whole.to_string()),
         "lighting_surface_cache_attach_movers" => ("surface_cache.attach_movers", on_off(v)),
+        "lighting_surface_cache_sh_cells" => ("surface_cache.sh_cells", on_off(v)),
+        "lighting_surface_cache_sh_texel_detail" => ("surface_cache.sh_texel_detail", on_off(v)),
+        "lighting_surface_cache_sh_texel_ray_cut" => ("surface_cache.sh_texel_ray_cut", on_off(v)),
         "lighting_surface_cache_blend" => (
             "surface_cache.blend",
             if v >= 0.5 { "hold" } else { "msme" }.to_string(),
@@ -641,9 +955,37 @@ pub fn apply_lighting_knob(
         "lighting_surface_cache_firefly_sigma" => ("surface_cache.firefly_sigma", format!("{v}")),
         "lighting_surface_cache_ray_budget" => ("surface_cache.ray_budget", whole.to_string()),
         "lighting_surface_cache_dormant_rays" => ("surface_cache.dormant_rays", whole.to_string()),
-        "lighting_probes" => ("probes", on_off(v)),
-        "lighting_probe_rays" => ("probe_rays", whole.to_string()),
-        "lighting_probe_stale" => ("probe_stale", whole.max(1).to_string()),
+        "lighting_fill_budget" => ("surface_cache.fill_budget", whole.to_string()),
+        "lighting_fill_tile" => ("surface_cache.fill_tile", whole.to_string()),
+        "lighting_fill_lod_near" => ("surface_cache.fill_lod_near", format!("{v}")),
+        "lighting_fill_cell_max" => ("surface_cache.fill_cell_max", format!("{v}")),
+        "lighting_fill_leash" => ("surface_cache.fill_leash", format!("{v}")),
+        "lighting_fill_look_ahead" => ("surface_cache.fill_look_ahead", format!("{v}")),
+        "lighting_fill_far" => ("surface_cache.fill_far", format!("{v}")),
+        "lighting_fill_offscreen_floor" => ("surface_cache.fill_offscreen_floor", format!("{v}")),
+        "lighting_fill_error_target" => ("surface_cache.fill_error_target", format!("{v}")),
+        "lighting_fill_far_share" => ("surface_cache.fill_far_share", format!("{v}")),
+        "lighting_fill_prox_min" => ("surface_cache.fill_prox_min", format!("{v}")),
+        "lighting_fill_change_weight" => ("surface_cache.fill_change_weight", format!("{v}")),
+        "lighting_fill_check_rate" => ("surface_cache.fill_check_rate", whole.to_string()),
+        "lighting_fill_max_picks" => ("surface_cache.fill_max_picks", whole.to_string()),
+        "lighting_fill_lambda_decay" => ("surface_cache.fill_lambda_decay", format!("{v}")),
+        "lighting_fill_window_floor" => ("surface_cache.fill_window_floor", format!("{v}")),
+        "lighting_fill_catchup_max" => ("surface_cache.fill_catchup_max", format!("{v}")),
+        "lighting_fill_check_sigma" => ("surface_cache.fill_check_sigma", format!("{v}")),
+        "lighting_fill_warmup" => ("surface_cache.fill_warmup", whole.to_string()),
+        "lighting_fill_ray_cap" => ("surface_cache.fill_ray_cap", whole.to_string()),
+        "lighting_fill_frame_dt" => ("surface_cache.fill_frame_dt", format!("{v}")),
+        "lighting_fill_share" => ("surface_cache.fill_share", whole.to_string()),
+        "lighting_fill_share_min_hit" => ("surface_cache.fill_share_min_hit", format!("{v}")),
+        "lighting_fill_share_cap" => ("surface_cache.fill_share_cap", whole.to_string()),
+        "lighting_fill_share_plane" => ("surface_cache.fill_share_plane", format!("{v}")),
+        "lighting_fill_share_normal" => ("surface_cache.fill_share_normal", format!("{v}")),
+        "lighting_fill_share_w_cap" => ("surface_cache.fill_share_w_cap", format!("{v}")),
+        "lighting_fill_share_cos" => ("surface_cache.fill_share_cos", format!("{v}")),
+        "lighting_fill_share_conf" => ("surface_cache.fill_share_conf", format!("{v}")),
+        "lighting_fill_share_receivers" => ("surface_cache.fill_share_receivers", whole.to_string()),
+        "lighting_fill_share_handover" => ("surface_cache.fill_share_handover", whole.to_string()),
         "lighting_world_cache" => ("world_cache", on_off(v)),
         "lighting_world_stale" => ("world_stale", whole.max(1).to_string()),
         "lighting_denoise" => ("denoise", on_off(v)),
@@ -799,6 +1141,59 @@ pub fn apply_fog_knob(settings: &mut FogSettings, name: &str, v: f64) -> Result<
     Ok(true)
 }
 
+/// Stage-1 particle keys. Prefixed so they do not collide with fog's `enabled`.
+#[must_use]
+pub fn particle_knobs(settings: &ParticleSettings) -> Vec<Knob> {
+    vec![
+        Knob::switch("fx_enabled", "fx_enabled", settings.enabled),
+        Knob::number(
+            "fx_count",
+            "fx_count",
+            f64::from(settings.count),
+            (0.0, f64::from(settings.max_particles.max(1))),
+            1.0,
+            "",
+        ),
+        Knob::number(
+            "fx_max",
+            "fx_max",
+            f64::from(settings.max_particles),
+            (0.0, f64::from(HIGH_MAX_PARTICLES)),
+            1024.0,
+            "",
+        ),
+        Knob::number(
+            "fx_rate",
+            "fx_rate",
+            f64::from(settings.rate),
+            (0.0, 1000.0),
+            1.0,
+            "",
+        ),
+        Knob::switch("fx_freeze", "fx_freeze", settings.freeze),
+    ]
+}
+
+/// Write one particle knob through [`ParticleSettings::set_key`].
+///
+/// Returns false when `name` is not a particle knob.
+pub fn apply_particle_knob(
+    settings: &mut ParticleSettings,
+    name: &str,
+    v: f64,
+) -> Result<bool, String> {
+    let switch = if v >= 0.5 { "on" } else { "off" };
+    match name {
+        "fx_enabled" => settings.set_key("enabled", switch)?,
+        "fx_count" => settings.set_key("count", &format!("{v:.0}"))?,
+        "fx_max" => settings.set_key("max_particles", &format!("{v:.0}"))?,
+        "fx_rate" => settings.set_key("rate", &format!("{v}"))?,
+        "fx_freeze" => settings.set_key("freeze", switch)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn choice_index(value: f64, len: usize) -> usize {
     let mut index = 0;
     let mut cursor = 0.0;
@@ -846,19 +1241,51 @@ mod tests {
         "lighting_direct_lights",
         "lighting_direct_refresh",
         "lighting_direct_scale",
+        "lighting_direct_specular",
         "lighting_shadows",
         "lighting_shadow_filter",
         "lighting_gi",
         "lighting_gi_refresh",
         "lighting_budget_shift",
         "lighting_surface_cache_attach_movers",
+        "lighting_surface_cache_sh_cells",
+        "lighting_surface_cache_sh_texel_detail",
+        "lighting_surface_cache_sh_texel_ray_cut",
         "lighting_surface_cache_blend",
         "lighting_surface_cache_firefly_sigma",
         "lighting_surface_cache_ray_budget",
         "lighting_surface_cache_dormant_rays",
-        "lighting_probes",
-        "lighting_probe_rays",
-        "lighting_probe_stale",
+        "lighting_fill_budget",
+        "lighting_fill_tile",
+        "lighting_fill_lod_near",
+        "lighting_fill_cell_max",
+        "lighting_fill_leash",
+        "lighting_fill_look_ahead",
+        "lighting_fill_far",
+        "lighting_fill_offscreen_floor",
+        "lighting_fill_error_target",
+        "lighting_fill_far_share",
+        "lighting_fill_prox_min",
+        "lighting_fill_change_weight",
+        "lighting_fill_check_rate",
+        "lighting_fill_max_picks",
+        "lighting_fill_lambda_decay",
+        "lighting_fill_window_floor",
+        "lighting_fill_catchup_max",
+        "lighting_fill_check_sigma",
+        "lighting_fill_warmup",
+        "lighting_fill_ray_cap",
+        "lighting_fill_frame_dt",
+        "lighting_fill_share",
+        "lighting_fill_share_min_hit",
+        "lighting_fill_share_cap",
+        "lighting_fill_share_plane",
+        "lighting_fill_share_normal",
+        "lighting_fill_share_w_cap",
+        "lighting_fill_share_cos",
+        "lighting_fill_share_conf",
+        "lighting_fill_share_receivers",
+        "lighting_fill_share_handover",
         "lighting_world_cache",
         "lighting_world_stale",
         "lighting_denoise",
@@ -911,5 +1338,19 @@ mod tests {
         assert!(fog.history);
         assert_eq!(fog.inspect_line(), "weight=0");
         assert!(!apply_fog_knob(&mut fog, "lighting_gi", 1.0).expect("skip"));
+    }
+
+    #[test]
+    fn a_particle_knob_writes_the_budget_and_leaves_fog_alone() {
+        let mut particles = ParticleSettings::default();
+        assert!(apply_particle_knob(&mut particles, "fx_enabled", 1.0).expect("enabled"));
+        assert!(apply_particle_knob(&mut particles, "fx_count", 32.0).expect("count"));
+        assert!(apply_particle_knob(&mut particles, "fx_max", 128.0).expect("max"));
+        assert!(apply_particle_knob(&mut particles, "fx_freeze", 1.0).expect("freeze"));
+        assert!(particles.enabled);
+        assert_eq!(particles.count, 32);
+        assert_eq!(particles.max_particles, 128);
+        assert!(particles.freeze);
+        assert!(!apply_particle_knob(&mut particles, "enabled", 1.0).expect("skip"));
     }
 }

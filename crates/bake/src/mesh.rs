@@ -1,16 +1,48 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::manual_midpoint, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::needless_for_each, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::assert_is_empty,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::manual_midpoint,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::needless_for_each,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! The bake's input: object-space triangles and the material data cards capture.
 
-use genos_load::{shade_sets, shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, Primitive, ShadeSample};
+use genos_load::{
+    shade_sets, shade_uv, AlphaMode, GltfScene, Image, PbrMaterial, Primitive, ShadeSample,
+};
 use genos_mesh::MeshTriangle;
 
 use crate::BakeSettings;
@@ -51,12 +83,10 @@ impl<'a> BakeMesh<'a> {
         });
         let mut triangles = Vec::new();
         let mut uv_sets = Vec::new();
-        let keep_sets = mesh.primitives.iter().any(|p| {
-            p.texcoord_sets
-                .iter()
-                .skip(1)
-                .any(|set| !set.is_empty())
-        });
+        let keep_sets = mesh
+            .primitives
+            .iter()
+            .any(|p| p.texcoord_sets.iter().skip(1).any(|set| !set.is_empty()));
         for p in &mesh.primitives {
             let material = p.material.map_or(default, |m| m as u32);
             let two_sided = scene
@@ -287,7 +317,11 @@ fn triangle_sets(primitive: &Primitive, corners: [usize; 3]) -> Vec<Option<[[f32
     if primitive.texcoord_sets.is_empty() {
         return vec![triple(&primitive.texcoords)];
     }
-    primitive.texcoord_sets.iter().map(|set| triple(set)).collect()
+    primitive
+        .texcoord_sets
+        .iter()
+        .map(|set| triple(set))
+        .collect()
 }
 
 fn shade_bary(
@@ -397,7 +431,9 @@ impl Fnv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use genos_load::{AlphaMode, GltfMesh, GltfScene, MeshInstance, Primitive, Sampler, TextureSlot};
+    use genos_load::{
+        AlphaMode, GltfMesh, GltfScene, MeshInstance, Primitive, Sampler, TextureSlot,
+    };
 
     fn mask_scene(alpha: u8) -> GltfScene {
         let mut scene = GltfScene::default();
@@ -430,7 +466,9 @@ mod tests {
         scene.instances.push(MeshInstance {
             mesh: 0,
             node_name: None,
-            transform: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            transform: [
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
         });
         scene
     }
@@ -447,16 +485,12 @@ mod tests {
         scene.images.push(Image {
             width: 2,
             height: 2,
-            pixels: vec![
-                255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255,
-            ],
+            pixels: vec![255, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255],
         });
         scene.images.push(Image {
             width: 2,
             height: 2,
-            pixels: vec![
-                0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 0, 255,
-            ],
+            pixels: vec![0, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 0, 0, 255],
         });
         scene.materials.push(PbrMaterial {
             base_color_texture: Some(TextureSlot {

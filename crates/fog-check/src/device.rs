@@ -12,8 +12,7 @@ use genos_render::{
 use genos_window::Window;
 
 struct Session {
-    renderer: Renderer,
-    window: Window,
+    owner: genos_window::Lifecycle<Renderer>,
 }
 
 thread_local! {
@@ -89,7 +88,9 @@ fn open() -> bool {
         if guard.is_none() {
             *guard = Session::open();
         }
-        guard.as_ref().is_some_and(|session| !session.window.display.is_null())
+        guard
+            .as_ref()
+            .is_some_and(|session| !session.owner.window.display.is_null())
     })
 }
 
@@ -97,7 +98,7 @@ fn with_renderer<T>(f: impl FnOnce(&mut Renderer) -> Result<T, String>) -> Optio
     GPU.with(|slot| {
         let mut guard = slot.borrow_mut();
         let session = guard.as_mut()?;
-        f(&mut session.renderer).ok()
+        f(&mut session.owner.device).ok()
     })
 }
 
@@ -105,8 +106,9 @@ impl Session {
     fn open() -> Option<Self> {
         let mut window = Window::open_proof(64, 64).ok()?;
         let frame = window.pump();
-        let renderer =
+        let (renderer, permit) =
             Renderer::open(window.display, window.surface, frame.width, frame.height).ok()?;
-        Some(Self { renderer, window })
+        let owner = genos_window::Lifecycle::new(window, renderer, permit);
+        Some(Self { owner })
     }
 }

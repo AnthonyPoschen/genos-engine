@@ -212,11 +212,7 @@ impl Scene {
                     Vec3::new(0.4, 0.6, 1.0)
                 };
                 lamps.push(Lamp {
-                    position: Vec3::new(
-                        -6.0 + 0.8 * as_f32(col),
-                        height,
-                        -6.0 + 0.8 * as_f32(row),
-                    ),
+                    position: Vec3::new(-6.0 + 0.8 * as_f32(col), height, -6.0 + 0.8 * as_f32(row)),
                     intensity: tint * power,
                 });
             }

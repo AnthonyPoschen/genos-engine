@@ -18,6 +18,21 @@ kind = "mirror"
 detail = "--fps-hz"
 
 [[var]]
+name = "GENOS_JOBS_WORKERS"
+kind = "mirror"
+detail = "--jobs-workers"
+
+[[var]]
+name = "GENOS_JOBS_ORDER"
+kind = "mirror"
+detail = "--jobs-order"
+
+[[var]]
+name = "GENOS_JOBS_BUDGET_MS"
+kind = "mirror"
+detail = "--jobs-budget-ms"
+
+[[var]]
 name = "GENOS_MENU"
 kind = "mirror"
 detail = "--menu"
@@ -26,6 +41,11 @@ detail = "--menu"
 name = "GENOS_GPU_TIMES"
 kind = "mirror"
 detail = "--gpu-times"
+
+[[var]]
+name = "GENOS_PROFILE_PASSES"
+kind = "mirror"
+detail = "--profile-passes"
 
 [[var]]
 name = "GENOS_GI_METRICS"
@@ -253,6 +273,11 @@ kind = "test"
 detail = "harness only"
 
 [[var]]
+name = "GENOS_KNOCKOUT"
+kind = "test"
+detail = "harness only"
+
+[[var]]
 name = "OCC_DUMP"
 kind = "test"
 detail = "harness only"
@@ -266,6 +291,11 @@ detail = "no CLI argument yet"
 name = "GENOS_BAKE_CACHE"
 kind = "todo"
 detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_COOKED"
+kind = "mirror"
+detail = "--cooked"
 
 [[var]]
 name = "GENOS_GPUREF_FLIP"
@@ -294,13 +324,13 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_ASYNC"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-cache-async (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_ATROUS_DIRTY"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-denoise-dirty (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_BORROW"
@@ -309,13 +339,13 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_CACHE_HZ"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-cache-hz (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_CACHE_PICKS"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-cache-picks (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_CATCH_UP"
@@ -388,6 +418,11 @@ kind = "todo"
 detail = "no CLI argument yet"
 
 [[var]]
+name = "GENOS_LIGHTING_DIRECT_SPECULAR"
+kind = "mirror"
+detail = "--lighting-direct-specular"
+
+[[var]]
 name = "GENOS_LIGHTING_DUMP"
 kind = "todo"
 detail = "no CLI argument yet"
@@ -414,8 +449,163 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_FILL"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-fill (stress), LightingSettings key; MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_BUDGET"
+kind = "mirror"
+detail = "surface_cache.fill_budget (stress knob lighting_fill_budget); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CATCHUP_MAX"
+kind = "mirror"
+detail = "surface_cache.fill_catchup_max (stress knob lighting_fill_catchup_max); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CELL_MAX"
+kind = "mirror"
+detail = "surface_cache.fill_cell_max (stress knob lighting_fill_cell_max); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CHANGE_WEIGHT"
+kind = "mirror"
+detail = "surface_cache.fill_change_weight (stress knob lighting_fill_change_weight); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CHECK_RATE"
+kind = "mirror"
+detail = "surface_cache.fill_check_rate (stress knob lighting_fill_check_rate); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CHECK_SIGMA"
+kind = "mirror"
+detail = "surface_cache.fill_check_sigma (stress knob lighting_fill_check_sigma); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_ERROR_TARGET"
+kind = "mirror"
+detail = "surface_cache.fill_error_target (stress knob lighting_fill_error_target); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_FAR"
+kind = "mirror"
+detail = "surface_cache.fill_far (stress knob lighting_fill_far); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_FAR_SHARE"
+kind = "mirror"
+detail = "surface_cache.fill_far_share (stress knob lighting_fill_far_share); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_FRAME_DT"
+kind = "mirror"
+detail = "surface_cache.fill_frame_dt (stress knob lighting_fill_frame_dt); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_LAMBDA_DECAY"
+kind = "mirror"
+detail = "surface_cache.fill_lambda_decay (stress knob lighting_fill_lambda_decay); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_LEASH"
+kind = "mirror"
+detail = "surface_cache.fill_leash (stress knob lighting_fill_leash); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_LOD_NEAR"
+kind = "mirror"
+detail = "surface_cache.fill_lod_near (stress knob lighting_fill_lod_near); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_LOOK_AHEAD"
+kind = "mirror"
+detail = "surface_cache.fill_look_ahead (stress knob lighting_fill_look_ahead); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_MAX_PICKS"
+kind = "mirror"
+detail = "surface_cache.fill_max_picks (stress knob lighting_fill_max_picks); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_OFFSCREEN_FLOOR"
+kind = "mirror"
+detail = "surface_cache.fill_offscreen_floor (stress knob lighting_fill_offscreen_floor); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_PROX_MIN"
+kind = "mirror"
+detail = "surface_cache.fill_prox_min (stress knob lighting_fill_prox_min); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_RAY_CAP"
+kind = "mirror"
+detail = "surface_cache.fill_ray_cap (stress knob lighting_fill_ray_cap); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE"
+kind = "mirror"
+detail = "surface_cache.fill_share (stress knob lighting_fill_share); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_CAP"
+kind = "mirror"
+detail = "surface_cache.fill_share_cap (stress knob lighting_fill_share_cap); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_CONF"
+kind = "mirror"
+detail = "surface_cache.fill_share_conf (stress knob lighting_fill_share_conf); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_COS"
+kind = "mirror"
+detail = "surface_cache.fill_share_cos (stress knob lighting_fill_share_cos); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_HANDOVER"
+kind = "mirror"
+detail = "surface_cache.fill_share_handover (stress knob lighting_fill_share_handover); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_MIN_HIT"
+kind = "mirror"
+detail = "surface_cache.fill_share_min_hit (stress knob lighting_fill_share_min_hit); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_NORMAL"
+kind = "mirror"
+detail = "surface_cache.fill_share_normal (stress knob lighting_fill_share_normal); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_PLANE"
+kind = "mirror"
+detail = "surface_cache.fill_share_plane (stress knob lighting_fill_share_plane); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_RECEIVERS"
+kind = "mirror"
+detail = "surface_cache.fill_share_receivers (stress knob lighting_fill_share_receivers); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_SHARE_W_CAP"
+kind = "mirror"
+detail = "surface_cache.fill_share_w_cap (stress knob lighting_fill_share_w_cap); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_TILE"
+kind = "mirror"
+detail = "surface_cache.fill_tile (stress knob lighting_fill_tile); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_WARMUP"
+kind = "mirror"
+detail = "surface_cache.fill_warmup (stress knob lighting_fill_warmup); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_WINDOW_FLOOR"
+kind = "mirror"
+detail = "surface_cache.fill_window_floor (stress knob lighting_fill_window_floor); MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_GI"
@@ -564,8 +754,8 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_FLAGS"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-sc-flags (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_LOCAL"
@@ -598,9 +788,29 @@ kind = "mirror"
 detail = "--surface-cache-ray-budget"
 
 [[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS"
+kind = "mirror"
+detail = "surface_cache.sh_cells (stress knob lighting_surface_cache_sh_cells); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL"
+kind = "mirror"
+detail = "surface_cache.sh_texel_detail (stress knob); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT"
+kind = "mirror"
+detail = "surface_cache.sh_texel_ray_cut (stress knob); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE"
+kind = "mirror"
+detail = "surface_cache.sh_probe_retire (stress knob); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_SC_SETTLE"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-sc-settle (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_SC_TRACE"
@@ -634,18 +844,13 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_TILE"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-probe-tile (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_TOGGLES"
-kind = "todo"
-detail = "no CLI argument yet"
-
-[[var]]
-name = "GENOS_LIGHTING_TOGGLES_FILE"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-toggles (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_URGENT"
@@ -664,8 +869,8 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_WORLD_CAP"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-world-cap (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_WORLD_CELL"
@@ -684,8 +889,8 @@ detail = "no CLI argument yet"
 
 [[var]]
 name = "GENOS_LIGHTING_YOUNG_ONLY"
-kind = "todo"
-detail = "no CLI argument yet"
+kind = "mirror"
+detail = "--lighting-young-only (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_MENU_SHOT"
@@ -1145,11 +1350,6 @@ kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_TOGGLES; one-release warning"
 
 [[var]]
-name = "GENOS_GI2_TOGGLES_FILE"
-kind = "override"
-detail = "deprecated alias of GENOS_LIGHTING_TOGGLES_FILE; one-release warning"
-
-[[var]]
 name = "GENOS_GI2_UNFILLED"
 kind = "override"
 detail = "deprecated alias of GENOS_LIGHTING_UNFILLED; one-release warning"
@@ -1336,6 +1536,36 @@ kind = "mirror"
 detail = "--fog-samples"
 
 [[var]]
+name = "GENOS_FX_PRESET"
+kind = "mirror"
+detail = "--fx-preset"
+
+[[var]]
+name = "GENOS_FX_MAX"
+kind = "mirror"
+detail = "--fx-max"
+
+[[var]]
+name = "GENOS_FX_COUNT"
+kind = "mirror"
+detail = "--fx-count"
+
+[[var]]
+name = "GENOS_FX_FREEZE"
+kind = "mirror"
+detail = "--fx-freeze"
+
+[[var]]
+name = "GENOS_FX_SYNC_CHILD"
+kind = "test"
+detail = "particles_gpu overlap child: clean, skip, or reflect"
+
+[[var]]
+name = "GENOS_FX_SYNC_SKIP"
+kind = "test"
+detail = "non-empty reason to skip the particle sync test when the validation layer cannot run"
+
+[[var]]
 name = "GENOS_FOG_SUITE"
 kind = "mirror"
 detail = "--suite"
@@ -1480,3 +1710,108 @@ detail = "--temporal"
 name = "GENOS_RESTIR_SPATIAL"
 kind = "mirror"
 detail = "--spatial"
+
+[[var]]
+name = "GENOS_RESTIR_DI"
+kind = "mirror"
+detail = "--restir-di"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_NEIGHBORS"
+kind = "mirror"
+detail = "--restir-spatial-neighbors (stress), LightingSettings key restir_spatial_neighbors"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_RADIUS"
+kind = "mirror"
+detail = "--restir-spatial-radius (stress), LightingSettings key restir_spatial_radius"
+
+[[var]]
+name = "GENOS_RESTIR_RESOLUTION_SCALE"
+kind = "mirror"
+detail = "--restir-resolution-scale (stress), LightingSettings key restir_resolution_scale"
+
+[[var]]
+name = "GENOS_RESTIR_CANDIDATES"
+kind = "mirror"
+detail = "--restir-candidates (stress), LightingSettings key restir_candidates"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_CHECKERBOARD"
+kind = "mirror"
+detail = "--restir-spatial-checkerboard (stress), LightingSettings key restir_spatial_checkerboard"
+
+[[var]]
+name = "GENOS_RESTIR_SPLIT_PASSES"
+kind = "mirror"
+detail = "--restir-split-passes (stress), LightingSettings key restir_split_passes"
+
+[[var]]
+name = "GENOS_RESTIR_COST"
+kind = "test"
+detail = "diagnostic: 1 prints reservoir iteration counts, not milliseconds"
+
+[[var]]
+name = "GENOS_RESTIR_REUSE"
+kind = "test"
+detail = "diagnostic: off drops ReSTIR temporal and spatial reuse"
+
+[[var]]
+name = "GENOS_LIFECYCLE_BLOCK_MS"
+kind = "mirror"
+detail = "--lifecycle-block-ms"
+
+[[var]]
+name = "GENOS_LIFECYCLE_CLOSE_EARLY"
+kind = "mirror"
+detail = "--lifecycle-close-early"
+
+[[var]]
+name = "GENOS_LIFECYCLE_FULL_DESTROY"
+kind = "mirror"
+detail = "--lifecycle-full-destroy"
+
+[[var]]
+name = "GENOS_PBR_PARITY_DEVICE"
+kind = "test"
+detail = "harness only"
+
+[[var]]
+name = "GENOS_TEST_TIMEOUT_SECS"
+kind = "test"
+detail = "material_stream watchdog seconds"
+
+[[var]]
+name = "GENOS_COMPOSE_MAINT"
+kind = "build"
+detail = "glslang -D for the lighting compose maintenance compile; not a process environment variable"
+
+[[var]]
+name = "GENOS_TEXEL_RO_DIR"
+kind = "test"
+detail = "harness only: directory of the planted cache handed from the read-only planter process to the reader process"
+
+[[var]]
+name = "GENOS_TEXEL_RO_ROLE"
+kind = "test"
+detail = "harness only: planter or reader, so the read-only test's child process does not compile both modules"
+
+[[var]]
+name = "GENOS_COMPOSE_NO_WALK"
+kind = "build"
+detail = "glslang -D for every compose compile; the neighbour walk stays in the cache relight and is not a process environment variable"
+
+[[var]]
+name = "GENOS_COMPOSE_SC_WRITES"
+kind = "override"
+detail = "read-only compose is primary; 1 sets compose spec constant 0 so compose writes the cache again (A/B kill switch)"
+
+[[var]]
+name = "GENOS_FILL_REF_OUT"
+kind = "mirror"
+detail = "--out on fill-ref"
+
+[[var]]
+name = "GENOS_FILL_TILE"
+kind = "mirror"
+detail = "--tile-fill"

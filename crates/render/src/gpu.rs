@@ -162,11 +162,12 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 
-//! Vulkan loader and one forward pass. Entry points come from libvulkan.
+//! Vulkan loader and one forward pass. Entry points come from the platform loader.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::raw::c_char;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use genos_scene::{view_proj, Camera, LightingPreset};
@@ -180,6 +181,23 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 
 mod fog;
 mod media_check;
+mod particle_pass;
+mod pass_sync;
+mod stage;
+mod texel_detail;
+mod texel_ray_cut;
+
+/// Return lavapipe's compiler scratch to the OS. The software fixture calls
+/// this after it drops the device that planted the read-only scene, and before
+/// it opens the device that compiles the reader. A product frame does not call it.
+pub fn release_software_compiler_heap() {
+    texel_detail::release_compiler_heap();
+}
+
+pub use texel_detail::TexelDetailPlant;
+mod traffic;
+
+pub use traffic::VkTraffic;
 
 #[path = "debug_view.rs"]
 mod debug_view;
@@ -276,6 +294,8 @@ impl MaterialStats {
 
 pub struct Renderer {
     gpu: Gpu,
+    /// The world identity drawn last (0 before the first draw).
+    world_identity: u64,
     width: u32,
     height: u32,
     wire_on: bool,
@@ -290,6 +310,11 @@ pub struct Renderer {
     keep_pictures: bool,
     /// Debug view and lighting overrides ([`debug_view`]).
     debug: debug_view::DebugState,
+    /// One wait inside `poll_idle`, planted by the quit harness.
+    ///
+    /// Real fences signal immediately on lavapipe. This wait is the slow fence
+    /// the harness uses so a blocked drain still fails the 100 ms budget.
+    slow_fence: Option<Duration>,
 }
 
 impl Renderer {
@@ -298,27 +323,33 @@ impl Renderer {
         surface: *mut c_void,
         width: u32,
         height: u32,
-    ) -> Result<Self, String> {
+    ) -> Result<(Self, genos_window::ShutdownPermit), String> {
         let gpu = Gpu::open(display, surface, width, height)?;
         let width = gpu.extent_w;
         let height = gpu.extent_h;
         let unfilled = gpu.unfilled;
-        Ok(Self {
-            gpu,
-            width,
-            height,
-            wire_on: false,
-            memory: FrameMemory::default(),
-            shapes: crate::pool::MeshPool::default(),
-            overlay_rects: Vec::new(),
-            overlay_lines: Vec::new(),
-            overlay_verts: Vec::new(),
-            keep_pictures: false,
-            debug: debug_view::DebugState {
-                unfilled,
-                ..debug_view::DebugState::default()
+        let permit = genos_window::ShutdownPermit::issue();
+        Ok((
+            Self {
+                gpu,
+                width,
+                height,
+                wire_on: false,
+                world_identity: 0,
+                memory: FrameMemory::default(),
+                shapes: crate::pool::MeshPool::default(),
+                overlay_rects: Vec::new(),
+                overlay_lines: Vec::new(),
+                overlay_verts: Vec::new(),
+                keep_pictures: false,
+                debug: debug_view::DebugState {
+                    unfilled,
+                    ..debug_view::DebugState::default()
+                },
+                slow_fence: None,
             },
-        })
+            permit,
+        ))
     }
 
     /// Answer compositor pings on a side thread during device waits and pipeline compiles.
@@ -334,16 +365,6 @@ impl Renderer {
     pub fn clear_blocker() {
         ENTER.with(|cell| cell.set(None));
         LEAVE.with(|cell| cell.set(None));
-    }
-
-    /// Drop the renderer without `vkDeviceWaitIdle`.
-    ///
-    /// Call this after the window is destroyed. The driver reclaims the device
-    /// when the process exits. Waiting here is what makes a quit miss pings
-    /// when the window is still mapped, and what keeps the process alive after
-    /// the window is gone.
-    pub fn abandon(mut self) {
-        self.gpu.abandon = true;
     }
 
     /// Lines drawn over the picture with the next overlay rectangles, in the same
@@ -371,10 +392,69 @@ impl Renderer {
 
     /// Pixels from the frame before the latest submit. That frame keeps its own lamp.
     ///
-    /// Needs `set_keep_pictures(true)` before both draws.
+    /// Needs `set_keep_pictures(true)` before both draws. A flight whose fence was
+    /// reset and not submitted is not waited.
     pub fn read_earlier_frame(&mut self) -> Result<Vec<u8>, String> {
         let slot = self.gpu.flight;
         self.gpu.read_host(slot)
+    }
+
+    /// Swapchain size the device allocated. A requested size can differ when the compositor clamps it.
+    pub fn picture_extent(&self) -> (u32, u32) {
+        (self.gpu.extent_w, self.gpu.extent_h)
+    }
+
+    /// Rebuild the post chain for `hdr`. GI targets follow Potato so the check does not also build the High cache.
+    ///
+    /// Potato's lighting preset does not force SDR for this call. Encode follows `hdr.output`,
+    /// except Potato and Low settings, which stay SDR.
+    pub fn layout_post(&mut self, hdr: genos_scene::HdrSettings) -> Result<(), String> {
+        self.layout_post_for(
+            hdr,
+            genos_scene::LightingPreset::High,
+            crate::hdr_output::DeckPanel::Desktop,
+            false,
+        )
+    }
+
+    /// Rebuild the post chain the way `post_locks_sdr` classifies `preset` on `panel`.
+    ///
+    /// GI targets still follow Potato. `hdr10_listed` is the Deck OLED exception.
+    pub fn layout_post_for(
+        &mut self,
+        hdr: genos_scene::HdrSettings,
+        preset: genos_scene::LightingPreset,
+        panel: crate::hdr_output::DeckPanel,
+        hdr10_listed: bool,
+    ) -> Result<(), String> {
+        self.gpu.lighting.settings =
+            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
+        self.gpu.lighting.hdr = hdr;
+        self.gpu.lighting.budget_hdr = true;
+        self.gpu.lighting.budget_preset = preset;
+        self.gpu.lighting.budget_panel = panel;
+        self.gpu.lighting.budget_hdr10_listed = hdr10_listed;
+        let result = self.gpu.make_lighting_targets();
+        self.gpu.lighting.budget_hdr = false;
+        self.gpu.lighting.budget_preset = genos_scene::LightingPreset::High;
+        self.gpu.lighting.budget_panel = crate::hdr_output::DeckPanel::Desktop;
+        self.gpu.lighting.budget_hdr10_listed = false;
+        result
+    }
+
+    /// Ask the next frames to write the display-pass bloom tent and lattice samples.
+    pub fn set_bloom_probe(&mut self, on: bool) {
+        self.gpu.lighting.bloom_probe = on;
+    }
+
+    /// Bloom tent from the last display pass, before the intensity scale.
+    pub fn read_bloom_probe(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_bloom_probe()
+    }
+
+    /// `agx_eval` at 64 lattice inputs, from the last display pass.
+    pub fn read_agx_probe(&self) -> Result<Vec<f32>, String> {
+        self.gpu.read_agx_probe()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
@@ -472,12 +552,13 @@ impl Renderer {
         self.gpu.lighting.hdr_ms
     }
 
-    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p, not a lavapipe score.
+    /// `hdr_ms`. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p.
+    /// A lavapipe timestamp is not that score.
     pub fn post_ms_device(&self) -> f64 {
         self.hdr_ms()
     }
 
-    /// Bytes of the post buffers: scene image, host copy, bloom, encode, lattice, params, meter.
+    /// Bytes of the post buffers: scene image, host copy, bloom, encode, params, meter.
     pub fn hdr_vram_bytes(&self) -> f64 {
         let lighting = &self.gpu.lighting;
         let bytes = lighting
@@ -486,14 +567,53 @@ impl Renderer {
             .saturating_add(lighting.scene_host.size)
             .saturating_add(lighting.bloom.size)
             .saturating_add(lighting.hdr_encode.size)
-            .saturating_add(lighting.agx_lut.size)
             .saturating_add(lighting.hdr_params.size)
-            .saturating_add(lighting.meter_dev.size)
-            .saturating_add(lighting.meter_host.size);
+            .saturating_add(lighting.meter_dev[0].size)
+            .saturating_add(lighting.meter_dev[1].size)
+            .saturating_add(lighting.meter_host[0].size)
+            .saturating_add(lighting.meter_host[1].size);
         bytes as f64
     }
 
-    /// Post-chain bytes as MiB. The 96 MiB ceiling is the allocation budget.
+    /// Sum of `VkMemoryRequirements.size` for the post buffers, when each size is
+    /// the logical size or that size rounded up to the buffer's alignment.
+    ///
+    /// This is the number [`Self::hdr_vram_bytes`] reports. `None` means a buffer
+    /// is a different size from the chain.
+    pub fn post_device_bytes(&self, chain: &crate::hdr_output::PostChain) -> Option<u64> {
+        let lighting = &self.gpu.lighting;
+        let buffer = |source: &Buffer| crate::hdr_output::PostBuffer {
+            size: source.size,
+            align: source.align,
+        };
+        let matched = crate::hdr_output::post_device_bytes(
+            chain,
+            crate::hdr_output::PostDevice {
+                scene: buffer(&lighting.scene_lin),
+                scene_host: buffer(&lighting.scene_host),
+                bloom: buffer(&lighting.bloom),
+                encode: buffer(&lighting.hdr_encode),
+                lut: crate::hdr_output::PostBuffer { size: 0, align: 0 },
+                params: buffer(&lighting.hdr_params),
+                meter: buffer(&lighting.meter_dev[0]),
+                meter_host: buffer(&lighting.meter_host[0]),
+            },
+        )?;
+        // The other flight has the same meter. One buffer was a WRITE_AFTER_WRITE
+        // when both frames filled it. The chain sizes one; the total counts both.
+        if lighting.meter_dev[1].size != lighting.meter_dev[0].size
+            || lighting.meter_host[1].size != lighting.meter_host[0].size
+        {
+            return None;
+        }
+        Some(
+            matched
+                .saturating_add(lighting.meter_dev[1].size)
+                .saturating_add(lighting.meter_host[1].size),
+        )
+    }
+
+    /// Post-chain bytes as MiB. The ceiling is the preset row in the HDR pipeline record.
     pub fn post_vram_device(&self) -> f64 {
         self.hdr_vram_bytes() / (1024.0 * 1024.0)
     }
@@ -537,6 +657,70 @@ impl Renderer {
         self.gpu.lighting.last_ms
     }
 
+    /// Mean GPU milliseconds of the ReSTIR direct passes.
+    ///
+    /// Order: initial (candidates; temporal is fused here unless the passes are
+    /// split), temporal, spatial, prepare, shade. Shade is the direct dispatch
+    /// and includes that pixel's visibility ray. Zero until a timestamped frame
+    /// has been collected.
+    pub fn lighting_restir_ms(&self) -> [f64; 5] {
+        self.gpu.lighting_restir_ms()
+    }
+
+    /// Last collected ReSTIR frame, in milliseconds.
+    ///
+    /// Same order as [`Self::lighting_restir_ms`]. One frame behind the draw
+    /// that just returned. Shade includes that dispatch's visibility ray.
+    pub fn lighting_restir_last_ms(&self) -> [f64; 5] {
+        self.gpu.lighting_restir_last_ms()
+    }
+
+    /// How many lighting timestamp frames have been collected.
+    ///
+    /// A profile row is one of these. The draw that observes a new count is
+    /// one frame behind the GPU work.
+    pub fn lighting_pass_samples(&self) -> u32 {
+        self.gpu.lighting.pass_samples
+    }
+
+    /// Last collected frame by dispatch pass id, in milliseconds.
+    ///
+    /// Index 6 is the cache relight (the `cache` column of `LIGHTING_MS`).
+    /// Index 9 is the SH prep, which the cache bucket counts with the relight.
+    /// One frame behind the draw that just returned.
+    pub fn lighting_pass_id_ms(&self) -> [f64; 10] {
+        self.gpu.lighting.pass_id_ms
+    }
+
+    /// Bottom-of-pipe lighting span of the last collected frame, milliseconds.
+    ///
+    /// The `lighting` column of `GPU_MS` for that frame. Pass 9 (SH prep) and
+    /// the prepare stamp are inside this span and outside the nine-wide
+    /// `LIGHTING_MS` total. One frame behind the draw that just returned.
+    pub fn lighting_span_ms(&self) -> f64 {
+        self.gpu.lighting_span_ms()
+    }
+
+    /// Surface-cache counters from the latest world round, or the frame copy
+    /// when that round has not written yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when neither stats buffer can be mapped.
+    pub fn read_cache_round(&mut self) -> Result<CacheRound, String> {
+        self.gpu.lighting_cache_round()
+    }
+
+    /// ReSTIR scratch and the visibility mean for a few screen pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reservoirs are not allocated, a pixel is
+    /// outside the frame, or the device rejects the copy.
+    pub fn read_direct_samples(&mut self, pixels: &[u32]) -> Result<Vec<DirectSample>, String> {
+        self.gpu.read_direct_samples(pixels)
+    }
+
     /// `--gi-metrics` is on, so pass times and work counters are recorded.
     pub fn gi_metrics_enabled(&self) -> bool {
         self.gpu
@@ -562,6 +746,12 @@ impl Renderer {
             times.samples.clear();
             times.recorded = 0;
         }
+    }
+
+    /// The device enabled BC7 and BC5 (`textureCompressionBC`).
+    #[must_use]
+    pub fn bc_textures(&self) -> bool {
+        self.gpu.bc_textures
     }
 
     /// Material knobs in force. `texture_quality` does not follow the VRAM size.
@@ -701,10 +891,26 @@ impl Renderer {
         self.gpu.fail_device_allocs.set(count);
     }
 
+    /// What kind of device this renderer runs on. A check that grades a timing
+    /// or a real-GPU picture asks this first: a software device cannot prove it.
+    #[must_use]
+    pub fn gpu_kind(&self) -> GpuKind {
+        self.gpu.gpu_kind
+    }
+
     /// Device bytes still held. This drops only when a free reaches the driver.
     #[must_use]
     pub fn device_bytes(&self) -> u64 {
         self.gpu.device_bytes.get()
+    }
+
+    /// Vulkan creates, allocates, and recording calls since the process started.
+    ///
+    /// One device per process. The steady-state delta is [`VkTraffic::is_flat`].
+    #[must_use]
+    pub fn vk_traffic(&self) -> VkTraffic {
+        let _ = self.gpu.device;
+        traffic::snapshot()
     }
 
     /// Bytes of device memory still bound to streamed mip pages.
@@ -767,8 +973,10 @@ impl Renderer {
     }
 
     pub fn read_picture(&mut self) -> Result<Vec<u8>, String> {
-        self.gpu.copy_last_picture()?;
-        self.gpu.read_color()
+        self.gpu.copy_last_picture(false)?;
+        let pixels = self.gpu.read_color()?;
+        self.gpu.free_picture_host();
+        Ok(pixels)
     }
 
     /// Scene-referred radiance of the last compose, before the display transform.
@@ -776,12 +984,14 @@ impl Renderer {
     /// Empty when lighting has not allocated the image. Each texel goes through
     /// [`scene_read_from_rgba`], which calls [`scene_referred`].
     pub fn read_scene(&mut self) -> Result<crate::hdr_output::SceneRead, String> {
-        self.gpu.copy_last_picture()?;
-        self.gpu.read_scene_host()
+        self.gpu.copy_last_picture(true)?;
+        let scene = self.gpu.read_scene_host()?;
+        self.gpu.free_picture_host();
+        Ok(scene)
     }
 
     /// Bloom the frame's pyramid wrote. RGBA32F, full resolution, before the
-    /// intensity scale. The mip chain sits past this image and is not returned.
+    /// intensity scale. The stored chain is the mip pyramid; this tents the finest mip up.
     pub fn read_bloom(&self) -> Result<Vec<f32>, String> {
         self.gpu.read_bloom_host()
     }
@@ -804,6 +1014,18 @@ impl Renderer {
         readback: bool,
         wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
+        // A different world is a scene switch: the cached texels belong to the
+        // old one (docs/systems/lighting/surface-cache-wall-leak.md).
+        if world.identity() != self.world_identity {
+            if self.world_identity != 0 {
+                self.reset_lighting_cache();
+            }
+            self.world_identity = world.identity();
+        }
+        // A lamp added, removed, recoloured or dimmed is followed incrementally
+        // (lighting_wrc_note_lamps: the change ring and the settle rounds drain
+        // the old bounce), not by dropping the cache: a reset showed the frame
+        // after a power step with no bounce at all, a pop below both levels.
         self.gpu.sync_materials(world)?;
         let aspect = self.width as f32 / self.height.max(1) as f32;
         let matrix = view_proj(camera, aspect);
@@ -822,14 +1044,19 @@ impl Renderer {
         }
         let overlay_verts = self.overlay_verts.clone();
         self.wire_on = wireframe;
-        let views = crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
+        let views =
+            crate::material_stream::frame_views(world, camera, self.width, self.height, &matrix);
         self.gpu.tick_materials(self.memory.accounted(), &views)?;
         self.fund_stream_pages()?;
         self.gpu.submit_transfer()?;
         let overlay_count = overlay_verts.len() as u32;
         // The dynamic patch belongs to the frame that is about to record.
         let slot = self.gpu.flight;
-        self.gpu.wait_flight(slot)?;
+        // A reset fence with no submit is not live. Waiting it hangs. An
+        // OUT_OF_DATE acquire leaves the slot in that state.
+        if self.gpu.flight_live[slot] {
+            self.gpu.wait_flight(slot)?;
+        }
         self.gpu.bind_flight();
         let mut dynamic = Vec::new();
         let mut draws = Vec::new();
@@ -844,6 +1071,9 @@ impl Renderer {
                     color_rect,
                     normal_rect,
                     cutoff,
+                    roughness,
+                    metallic,
+                    material_flags,
                     source,
                 } => {
                     if !self.memory.contains_shape(*key) {
@@ -871,7 +1101,7 @@ impl Renderer {
                         ],
                         atlas: *color_rect,
                         normal_atlas: *normal_rect,
-                        extra: [*cutoff, 0.0, 0.0, 0.0],
+                        extra: [*cutoff, *roughness, *metallic, f32::from_bits(*material_flags)],
                     });
                     draws.push(DrawSpan {
                         shapes: true,
@@ -932,7 +1162,10 @@ impl Renderer {
             // The particle image is one shared buffer. Both frames can sample it.
             let (width, height) = self.memory.image_size();
             let bytes = pack::image_bytes(width, height, self.memory.image_pixels());
-            self.gpu.wait_flight(1 - slot)?;
+            let earlier = 1 - slot;
+            if self.gpu.flight_live[earlier] {
+                self.gpu.wait_flight(earlier)?;
+            }
             self.gpu.upload_image(&bytes)?;
             self.memory.clear_image_upload();
         }
@@ -941,7 +1174,20 @@ impl Renderer {
         self.gpu.unfilled_eye = [camera.position.x, camera.position.y, camera.position.z];
         self.gpu.unfilled_yaw = camera.yaw;
         self.gpu.unfilled_pitch = camera.pitch;
+        let saved_debug_view = self.debug.view;
+        if !crate::gate::guard(crate::gate::BOUNCE_IN_COMPOSE) {
+            self.debug.view = crate::DebugView {
+                mode: crate::ViewMode::Direct,
+                lamp: saved_debug_view.lamp,
+            };
+        } else if !crate::gate::guard(crate::gate::DIRECT_IN_COMPOSE) {
+            self.debug.view = crate::DebugView {
+                mode: crate::ViewMode::Bounce,
+                lamp: saved_debug_view.lamp,
+            };
+        }
         self.debug.apply(&mut pack);
+        self.debug.view = saved_debug_view;
         self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         self.gpu.note_vertex_count(world_dynamic);
@@ -949,14 +1195,22 @@ impl Renderer {
         self.gpu.note_overlay_count(overlay_count);
         self.gpu
             .note_reflections(world, camera, aspect, quad_first, quad_count);
+        self.gpu
+            .note_particles(&world.scene.particles, camera, aspect);
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
         self.gpu.set_froxel_frame(&world.scene, camera, aspect);
-        self.gpu.record_and_submit(&matrix)?;
+        if !self.gpu.record_and_submit(&matrix)? {
+            return Ok(None);
+        }
         let pixels = if readback {
             self.gpu.wait_gpu()?;
-            Some(self.gpu.read_color()?)
+            let pixels = self.gpu.read_color()?;
+            if !self.keep_pictures {
+                self.gpu.free_picture_host();
+            }
+            Some(pixels)
         } else {
             None
         };
@@ -1044,10 +1298,72 @@ impl Renderer {
         self.gpu.lighting_stats()
     }
 
+    /// Read the surface-cache cells a still picture would hash at `queries`.
+    ///
+    /// The device must be idle. The read copies the key table and the stored
+    /// records. It does not change the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cache is not allocated, a query list is longer
+    /// than 32, or the device rejects the copy.
+    pub fn read_cache_cells(
+        &mut self,
+        queries: &[crate::cache_probe::CacheQuery],
+    ) -> Result<Vec<crate::cache_probe::StoredCell>, String> {
+        self.gpu.read_cache_cells(queries)
+    }
+
     /// Five closed forms from `media_check.comp`. The parity test compares them
     /// with `genos_math::media`. This does not present.
     pub fn media_closed_forms(&mut self) -> Result<[f32; 5], String> {
         self.gpu.media_closed_forms()
+    }
+
+    /// One lavapipe dispatch of `lighting_screen_probe_indirect` with the
+    /// production cache. The rows are the stage 3 covered and uncovered cases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod()
+    }
+
+    /// Writing specialization with `lamp.x = 1`. The returned bytes are the
+    /// planted cache and key table. Drop this renderer before compiling the
+    /// reader: lavapipe keeps the compiler heap until the device is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_plant(&mut self) -> Result<TexelDetailPlant, String> {
+        self.gpu.texel_detail_prod_plant()
+    }
+
+    /// The same production function compiled with `LIGHTING_SC_WRITES` false.
+    /// `plant` was captured by [`Self::texel_detail_prod_plant`] on a device
+    /// that has since been dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_readonly(
+        &mut self,
+        plant: TexelDetailPlant,
+    ) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_readonly(plant)
+    }
+
+    /// One lavapipe dispatch of `lighting_compact_hold_texel_rays`.
+    ///
+    /// The rows are the stage 4 agreement cases. The shader does not trace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_ray_cut(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_ray_cut()
     }
 
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
@@ -1061,7 +1377,10 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the device rejects the dispatch.
-    pub fn run_fog(&mut self, job: &crate::fog_pass::FogDispatch) -> Result<crate::fog_pass::FogGpu, String> {
+    pub fn run_fog(
+        &mut self,
+        job: &crate::fog_pass::FogDispatch,
+    ) -> Result<crate::fog_pass::FogGpu, String> {
         self.gpu.run_fog(job)
     }
 
@@ -1070,7 +1389,11 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the device has no timestamp queries or the dispatch fails.
-    pub fn froxel_sample_ms(&mut self, preset: LightingPreset, samples: u32) -> Result<f64, String> {
+    pub fn froxel_sample_ms(
+        &mut self,
+        preset: LightingPreset,
+        samples: u32,
+    ) -> Result<f64, String> {
         self.gpu.froxel_sample_ms(preset, samples)
     }
 
@@ -1089,14 +1412,22 @@ impl Renderer {
     /// # Errors
     ///
     /// Returns an error when the image or buffer allocation fails.
-    pub fn froxel_allocation(&mut self, preset: LightingPreset, doubled: bool) -> Result<u64, String> {
+    pub fn froxel_allocation(
+        &mut self,
+        preset: LightingPreset,
+        doubled: bool,
+    ) -> Result<u64, String> {
         self.gpu.froxel_allocation(preset, doubled)
     }
 
     /// Probe for the debug page. `pass_ms` is the last frame's froxel timestamp.
     /// History stays off, so accepts and rejects stay 0.
     #[must_use]
-    pub fn fog_frame_probe(&self, fog: &genos_scene::FogSettings, preset: LightingPreset) -> crate::fog_budget::FogProbe {
+    pub fn fog_frame_probe(
+        &self,
+        fog: &genos_scene::FogSettings,
+        preset: LightingPreset,
+    ) -> crate::fog_budget::FogProbe {
         let mut probe = crate::fog_budget::fog_probe(fog, preset);
         if probe.dispatches == 0 || !self.gpu.froxel_wrote {
             probe.dispatches = 0;
@@ -1110,6 +1441,8 @@ impl Renderer {
     }
 
     /// Columns written by the last frame dispatch. Empty when that frame skipped fog.
+    ///
+    /// A flight whose fence was reset and not submitted is not waited.
     ///
     /// # Errors
     ///
@@ -1185,6 +1518,54 @@ impl Renderer {
         self.gpu.lighting_lamp_pick_counts()
     }
 
+    /// Displaying picture pixels whose fine world-cache read was under a full
+    /// set count last frame. A real zero at that count is dark and is not
+    /// included. Waits for that frame.
+    pub fn lighting_under_trusted_pixels(&mut self) -> u32 {
+        self.gpu.lighting_under_trusted_pixels()
+    }
+
+    /// Fill scheduler work from the last frame: serial plan iterations, then
+    /// the histogram dispatch's group count. Waits for that frame.
+    pub fn lighting_fill_compact_work(&mut self) -> [u32; 2] {
+        self.gpu.lighting_fill_compact_work()
+    }
+
+    /// Last frame: rays, on-screen, remainder, checks, cells committed, live.
+    pub fn lighting_fill_ray_split(&mut self) -> [u32; 6] {
+        self.gpu.lighting_fill_ray_split()
+    }
+
+    /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`
+    /// (0–4 neighbours). 2 is `restir-spatial-wide`. 0 before a spatial pass.
+    pub fn restir_spatial_bound(&self) -> u8 {
+        self.gpu.lighting.restir_spatial_bound
+    }
+
+    /// One spatial dispatch on fixed reservoirs. `neighbors` is the count the
+    /// product frame would bind: 0–4 is `restir-spatial`, above 4 is
+    /// `restir-spatial-wide`. The shader still reads header word 13, so a
+    /// scalar bind with a larger word leaves the input sample.
+    pub fn restir_merge_oracle(
+        &mut self,
+        neighbors: u32,
+        scene: &[u32],
+        gbuf: &[u32],
+        restir: &[u32],
+    ) -> Result<Vec<u32>, String> {
+        self.gpu.restir_merge_oracle(neighbors, scene, gbuf, restir)
+    }
+
+    /// Product frames that missed the reservoir and shaded the labelled exact sum.
+    pub fn lighting_restir_prepare_failures(&self) -> u32 {
+        self.gpu.lighting_restir_prepare_failures()
+    }
+
+    /// The next product prepare shades the labelled exact sum and counts a failure.
+    pub fn force_restir_prepare_failure(&mut self, on: bool) {
+        self.gpu.force_restir_prepare_failure(on);
+    }
+
     /// Sun-step mark from the last submitted frame. Waits for that frame.
     /// `gpu_sun` is the shader bit. `host_frames` counts frames the CPU took
     /// the small-sun path.
@@ -1202,6 +1583,57 @@ impl Renderer {
     /// Off by default: the copy is a whole picture over the bus each frame.
     pub fn set_keep_pictures(&mut self, on: bool) {
         self.keep_pictures = on;
+    }
+}
+
+impl genos_window::ShutdownDevice for Renderer {
+    fn poll_idle(&mut self) -> bool {
+        if let Some(stall) = self.slow_fence.take() {
+            // No seat thread. The drain phase's clock includes this wait, and
+            // the next seat dispatch records it as the quit gap.
+            wait_unpumped(stall);
+        }
+        self.gpu.poll_idle()
+    }
+
+    fn destroy_step(&mut self) -> bool {
+        self.gpu.destroy_step()
+    }
+
+    fn next_phase(&self) -> &'static str {
+        self.gpu.next_shutdown_phase()
+    }
+
+    fn plant_slow_fence(&mut self, stall: Duration) {
+        self.slow_fence = Some(stall);
+    }
+
+    fn release_driver_at_exit(&mut self) {
+        self.gpu.release_driver_at_exit();
+    }
+
+    fn frames_presented(&self) -> u64 {
+        self.gpu.presented
+    }
+}
+
+/// Wait out `duration` without dispatching the seat.
+///
+/// A condvar timeout is the wait. `std::thread::sleep` is denied, and this
+/// must not run inside `block()`, or the seat thread would hide the stall.
+fn wait_unpumped(duration: Duration) {
+    if duration.is_zero() {
+        return;
+    }
+    let deadline = Instant::now() + duration;
+    let pair = (Mutex::new(()), Condvar::new());
+    while Instant::now() < deadline {
+        let guard = match pair.0.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = pair.1.wait_timeout(guard, remaining);
     }
 }
 
@@ -1402,7 +1834,12 @@ struct Gpu {
     cmds: [Handle; 2],
     fences: [Handle; 2],
     image_readies: [Handle; 2],
-    render_dones: [Handle; 2],
+    /// Present-wait semaphores, one per swapchain image, indexed by the image
+    /// `vkAcquireNextImageKHR` returns. The submit fence does not prove the
+    /// presentation engine has finished waiting, so a frames-in-flight semaphore
+    /// is still in use when the next submit signals it. `vkDestroySwapchainKHR`
+    /// then waits for a present that cannot complete.
+    present_sems: Vec<Handle>,
     colors: [Image; 2],
     depths: [Image; 2],
     framebuffers: [Handle; 2],
@@ -1415,8 +1852,8 @@ struct Gpu {
     /// This frame's scene bytes, written into `frame_scene` once its slot is free.
     frame_bytes: Vec<u8>,
     /// S70C: what the resident scene buffer holds (`frame_scene[0]`, device-local;
-    /// `[1]` names the same buffer). A frame records only the 256-byte blocks that
-    /// differ (vkCmdUpdateBuffer, in the frame's command stream).
+    /// `[1]` names the same buffer). A frame copies only the 256-byte blocks that
+    /// differ, from the staging buffer, in the frame's command stream.
     scene_shadow: Vec<u8>,
     particle_buf: Buffer,
     /// Device-local atlases the fragment shader loads (bindings 4 and 7).
@@ -1427,6 +1864,17 @@ struct Gpu {
     sampled_size: [(u32, u32); 2],
     sampled_layout: [u32; 2],
     sampled_cleared: [bool; 2],
+    /// `VkFormat` of the two sampled atlases. 37 is RGBA8.
+    sampled_format: [i32; 2],
+    sampled_mips: [u32; 2],
+    /// Nearest sampler for texelFetch of the atlases.
+    atlas_sampler: Handle,
+    /// `color_linear`, `color_lod`, `normal_lod`, pad. Host uniform, binding 1.
+    atlas_mode: Buffer,
+    atlas_linear: u32,
+    atlas_lod: [u32; 2],
+    /// The device enabled `textureCompressionBC`.
+    bc_textures: bool,
     /// One texel copied from the colour atlas by the transfer. The CPU never
     /// stores a mip byte here.
     atlas_readback: Buffer,
@@ -1447,7 +1895,7 @@ struct Gpu {
     transfer_wait: bool,
     /// Mesh SDF instances for the software tracer (mesh_field.rs; binding 5).
     /// Device-local and resident: what it holds is `mesh_field_shadow`, and a frame
-    /// records only `mesh_field_dirty` (byte ranges) with vkCmdUpdateBuffer, so a
+    /// copies only `mesh_field_dirty` (byte ranges) from the staging buffer, so a
     /// moving instance costs its 128-byte record and no device wait.
     mesh_field: Buffer,
     mesh_field_cap: u64,
@@ -1490,10 +1938,48 @@ struct Gpu {
     audio_fence: Handle,
     /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
     media_check: Option<media_check::Pipe>,
+    /// Lazy ADR 0039 stage 3 production dispatch. Absent until that test asks.
+    texel_detail: Option<texel_detail::Pipe>,
+    /// Lazy ADR 0039 stage 4 ray-cut dispatch. Absent until that test asks.
+    texel_ray_cut: Option<texel_ray_cut::Pipe>,
     /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
     media_ms: Option<f64>,
     /// Workgroups for the next media dispatch. The parity check uses 1.
     media_groups: u32,
+    /// Stage-1 particle buffers. Absent until an emitter dispatches.
+    particle_pass: Option<particle_pass::Pass>,
+    /// The emitter the next compute step runs. None skips the dispatch.
+    particle_job: Option<particle_pass::Job>,
+    /// Seconds for the next particle step. Zero does not integrate or emit.
+    particle_dt: f32,
+    /// Skip-dead or skip-indirect mutation. None is the specified step.
+    particle_fault: crate::particle_sim::ParticleFault,
+    /// The 4-byte sync witness. Off in a shipping recording. Tests turn it on.
+    particle_sync_witness: bool,
+    /// Depth samples uploaded for the next step. Empty skips collision.
+    particle_depth: Vec<f32>,
+    /// Width and height of `particle_depth`.
+    particle_depth_size: (u32, u32),
+    /// Last completed particle step.
+    particle_stats: crate::particle_sim::ParticleStats,
+    /// This frame's command buffer wrote particle timestamps.
+    particle_stamped: bool,
+    /// The keep pass already drew this frame's particles.
+    particle_drawn: bool,
+    /// Flight whose compute was recorded into the command buffer just submitted.
+    particle_submitted: usize,
+    /// This slot's timestamp queries belong to a submission whose fence has been waited.
+    particle_query_ready: [bool; 2],
+    /// This slot's compute wrote timestamps that no fence wait has collected yet.
+    particle_stamps_pending: [bool; 2],
+    /// View-projection used by the flight that stored scene depth.
+    particle_view_proj: [[f32; 16]; 2],
+    /// That flight stored the scene depth image for a later sample.
+    particle_depth_retained: [bool; 2],
+    /// This frame's scene pass stores depth instead of discarding it.
+    store_scene_depth: bool,
+    /// Measurement hook. Waits the other flight on the CPU before particle recording.
+    particle_cpu_fence: bool,
     /// Froxel targets, pipelines, and the standalone command buffer.
     froxel: Option<fog::Targets>,
     /// What the next frame's froxel pass runs. None skips the pass.
@@ -1507,10 +1993,40 @@ struct Gpu {
     /// This frame's `record_froxel` copied columns and wrote the compose header.
     froxel_wrote: bool,
     submit_pending: bool,
-    /// Drop returns without `vkDeviceWaitIdle`. The process is leaving.
-    abandon: bool,
+    /// Frame-slot fence has a submit that has not been waited. A reset fence
+    /// with no submit stays false: polling it would wait forever.
+    flight_live: [bool; 2],
+    /// Test hook. The next acquire resets the fence and returns out of date
+    /// without submitting, which is the hang the live check exists for.
+    fail_next_acquire: bool,
+    /// Live flights were waited and the device idled before this teardown frees.
+    teardown_drained: std::cell::Cell<bool>,
+    /// A buffer or image was freed during teardown before that drain.
+    freed_before_drain: std::cell::Cell<bool>,
+    /// Non-null buffers and images freed after the drain. Zero means the
+    /// lighting step freed nothing the test can see.
+    teardown_frees: std::cell::Cell<u32>,
+    /// Presents the driver accepted (success or suboptimal).
+    presented: u64,
+    /// The lifecycle is draining and destroying. Lighting waits must not block.
+    lifecycle_release: bool,
+    /// The instance has been destroyed, or quit left it for process exit.
+    torn_down: bool,
+    /// Quit will `_exit` and must not wait in `vkDestroyDevice` or
+    /// `vkDestroyInstance`. Those two calls share one lavapipe teardown wait.
+    exit_release: bool,
+    /// 0 yields, 1 destroys lighting, 2 destroys the swapchain, 3 releases
+    /// images and pipelines, 4 destroys the surface, 5 the device, then the instance.
+    teardown: u8,
+    /// The drain submits have been queued.
+    shutdown_armed: bool,
+    /// Fence for the graphics-queue drain submit.
+    shutdown_fence: Handle,
+    /// Fence for the compute-queue drain submit, when that queue is distinct.
+    shutdown_compute: Handle,
     timestamp_period: f32,
     timestamp_bits: u32,
+    gpu_kind: GpuKind,
     query_pool: Handle,
     /// Two timestamps per frame, bloom start and display end. Independent of `--gpu-times`.
     hdr_time_pool: Handle,
@@ -1527,6 +2043,10 @@ struct Gpu {
     /// Last known layout of each flight's color image. `0` is undefined. `6` is transfer source.
     color_layout: [u32; 2],
     keep_pass: Handle,
+    /// Scene pass that stores depth for the next frame's particle collision.
+    render_pass_store: Handle,
+    /// Keep pass that loads and stores that depth. The default keep pass discards it.
+    keep_pass_store: Handle,
     aa_src: [Buffer; 2],
     aa_dst: [Buffer; 2],
     aa_desc_layout: Handle,
@@ -1541,6 +2061,8 @@ struct Gpu {
     memory_props: MemProps,
     /// Upload buffers that went to device-local memory, and all upload buffers.
     upload_local: std::cell::Cell<[u32; 2]>,
+    /// `VkMemoryPropertyFlags` of the type the last `alloc` bound.
+    last_memory_flags: std::cell::Cell<u32>,
     /// Device allocations to fail with out-of-device-memory before the driver.
     fail_device_allocs: std::cell::Cell<u32>,
     /// Device bytes allocated minus the bytes passed to the free that calls
@@ -1567,6 +2089,10 @@ struct Gpu {
     budget_extension: bool,
     memory_budget_query: Option<FnMemProps>,
     frame_mark: Option<Instant>,
+    /// Host staging for device uploads. One slot per reused command buffer.
+    /// Reset when that buffer's fence has retired, so the copy memory is not
+    /// allocated again each frame.
+    stage: stage::StageSet,
 }
 
 struct Image {
@@ -1578,16 +2104,21 @@ struct Image {
 struct Buffer {
     buffer: Handle,
     memory: Handle,
+    /// `VkMemoryRequirements.size`. At least the size asked for, and a multiple of `align`.
     size: u64,
+    /// `VkMemoryRequirements.alignment`. Zero on an empty buffer.
+    align: u64,
 }
 
 struct StreamSource {
     index: usize,
     color: bool,
+    /// This chain is the image the fragment shader fetches.
+    sampled: bool,
     chain: crate::material_stream::Chain,
     staging: Buffer,
     mip_offset: Vec<u64>,
-    /// Mip last blitted into the device atlas. `None` until the first copy.
+    /// Mip last copied into the device atlas. `None` until the first copy.
     shown: Option<u32>,
 }
 
@@ -1625,6 +2156,7 @@ struct MemProps {
 }
 
 #[allow(dead_code)]
+#[derive(Clone, Copy)]
 struct Fns {
     destroy_instance: FnDestroy,
     destroy_device: FnDestroy,
@@ -1662,6 +2194,7 @@ struct Fns {
     cmd_bind_pipe: FnBindPipe,
     cmd_bind_vb: FnBindVb,
     cmd_draw: FnDraw,
+    cmd_draw_indirect: FnDrawIndirect,
     cmd_push: FnPush,
     cmd_viewport: FnViewport,
     cmd_scissor: FnScissor,
@@ -1674,6 +2207,8 @@ struct Fns {
     cmd_clear_color: FnClearColor,
     create_sem: FnCreateSem,
     destroy_sem: Fn2,
+    create_sampler: FnCreateSem,
+    destroy_sampler: Fn2,
     create_fence: FnFence,
     destroy_fence: Fn2,
     wait_fences: FnWait,
@@ -1768,6 +2303,7 @@ type FnBeginRp = unsafe extern "system" fn(Handle, *const u8, u32);
 type FnBindPipe = unsafe extern "system" fn(Handle, u32, Handle);
 type FnBindVb = unsafe extern "system" fn(Handle, u32, u32, *const Handle, *const u64);
 type FnDraw = unsafe extern "system" fn(Handle, u32, u32, u32, u32);
+type FnDrawIndirect = unsafe extern "system" fn(Handle, Handle, u64, u32, u32);
 type FnPush = unsafe extern "system" fn(Handle, Handle, u32, u32, u32, *const c_void);
 type FnViewport = unsafe extern "system" fn(Handle, u32, u32, *const f32);
 type FnScissor = unsafe extern "system" fn(Handle, u32, u32, *const i32);
@@ -1832,14 +2368,7 @@ impl Gpu {
         height: u32,
     ) -> Result<Self, String> {
         unsafe {
-            let lib = dlopen(b"libvulkan.so.1\0".as_ptr() as *const c_char, 2);
-            if lib.is_null() {
-                return Err("libvulkan.so.1 did not open".into());
-            }
-            let get_instance: GetProc = transmute(dlsym(
-                lib,
-                b"vkGetInstanceProcAddr\0".as_ptr() as *const c_char,
-            ));
+            let get_instance = load_instance_proc()?;
             let enumerate_ext: unsafe extern "system" fn(
                 *const c_void,
                 *mut u32,
@@ -1870,7 +2399,7 @@ impl Gpu {
                 )?;
             }
             let surface_ext = b"VK_KHR_surface\0";
-            let wayland_ext = b"VK_KHR_wayland_surface\0";
+            let wayland_ext = surface_extension_name();
             let color_ext = b"VK_EXT_swapchain_colorspace\0";
             let props2_ext = b"VK_KHR_get_physical_device_properties2\0";
             let has_props2 = extension_listed(
@@ -1887,6 +2416,9 @@ impl Gpu {
             }
             if extension_listed(&inst_listed, ext_count, b"VK_EXT_swapchain_colorspace") {
                 ext_ptrs.push(color_ext.as_ptr() as *const c_char);
+            }
+            if let Some(extra) = extra_instance_extension() {
+                ext_ptrs.push(extra.as_ptr() as *const c_char);
             }
             let app_name = b"genos-camera\0";
             #[repr(C)]
@@ -1922,7 +2454,7 @@ impl Gpu {
             let info = InstInfo {
                 s_type: 1,
                 next: std::ptr::null(),
-                flags: 0,
+                flags: instance_flags(),
                 app: &app,
                 enabled_layers: 0,
                 layer_names: std::ptr::null(),
@@ -1946,7 +2478,12 @@ impl Gpu {
             let mem_props: FnMemProps = transmute(load(b"vkGetPhysicalDeviceMemoryProperties\0"));
             let create_device: FnCreateDevice = transmute(load(b"vkCreateDevice\0"));
             let get_device: GetProc = transmute(load(b"vkGetDeviceProcAddr\0"));
-            let create_wayland_surface: FnWayland = transmute(load(b"vkCreateWaylandSurfaceKHR\0"));
+            let wayland_pfn = load(b"vkCreateWaylandSurfaceKHR\0");
+            let create_wayland_surface: FnWayland = if wayland_pfn.is_null() {
+                unused_wayland_surface
+            } else {
+                transmute(wayland_pfn)
+            };
             let destroy_surface: Fn2 = transmute(load(b"vkDestroySurfaceKHR\0"));
             let surface_support: FnSupport =
                 transmute(load(b"vkGetPhysicalDeviceSurfaceSupportKHR\0"));
@@ -1972,31 +2509,7 @@ impl Gpu {
                 "device list",
             )?;
 
-            #[repr(C)]
-            struct WaylandInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                display: *mut c_void,
-                surface: *mut c_void,
-            }
-            let wayland = WaylandInfo {
-                s_type: 1000006000,
-                next: std::ptr::null(),
-                flags: 0,
-                display,
-                surface: wl_surface,
-            };
-            let mut vk_surface = std::ptr::null_mut();
-            check(
-                create_wayland_surface(
-                    instance,
-                    &wayland as *const WaylandInfo as *const u8,
-                    std::ptr::null(),
-                    &mut vk_surface,
-                ),
-                "wayland surface",
-            )?;
+            let vk_surface = create_surface(get_instance, instance, display, wl_surface)?;
 
             let get_props: unsafe extern "system" fn(Handle, *mut u8) =
                 transmute(load(b"vkGetPhysicalDeviceProperties\0"));
@@ -2046,6 +2559,10 @@ impl Gpu {
             );
             let mut prop_bytes = vec![0u8; 1024];
             get_props(physical, prop_bytes.as_mut_ptr());
+            // VkPhysicalDeviceProperties.deviceType sits at byte 16.
+            let gpu_kind = GpuKind::from_vk_device_type(u32::from_ne_bytes(
+                prop_bytes[16..20].try_into().unwrap(),
+            ));
             let timestamp_flag = u32::from_ne_bytes(prop_bytes[716..720].try_into().unwrap());
             let mut timestamp_period = f32::from_ne_bytes(prop_bytes[720..724].try_into().unwrap());
             if timestamp_flag == 0
@@ -2059,23 +2576,12 @@ impl Gpu {
             mem_props(physical, raw_props.as_mut_ptr());
             let memory_props = parse_mem_props(&raw_props);
 
-            let mut transfer_family = queue_family;
-            let mut transfer_dedicated = false;
-            for index in 0..family_count {
-                if index == queue_family || index == compute_family {
-                    continue;
-                }
-                let base = index as usize * 24;
-                let flags = u32::from_ne_bytes(families[base..base + 4].try_into().unwrap());
-                let queues =
-                    u32::from_ne_bytes(families[base + 4..base + 8].try_into().unwrap());
-                // Transfer without graphics. A shared graphics family keeps the graphics queue.
-                if flags & 0x4 != 0 && flags & 0x1 == 0 && queues > 0 {
-                    transfer_family = index;
-                    transfer_dedicated = true;
-                    break;
-                }
-            }
+            // The streaming submit blits mips into the atlas (vkCmdBlitImage) and
+            // can clear it (vkCmdClearColorImage) and hand it to fragment stages. All need a graphics
+            // queue. A transfer-only family (NVIDIA family 1) cannot run them: the
+            // submit faults and its fence never signals, so `wait_fence` blocked
+            // forever. Streaming stays on the graphics family.
+            let transfer_family = queue_family;
             let priorities = [1.0f32, 0.0f32, 1.0f32];
             #[repr(C)]
             struct QueueInfo {
@@ -2113,7 +2619,7 @@ impl Gpu {
                     priorities: priorities.as_ptr().add(2),
                 },
             ];
-            let mut queue_info_count = if separate {
+            let queue_info_count = if separate {
                 2
             } else if gfx_queues >= 2 {
                 queue_infos[0].count = 2;
@@ -2121,9 +2627,6 @@ impl Gpu {
             } else {
                 1
             };
-            if transfer_dedicated {
-                queue_info_count += 1;
-            }
             let enumerate_device_ext: unsafe extern "system" fn(
                 Handle,
                 *const c_char,
@@ -2165,10 +2668,23 @@ impl Gpu {
             } else {
                 None
             };
-            // VkPhysicalDeviceFeatures: only fragmentStoresAndAtomics (26), for the GI
-            // v2 G-buffer. Every desktop driver (and lavapipe, MoltenVK) has it.
+            // VkPhysicalDeviceFeatures: fragmentStoresAndAtomics (26) for the GI
+            // G-buffer, textureCompressionBC (22) when the device has it, and
+            // shaderInt64 (40) only when the device reports it. A SPIR-V module
+            // that declares OpCapability Int64 is illegal without the feature.
+            type FnFeatures = unsafe extern "system" fn(Handle, *mut u32);
+            let get_features: FnFeatures = transmute(load(b"vkGetPhysicalDeviceFeatures\0"));
+            let mut have = [0u32; 55];
+            get_features(physical, have.as_mut_ptr());
             let mut features = [0u32; 55];
             features[26] = 1;
+            let bc_textures = have[22] != 0;
+            if bc_textures {
+                features[22] = 1;
+            }
+            if have[40] != 0 {
+                features[40] = 1;
+            }
             let swap_ext = b"VK_KHR_swapchain\0";
             let budget_ext = b"VK_EXT_memory_budget\0";
             let hdr_meta_ext = b"VK_EXT_hdr_metadata\0";
@@ -2181,6 +2697,7 @@ impl Gpu {
             if hdr_meta {
                 dev_exts.push(hdr_meta_ext.as_ptr() as *const c_char);
             }
+            push_device_extensions(&mut dev_exts, &dev_listed, dev_ext_count);
             #[repr(C)]
             struct DevInfo {
                 s_type: i32,
@@ -2226,10 +2743,7 @@ impl Gpu {
             } else if gfx_queues >= 2 {
                 get_device_queue(device, queue_family, 1, &mut compute_queue);
             }
-            let mut transfer_queue = queue;
-            if transfer_dedicated {
-                get_device_queue(device, transfer_family, 0, &mut transfer_queue);
-            }
+            let transfer_queue = queue;
             let materials = genos_load::MaterialSettings::default();
 
             let mut gpu = Self {
@@ -2291,7 +2805,7 @@ impl Gpu {
                 cmds: [std::ptr::null_mut(); 2],
                 fences: [std::ptr::null_mut(); 2],
                 image_readies: [std::ptr::null_mut(); 2],
-                render_dones: [std::ptr::null_mut(); 2],
+                present_sems: Vec::new(),
                 colors: [Image::empty(), Image::empty()],
                 depths: [Image::empty(), Image::empty()],
                 framebuffers: [std::ptr::null_mut(); 2],
@@ -2304,6 +2818,13 @@ impl Gpu {
                 sampled_size: [(0, 0), (0, 0)],
                 sampled_layout: [0, 0],
                 sampled_cleared: [false, false],
+                sampled_format: [37, 37],
+                sampled_mips: [1, 1],
+                atlas_sampler: std::ptr::null_mut(),
+                atlas_mode: Buffer::empty(),
+                atlas_linear: 0,
+                atlas_lod: [0, 0],
+                bc_textures,
                 atlas_readback: Buffer::empty(),
                 page_readback: Buffer::empty(),
                 material_key: 0,
@@ -2345,8 +2866,27 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 media_check: None,
+                texel_detail: None,
+                texel_ray_cut: None,
                 media_ms: None,
                 media_groups: 1,
+                particle_pass: None,
+                particle_job: None,
+                particle_dt: 0.0,
+                particle_fault: crate::particle_sim::ParticleFault::None,
+                particle_sync_witness: false,
+                particle_depth: Vec::new(),
+                particle_depth_size: (0, 0),
+                particle_stats: crate::particle_sim::ParticleStats::default(),
+                particle_stamped: false,
+                particle_drawn: false,
+                particle_submitted: 0,
+                particle_query_ready: [false, false],
+                particle_stamps_pending: [false, false],
+                particle_view_proj: [[0.0; 16]; 2],
+                particle_depth_retained: [false, false],
+                store_scene_depth: false,
+                particle_cpu_fence: false,
                 froxel: None,
                 froxel_frame: None,
                 froxel_pass_ms: 0.0,
@@ -2354,9 +2894,22 @@ impl Gpu {
                 froxel_pending: false,
                 froxel_wrote: false,
                 submit_pending: false,
-                abandon: false,
+                flight_live: [false, false],
+                fail_next_acquire: false,
+                teardown_drained: std::cell::Cell::new(false),
+                freed_before_drain: std::cell::Cell::new(false),
+                teardown_frees: std::cell::Cell::new(0),
+                presented: 0,
+                lifecycle_release: false,
+                torn_down: false,
+                exit_release: false,
+                teardown: 0,
+                shutdown_armed: false,
+                shutdown_fence: std::ptr::null_mut(),
+                shutdown_compute: std::ptr::null_mut(),
                 timestamp_period,
                 timestamp_bits,
+                gpu_kind,
                 query_pool: std::ptr::null_mut(),
                 hdr_time_pool: std::ptr::null_mut(),
                 gpu_times: {
@@ -2385,6 +2938,8 @@ impl Gpu {
                 antialias: Antialias::Off,
                 color_layout: [0, 0],
                 keep_pass: std::ptr::null_mut(),
+                render_pass_store: std::ptr::null_mut(),
+                keep_pass_store: std::ptr::null_mut(),
                 aa_src: [Buffer::empty(), Buffer::empty()],
                 aa_dst: [Buffer::empty(), Buffer::empty()],
                 aa_desc_layout: std::ptr::null_mut(),
@@ -2393,7 +2948,7 @@ impl Gpu {
                 aa_pool: std::ptr::null_mut(),
                 aa_sets: [std::ptr::null_mut(); 2],
                 reflection: ReflectionGpu::idle(),
-                fns: load_fns(
+                fns: load_fns_installed(
                     dload,
                     create_wayland_surface,
                     destroy_surface,
@@ -2408,6 +2963,7 @@ impl Gpu {
                 ),
                 memory_props,
                 upload_local: std::cell::Cell::new([0, 0]),
+                last_memory_flags: std::cell::Cell::new(0),
                 fail_device_allocs: std::cell::Cell::new(0),
                 device_bytes: std::cell::Cell::new(0),
                 transfer_queue,
@@ -2433,11 +2989,15 @@ impl Gpu {
                 budget_extension,
                 memory_budget_query,
                 frame_mark: None,
+                stage: stage::StageSet::empty(),
             };
             let _ = (destroy_instance, surface_support);
             gpu.create_static_objects()?;
             gpu.recreate(width, height)?;
             block(|| gpu.make_lighting())?;
+            // Before the scene exists. Otherwise a potato launch still builds
+            // the High cache once, and lavapipe holds it through quit.
+            gpu.apply_launch_preset()?;
             gpu.make_lighting_targets()?;
             let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
             gpu.debug_out = launch.out.clone();
@@ -2448,8 +3008,10 @@ impl Gpu {
 
     fn create_static_objects(&mut self) -> Result<(), String> {
         unsafe {
-            self.render_pass = self.make_render_pass(false)?;
-            self.keep_pass = self.make_render_pass(true)?;
+            self.render_pass = self.make_render_pass(false, false)?;
+            self.keep_pass = self.make_render_pass(true, false)?;
+            self.render_pass_store = self.make_render_pass(false, true)?;
+            self.keep_pass_store = self.make_render_pass(true, true)?;
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
             let start = Instant::now();
@@ -2517,7 +3079,6 @@ impl Gpu {
             };
             for slot in 0..2 {
                 self.image_readies[slot] = self.make_sem()?;
-                self.render_dones[slot] = self.make_sem()?;
                 check(
                     (self.fns.create_fence)(
                         self.device,
@@ -2529,7 +3090,6 @@ impl Gpu {
                 )?;
             }
             self.image_ready = self.image_readies[0];
-            self.render_done = self.render_dones[0];
             self.fence = self.fences[0];
             let transfer_pool = PoolInfo {
                 s_type: 39,
@@ -2596,6 +3156,7 @@ impl Gpu {
     fn recreate(&mut self, width: u32, height: u32) -> Result<(), String> {
         self.idle_device();
         self.destroy_targets();
+        self.destroy_swapchain();
         self.create_targets(width, height)
     }
 
@@ -2698,13 +3259,32 @@ impl Gpu {
             }
             let format = i32::from_ne_bytes(chunk[0..4].try_into().unwrap());
             let color_space = i32::from_ne_bytes(chunk[4..8].try_into().unwrap());
-            listed.push(crate::hdr_output::ListedFormat { format, color_space });
+            listed.push(crate::hdr_output::ListedFormat {
+                format,
+                color_space,
+            });
         }
-        let force_sdr = self.lighting.hdr.legacy_bytes
-            || matches!(
-                self.lighting.settings.preset,
+        let hdr10_listed = listed.iter().any(|item| {
+            (item.format == crate::hdr_output::FORMAT_A2B10
+                || item.format == crate::hdr_output::FORMAT_A2R10)
+                && item.color_space == crate::hdr_output::COLOR_SPACE_HDR10
+        });
+        let force_sdr = if self.lighting.hdr.legacy_bytes {
+            true
+        } else {
+            let preset = self.lighting.settings.preset;
+            let named = matches!(
+                preset,
                 genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
             );
+            named
+                && crate::hdr_output::post_locks_sdr(
+                    &self.lighting.hdr,
+                    preset,
+                    crate::hdr_output::deck_panel(),
+                    hdr10_listed,
+                )
+        };
         crate::hdr_output::surface_choice(
             sdr_format,
             &listed,
@@ -2723,12 +3303,16 @@ impl Gpu {
         }
         self.idle_device();
         self.destroy_targets();
+        self.destroy_swapchain();
         self.destroy_color_pipelines();
         self.format = format;
         self.color_space = space;
         self.hdr_output = mode;
-        self.render_pass = self.make_render_pass(false)?;
-        self.keep_pass = self.make_render_pass(true)?;
+        self.destroy_particle_pass();
+        self.render_pass = self.make_render_pass(false, false)?;
+        self.keep_pass = self.make_render_pass(true, false)?;
+        self.render_pass_store = self.make_render_pass(false, true)?;
+        self.keep_pass_store = self.make_render_pass(true, true)?;
         self.pipeline = block(|| self.make_pipeline(true, true, false))?;
         self.depth_pipeline = block(|| self.make_depth_pipeline())?;
         self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
@@ -2758,6 +3342,18 @@ impl Gpu {
             if !self.keep_pass.is_null() {
                 (self.fns.destroy_render_pass)(self.device, self.keep_pass, std::ptr::null());
                 self.keep_pass = std::ptr::null_mut();
+            }
+            if !self.render_pass_store.is_null() {
+                (self.fns.destroy_render_pass)(
+                    self.device,
+                    self.render_pass_store,
+                    std::ptr::null(),
+                );
+                self.render_pass_store = std::ptr::null_mut();
+            }
+            if !self.keep_pass_store.is_null() {
+                (self.fns.destroy_render_pass)(self.device, self.keep_pass_store, std::ptr::null());
+                self.keep_pass_store = std::ptr::null_mut();
             }
         }
     }
@@ -2894,6 +3490,12 @@ impl Gpu {
                 clipped: u32,
                 old: Handle,
             }
+            // One wl_surface carries one wp_fifo. A second live swapchain on
+            // the same surface is a protocol error on drivers that use
+            // fifo-v1, and the surface is lost.
+            if !self.swapchain.is_null() {
+                return Err("swapchain: the previous swapchain is still live".into());
+            }
             let present = self.choose_present()?;
             self.present_mode = present;
             // Mailbox needs a free image while one image is queued and one is on screen.
@@ -2955,13 +3557,8 @@ impl Gpu {
                 ),
                 "image list",
             )?;
+            self.make_present_sems()?;
 
-            let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
-                8
-            } else {
-                4
-            };
-            let bytes = self.extent_w as u64 * self.extent_h as u64 * bpp;
             for slot in 0..2 {
                 self.colors[slot] = self.make_image(
                     self.format,
@@ -2970,12 +3567,13 @@ impl Gpu {
                     self.extent_w,
                     self.extent_h,
                 )?;
+                // Sampled as well as attached: the next frame's particle compute reads it.
                 self.depths[slot] =
-                    self.make_image(126, 0x20 | 0x1, 2, self.extent_w, self.extent_h)?;
+                    self.make_image(126, 0x20 | 0x1 | 0x4, 2, self.extent_w, self.extent_h)?;
                 self.color = copy_image(&self.colors[slot]);
                 self.depth = copy_image(&self.depths[slot]);
                 self.framebuffers[slot] = self.make_framebuffer()?;
-                self.hosts[slot] = self.make_buffer(bytes, 0x2, Memory::Readback)?;
+                self.hosts[slot] = Buffer::empty();
             }
             self.color = copy_image(&self.colors[0]);
             self.depth = copy_image(&self.depths[0]);
@@ -3113,6 +3711,8 @@ impl Gpu {
         };
         let slot = self.flight;
         if self.instance_bufs[slot].size < bytes.len() as u64 {
+            // Both raster sets are rewritten. The other flight may still be executing.
+            self.wait_all_inflight()?;
             let share = self.light_families();
             let next = self.make_buffer_queues(
                 (bytes.len() as u64).max(5120),
@@ -3133,7 +3733,6 @@ impl Gpu {
         self.cmd = self.cmds[slot];
         self.fence = self.fences[slot];
         self.image_ready = self.image_readies[slot];
-        self.render_done = self.render_dones[slot];
         self.color = copy_image(&self.colors[slot]);
         self.depth = copy_image(&self.depths[slot]);
         self.framebuffer = self.framebuffers[slot];
@@ -3141,7 +3740,242 @@ impl Gpu {
         self.vertex = copy_buffer(&self.vertices[slot]);
     }
 
-    fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<(), String> {
+    /// Record `cmd` again. The caller has waited this buffer's fence and reset
+    /// it. Flags stay 0.
+    ///
+    /// `VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT` makes the NVIDIA driver
+    /// drop that recording's backing store. The stores are freed in
+    /// `vkDestroyDevice`, so the quit stall grew with the frame count.
+    fn begin_reused(&mut self, cmd: Handle) -> Result<(), String> {
+        self.stage_reset(cmd);
+        #[repr(C)]
+        struct BeginInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            inherit: *const c_void,
+        }
+        let begin = BeginInfo {
+            s_type: 42,
+            next: std::ptr::null(),
+            flags: 0,
+            inherit: std::ptr::null(),
+        };
+        unsafe {
+            check(
+                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
+                "begin cmd",
+            )
+        }
+    }
+
+    fn stage_slot(&self, cmd: Handle) -> Option<usize> {
+        if cmd.is_null() {
+            return None;
+        }
+        if cmd == self.cmds[0] {
+            return Some(0);
+        }
+        if cmd == self.cmds[1] {
+            return Some(1);
+        }
+        if cmd == self.lighting.world_cmd {
+            return Some(2);
+        }
+        if cmd == self.audio_cmd {
+            return Some(3);
+        }
+        if self
+            .froxel
+            .as_ref()
+            .is_some_and(|targets| targets.cmd == cmd)
+        {
+            return Some(4);
+        }
+        if self
+            .media_check
+            .as_ref()
+            .is_some_and(|pipe| pipe.cmd == cmd)
+        {
+            return Some(5);
+        }
+        // The seed check records its own buffer and does not stage uploads.
+        // The stage table has six slots (0-5). A seventh index would panic.
+        None
+    }
+
+    fn stage_families(&self, index: usize) -> Vec<u32> {
+        if index == 2 {
+            self.light_families()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn make_stage(&self, size: u64, families: &[u32]) -> Result<stage::Staged, String> {
+        let buffer = self.make_buffer_queues(size, 1, Memory::Upload, families)?;
+        let mut mapped = std::ptr::null_mut();
+        let result = unsafe {
+            (self.fns.map_mem)(self.device, buffer.memory, 0, buffer.size, 0, &mut mapped)
+        };
+        if result != VK_SUCCESS {
+            let mut buffer = buffer;
+            self.destroy_buffer(&mut buffer);
+            return Err(format!("map stage {result}"));
+        }
+        Ok(stage::Staged {
+            buffer,
+            mapped: mapped.cast(),
+        })
+    }
+
+    fn drop_staged(&self, staged: &mut stage::Staged) {
+        if !staged.mapped.is_null() && !staged.buffer.memory.is_null() && !self.device.is_null() {
+            unsafe {
+                (self.fns.unmap_mem)(self.device, staged.buffer.memory);
+            }
+        }
+        staged.mapped = std::ptr::null_mut();
+        self.destroy_buffer(&mut staged.buffer);
+    }
+
+    fn drop_stages(&mut self) {
+        for index in 0..self.stage.slots.len() {
+            let mut overflow = std::mem::take(&mut self.stage.slots[index].overflow);
+            for extra in &mut overflow {
+                self.drop_staged(extra);
+            }
+            let mut main =
+                std::mem::replace(&mut self.stage.slots[index].main, stage::Staged::empty());
+            self.drop_staged(&mut main);
+        }
+    }
+
+    /// The fence for `cmd` has retired. Drop overflow copies and grow the
+    /// standing buffer when the last recording did not fit.
+    fn stage_reset(&mut self, cmd: Handle) {
+        let Some(index) = self.stage_slot(cmd) else {
+            return;
+        };
+        let families = self.stage_families(index);
+        let filled = self.stage.slots[index].filled;
+        let main_size = self.stage.slots[index].main.buffer.size;
+        let mut overflow = std::mem::take(&mut self.stage.slots[index].overflow);
+        for extra in &mut overflow {
+            self.drop_staged(extra);
+        }
+        if filled > main_size && main_size > 0 {
+            let cap = filled
+                .max(4096)
+                .checked_next_power_of_two()
+                .unwrap_or(filled);
+            if let Ok(created) = self.make_stage(cap, &families) {
+                let mut old = std::mem::replace(&mut self.stage.slots[index].main, created);
+                self.drop_staged(&mut old);
+            }
+        }
+        self.stage.slots[index].cursor = 0;
+        self.stage.slots[index].filled = 0;
+    }
+
+    fn stage_reserve(&mut self, index: usize, size: u64) -> Result<(Handle, u64, *mut u8), String> {
+        let families = self.stage_families(index);
+        if self.stage.slots[index].main.buffer.buffer.is_null() {
+            self.stage.slots[index].main = self.make_stage(256u64 * 1024, &families)?;
+        }
+        let aligned = {
+            let slot = &self.stage.slots[index];
+            let cursor = slot.cursor.saturating_add(3) & !3;
+            if cursor.saturating_add(size) <= slot.main.buffer.size {
+                Some(cursor)
+            } else {
+                None
+            }
+        };
+        if let Some(aligned) = aligned {
+            let slot = &mut self.stage.slots[index];
+            slot.cursor = aligned.saturating_add(size);
+            slot.filled = slot.filled.max(slot.cursor);
+            let offset = usize::try_from(aligned).unwrap_or(0);
+            let ptr = unsafe { slot.main.mapped.add(offset) };
+            return Ok((slot.main.buffer.buffer, aligned, ptr));
+        }
+        let cap = size.max(4096).checked_next_power_of_two().unwrap_or(size);
+        let extra = self.make_stage(cap, &families)?;
+        let handle = extra.buffer.buffer;
+        let ptr = extra.mapped;
+        self.stage.slots[index].overflow.push(extra);
+        let slot = &mut self.stage.slots[index];
+        slot.filled = slot.filled.saturating_add(size);
+        Ok((handle, 0, ptr))
+    }
+
+    /// Copy `bytes` into the staging slot for `cmd` and record a buffer copy.
+    /// `vkCmdUpdateBuffer` embeds the host bytes in the command buffer. NVIDIA
+    /// frees that copy in `vkDestroyDevice`.
+    fn write_device(
+        &mut self,
+        cmd: Handle,
+        dst: Handle,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        if dst.is_null() || bytes.is_empty() {
+            return Ok(());
+        }
+        let size = u64::try_from(bytes.len()).unwrap_or(0) & !3;
+        if size == 0 {
+            return Ok(());
+        }
+        if offset & 3 != 0 {
+            return Err("device upload offset is not a multiple of 4".into());
+        }
+        let Some(index) = self.stage_slot(cmd) else {
+            return Err("device upload has no staging slot".into());
+        };
+        let (src, src_offset, ptr) = self.stage_reserve(index, size)?;
+        let count = usize::try_from(size).unwrap_or(0);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, count);
+        }
+        // Host write makes the staging bytes visible. Transfer write orders the
+        // previous copy of this destination: another flight may still be
+        // uploading it, and two copies in one recording share no other barrier.
+        self.barrier_on(cmd, 0x4000 | 0x1000, 0x1000, 0x4000 | 0x1000, 0x800 | 0x1000);
+        #[repr(C)]
+        struct Region {
+            src: u64,
+            dst: u64,
+            size: u64,
+        }
+        let region = Region {
+            src: src_offset,
+            dst: offset,
+            size,
+        };
+        unsafe {
+            (self.fns.cmd_copy_buffer)(cmd, src, dst, 1, &region as *const Region as *const u8);
+        }
+        Ok(())
+    }
+
+    /// One swapchain image, or `VK_ERROR_OUT_OF_DATE_KHR` when the surface moved.
+    fn acquire_index(&self) -> (i32, u32) {
+        let mut index = 0u32;
+        let result = unsafe {
+            (self.fns.acquire)(
+                self.device,
+                self.swapchain,
+                u64::MAX,
+                self.image_ready,
+                std::ptr::null_mut(),
+                &mut index,
+            )
+        };
+        (result, index)
+    }
+
+    fn record_and_submit(&mut self, matrix: &[f32; 16]) -> Result<bool, String> {
         if self.unfilled.dump_pct.is_some() {
             self.copy_picture = true;
         }
@@ -3152,8 +3986,29 @@ impl Gpu {
         }
         self.bind_flight();
         let slot = self.flight;
-        self.wait_fence(self.fence, "wait fence")?;
+        // The fence is reset below, before acquire. OUT_OF_DATE returns without
+        // a submit, so this slot is not live and the next call must not wait.
+        if self.flight_live[slot] {
+            self.wait_fence(self.fence, "wait fence")?;
+            self.flight_live[slot] = false;
+        }
+        // The other flight stays on the GPU. Particle compute waits its writes
+        // with a pipeline barrier, not this fence. The hook below times the old fence.
+        if self.particle_cpu_fence && self.particle_pass.is_some() {
+            let other = 1 - slot;
+            if self.flight_live[other] {
+                self.wait_flight(other)?;
+                self.flight_live[other] = false;
+            }
+        }
+        self.store_scene_depth = self.particle_job.is_some_and(|job| job.depth_collision);
+        if self.store_scene_depth {
+            self.particle_view_proj[slot] = *matrix;
+        } else {
+            self.particle_depth_retained[slot] = false;
+        }
         let fences = [self.fence];
+        let mut index;
         unsafe {
             self.collect_slot_after_wait(slot)?;
             if self.lighting_active() {
@@ -3161,61 +4016,70 @@ impl Gpu {
             }
             self.collect_hdr_time(slot);
             self.collect_froxel_time();
+            if self.particle_stamps_pending[slot] {
+                self.particle_query_ready[slot] = true;
+                self.particle_stamps_pending[slot] = false;
+            }
+            self.collect_particle_stats();
             self.collect_frame_times(slot);
             self.desc_set = self.raster_sets[slot];
             check(
                 (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
                 "reset fence",
             )?;
-            let mut index = 0u32;
-            let acquire = (self.fns.acquire)(
-                self.device,
-                self.swapchain,
-                u64::MAX,
-                self.image_ready,
-                std::ptr::null_mut(),
-                &mut index,
-            );
-            if acquire == OUT_OF_DATE {
+            if self.fail_next_acquire {
+                self.fail_next_acquire = false;
                 return Err("out of date".into());
             }
-            check(acquire, "acquire")?;
-            check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
+            let mut acquire;
+            (acquire, index) = self.acquire_index();
+            if acquire == OUT_OF_DATE {
+                if self.extent_w == 0 || self.extent_h == 0 {
+                    return Ok(false);
+                }
+                self.recreate(self.extent_w, self.extent_h)?;
+                (acquire, index) = self.acquire_index();
             }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
+            if acquire == OUT_OF_DATE {
+                return Ok(false);
+            }
+            if acquire != VK_SUCCESS && acquire != SUBOPTIMAL {
+                check(acquire, "acquire")?;
+            }
+            let image = usize::try_from(index).unwrap_or(usize::MAX);
+            let Some(present_sem) = self.present_sems.get(image).copied() else {
+                return Err(format!(
+                    "swapchain image {index} has no present semaphore"
+                ));
             };
-            check(
-                (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
-                "begin cmd",
-            )?;
+            // This image was reacquired, so the presentation engine has released
+            // the semaphore it waited on for the previous present of this image.
+            self.render_done = present_sem;
+            check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
+            self.begin_reused(self.cmd)?;
             if profiled {
                 self.reset_queries(slot);
                 // Top of pipe, before the GPU work. The value is device ticks.
                 self.write_stamp(slot, 0, 1);
             }
             self.frame_stamp(slot, FrameStamp::Start);
+            self.write_atlas_mode()?;
             self.init_fresh_atlas();
-            self.update_resident_scene();
-            self.update_resident_fields();
+            self.update_resident_scene()?;
+            self.update_resident_fields()?;
             let swap = self.swap_images[index as usize];
-            self.image_barrier(swap, 0, 7, 1, 0x1000, 0, 0x1000);
+            // The acquire semaphore is waited in color output. The layout
+            // transition has to happen in that stage, or it races the
+            // presentation engine's read of this image.
+            self.image_barrier(swap, 0, 7, 0x400, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
             {
                 let lighting = self.lighting_active();
                 if lighting {
-                    self.lighting_begin(slot);
+                    self.lighting_begin(slot)?;
                 }
                 self.frame_stamp(slot, FrameStamp::Setup);
+                self.record_particle_compute()?;
                 self.raster_scene(
                     self.framebuffer,
                     self.extent_w,
@@ -3228,10 +4092,10 @@ impl Gpu {
                 self.froxel_wrote = false;
                 self.record_froxel()?;
                 if !self.froxel_wrote {
-                    self.release_froxel_header();
+                    self.release_froxel_header()?;
                 }
                 if lighting {
-                    self.lighting_passes(slot);
+                    self.lighting_passes(slot)?;
                 }
                 self.frame_stamp(slot, FrameStamp::Lighting);
                 self.reflections_after_lighting(matrix)?;
@@ -3239,6 +4103,9 @@ impl Gpu {
                 // time stays out of the lighting span.
                 if lighting && !filtering && self.overlay_count > 0 {
                     self.raster_overlay();
+                }
+                if lighting && !filtering {
+                    self.record_particle_draw();
                 }
                 self.frame_stamp(slot, FrameStamp::EarlyOverlay);
                 if self.antialias == Antialias::Fxaa {
@@ -3249,10 +4116,14 @@ impl Gpu {
             if filtering && self.overlay_count > 0 {
                 self.raster_overlay();
             }
+            if filtering || !self.lighting_active() {
+                self.record_particle_draw();
+            }
             self.frame_stamp(slot, FrameStamp::Overlay);
             self.copy_color_to_swapchain(swap);
             // The host copy is a whole picture over the bus; only a readback pays it.
             if self.copy_picture {
+                self.ensure_picture_host()?;
                 self.copy_color_to_buffer();
             }
             self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
@@ -3262,6 +4133,7 @@ impl Gpu {
                 // The value is device ticks, not the CPU time spent in submit.
                 self.write_stamp(slot, 1, 0x2000);
             }
+            self.signal_particle_depth(slot);
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
 
             let mut wait_stage = [0x400u32, 0x80];
@@ -3306,6 +4178,9 @@ impl Gpu {
                 ),
                 "submit",
             )?;
+            self.flight_live[slot] = true;
+            self.particle_stamps_pending[slot] = self.particle_stamped;
+            self.particle_query_ready[slot] = false;
             self.present_index = index;
             let status = (self.fns.fence_status)(self.device, self.fence);
             self.submit_pending = status == 1;
@@ -3318,7 +4193,7 @@ impl Gpu {
             }
             self.flight = 1 - self.flight;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn make_query_pool(&mut self) -> Result<Handle, String> {
@@ -3423,8 +4298,25 @@ impl Gpu {
             }) {
             let c = self.lighting_lamp_pick_counts();
             format!(
-                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={}",
-                c.pixels, c.kept, c.fills, c.cache, c.spatial
+                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} \
+                 hit_kept_live={} hit_kept_due={} hit_kept_shade={} hit_fill_live={} hit_fill_shade={} \
+                 hit_near_tests={} px_lamps={} hit_lamps={} \
+                 restir_hist_accept={} restir_hist_reject={} restir_point_adds={}",
+                c.pixels,
+                c.kept,
+                c.fills,
+                c.cache,
+                c.kept_live,
+                c.kept_due,
+                c.kept_shade,
+                c.fill_live,
+                c.fill_shade,
+                c.near_tests,
+                c.px_lamps,
+                c.hit_lamps,
+                c.history_accepts,
+                c.history_rejects,
+                c.restir_point_adds
             )
         } else {
             String::new()
@@ -3462,9 +4354,15 @@ impl Gpu {
         if got != 0 {
             return;
         }
+        let mut lighting_span = 0.0;
         if times.print {
             for (k, w) in raw.windows(2).enumerate() {
-                times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                // Span 2 is gbuffer bottom to lighting bottom: the GPU_MS lighting column.
+                if k == 2 {
+                    lighting_span = ms;
+                }
+                times.frame[k] += ms;
             }
             times
                 .frame_spans
@@ -3477,12 +4375,17 @@ impl Gpu {
         let counts = self.lighting.frame_counts[slot];
         let mut bucket_ms = [0.0f64; BUCKETS];
         if !ids.is_empty() && !times.lighting_pool.is_null() {
-            let mut g = vec![0u64; ids.len() + 1];
+            // Pass stamps stop before the ReSTIR queries. A longer list is not timed.
+            let stamp_n = (ids.len() + 1).min(RESTIR_STAMP_AT as usize);
+            let mut g = vec![0u64; stamp_n];
+            // One cast for both query ranges. A second `slot as u32` is a new
+            // lossy-cast line, and the baseline does not allow it.
+            let stamp_base = slot as u32 * LIGHTING_STAMPS;
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
                     times.lighting_pool,
-                    slot as u32 * LIGHTING_STAMPS,
+                    stamp_base,
                     g.len() as u32,
                     8 * g.len(),
                     g.as_mut_ptr() as *mut c_void,
@@ -3494,8 +4397,13 @@ impl Gpu {
                 if times.print && times.lighting_disp.len() != ids.len() {
                     times.lighting_disp = ids.iter().map(|&p| (p, 0.0)).collect();
                 }
+                let mut shade_ms = 0.0;
+                let mut pass_id_ms = [0.0f64; 10];
                 for (i, (&pass, w)) in ids.iter().zip(g.windows(2)).enumerate() {
                     let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                    if pass < pass_id_ms.len() {
+                        pass_id_ms[pass] += ms;
+                    }
                     if times.print && pass < times.lighting.len() {
                         times.lighting[pass] += ms;
                     }
@@ -3509,8 +4417,74 @@ impl Gpu {
                             times.lighting_bucket[tag] += ms;
                         }
                     }
+                    if tag == B_DIRECT as usize {
+                        shade_ms += ms;
+                    }
                     if shadow && (tag == B_DIRECT as usize || tag == B_HIT as usize) {
                         bucket_ms[B_SHADOWS as usize] += ms;
+                    }
+                }
+                let restir_at = self.lighting.restir_query[slot];
+                if restir_at != u32::MAX {
+                    let mut raw = [0u64; 4];
+                    let restir_got = unsafe {
+                        (self.fns.get_query_results)(
+                            self.device,
+                            times.lighting_pool,
+                            restir_at,
+                            4,
+                            32,
+                            raw.as_mut_ptr().cast::<c_void>(),
+                            8,
+                            0x1,
+                        )
+                    };
+                    let mut prepare_raw = [0u64; 2];
+                    let prepare_got = unsafe {
+                        (self.fns.get_query_results)(
+                            self.device,
+                            times.lighting_pool,
+                            stamp_base + RESTIR_PREPARE_AT,
+                            2,
+                            16,
+                            prepare_raw.as_mut_ptr().cast::<c_void>(),
+                            8,
+                            0x1,
+                        )
+                    };
+                    if restir_got == 0 {
+                        let part = |a, b| tick_delta(a, b, bits) as f64 * period / 1.0e6;
+                        let parts = [
+                            part(raw[0], raw[1]),
+                            part(raw[1], raw[2]),
+                            part(raw[2], raw[3]),
+                        ];
+                        let sum = parts[0] + parts[1] + parts[2];
+                        bucket_ms[B_DIRECT as usize] += sum;
+                        let prepare_ms = if prepare_got == 0 {
+                            part(prepare_raw[0], prepare_raw[1])
+                        } else {
+                            0.0
+                        };
+                        let frame_parts = [parts[0], parts[1], parts[2], prepare_ms, shade_ms];
+                        self.lighting.restir_ms_last = frame_parts;
+                        for (i, ms) in frame_parts.into_iter().enumerate() {
+                            self.lighting.restir_ms_sum[i] += ms;
+                        }
+                        self.lighting.restir_ms_frames =
+                            self.lighting.restir_ms_frames.saturating_add(1);
+                        if times.print {
+                            times.lighting[3] += sum;
+                            times.lighting_bucket[B_DIRECT as usize] += sum;
+                            times.restir[0] += parts[0];
+                            times.restir[1] += parts[1];
+                            times.restir[2] += parts[2];
+                            if prepare_got == 0 {
+                                times.restir[3] += part(prepare_raw[0], prepare_raw[1]);
+                            }
+                            times.restir[4] += shade_ms;
+                            times.restir_frames += 1;
+                        }
                     }
                 }
                 if times.print {
@@ -3521,6 +4495,9 @@ impl Gpu {
                 }
                 self.lighting.last_ms = bucket_ms;
                 self.lighting.last_dispatches = counts;
+                self.lighting.pass_id_ms = pass_id_ms;
+                self.lighting.span_ms = lighting_span;
+                self.lighting.pass_samples = self.lighting.pass_samples.saturating_add(1);
                 if times.record {
                     let world_rays = std::mem::take(&mut times.pending_world_rays);
                     let world_relit = std::mem::take(&mut times.pending_world_relit);
@@ -3583,7 +4560,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} light_px={:.3} light_hit={:.3} prefill={:.3}{}{}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} light_px={:.3} light_hit={:.3} prefill={:.3}{}{}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -3609,9 +4586,21 @@ impl Gpu {
                 times.lighting_bucket[B_HIT as usize] / f64::from(times.lighting_frames),
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
                 self.last_unfilled
-                    .map(|stats| format!(" | {}", stats.line()))
-                    .unwrap_or_default(),
-                lamp_pick_line
+                    .map_or_else(String::new, |stats| format!(" | {}", stats.line())),
+                lamp_pick_line,
+                if times.restir_frames > 0 {
+                    let n = f64::from(times.restir_frames);
+                    format!(
+                        " restir_prepare={:.3} restir_initial={:.3} restir_temporal={:.3} restir_spatial={:.3} restir_shade={:.3}",
+                        times.restir[3] / n,
+                        times.restir[0] / n,
+                        times.restir[1] / n,
+                        times.restir[2] / n,
+                        times.restir[4] / n
+                    )
+                } else {
+                    String::new()
+                }
             );
         }
         if !times.light_spans.is_empty() {
@@ -3625,28 +4614,7 @@ impl Gpu {
             let [local, all] = self.upload_local.get();
             eprintln!("GPU_MEM upload buffers in device-local memory: {local} of {all}");
         }
-        let pool = times.pool;
-        let lighting_pool = times.lighting_pool;
-        let print = times.print;
-        let record = times.record;
-        let samples = std::mem::take(&mut times.samples);
-        let recorded = times.recorded;
-        let pending_world_rays = times.pending_world_rays;
-        let pending_world_relit = times.pending_world_relit;
-        **times = GpuTimes {
-            pool,
-            lighting_pool,
-            written: times.written,
-            every: times.every,
-            placed: true,
-            print,
-            record,
-            samples,
-            recorded,
-            pending_world_rays,
-            pending_world_relit,
-            ..GpuTimes::default()
-        };
+        roll_printed_times(times);
     }
 
     fn reset_queries(&self, slot: usize) {
@@ -3785,25 +4753,73 @@ impl Gpu {
         self.wait_fence(self.fences[slot], "flight wait")
     }
 
+    /// Wait `fence` when it belongs to a flight that has a submit in flight.
+    ///
+    /// An out-of-date acquire resets the fence and returns before submit, so
+    /// the slot is not live. Waiting that fence never returns.
+    fn wait_live_fence(&mut self, fence: Handle, what: &str) -> Result<(), String> {
+        if let Some(slot) = (0..2).find(|&slot| std::ptr::eq(self.fences[slot], fence)) {
+            if !self.flight_live[slot] {
+                return Ok(());
+            }
+        }
+        self.wait_fence(fence, what)
+    }
+
     fn wait_all_inflight(&mut self) -> Result<(), String> {
         for slot in 0..2 {
-            self.wait_flight(slot)?;
+            if self.flight_live[slot] {
+                self.wait_flight(slot)?;
+            }
         }
         Ok(())
     }
 
+    pub(crate) fn teardown_drained(&self) -> bool {
+        self.teardown_drained.get()
+    }
+
+    pub(crate) fn freed_before_drain(&self) -> bool {
+        self.freed_before_drain.get()
+    }
+
+    pub(crate) fn teardown_frees(&self) -> u32 {
+        self.teardown_frees.get()
+    }
+
+    /// The next frame resets its fence and returns out of date before submit.
+    pub(crate) fn fail_next_acquire(&mut self) {
+        self.fail_next_acquire = true;
+    }
+
     fn read_host(&mut self, slot: usize) -> Result<Vec<u8>, String> {
-        self.wait_fence(self.fences[slot], "earlier frame")?;
+        self.wait_live_fence(self.fences[slot], "earlier frame")?;
         let saved = copy_buffer(&self.host);
         self.host = copy_buffer(&self.hosts[slot]);
         let pixels = self.read_color()?;
-        self.host = saved;
+        let freed = self.hosts[slot].buffer;
+        let mut host = std::mem::replace(&mut self.hosts[slot], Buffer::empty());
+        self.destroy_buffer(&mut host);
+        self.host = if saved.buffer.is_null() || saved.buffer == freed {
+            Buffer::empty()
+        } else {
+            saved
+        };
         Ok(pixels)
     }
 
     fn wait_gpu(&mut self) -> Result<(), String> {
         self.wait_fence(self.fence, "present wait")?;
+        let submitted = 1 - self.flight.min(1);
+        self.flight_live[submitted] = false;
         self.collect_froxel_time();
+        // This fence is the submission just recorded. Its stamps are done.
+        // The slot still in flight is not read.
+        if self.particle_stamps_pending[submitted] {
+            self.particle_query_ready[submitted] = true;
+            self.particle_stamps_pending[submitted] = false;
+            self.collect_particle_stats_slot(submitted);
+        }
         Ok(())
     }
 
@@ -3837,6 +4853,9 @@ impl Gpu {
             if result != VK_SUCCESS && result != SUBOPTIMAL && result != OUT_OF_DATE {
                 return Err(format!("present failed: {result}"));
             }
+            if result != OUT_OF_DATE {
+                self.presented += 1;
+            }
             Ok(result)
         }
     }
@@ -3845,8 +4864,9 @@ impl Gpu {
     ///
     /// Reuses that frame's command buffer and fence; the next frame on this flight
     /// waits for the fence as usual.
-    fn copy_last_picture(&mut self) -> Result<(), String> {
+    fn copy_last_picture(&mut self, with_scene: bool) -> Result<(), String> {
         self.wait_gpu()?;
+        self.ensure_picture_host()?;
         unsafe {
             let fences = [self.fence];
             check(
@@ -3854,25 +4874,11 @@ impl Gpu {
                 "reset fence",
             )?;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.cmd, &begin as *const BeginInfo as *const u8),
-                "begin cmd",
-            )?;
+            self.begin_reused(self.cmd)?;
             self.copy_color_to_buffer();
-            self.copy_scene_for_readback();
+            if with_scene {
+                self.copy_scene_for_readback();
+            }
             check((self.fns.end_cmd)(self.cmd), "end cmd")?;
             #[repr(C)]
             struct Submit {
@@ -3937,10 +4943,11 @@ impl Gpu {
     }
 
     /// BGRA8 picture of an HDR frame. The swapchain holds PQ or fp16 words, so
-    /// the display pass also stores the SDR bytes in each encode texel's fourth word.
+    /// the display pass stores the SDR bytes after the packed fp16 image.
     fn read_color_of_hdr(&self, bytes: usize) -> Result<Vec<u8>, String> {
         let pixels = bytes / 4;
-        let need = pixels.saturating_mul(16);
+        let tail = pixels.saturating_mul(8);
+        let need = tail.saturating_add(bytes);
         let memory = self.lighting.hdr_encode.memory;
         let size = self.lighting.hdr_encode.size;
         if memory.is_null() || usize::try_from(size).unwrap_or(0) < need {
@@ -3954,23 +4961,73 @@ impl Gpu {
                 "map hdr readback",
             )?;
             let words = mapped as *const u8;
-            for index in 0..pixels {
-                let src = words.add(index * 16 + 12);
-                std::ptr::copy_nonoverlapping(src, out.as_mut_ptr().add(index * 4), 4);
-            }
+            std::ptr::copy_nonoverlapping(words.add(tail), out.as_mut_ptr(), bytes);
             (self.fns.unmap_mem)(self.device, memory);
         }
         Ok(out)
     }
 
-    /// Device scene image to the host buffer. The fence has already waited.
-    fn copy_scene_for_readback(&mut self) {
-        let src = self.lighting.scene_lin.buffer;
-        let dst = self.lighting.scene_host.buffer;
-        if src.is_null() || dst.is_null() {
+    fn picture_host_bytes(&self) -> u64 {
+        let bpp = if self.format == crate::hdr_output::FORMAT_R16F {
+            8
+        } else {
+            4
+        };
+        u64::from(self.extent_w)
+            .saturating_mul(u64::from(self.extent_h))
+            .saturating_mul(bpp)
+    }
+
+    /// The picture readback buffer is allocated for the copy and freed after the read.
+    fn ensure_picture_host(&mut self) -> Result<(), String> {
+        let bytes = self.picture_host_bytes();
+        if bytes == 0 {
+            return Ok(());
+        }
+        let slot = self.flight;
+        if self.hosts[slot].size < bytes {
+            let next = self.make_buffer(bytes, 0x2, Memory::Readback)?;
+            let mut old = std::mem::replace(&mut self.hosts[slot], next);
+            self.destroy_buffer(&mut old);
+        }
+        self.host = copy_buffer(&self.hosts[slot]);
+        Ok(())
+    }
+
+    fn free_picture_host(&mut self) {
+        let handle = self.host.buffer;
+        if handle.is_null() {
             return;
         }
-        let size = self.lighting.scene_lin.size.min(self.lighting.scene_host.size);
+        for slot in 0..2 {
+            if self.hosts[slot].buffer == handle {
+                let mut host = std::mem::replace(&mut self.hosts[slot], Buffer::empty());
+                self.destroy_buffer(&mut host);
+            }
+        }
+        self.host = Buffer::empty();
+    }
+
+    /// Device scene image to the host buffer. The fence has already waited.
+    /// The host buffer is allocated here and freed by [`Self::read_scene_host`].
+    fn copy_scene_for_readback(&mut self) {
+        let src = self.lighting.scene_lin.buffer;
+        let need = self.lighting.scene_lin.size;
+        if src.is_null() || need == 0 {
+            return;
+        }
+        if self.lighting.scene_host.buffer.is_null() || self.lighting.scene_host.size < need {
+            let Ok(host) = self.make_buffer(need, 0x2, Memory::Readback) else {
+                return;
+            };
+            let mut old = std::mem::replace(&mut self.lighting.scene_host, host);
+            self.destroy_buffer(&mut old);
+        }
+        let dst = self.lighting.scene_host.buffer;
+        if dst.is_null() {
+            return;
+        }
+        let size = need.min(self.lighting.scene_host.size);
         if size == 0 {
             return;
         }
@@ -3980,7 +5037,11 @@ impl Gpu {
             dst: u64,
             size: u64,
         }
-        let region = Region { src: 0, dst: 0, size };
+        let region = Region {
+            src: 0,
+            dst: 0,
+            size,
+        };
         unsafe {
             (self.fns.cmd_copy_buffer)(
                 self.cmd,
@@ -3992,32 +5053,76 @@ impl Gpu {
         }
     }
 
-    fn read_scene_host(&self) -> Result<crate::hdr_output::SceneRead, String> {
-        let pixels = self.extent_w as usize * self.extent_h as usize;
-        let bytes = pixels.saturating_mul(16);
+    fn read_scene_host(&mut self) -> Result<crate::hdr_output::SceneRead, String> {
+        let width = usize::try_from(self.extent_w).unwrap_or(0);
+        let height = usize::try_from(self.extent_h).unwrap_or(0);
+        let pixels = width.saturating_mul(height);
+        let bytes = u64::try_from(pixels.saturating_mul(8)).unwrap_or(0);
+        let empty = crate::hdr_output::SceneRead {
+            width: 0,
+            height: 0,
+            rgb: Vec::new(),
+            distance_m: Vec::new(),
+        };
         if bytes == 0
             || self.lighting.scene_host.memory.is_null()
-            || self.lighting.scene_host.size < bytes as u64
+            || self.lighting.scene_host.size < bytes
         {
-            return Ok(crate::hdr_output::SceneRead {
-                width: 0,
-                height: 0,
-                rgb: Vec::new(),
-                distance_m: Vec::new(),
-            });
+            return Ok(empty);
         }
-        let values = read_f32s(
-            self.fns.map_mem,
-            self.fns.unmap_mem,
-            self.device,
-            self.lighting.scene_host.memory,
-            pixels.saturating_mul(4),
-        )?;
-        Ok(crate::hdr_output::scene_read_from_rgba(
-            self.extent_w,
-            self.extent_h,
-            &values,
-        ))
+        let size = usize::try_from(bytes).unwrap_or(0);
+        let mut raw = vec![0u8; size];
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(
+                self.device,
+                self.lighting.scene_host.memory,
+                0,
+                bytes,
+                0,
+                &mut mapped,
+            ) != 0
+            {
+                return Ok(empty);
+            }
+            std::ptr::copy_nonoverlapping(mapped.cast::<u8>(), raw.as_mut_ptr(), size);
+            (self.fns.unmap_mem)(self.device, self.lighting.scene_host.memory);
+        }
+        let values = crate::hdr_output::rgba_f32_from_rgba16f(&raw, pixels);
+        let read = crate::hdr_output::scene_read_from_rgba(self.extent_w, self.extent_h, &values);
+        let mut host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
+        self.destroy_buffer(&mut host);
+        Ok(read)
+    }
+
+    /// One binary semaphore per current swapchain image. Replaces any previous set.
+    fn make_present_sems(&mut self) -> Result<(), String> {
+        self.destroy_present_sems();
+        let count = self.swap_images.len();
+        self.present_sems.reserve(count);
+        for _ in 0..count {
+            let sem = self.make_sem()?;
+            self.present_sems.push(sem);
+        }
+        if let Some(sem) = self.present_sems.first().copied() {
+            self.render_done = sem;
+        }
+        Ok(())
+    }
+
+    fn destroy_present_sems(&mut self) {
+        if self.device.is_null() {
+            self.present_sems.clear();
+            return;
+        }
+        let sems = std::mem::take(&mut self.present_sems);
+        for sem in sems {
+            if !sem.is_null() {
+                unsafe {
+                    (self.fns.destroy_sem)(self.device, sem, std::ptr::null());
+                }
+            }
+        }
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {
@@ -4086,10 +5191,18 @@ impl Gpu {
                 stages: 0x1,
                 samplers: std::ptr::null(),
             },
+            // Atlas mode: color_linear and the resident lods. Fragment only.
+            Binding {
+                binding: 1,
+                kind: 6,
+                count: 1,
+                stages: 0x10,
+                samplers: std::ptr::null(),
+            },
             // Device-local colour atlas. Fragment only: the depth mask and the G-buffer.
             Binding {
                 binding: 4,
-                kind: 3,
+                kind: 1,
                 count: 1,
                 stages: 0x10,
                 samplers: std::ptr::null(),
@@ -4112,7 +5225,7 @@ impl Gpu {
             // Device-local normal atlas. Same readers as binding 4.
             Binding {
                 binding: 7,
-                kind: 3,
+                kind: 1,
                 count: 1,
                 stages: 0x10,
                 samplers: std::ptr::null(),
@@ -4149,9 +5262,14 @@ impl Gpu {
         ];
         self.particle_buf =
             self.make_buffer_queues(16 + 256 * 256 * 4, 0x20, Memory::Upload, &share)?;
-        self.sampled_color = self.make_atlas_image(1, 1)?;
-        self.sampled_normal = self.make_atlas_image(1, 1)?;
+        self.atlas_sampler = self.make_sampler()?;
+        self.atlas_mode = self.make_buffer(16, 0x10, Memory::Upload)?;
+        self.write_buffer(&self.atlas_mode, &[0u8; 16])?;
+        self.sampled_color = self.make_atlas_image(1, 1, 37, 1)?;
+        self.sampled_normal = self.make_atlas_image(1, 1, 37, 1)?;
         self.sampled_size = [(1, 1), (1, 1)];
+        self.sampled_format = [37, 37];
+        self.sampled_mips = [1, 1];
         self.atlas_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
         self.page_readback = self.make_buffer(4, 0x2, Memory::Readback)?;
         // The CPU never stores a mip here. A skipped copy reads back as zero.
@@ -4184,8 +5302,12 @@ impl Gpu {
             size_count: u32,
             sizes: *const Size,
         }
-        // Two raster sets: five storage buffers plus the two material images.
-        let sizes = [Size { kind: 7, count: 16 }, Size { kind: 3, count: 8 }];
+        // Two raster sets: storage buffers, the atlas-mode uniform, and two samplers.
+        let sizes = [
+            Size { kind: 7, count: 16 },
+            Size { kind: 6, count: 4 },
+            Size { kind: 1, count: 8 },
+        ];
         let pool = PoolInfo {
             s_type: 33,
             next: std::ptr::null(),
@@ -4353,13 +5475,18 @@ impl Gpu {
             view: Handle,
             layout: u32,
         }
+        let mode = BufInfo {
+            buffer: self.atlas_mode.buffer,
+            offset: 0,
+            range: 16,
+        };
         let color_info = ImageInfo {
-            sampler: std::ptr::null_mut(),
+            sampler: self.atlas_sampler,
             view: self.sampled_color.view,
             layout: 1,
         };
         let normal_info = ImageInfo {
-            sampler: std::ptr::null_mut(),
+            sampler: self.atlas_sampler,
             view: self.sampled_normal.view,
             layout: 1,
         };
@@ -4428,10 +5555,22 @@ impl Gpu {
                 s_type: 35,
                 next: std::ptr::null(),
                 set,
+                binding: 1,
+                element: 0,
+                count: 1,
+                kind: 6,
+                image: std::ptr::null(),
+                buffer: &mode,
+                texel: std::ptr::null(),
+            },
+            Write {
+                s_type: 35,
+                next: std::ptr::null(),
+                set,
                 binding: 4,
                 element: 0,
                 count: 1,
-                kind: 3,
+                kind: 1,
                 image: &color_info as *const ImageInfo as *const c_void,
                 buffer: std::ptr::null(),
                 texel: std::ptr::null(),
@@ -4443,7 +5582,7 @@ impl Gpu {
                 binding: 7,
                 element: 0,
                 count: 1,
-                kind: 3,
+                kind: 1,
                 image: &normal_info as *const ImageInfo as *const c_void,
                 buffer: std::ptr::null(),
                 texel: std::ptr::null(),
@@ -4814,23 +5953,7 @@ impl Gpu {
                 "audio reset fence",
             )?;
             check((self.fns.reset_cmd)(self.audio_cmd, 0), "audio reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inherit: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 1,
-                inherit: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.audio_cmd, &begin as *const BeginInfo as *const u8),
-                "audio begin",
-            )?;
+            self.begin_reused(self.audio_cmd)?;
             #[repr(C)]
             struct MemBar {
                 s_type: i32,
@@ -5004,10 +6127,10 @@ impl Gpu {
     }
 
     /// Record the field's marked ranges into this frame (before any pass reads it).
-    fn update_resident_fields(&mut self) {
+    fn update_resident_fields(&mut self) -> Result<(), String> {
         const RUN: usize = 65536;
         if self.mesh_field_dirty.is_empty() || self.mesh_field.buffer.is_null() {
-            return;
+            return Ok(());
         }
         if self.lighting.async_on {
             // The async light cache reads the field too: let its round finish, and
@@ -5017,7 +6140,9 @@ impl Gpu {
         }
         let mut ranges = std::mem::take(&mut self.mesh_field_dirty);
         ranges.sort_unstable();
-        self.memory_barrier(0x10000, 0x1000, 0x20 | 0x8, 0x1000);
+        // Transfer is in the source: the other flight may still be copying this
+        // buffer. Queue order is not a memory dependency.
+        self.memory_barrier(0x10000 | 0x1000, 0x1000, 0x20 | 0x8 | 0x1000, 0x1000);
         let mut sent = 0usize;
         for &(start, stop) in &ranges {
             let stop = stop.min(self.mesh_field_shadow.len());
@@ -5029,15 +6154,14 @@ impl Gpu {
                 if end <= at {
                     break;
                 }
-                unsafe {
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.mesh_field.buffer,
-                        at as u64,
-                        (end - at) as u64,
-                        self.mesh_field_shadow[at..end].as_ptr() as *const c_void,
-                    );
-                }
+                let chunk = self.mesh_field_shadow[at..end].to_vec();
+                let cmd = self.cmd;
+                let dst = self.mesh_field.buffer;
+                let Ok(offset) = u64::try_from(at) else {
+                    break;
+                };
+                self.write_device(cmd, dst, offset, &chunk)?;
+                self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
                 sent += end - at;
                 at = end;
             }
@@ -5051,6 +6175,7 @@ impl Gpu {
                 self.mesh_field_shadow.len()
             );
         }
+        Ok(())
     }
 
     fn upload_scene(&mut self, pack: &Pack) -> Result<(), String> {
@@ -5077,15 +6202,15 @@ impl Gpu {
         self.write_buffer(&self.particle_buf, bytes)
     }
 
-    /// S70C: bring the resident scene up to this frame's bytes, recording only the
-    /// 256-byte blocks that changed (runs up to vkCmdUpdateBuffer's 64 KiB).
-    fn update_resident_scene(&mut self) {
+    /// S70C: bring the resident scene up to this frame's bytes, copying only the
+    /// 256-byte blocks that changed (runs up to 64 KiB).
+    fn update_resident_scene(&mut self) -> Result<(), String> {
         const BLOCK: usize = 256;
         const RUN: usize = 65536;
         let bytes = std::mem::take(&mut self.frame_bytes);
         if bytes.is_empty() || self.frame_scene[0].buffer.is_null() {
             self.frame_bytes = bytes;
-            return;
+            return Ok(());
         }
         let len = bytes.len().min(self.frame_scene[0].size as usize) & !3;
         let mut runs: Vec<(usize, usize)> = Vec::new();
@@ -5103,18 +6228,17 @@ impl Gpu {
             at = end;
         }
         if !runs.is_empty() {
-            // The last frame's reads are done before the writes (in queue order).
-            self.memory_barrier(0x10000, 0x1000, 0x20 | 0x8, 0x1000);
+            // The other flight may still be copying this buffer. Transfer is in
+            // the source because queue order is not a memory dependency.
+            self.memory_barrier(0x10000 | 0x1000, 0x1000, 0x20 | 0x8 | 0x1000, 0x1000);
             for &(start, stop) in &runs {
-                unsafe {
-                    (self.fns.cmd_update_buffer)(
-                        self.cmd,
-                        self.frame_scene[0].buffer,
-                        start as u64,
-                        (stop - start) as u64,
-                        bytes[start..stop].as_ptr() as *const c_void,
-                    );
-                }
+                let cmd = self.cmd;
+                let dst = self.frame_scene[0].buffer;
+                let Ok(offset) = u64::try_from(start) else {
+                    continue;
+                };
+                self.write_device(cmd, dst, offset, &bytes[start..stop])?;
+                self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             }
             self.memory_barrier(0x1000, 0x10000, 0x1000, 0x20 | 0x8);
             if self.scene_shadow.len() < len {
@@ -5129,6 +6253,7 @@ impl Gpu {
             }
         }
         self.frame_bytes = bytes;
+        Ok(())
     }
 
     fn sync_materials(&mut self, world: &World) -> Result<(), String> {
@@ -5170,19 +6295,45 @@ impl Gpu {
         atlas: &crate::world::MaterialAtlas,
         sampled: bool,
     ) -> Result<(), String> {
-        let Some(chain) = crate::material_stream::mip_chain(atlas.width, atlas.height, &atlas.rgba)
-        else {
-            return Ok(());
+        let chain = if atlas.block_format != 0 && !atlas.block_mips.is_empty() {
+            crate::material_stream::Chain {
+                width: atlas.width,
+                height: atlas.height,
+                levels: atlas.block_mips.clone(),
+                format: i32::try_from(atlas.block_format).unwrap_or(37),
+            }
+        } else {
+            let Some(chain) =
+                crate::material_stream::mip_chain(atlas.width, atlas.height, &atlas.rgba)
+            else {
+                return Ok(());
+            };
+            chain
         };
         if sampled {
-            self.ensure_sampled(color, chain.width, chain.height)?;
+            self.ensure_sampled(
+                color,
+                chain.width,
+                chain.height,
+                chain.format,
+                u32::try_from(chain.levels.len()).unwrap_or(1),
+            )?;
+            if color && chain.format == 146 {
+                self.atlas_linear = 1;
+            }
+            if color && chain.format == 37 {
+                self.atlas_linear = 0;
+                self.atlas_lod[0] = 0;
+            }
+            if !color && chain.format == 37 {
+                self.atlas_lod[1] = 0;
+            }
         }
         let started = Instant::now();
         let bytes = chain.level_bytes();
         let total = chain.total_bytes();
         let index = self.streamer.texture_count();
-        self.streamer
-            .add_texture(chain.width, chain.height, &bytes);
+        self.streamer.add_texture(chain.width, chain.height, &bytes);
         let elapsed = started.elapsed().as_millis().max(1);
         let ms = u32::try_from(elapsed).unwrap_or(u32::MAX);
         self.streamer.observe_disk(total, ms);
@@ -5191,6 +6342,7 @@ impl Gpu {
         self.stream_sources.push(StreamSource {
             index,
             color,
+            sampled,
             chain,
             staging,
             mip_offset,
@@ -5199,13 +6351,25 @@ impl Gpu {
         Ok(())
     }
 
-    fn ensure_sampled(&mut self, color: bool, width: u32, height: u32) -> Result<(), String> {
+    fn ensure_sampled(
+        &mut self,
+        color: bool,
+        width: u32,
+        height: u32,
+        format: i32,
+        mips: u32,
+    ) -> Result<(), String> {
         let slot = usize::from(!color);
-        if self.sampled_size[slot] == (width, height) && !self.sampled_image(color).image.is_null()
+        if self.sampled_size[slot] == (width, height)
+            && self.sampled_format[slot] == format
+            && self.sampled_mips[slot] == mips.max(1)
+            && !self.sampled_image(color).image.is_null()
         {
             return Ok(());
         }
-        let image = self.make_atlas_image(width, height)?;
+        let image = self.make_atlas_image(width, height, format, mips)?;
+        self.sampled_format[slot] = format;
+        self.sampled_mips[slot] = mips.max(1);
         let mut old = if color {
             std::mem::replace(&mut self.sampled_color, image)
         } else {
@@ -5358,7 +6522,7 @@ impl Gpu {
         Ok(layout)
     }
 
-    fn make_render_pass(&mut self, keep: bool) -> Result<Handle, String> {
+    fn make_render_pass(&mut self, keep: bool, store_depth: bool) -> Result<Handle, String> {
         #[repr(C)]
         struct Att {
             flags: u32,
@@ -5413,8 +6577,21 @@ impl Gpu {
         }
         let color_load = if keep { 0 } else { 1 };
         let color_initial = if keep { 6 } else { 0 };
-        let depth_load = if keep { 2 } else { 1 };
-        // Final layout cannot be undefined. The overlay pass discards depth.
+        // Default frames discard depth, matching the pre-particle pass. A
+        // depth-collision frame stores it and the keep pass loads it back.
+        let (depth_load, depth_store, depth_initial) = if store_depth && keep {
+            (0, 0, 3)
+        } else if store_depth {
+            (1, 0, 0)
+        } else if keep {
+            // The scene pass ends in depth-attachment layout. Matching it here
+            // keeps the keep pass from transitioning the image out of nowhere.
+            (2, 1, 3)
+        } else {
+            (1, 1, 0)
+        };
+        // Final layout cannot be undefined. The overlay pass discards depth
+        // unless this frame is keeping it for the next particle step.
         let depth_final = 3;
         // Both variants share one external dependency so the keep and clear
         // passes stay render-pass compatible (VUID-VkRenderPassBeginInfo-renderPass-00904,
@@ -5422,9 +6599,8 @@ impl Gpu {
         // against one variant and used with the other. The filter leaves the
         // color image visible to a transfer read; the clear pass waits on the
         // previous frame's color output.
-        let in_stage = 0x1000 | 0x400;
-        let in_access = 0x800 | 0x100;
-        let in_dst = 0x180;
+        let into = pass_sync::scene_pass_in();
+        let out = pass_sync::scene_pass_out();
         let atts = [
             Att {
                 flags: 0,
@@ -5442,10 +6618,10 @@ impl Gpu {
                 format: 126,
                 samples: 1,
                 load: depth_load,
-                store: 1,
+                store: depth_store,
                 stencil_load: 1,
                 stencil_store: 1,
-                initial: 0,
+                initial: depth_initial,
                 final_layout: depth_final,
             },
         ];
@@ -5473,19 +6649,19 @@ impl Gpu {
             Dep {
                 src: u32::MAX,
                 dst: 0,
-                src_stage: in_stage,
-                dst_stage: 0x400,
-                src_access: in_access,
-                dst_access: in_dst,
+                src_stage: into.src_stage,
+                dst_stage: into.dst_stage,
+                src_access: into.src_access,
+                dst_access: into.dst_access,
                 flags: 0,
             },
             Dep {
                 src: 0,
                 dst: u32::MAX,
-                src_stage: 0x400,
-                dst_stage: 0x1000,
-                src_access: 0x100,
-                dst_access: 0x800,
+                src_stage: out.src_stage,
+                dst_stage: out.dst_stage,
+                src_access: out.src_access,
+                dst_access: out.dst_access,
                 flags: 0,
             },
         ];
@@ -6054,7 +7230,7 @@ impl Gpu {
                 (self.fns.bind_image)(self.device, image, memory, 0),
                 "bind image",
             )?;
-            let view = self.make_view(image, format, aspect)?;
+            let view = self.make_view(image, format, aspect, 1)?;
             Ok(Image {
                 image,
                 view,
@@ -6063,8 +7239,14 @@ impl Gpu {
         }
     }
 
-    /// Device-local atlas the fragment shader loads. Transfer is the only writer.
-    fn make_atlas_image(&self, width: u32, height: u32) -> Result<Image, String> {
+    /// Device-local atlas the fragment shader fetches. Transfer is the only writer.
+    fn make_atlas_image(
+        &self,
+        width: u32,
+        height: u32,
+        format: i32,
+        mips: u32,
+    ) -> Result<Image, String> {
         #[repr(C)]
         struct Extent {
             w: u32,
@@ -6096,17 +7278,18 @@ impl Gpu {
             next: std::ptr::null(),
             flags: 0,
             image_type: 1,
-            format: 37,
+            format,
             extent: Extent {
                 w: width.max(1),
                 h: height.max(1),
                 d: 1,
             },
-            mips: 1,
+            mips: mips.max(1),
             layers: 1,
             samples: 1,
             tiling: 0,
-            usage: 0x1 | 0x2 | 0x8,
+            // TRANSFER_SRC | TRANSFER_DST | SAMPLED. Block formats are not storage images.
+            usage: 0x1 | 0x2 | 0x4,
             sharing: u32::from(shared),
             queue_count: if shared { 2 } else { 0 },
             queues: if shared {
@@ -6136,7 +7319,7 @@ impl Gpu {
                 (self.fns.bind_image)(self.device, image, memory, 0),
                 "bind atlas",
             )?;
-            let view = self.make_view(image, 37, 1)?;
+            let view = self.make_view(image, format, 1, mips.max(1))?;
             Ok(Image {
                 image,
                 view,
@@ -6145,7 +7328,13 @@ impl Gpu {
         }
     }
 
-    fn make_view(&self, image: Handle, format: i32, aspect: u32) -> Result<Handle, String> {
+    fn make_view(
+        &self,
+        image: Handle,
+        format: i32,
+        aspect: u32,
+        levels: u32,
+    ) -> Result<Handle, String> {
         #[repr(C)]
         struct Comp {
             r: u32,
@@ -6188,7 +7377,7 @@ impl Gpu {
             range: Range {
                 aspect,
                 mip: 0,
-                levels: 1,
+                levels: levels.max(1),
                 layer: 0,
                 layers: 1,
             },
@@ -6309,6 +7498,7 @@ impl Gpu {
             let mut req = [0u8; 24];
             (self.fns.buffer_reqs)(self.device, buffer, req.as_mut_ptr());
             let req_size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
+            let align = u64::from_ne_bytes(req[8..16].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
             let memory = self.alloc(req_size, bits, memory)?;
             check(
@@ -6319,6 +7509,7 @@ impl Gpu {
                 buffer,
                 memory,
                 size: req_size,
+                align,
             })
         }
     }
@@ -6354,6 +7545,7 @@ impl Gpu {
         if let Some(want) = first {
             if let Some(index) = self.memory_index(type_bits, want) {
                 if let Ok(handle) = self.alloc_index(size, index) {
+                    self.note_memory_type(index);
                     if memory == Memory::Upload {
                         let [local, all] = self.upload_local.get();
                         self.upload_local.set([local + 1, all]);
@@ -6377,11 +7569,20 @@ impl Gpu {
             return Err("no memory type".into());
         };
         let handle = self.alloc_index(size, index)?;
+        self.note_memory_type(index);
         if memory == Memory::Device {
             self.device_bytes
                 .set(self.device_bytes.get().saturating_add(size));
         }
         Ok(handle)
+    }
+
+    fn note_memory_type(&self, index: u32) {
+        let flags = usize::try_from(index)
+            .ok()
+            .and_then(|slot| self.memory_props.types.get(slot).copied())
+            .unwrap_or(0);
+        self.last_memory_flags.set(flags);
     }
 
     /// The first memory type allowed by `type_bits` with every flag in `want`.
@@ -6537,7 +7738,8 @@ impl Gpu {
         raw[8..16].copy_from_slice(&next.to_ne_bytes());
         unsafe { query(self.physical, raw.as_mut_ptr()) };
         let props = parse_mem_props(&raw[16..]);
-        let heap_count = u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
+        let heap_count =
+            u32::from_ne_bytes(raw[16 + 260..16 + 264].try_into().unwrap_or([0; 4])).min(16);
         let mut heap_budget = 0u64;
         let mut heap_usage = 0u64;
         for index in 0..heap_count {
@@ -6593,23 +7795,7 @@ impl Gpu {
                 "transfer reset fence",
             )?;
             check((self.fns.reset_cmd)(self.transfer_cmd, 0), "transfer reset")?;
-            #[repr(C)]
-            struct BeginInfo {
-                s_type: i32,
-                next: *const c_void,
-                flags: u32,
-                inheritance: *const c_void,
-            }
-            let begin = BeginInfo {
-                s_type: 42,
-                next: std::ptr::null(),
-                flags: 0x1,
-                inheritance: std::ptr::null(),
-            };
-            check(
-                (self.fns.begin_cmd)(self.transfer_cmd, &begin as *const BeginInfo as *const u8),
-                "transfer begin",
-            )?;
+            self.begin_reused(self.transfer_cmd)?;
         }
         self.staging_barrier(0x4000, 0x1000, 0x4000, 0x800);
         let mut copied = 0u64;
@@ -6639,8 +7825,17 @@ impl Gpu {
         self.prepare_atlas_draw(true);
         self.prepare_atlas_draw(false);
         let show = self.ready_to_show();
+        let mut last_page = None;
         for (index, level) in &show {
-            self.record_mip_blit(*index, *level);
+            if let Some(image) = self.record_mip_blit(*index, *level) {
+                last_page = Some(image);
+            }
+        }
+        // One readback for the submit. Copying every page into the same
+        // 4-byte buffer was a WRITE_AFTER_WRITE (the allocation is often 16
+        // bytes). The host reads the last page.
+        if let Some(image) = last_page {
+            self.copy_page_texel(image);
         }
         for (index, level) in show {
             if let Some(source) = self
@@ -6649,6 +7844,15 @@ impl Gpu {
                 .find(|source| source.index == index)
             {
                 source.shown = Some(level);
+            }
+        }
+        for source in &self.stream_sources {
+            // RGBA blits the resident mip up to mip 0. Block formats are copied
+            // into the matching mip, so the fetch lod is that level.
+            if source.sampled && block_texel(source.chain.format) {
+                if let Some(level) = source.shown {
+                    self.atlas_lod[usize::from(!source.color)] = level;
+                }
             }
         }
         self.finish_atlas_draw(true, true);
@@ -6758,7 +7962,11 @@ impl Gpu {
     }
 
     fn record_mip_copy(&self, index: usize, level: u32) -> u64 {
-        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
+        let Some(source) = self
+            .stream_sources
+            .iter()
+            .find(|source| source.index == index)
+        else {
             return 0;
         };
         let Some(slot) = usize::try_from(level).ok() else {
@@ -6784,8 +7992,9 @@ impl Gpu {
             page.layout,
             width,
             height,
+            block_texel(source.chain.format),
         );
-        u64::from(width) * u64::from(height) * 4
+        u64::try_from(mip.rgba.len()).unwrap_or(0)
     }
 
     /// Move the atlas to transfer-dest and clear it once. A later blit overwrites
@@ -6812,7 +8021,9 @@ impl Gpu {
             self.sampled_layout[slot] = 7;
         }
         if !self.sampled_cleared[slot] {
-            self.clear_color(self.transfer_cmd, image, 7);
+            if !block_texel(self.sampled_format[slot]) {
+                self.clear_color(self.transfer_cmd, image, 7);
+            }
             self.sampled_cleared[slot] = true;
         }
     }
@@ -6829,7 +8040,9 @@ impl Gpu {
                 continue;
             }
             self.cmd_image_barrier(self.cmd, image, 0, 7, 0x1, 0x1000, 0, 0x1000);
-            self.clear_color(self.cmd, image, 7);
+            if !block_texel(self.sampled_format[slot]) {
+                self.clear_color(self.cmd, image, 7);
+            }
             self.cmd_image_barrier(self.cmd, image, 7, 1, 0x1000, 0x80, 0x1000, 0x20);
             self.sampled_layout[slot] = 1;
             self.sampled_cleared[slot] = true;
@@ -6861,7 +8074,7 @@ impl Gpu {
             0x800,
         );
         self.sampled_layout[slot] = 1;
-        if readback {
+        if readback && !block_texel(self.sampled_format[0]) {
             self.copy_atlas_texel(image);
         }
     }
@@ -6870,26 +8083,29 @@ impl Gpu {
         self.copy_image_texel(image, 6, &self.page_readback);
     }
 
-    fn record_mip_blit(&self, index: usize, level: u32) {
-        let Some(source) = self.stream_sources.iter().find(|source| source.index == index) else {
-            return;
-        };
-        let Some(slot) = usize::try_from(level).ok() else {
-            return;
-        };
-        let Some(mip) = source.chain.levels.get(slot) else {
-            return;
-        };
-        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))
-        else {
-            return;
-        };
-        self.publish_resident(&page, source.color);
+    /// Blit one resident page. Returns the page image when it is a colour page
+    /// the host can read, so the submit copies that texel once.
+    fn record_mip_blit(&self, index: usize, level: u32) -> Option<Handle> {
+        let source = self.stream_sources.iter().find(|source| source.index == index)?;
+        let slot = usize::try_from(level).ok()?;
+        let mip = source.chain.levels.get(slot)?;
+        let page = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))?;
+        let color = source.color;
+        self.publish_resident(&page, color, level);
+        let atlas_slot = usize::from(!color);
+        let readable = color && !block_texel(self.sampled_format[atlas_slot]);
+        readable.then_some(page.image)
     }
 
     /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
     /// handle and not a staging buffer.
-    fn copied_page(&self, index: usize, level: u32, width: u32, height: u32) -> Option<ResidentPage> {
+    fn copied_page(
+        &self,
+        index: usize,
+        level: u32,
+        width: u32,
+        height: u32,
+    ) -> Option<ResidentPage> {
         let page = self.stream_pages.iter().find(|page| {
             page.index == index && page.level == level && page.copied && !page.image.is_null()
         })?;
@@ -6901,22 +8117,24 @@ impl Gpu {
     }
 
     /// Blit `page` into the device atlas. This is the only atlas write.
-    fn publish_resident(&self, page: &ResidentPage, color: bool) {
+    fn publish_resident(&self, page: &ResidentPage, color: bool, level: u32) {
+        let slot = usize::from(!color);
         let atlas = self.sampled_image(color).image;
-        let (atlas_w, atlas_h) = self.sampled_size[usize::from(!color)];
+        let (atlas_w, atlas_h) = self.sampled_size[slot];
         if atlas.is_null() || page.image.is_null() {
             return;
         }
-        self.blit_nearest(
-            page.image,
-            atlas,
-            page.width,
-            page.height,
-            atlas_w.max(1),
-            atlas_h.max(1),
-        );
-        if color {
-            self.copy_page_texel(page.image);
+        if block_texel(self.sampled_format[slot]) {
+            self.copy_same_size(page.image, atlas, page.width, page.height, level);
+        } else {
+            self.blit_nearest(
+                page.image,
+                atlas,
+                page.width,
+                page.height,
+                atlas_w.max(1),
+                atlas_h.max(1),
+            );
         }
     }
 
@@ -6957,7 +8175,9 @@ impl Gpu {
             if buffer.is_null() || size < 4 {
                 continue;
             }
-            self.transfer_buffer_barrier(buffer, size, src_stage, dst_stage, src_access, dst_access);
+            self.transfer_buffer_barrier(
+                buffer, size, src_stage, dst_stage, src_access, dst_access,
+            );
         }
     }
 
@@ -7034,6 +8254,134 @@ impl Gpu {
                 color.as_ptr().cast(),
                 1,
                 &range as *const Range as *const u8,
+            );
+        }
+    }
+
+    fn write_atlas_mode(&self) -> Result<(), String> {
+        let mut bytes = [0u8; 16];
+        bytes[0..4].copy_from_slice(&self.atlas_linear.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.atlas_lod[0].to_le_bytes());
+        bytes[8..12].copy_from_slice(&self.atlas_lod[1].to_le_bytes());
+        self.write_buffer(&self.atlas_mode, &bytes)
+    }
+
+    fn make_sampler(&self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            mag: i32,
+            min: i32,
+            mip: i32,
+            addr_u: i32,
+            addr_v: i32,
+            addr_w: i32,
+            bias: f32,
+            aniso: u32,
+            max_aniso: f32,
+            compare: u32,
+            compare_op: i32,
+            min_lod: f32,
+            max_lod: f32,
+            border: [f32; 4],
+            unnorm: u32,
+        }
+        let info = Info {
+            s_type: 31,
+            next: std::ptr::null(),
+            flags: 0,
+            mag: 0,
+            min: 0,
+            mip: 0,
+            addr_u: 2,
+            addr_v: 2,
+            addr_w: 2,
+            bias: 0.0,
+            aniso: 0,
+            max_aniso: 1.0,
+            compare: 0,
+            compare_op: 0,
+            min_lod: 0.0,
+            max_lod: 16.0,
+            border: [0.0; 4],
+            unnorm: 0,
+        };
+        let mut sampler = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_sampler)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut sampler,
+                ),
+                "sampler",
+            )?;
+        }
+        Ok(sampler)
+    }
+
+    /// Copy a block page into one mip of the atlas. Both images are the same size.
+    fn copy_same_size(&self, src: Handle, dst: Handle, width: u32, height: u32, dst_mip: u32) {
+        #[repr(C)]
+        struct Sub {
+            aspect: u32,
+            mip: u32,
+            layer: u32,
+            count: u32,
+        }
+        #[repr(C)]
+        struct Off {
+            x: i32,
+            y: i32,
+            z: i32,
+        }
+        #[repr(C)]
+        struct Ext {
+            w: u32,
+            h: u32,
+            d: u32,
+        }
+        #[repr(C)]
+        struct Copy {
+            src: Sub,
+            src_off: Off,
+            dst: Sub,
+            dst_off: Off,
+            extent: Ext,
+        }
+        let copy = Copy {
+            src: Sub {
+                aspect: 1,
+                mip: 0,
+                layer: 0,
+                count: 1,
+            },
+            src_off: Off { x: 0, y: 0, z: 0 },
+            dst: Sub {
+                aspect: 1,
+                mip: dst_mip,
+                layer: 0,
+                count: 1,
+            },
+            dst_off: Off { x: 0, y: 0, z: 0 },
+            extent: Ext {
+                w: width,
+                h: height,
+                d: 1,
+            },
+        };
+        unsafe {
+            (self.fns.cmd_copy_image)(
+                self.transfer_cmd,
+                src,
+                6,
+                dst,
+                7,
+                1,
+                &copy as *const Copy as *const u8,
             );
         }
     }
@@ -7166,7 +8514,12 @@ impl Gpu {
         }
     }
 
-    fn create_unbound_image(&self, width: u32, height: u32) -> Result<UnboundImage, String> {
+    fn create_unbound_image(
+        &self,
+        width: u32,
+        height: u32,
+        format: i32,
+    ) -> Result<UnboundImage, String> {
         #[repr(C)]
         struct Extent {
             w: u32,
@@ -7196,7 +8549,7 @@ impl Gpu {
             next: std::ptr::null(),
             flags: 0,
             image_type: 1,
-            format: 37,
+            format,
             extent: Extent {
                 w: width,
                 h: height,
@@ -7243,6 +8596,7 @@ impl Gpu {
         old_layout: u32,
         width: u32,
         height: u32,
+        block: bool,
     ) {
         #[repr(C)]
         struct Range {
@@ -7365,9 +8719,11 @@ impl Gpu {
                     &barrier as *const Barrier as *const u8,
                 );
             }
-            // Zero first. The buffer copy is the only writer of a real texel.
-            // Skipping that copy leaves the clear, and the blit publishes black.
-            self.clear_color(self.transfer_cmd, image, 7);
+            // Zero first on an uncompressed page. A block image cannot be cleared
+            // with vkCmdClearColorImage. Skipping the copy leaves the previous texel.
+            if !block {
+                self.clear_color(self.transfer_cmd, image, 7);
+            }
             (self.fns.cmd_barrier)(
                 self.transfer_cmd,
                 0x1000,
@@ -7529,7 +8885,11 @@ impl Gpu {
             let Some(mip) = source.chain.levels.get(slot) else {
                 continue;
             };
-            let image = self.create_unbound_image(mip.width.max(1), mip.height.max(1))?;
+            let image = self.create_unbound_image(
+                mip.width.max(1),
+                mip.height.max(1),
+                source.chain.format,
+            )?;
             self.stream_pages.push(StreamPage {
                 index,
                 level,
@@ -7555,14 +8915,7 @@ impl Gpu {
         dst_access: u32,
     ) {
         self.cmd_image_barrier(
-            self.cmd,
-            image,
-            old,
-            new,
-            src_stage,
-            dst_stage,
-            src_access,
-            dst_access,
+            self.cmd, image, old, new, src_stage, dst_stage, src_access, dst_access,
         );
     }
 
@@ -7611,7 +8964,7 @@ impl Gpu {
             range: Range {
                 aspect: 1,
                 mip: 0,
-                levels: 1,
+                levels: u32::MAX,
                 layer: 0,
                 layers: 1,
             },
@@ -7751,11 +9104,6 @@ impl Gpu {
 
     fn destroy_targets(&mut self) {
         unsafe {
-            if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
-                self.destroy_aa_targets();
-                self.destroy_reflection_targets();
-                return;
-            }
             self.destroy_aa_targets();
             self.destroy_reflection_targets();
             for slot in 0..2 {
@@ -7778,15 +9126,75 @@ impl Gpu {
             self.color = Image::empty();
             self.depth = Image::empty();
             self.host = Buffer::empty();
-            if !self.swapchain.is_null() {
-                (self.fns.destroy_swapchain)(self.device, self.swapchain, std::ptr::null());
-                self.swapchain = std::ptr::null_mut();
-            }
-            self.swap_images.clear();
+            self.particle_depth_retained = [false, false];
         }
     }
 
+    /// Live flight fences, then every queue. Lighting is the first resource
+    /// this teardown frees, and `wait_lighting_world` returns without waiting
+    /// once shutdown has started, so this runs before that free. The 48 ms
+    /// drain poll may already have given up. A fence that was reset and not
+    /// submitted is not live.
+    fn drain_for_teardown(&mut self) {
+        if self.device.is_null() || !self.lifecycle_release || self.teardown_drained.get() {
+            return;
+        }
+        self.retire_live_flights();
+        self.idle_device();
+        self.teardown_drained.set(true);
+    }
+
+    fn note_teardown_free(&self, live: bool) {
+        if !live || !self.lifecycle_release {
+            return;
+        }
+        if self.teardown_drained.get() {
+            self.teardown_frees.set(self.teardown_frees.get().saturating_add(1));
+        } else {
+            self.freed_before_drain.set(true);
+        }
+    }
+
+    fn retire_live_flights(&mut self) {
+        for slot in 0..2 {
+            if !self.flight_live[slot] {
+                continue;
+            }
+            let fence = self.fences[slot];
+            if self.wait_fence(fence, "retire flight").is_err() {
+                return;
+            }
+            self.flight_live[slot] = false;
+        }
+        // The present semaphore stays until after vkDestroySwapchainKHR.
+        // Destroying it here makes that call wait for a present that cannot
+        // finish, which is the teardown hang on a slow last frame.
+    }
+
+    /// Presentation images. The seat is dispatched around this call: the
+    /// driver round-trips the Wayland socket before it returns, and a client
+    /// that does not read the socket waits out the driver timeout.
+    fn destroy_swapchain(&mut self) {
+        // Lighting already drained. A teardown that skipped it still has to
+        // finish the queues before the swapchain images go away.
+        self.drain_for_teardown();
+        if self.device.is_null() || self.swapchain.is_null() {
+            self.swapchain = std::ptr::null_mut();
+            self.swap_images.clear();
+            self.destroy_present_sems();
+            return;
+        }
+        let swapchain = self.swapchain;
+        self.swapchain = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_swapchain)(self.device, swapchain, std::ptr::null());
+        }
+        self.swap_images.clear();
+        self.destroy_present_sems();
+    }
+
     fn destroy_image(&self, image: &mut Image) {
+        self.note_teardown_free(!image.image.is_null() || !image.view.is_null() || !image.memory.is_null());
         unsafe {
             if !image.view.is_null() {
                 (self.fns.destroy_image_view)(self.device, image.view, std::ptr::null());
@@ -7802,6 +9210,7 @@ impl Gpu {
     }
 
     fn destroy_buffer(&self, buffer: &mut Buffer) {
+        self.note_teardown_free(!buffer.buffer.is_null() || !buffer.memory.is_null());
         unsafe {
             if !buffer.buffer.is_null() {
                 (self.fns.destroy_buffer)(self.device, buffer.buffer, std::ptr::null());
@@ -7863,11 +9272,27 @@ fn read_f32s(
         .collect())
 }
 
+fn pod_bytes<T>(value: &T) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            std::ptr::from_ref(value).cast::<u8>(),
+            std::mem::size_of::<T>(),
+        )
+    }
+}
+
+fn pod_slice<T>(values: &[T]) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
+    }
+}
+
 fn copy_buffer(buffer: &Buffer) -> Buffer {
     Buffer {
         buffer: buffer.buffer,
         memory: buffer.memory,
         size: buffer.size,
+        align: buffer.align,
     }
 }
 
@@ -7887,19 +9312,309 @@ impl Buffer {
             buffer: std::ptr::null_mut(),
             memory: std::ptr::null_mut(),
             size: 0,
+            align: 0,
         }
     }
 }
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        unsafe {
-            if self.abandon || self.device.is_null() {
+        if self.torn_down {
+            return;
+        }
+        if !self.lifecycle_release {
+            // A null device was never opened. Already unwinding: leak. An idle wait is the stall.
+            if self.device.is_null() || std::thread::panicking() {
                 return;
             }
-            self.idle_device();
-            self.drop_stream_resources();
+            panic!("genos-render: the device was dropped outside the app lifecycle");
+        }
+        // The device pointer is cleared before the surface and the instance,
+        // so a null device here still has those two calls left.
+        self.finish_teardown();
+    }
+}
+
+impl Gpu {
+    /// `true` when the queues that presented and built lighting have retired.
+    ///
+    /// An empty submit on each queue, after the last present, is ordered after
+    /// that present. Frame fences are polled only when a submit is in flight.
+    /// A reset fence with no submit stays unsignaled, so it is not polled.
+    /// The transfer queue is separate from graphics and compute.
+    pub(crate) fn poll_idle(&mut self) -> bool {
+        if self.device.is_null() || self.torn_down {
+            return true;
+        }
+        if !self.shutdown_armed && !self.arm_shutdown() {
+            return false;
+        }
+        self.frames_retired()
+            && self.transfer_retired()
+            && self.fence_retired(self.shutdown_fence)
+            && self.fence_retired(self.shutdown_compute)
+            && (!self.lighting.world_busy || self.fence_retired(self.lighting.world_fence))
+    }
+
+    fn frames_retired(&self) -> bool {
+        (0..2).all(|slot| !self.flight_live[slot] || self.fence_retired(self.fences[slot]))
+    }
+
+    fn transfer_retired(&self) -> bool {
+        !self.transfer_busy || self.fence_retired(self.transfer_fence)
+    }
+
+    /// Leave `vkDestroyDevice` and `vkDestroyInstance` for process exit.
+    pub(crate) fn release_driver_at_exit(&mut self) {
+        self.exit_release = true;
+    }
+
+    /// Name of the group the next [`Self::destroy_step`] call destroys.
+    pub(crate) fn next_shutdown_phase(&self) -> &'static str {
+        if self.exit_release && self.teardown >= 5 {
+            return "driver_release";
+        }
+        match self.teardown {
+            0 => "destroy_yield",
+            1 => "destroy_lighting",
+            2 => "destroy_swapchain",
+            3 => "destroy_objects",
+            4 => "destroy_surface",
+            5 => "destroy_device",
+            _ => "destroy_instance",
+        }
+    }
+
+    /// Destroy one group and return. `true` when the instance is gone.
+    pub(crate) fn destroy_step(&mut self) -> bool {
+        if self.torn_down {
+            return true;
+        }
+        self.lifecycle_release = true;
+        match self.teardown {
+            0 => {
+                self.teardown = 1;
+                false
+            }
+            1 => {
+                // The seat thread dispatches while the driver call runs. On a
+                // real device these calls wait for the compositor, and a missed
+                // ping makes that wait hit the driver timeout. Lighting is the
+                // first free. `destroy_lighting` drains the queues before it
+                // frees, including when the 48 ms poll already gave up.
+                block(|| self.destroy_lighting());
+                self.teardown = 2;
+                false
+            }
+            2 => {
+                block(|| self.destroy_swapchain());
+                self.teardown = 3;
+                false
+            }
+            3 => {
+                block(|| self.destroy_gpu_objects());
+                self.teardown = 4;
+                false
+            }
+            4 => {
+                // The surface goes before the device. Its swapchain is already
+                // gone, so this is legal, and it lets the WSI layer release the
+                // compositor's buffers on its own step instead of inside
+                // vkDestroyDevice, where a wait on them looked like a driver
+                // stall of up to 20 s on the 4070.
+                block(|| self.destroy_surface_handle());
+                self.teardown = 5;
+                false
+            }
+            5 => {
+                if self.release_instead_of_driver_destroy() {
+                    return true;
+                }
+                block(|| self.destroy_device_handle());
+                self.teardown = 6;
+                false
+            }
+            _ => {
+                if self.release_instead_of_driver_destroy() {
+                    return true;
+                }
+                block(|| self.destroy_instance_handle());
+                true
+            }
+        }
+    }
+
+    fn finish_teardown(&mut self) {
+        if self.torn_down {
+            return;
+        }
+        if self.teardown < 2 {
             self.destroy_lighting();
+            self.teardown = 2;
+        }
+        if self.teardown < 3 {
+            self.destroy_swapchain();
+            self.teardown = 3;
+        }
+        if self.teardown < 4 {
+            self.destroy_gpu_objects();
+            self.teardown = 4;
+        }
+        if self.teardown < 5 {
+            self.destroy_surface_handle();
+            self.teardown = 5;
+        }
+        // A quit drop can reach here with `exit_release` set and the device
+        // still alive. Destroying it now is the same wait the quit skipped.
+        if self.exit_release {
+            let _ = self.release_instead_of_driver_destroy();
+            return;
+        }
+        if self.teardown < 6 {
+            self.destroy_device_handle();
+            self.teardown = 6;
+        }
+        self.destroy_instance_handle();
+    }
+
+    fn fence_retired(&self, fence: Handle) -> bool {
+        if fence.is_null() || self.device.is_null() {
+            return true;
+        }
+        let status = unsafe { (self.fns.fence_status)(self.device, fence) };
+        status != VK_NOT_READY
+    }
+
+    fn arm_shutdown(&mut self) -> bool {
+        if self.shutdown_armed {
+            return true;
+        }
+        let Ok(graphics) = self.make_plain_fence() else {
+            return false;
+        };
+        self.shutdown_fence = graphics;
+        let distinct =
+            !self.compute_queue.is_null() && !std::ptr::eq(self.compute_queue, self.queue);
+        if distinct {
+            let Ok(fence) = self.make_plain_fence() else {
+                self.destroy_shutdown_fences();
+                return false;
+            };
+            self.shutdown_compute = fence;
+        }
+        // The queue can block in the driver until the compositor releases a
+        // buffer. The seat thread answers that while this thread waits.
+        let graphics_submitted = block(|| self.submit_empty(self.queue, self.shutdown_fence));
+        if !graphics_submitted {
+            self.destroy_shutdown_fences();
+            return false;
+        }
+        let compute_submitted =
+            !distinct || block(|| self.submit_empty(self.compute_queue, self.shutdown_compute));
+        if distinct && !compute_submitted {
+            unsafe {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+            }
+            self.shutdown_compute = std::ptr::null_mut();
+        }
+        self.shutdown_armed = true;
+        true
+    }
+
+    fn make_plain_fence(&mut self) -> Result<Handle, String> {
+        #[repr(C)]
+        struct FenceInfo {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+        }
+        let info = FenceInfo {
+            s_type: 8,
+            next: std::ptr::null(),
+            flags: 0,
+        };
+        let mut fence = std::ptr::null_mut();
+        unsafe {
+            check(
+                (self.fns.create_fence)(
+                    self.device,
+                    &info as *const FenceInfo as *const u8,
+                    std::ptr::null(),
+                    &mut fence,
+                ),
+                "shutdown fence",
+            )?;
+        }
+        Ok(fence)
+    }
+
+    fn submit_empty(&self, queue: Handle, fence: Handle) -> bool {
+        if queue.is_null() || fence.is_null() {
+            return false;
+        }
+        #[repr(C)]
+        struct Submit {
+            s_type: i32,
+            next: *const c_void,
+            wait_count: u32,
+            waits: *const Handle,
+            stages: *const u32,
+            cmd_count: u32,
+            cmds: *const Handle,
+            signal_count: u32,
+            signals: *const Handle,
+        }
+        let submit = Submit {
+            s_type: 4,
+            next: std::ptr::null(),
+            wait_count: 0,
+            waits: std::ptr::null(),
+            stages: std::ptr::null(),
+            cmd_count: 0,
+            cmds: std::ptr::null(),
+            signal_count: 0,
+            signals: std::ptr::null(),
+        };
+        let result = unsafe {
+            (self.fns.queue_submit)(queue, 1, &submit as *const Submit as *const u8, fence)
+        };
+        result == VK_SUCCESS
+    }
+
+    fn destroy_shutdown_fences(&mut self) {
+        if self.device.is_null() {
+            self.shutdown_fence = std::ptr::null_mut();
+            self.shutdown_compute = std::ptr::null_mut();
+            return;
+        }
+        unsafe {
+            if !self.shutdown_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_fence, std::ptr::null());
+                self.shutdown_fence = std::ptr::null_mut();
+            }
+            if !self.shutdown_compute.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+                self.shutdown_compute = std::ptr::null_mut();
+            }
+        }
+    }
+
+    /// Images, buffers, and pipelines. The device, surface, and instance stay.
+    fn destroy_gpu_objects(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        self.lifecycle_release = true;
+        // Finish the queues before freeing what they still reference. Lighting
+        // already did this. A path that skipped it still must not free over a
+        // live frame. A fence that was reset and not submitted is not live.
+        self.drain_for_teardown();
+        // Stream pages and staging buffers are device memory. Free them here,
+        // on the lifecycle step, instead of waiting idle in Drop.
+        teardown_phase("drop_stages", || self.drop_stages());
+        teardown_phase("drop_stream_resources", || self.drop_stream_resources());
+        let rest = Instant::now();
+        unsafe {
             self.destroy_targets();
             self.vertex = Buffer::empty();
             let mut vertices =
@@ -7931,6 +9646,12 @@ impl Drop for Gpu {
             self.destroy_image(&mut sampled_normal);
             self.destroy_buffer(&mut atlas_readback);
             self.destroy_buffer(&mut page_readback);
+            let mut atlas_mode = std::mem::replace(&mut self.atlas_mode, Buffer::empty());
+            self.destroy_buffer(&mut atlas_mode);
+            if !self.atlas_sampler.is_null() {
+                (self.fns.destroy_sampler)(self.device, self.atlas_sampler, std::ptr::null());
+                self.atlas_sampler = std::ptr::null_mut();
+            }
             if !self.transfer_done.is_null() {
                 (self.fns.destroy_sem)(self.device, self.transfer_done, std::ptr::null());
                 self.transfer_done = std::ptr::null_mut();
@@ -7960,6 +9681,9 @@ impl Drop for Gpu {
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             self.destroy_media_check();
+            self.destroy_texel_detail();
+            self.destroy_texel_ray_cut();
+            self.destroy_particle_pass();
             self.destroy_froxel();
             if !self.audio_fence.is_null() {
                 (self.fns.destroy_fence)(self.device, self.audio_fence, std::ptr::null());
@@ -7987,10 +9711,8 @@ impl Drop for Gpu {
                 if !self.image_readies[slot].is_null() {
                     (self.fns.destroy_sem)(self.device, self.image_readies[slot], std::ptr::null());
                 }
-                if !self.render_dones[slot].is_null() {
-                    (self.fns.destroy_sem)(self.device, self.render_dones[slot], std::ptr::null());
-                }
             }
+            self.destroy_present_sems();
             if !self.desc_pool.is_null() {
                 (self.fns.destroy_desc_pool)(self.device, self.desc_pool, std::ptr::null());
             }
@@ -8027,6 +9749,16 @@ impl Drop for Gpu {
             if !self.render_pass.is_null() {
                 (self.fns.destroy_render_pass)(self.device, self.render_pass, std::ptr::null());
             }
+            if !self.keep_pass_store.is_null() {
+                (self.fns.destroy_render_pass)(self.device, self.keep_pass_store, std::ptr::null());
+            }
+            if !self.render_pass_store.is_null() {
+                (self.fns.destroy_render_pass)(
+                    self.device,
+                    self.render_pass_store,
+                    std::ptr::null(),
+                );
+            }
             if !self.aa_fxaa.is_null() {
                 (self.fns.destroy_pipeline)(self.device, self.aa_fxaa, std::ptr::null());
             }
@@ -8039,13 +9771,91 @@ impl Drop for Gpu {
             if !self.aa_desc_layout.is_null() {
                 (self.fns.destroy_desc_layout)(self.device, self.aa_desc_layout, std::ptr::null());
             }
-            self.destroy_reflection();
-            (self.fns.destroy_device)(self.device, std::ptr::null());
-            if !self.surface.is_null() {
-                (self.fns.destroy_surface)(self.instance, self.surface, std::ptr::null());
+            if !self.shutdown_fence.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_fence, std::ptr::null());
+                self.shutdown_fence = std::ptr::null_mut();
             }
-            (self.fns.destroy_instance)(self.instance, std::ptr::null());
+            if !self.shutdown_compute.is_null() {
+                (self.fns.destroy_fence)(self.device, self.shutdown_compute, std::ptr::null());
+                self.shutdown_compute = std::ptr::null_mut();
+            }
+            self.destroy_reflection();
         }
+        eprintln!(
+            "vk_teardown phase=buffers_images_pipelines_pools ms={:.2}",
+            rest.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    fn destroy_device_handle(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = self.device;
+        self.device = std::ptr::null_mut();
+        let traffic = traffic::snapshot();
+        eprintln!("vk_traffic {}", traffic.line());
+        eprintln!("vk_memory {}", traffic::memory_line());
+        eprintln!("vk_traffic_run {}", traffic::rate_line());
+        eprintln!("vk_teardown_by_type{}", traffic::destroy_line());
+        let wait = self.fns.device_wait;
+        teardown_phase("device_wait_idle", || unsafe {
+            wait(device);
+        });
+        teardown_phase("free_parked_memory", || traffic::free_parked(device));
+        let destroy = self.fns.destroy_device;
+        teardown_phase("vk_destroy_device", || unsafe {
+            destroy(device, std::ptr::null());
+        });
+    }
+
+    fn destroy_surface_handle(&mut self) {
+        if self.surface.is_null() || self.instance.is_null() {
+            self.surface = std::ptr::null_mut();
+            return;
+        }
+        let surface = self.surface;
+        self.surface = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_surface)(self.instance, surface, std::ptr::null());
+        }
+    }
+
+    /// Skip `vkDestroyDevice` and `vkDestroyInstance` on the player quit.
+    ///
+    /// On lavapipe those calls take one shared teardown lock: the threaded
+    /// submit join, the llvmpipe thread pool, or the shader-cache queue.
+    /// The wait is tens of milliseconds up to about 150 ms, and it shows up
+    /// on whichever of the two calls acquires the lock. While the instance
+    /// destroy holds the Wayland display lock, the seat thread cannot mark,
+    /// so the ping gap becomes that wait. This step runs before the unmap.
+    /// Skipping the calls keeps that wait off both the ping gap and the
+    /// window-gone-to-exit span. `_exit` reclaims the device.
+    fn release_instead_of_driver_destroy(&mut self) -> bool {
+        if !self.exit_release {
+            return false;
+        }
+        if !self.torn_down {
+            use std::io::Write;
+            println!("{}", genos_window::DRIVER_RELEASE_LINE);
+            let _ = std::io::stdout().flush();
+            self.torn_down = true;
+            self.lifecycle_release = true;
+        }
+        true
+    }
+
+    fn destroy_instance_handle(&mut self) {
+        if self.instance.is_null() {
+            self.torn_down = true;
+            return;
+        }
+        let instance = self.instance;
+        self.instance = std::ptr::null_mut();
+        unsafe {
+            (self.fns.destroy_instance)(instance, std::ptr::null());
+        }
+        self.torn_down = true;
     }
 }
 
@@ -8088,7 +9898,8 @@ fn device_extension_present(
             unsafe extern "system" fn(Handle, *const c_void, *mut u32, *mut u8) -> VkResult;
         let enumerate: Enumerate = transmute(raw);
         let mut count = 0u32;
-        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0 || count == 0
+        if enumerate(physical, std::ptr::null(), &mut count, std::ptr::null_mut()) != 0
+            || count == 0
         {
             return false;
         }
@@ -8225,6 +10036,7 @@ fn load_fns(
             cmd_bind_pipe: d!("vkCmdBindPipeline"),
             cmd_bind_vb: d!("vkCmdBindVertexBuffers"),
             cmd_draw: d!("vkCmdDraw"),
+            cmd_draw_indirect: d!("vkCmdDrawIndirect"),
             cmd_push: d!("vkCmdPushConstants"),
             cmd_viewport: d!("vkCmdSetViewport"),
             cmd_scissor: d!("vkCmdSetScissor"),
@@ -8237,6 +10049,8 @@ fn load_fns(
             cmd_clear_color: d!("vkCmdClearColorImage"),
             create_sem: d!("vkCreateSemaphore"),
             destroy_sem: d!("vkDestroySemaphore"),
+            create_sampler: d!("vkCreateSampler"),
+            destroy_sampler: d!("vkDestroySampler"),
             create_fence: d!("vkCreateFence"),
             destroy_fence: d!("vkDestroyFence"),
             wait_fences: d!("vkWaitForFences"),
@@ -8280,6 +10094,36 @@ fn load_fns(
     }
 }
 
+fn load_fns_installed(
+    dload: impl Fn(&[u8]) -> Pfn,
+    create_wayland_surface: FnWayland,
+    destroy_surface: Fn2,
+    surface_support: FnSupport,
+    surface_caps: FnCaps,
+    surface_formats: FnCount,
+    surface_modes: FnCount,
+    destroy_instance: FnDestroy,
+    enumerate_devices: FnEnumDev,
+    queue_families: FnQueues,
+    mem_props: FnMemProps,
+) -> Fns {
+    let mut fns = load_fns(
+        dload,
+        create_wayland_surface,
+        destroy_surface,
+        surface_support,
+        surface_caps,
+        surface_formats,
+        surface_modes,
+        destroy_instance,
+        enumerate_devices,
+        queue_families,
+        mem_props,
+    );
+    traffic::install(&mut fns);
+    fns
+}
+
 fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
     if bits == 0 || bits >= 64 {
         return end.wrapping_sub(start);
@@ -8291,11 +10135,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
 include!("reflections_frame.rs");
-
-extern "C" {
-    fn dlopen(filename: *const c_char, flags: i32) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> Pfn;
-}
+include!("vk_platform.rs");
 
 /// `Some(true)` when `arg` is `--gpu-times` and the count is the next argument.
 /// `Some(false)` when the flag already includes its value. `None` otherwise.
@@ -8532,6 +10372,9 @@ struct GpuTimes {
     /// Per-bucket sums, including cache rays and hit light. The shadows slot stays
     /// zero: it would only mirror the direct and hit-light dispatches.
     lighting_bucket: [f64; 12],
+    /// ReSTIR sums over `restir_frames`: initial, temporal, spatial, prepare, shade.
+    restir: [f64; 5],
+    restir_frames: u32,
     /// Frames in this line whose prefill scout was due. Printed as a fraction,
     /// not a millisecond: the scout shares the cache-ray dispatch.
     prefill_frames: u32,
@@ -8548,10 +10391,50 @@ struct GpuTimes {
 
 /// Stamps per frame for the GI passes, plus two for bloom and the display pass.
 /// One before the passes, one after each dispatch, then the HDR pair when it fits.
-const LIGHTING_STAMPS: u32 = 28;
+/// ReSTIR uses four pass queries at [`RESTIR_STAMP_AT`] and two prepare
+/// queries at [`RESTIR_PREPARE_AT`], past the pass list.
+const LIGHTING_STAMPS: u32 = 38;
+/// Before initial, after initial, after temporal, after spatial.
+const RESTIR_STAMP_AT: u32 = 32;
+/// Before the prefix upload, and after it. Shade is the direct-pass sum, not a query.
+const RESTIR_PREPARE_AT: u32 = 36;
 
 /// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
 const GI_SAMPLE_CAP: usize = 16_384;
+
+/// Drop the printed sums. The other flight slot's pass list is still unread.
+///
+/// A print every frame used to replace `lighting_ids` with two empty vecs.
+/// The slot that had not been collected yet then had no pass list, the
+/// lighting queries were skipped, and `pass_samples` moved once per run.
+fn roll_printed_times(times: &mut GpuTimes) {
+    let pool = times.pool;
+    let lighting_pool = times.lighting_pool;
+    let written = times.written;
+    let every = times.every;
+    let print = times.print;
+    let record = times.record;
+    let samples = std::mem::take(&mut times.samples);
+    let recorded = times.recorded;
+    let pending_world_rays = times.pending_world_rays;
+    let pending_world_relit = times.pending_world_relit;
+    let lighting_ids = std::mem::take(&mut times.lighting_ids);
+    *times = GpuTimes {
+        pool,
+        lighting_pool,
+        written,
+        every,
+        placed: true,
+        print,
+        record,
+        samples,
+        recorded,
+        pending_world_rays,
+        pending_world_relit,
+        lighting_ids,
+        ..GpuTimes::default()
+    };
+}
 
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
 fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {
@@ -8598,11 +10481,24 @@ impl Default for GpuTimes {
             lighting_frames: 0,
             lighting: [0.0; 9],
             lighting_bucket: [0.0; 12],
+            restir: [0.0; 5],
+            restir_frames: 0,
             prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
         }
     }
+}
+
+/// Run one teardown call and print how long it took, so a slow quit names
+/// the driver call that owns the time.
+fn teardown_phase(name: &str, f: impl FnOnce()) {
+    let start = Instant::now();
+    f();
+    eprintln!(
+        "vk_teardown phase={name} ms={:.2}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 #[cfg(test)]
@@ -8623,6 +10519,26 @@ mod pass_time_tests {
         let nonlight = 0.20 + 1.50 + 0.30 + 0.15 + 0.15;
         assert!((times.nonlight - nonlight).abs() < 1e-9);
         assert!((times.frame - (nonlight + 8.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_print_keeps_the_unread_slot_pass_list() {
+        let mut times = super::GpuTimes::default();
+        times.every = 1;
+        times.lighting_ids[1] = vec![3, 9, 7];
+        let _taken = std::mem::take(&mut times.lighting_ids[0]);
+        super::roll_printed_times(&mut times);
+        assert!(
+            times.lighting_ids[0].is_empty(),
+            "the slot just collected stays empty until the next record"
+        );
+        assert_eq!(
+            times.lighting_ids[1],
+            vec![3, 9, 7],
+            "the other slot's pass list is read on the next frame"
+        );
+        assert!(times.placed);
+        assert_eq!(times.every, 1);
     }
 }
 
@@ -8726,4 +10642,44 @@ mod memory_props {
         assert!(extension_listed(&listed, 1, name));
         assert!(!extension_listed(&listed, 1, b"VK_KHR_swapchain"));
     }
+}
+
+/// The device a frame was drawn on. Results from `Software` (lavapipe) prove
+/// correctness on that driver only; timings and real-GPU picture gates need `Hardware`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuKind {
+    /// `VK_PHYSICAL_DEVICE_TYPE_CPU`, e.g. lavapipe.
+    Software,
+    /// Integrated, discrete or virtual GPU.
+    Hardware,
+}
+
+impl GpuKind {
+    /// `VK_PHYSICAL_DEVICE_TYPE_*`. `4` is `CPU` (lavapipe, llvmpipe).
+    #[must_use]
+    pub fn from_vk_device_type(device_type: u32) -> Self {
+        // VK_PHYSICAL_DEVICE_TYPE_CPU = 4.
+        if device_type == 4 {
+            Self::Software
+        } else {
+            Self::Hardware
+        }
+    }
+
+    /// 1.50 ms is the 4070-at-1440p and Deck-at-800p ceiling. A software
+    /// rasterizer still needs a finite positive timestamp. It is not that score.
+    #[must_use]
+    pub fn post_ms_passes(self, value: f64, ceiling: f64) -> bool {
+        if !value.is_finite() || value <= 0.0 {
+            return false;
+        }
+        match self {
+            Self::Software => true,
+            Self::Hardware => value <= ceiling,
+        }
+    }
+}
+
+fn block_texel(format: i32) -> bool {
+    matches!(format, 141 | 145 | 146 | 157 | 158)
 }

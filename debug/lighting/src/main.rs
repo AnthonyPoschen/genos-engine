@@ -1,21 +1,71 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::assert_is_empty, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::chunks_exact_to_as_chunks, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::large_enum_variant, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::map_unwrap_or, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::trivially_copy_pass_by_ref, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unnecessary_wraps, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unwrap_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
-#![expect(clippy::wildcard_enum_match_arm, reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_sign_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::chunks_exact_to_as_chunks,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::panic, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::large_enum_variant,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::map_unwrap_or,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::too_many_lines,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unnecessary_wraps,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unwrap_used,
+    reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(lint-2026-10-14): pre-existing wildcard match. docs/LINT_RULES.md"
+)]
 
 //! Lighting debug binary. Scenes come from `debug/scenes/`. Arguments choose the
 //! scene, the checkpoint, the lighting preset, and where pictures land.
@@ -33,11 +83,15 @@ use genos_render::{identity_pose, DrawKind, FixedPart, Renderer, ScreenRect, Vie
 use genos_scene::{
     look_direction, parse_enabled, parse_menu_visible, parse_rate, update, Actions, Camera,
     DebugSettings, EventLoopSettings, Floor, FocusPolicy, FogCli, FogEnv, FogSettings,
-    FpsCounterSettings, Light, MenuSettings, ReflectionSettings, Scene, Sky, Vec3, PITCH_LIMIT,
+    FpsCounterSettings, Light, MenuSettings, ParticleCli, ParticleEnv, ParticlePreset,
+    ParticleSettings, ReflectionSettings, Scene, Sky, Vec3, PITCH_LIMIT,
 };
 use genos_scene_lib::{Entry, Kind, Lamp, Sun};
 use genos_stress::building::{Layout, LightMix};
-use genos_stress::knobs::{apply_fog_knob, apply_lighting_knob, fog_knobs, lighting_knobs};
+use genos_stress::knobs::{
+    apply_fog_knob, apply_lighting_knob, apply_particle_knob, fog_knobs, lighting_knobs,
+    particle_knobs,
+};
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
     button_panel_blocks, show_menu_tab, Action, FpsOverlay, InputPolicy, PanelBlock, PanelCheck,
@@ -91,6 +145,15 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --fog-grid WxHxS       froxel columns, rows, and slices. 0 on an axis keeps
                          the preset (GENOS_FOG_GRID)
   --fog-samples N        cell budget. 0 dispatches the whole grid (GENOS_FOG_SAMPLES)
+  --fx-preset low|medium|high
+                         particle quality knobs (GENOS_FX_PRESET)
+  --fx-max N             particle buffer budget (GENOS_FX_MAX)
+  --fx-count N           live particle cap (GENOS_FX_COUNT)
+  --fx-freeze            hold positions; skip integrate and emit (GENOS_FX_FREEZE)
+  --fx-spawn X,Y,Z       place the stage-1 emitter and turn it on
+  --lighting-direct-specular on|off
+                         Appendix B shade on pixel direct (default off)
+                         (GENOS_LIGHTING_DIRECT_SPECULAR; the argument wins)
   --surface-cache-attach-movers on|off
                          mover cache entries follow the object
                          (GENOS_LIGHTING_SURFACE_CACHE_ATTACH_MOVERS)
@@ -101,7 +164,24 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA)
   --surface-cache-ray-budget N
                          cache-round ray cap; 0 keeps the existing lists
-                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET).
+                         World mode 3 does not use this ceiling. It spends
+                         surface_cache.fill_budget every cache round
+                         (GENOS_LIGHTING_FILL_BUDGET, High 100000, 0 traces none).
+                         The other fill knobs are surface_cache.fill_* and
+                         GENOS_LIGHTING_FILL_TILE, FILL_LOD_NEAR, FILL_CELL_MAX,
+                         FILL_LEASH, FILL_LOOK_AHEAD, FILL_FAR, FILL_FAR_SHARE,
+                         FILL_OFFSCREEN_FLOOR, FILL_ERROR_TARGET, FILL_PROX_MIN,
+                         FILL_CHANGE_WEIGHT, FILL_CHECK_RATE, FILL_MAX_PICKS,
+                         FILL_LAMBDA_DECAY, FILL_WINDOW_FLOOR, FILL_CATCHUP_MAX,
+                         FILL_CHECK_SIGMA, FILL_WARMUP, FILL_RAY_CAP, FILL_FRAME_DT,
+                         FILL_SHARE, FILL_SHARE_MIN_HIT, FILL_SHARE_CAP,
+                         FILL_SHARE_PLANE, FILL_SHARE_NORMAL, FILL_SHARE_W_CAP,
+                         FILL_SHARE_COS, FILL_SHARE_CONF, FILL_SHARE_RECEIVERS,
+                         FILL_SHARE_HANDOVER.
+                         Check rays are one same-seed ray per fill_check_rate block.
+                         fill_share 1 seeds other cells in the same tile.
+                         0 turns that off. Ring is not a value here.
   --surface-cache-dormant-rays N
                          fresh rays per frame for a dormant cache entry, 0..16.
                          0 keeps one sweep in eight. 1..16 traces one new
@@ -116,7 +196,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          The scene step is 1/60. genos-stress is not this path
   --report DIR           script report (default <out>/gi/<script name>)
   --lighting-debug       print the lighting probe line (GENOS_LIGHTING_DEBUG)
-  --unfilled             show the texels view (slots with fewer than 4 sets are dim)
+  --cooked DIR           load a glTF scene from a genos-cook directory (ADR 0035).
+                         GENOS_COOKED applies only when this is omitted.
+                         Unset keeps the glTF and PNG path
+  --unfilled             show the texels view (red own mean, green seed, blue set count)
   --full-effort          preset high, unless --preset is set, and compose every frame
                          (GENOS_LIGHTING_COMPOSE_ALL)
   --denoise-launch hash|screen
@@ -126,6 +209,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --denoise-screen on|off alias of --denoise-launch (GENOS_LIGHTING_DENOISE_SCREEN)
   --headless             proof window, no panel
   --display NAME         Wayland display name. Omit it to use the session compositor.
+  --lifecycle-block-ms N stall shutdown once, for the quit-gap test.
+                         GENOS_LIFECYCLE_BLOCK_MS applies only when this is omitted
+  --lifecycle-close-early quit before the first frame. GENOS_LIFECYCLE_CLOSE_EARLY
+                         applies only when this is omitted
   --frames N             quit after N frames. The last frame PNG leaves out
                          the debug menu, the menu tab, the frame-rate plate,
                          and tool overlays
@@ -241,13 +328,46 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_lamp_pick_candidates",
     "lighting_lamp_pick_radius",
     "lighting_lamp_pick_history",
+    "lighting_restir_spatial_neighbors",
+    "lighting_restir_spatial_radius",
+    "lighting_restir_resolution_scale",
+    "lighting_restir_candidates",
     "lighting_gi_refresh",
     "lighting_budget_shift",
     "lighting_surface_cache_firefly_sigma",
     "lighting_surface_cache_ray_budget",
     "lighting_surface_cache_dormant_rays",
-    "lighting_probe_rays",
-    "lighting_probe_stale",
+    "lighting_fill_budget",
+    "lighting_fill_tile",
+    "lighting_fill_lod_near",
+    "lighting_fill_cell_max",
+    "lighting_fill_leash",
+    "lighting_fill_look_ahead",
+    "lighting_fill_far",
+    "lighting_fill_offscreen_floor",
+    "lighting_fill_error_target",
+    "lighting_fill_far_share",
+    "lighting_fill_prox_min",
+    "lighting_fill_change_weight",
+    "lighting_fill_check_rate",
+    "lighting_fill_max_picks",
+    "lighting_fill_lambda_decay",
+    "lighting_fill_window_floor",
+    "lighting_fill_catchup_max",
+    "lighting_fill_check_sigma",
+    "lighting_fill_warmup",
+    "lighting_fill_ray_cap",
+    "lighting_fill_frame_dt",
+    "lighting_fill_share",
+    "lighting_fill_share_min_hit",
+    "lighting_fill_share_cap",
+    "lighting_fill_share_plane",
+    "lighting_fill_share_normal",
+    "lighting_fill_share_w_cap",
+    "lighting_fill_share_cos",
+    "lighting_fill_share_conf",
+    "lighting_fill_share_receivers",
+    "lighting_fill_share_handover",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",
@@ -267,8 +387,8 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_surface_cache_blend",
     "fog_view",
 ];
-const VIEWS: [&str; 8] = [
-    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
+const VIEWS: [&str; 9] = [
+    "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance", "path",
 ];
 const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 
@@ -298,23 +418,37 @@ struct Options {
     check: bool,
     /// Set by `--mcp-port`. Empty means `GENOS_MCP_PORT`, then [`MCP_PORT`].
     mcp_port: Option<u16>,
+    /// `--lifecycle-block-ms`. The mirror applies when this stays empty.
+    block_ms: Option<std::time::Duration>,
+    /// `--lifecycle-close-early`. The mirror applies when this stays false.
+    close_early: bool,
     /// `--fog*`. Empty fields were omitted.
     fog_cli: FogCli,
     /// Mirrors for the fog flags this launch left empty.
     fog_env: FogEnv,
+    /// `--fx-*`. Empty fields were omitted.
+    particle_cli: ParticleCli,
+    /// Mirrors for the particle flags this launch left empty.
+    particle_env: ParticleEnv,
 }
 
 /// Loopback port for this binary. `genos-stress` and `genos-camera` stay on 8765.
 const MCP_PORT: u16 = 8766;
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("genos-lighting: {err}");
-        std::process::exit(1);
-    }
+    // Quit drops the lifecycle before `_exit`. Skip the lavapipe teardown wait.
+    genos_window::release_driver_on_process_exit();
+    let code = match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("genos-lighting: {err}");
+            1
+        }
+    };
+    genos_window::exit(code);
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<i32, String> {
     let opts = options()?;
     apply_intent(&opts)?;
     std::fs::create_dir_all(opts.out.join("shots")).map_err(|err| err.to_string())?;
@@ -340,9 +474,13 @@ fn run() -> Result<(), String> {
     )?;
     app.fog_cli = opts.fog_cli.clone();
     app.fog_env = opts.fog_env;
+    app.particle_cli = opts.particle_cli.clone();
+    app.particle_env = opts.particle_env;
     app.overlay_fog();
+    app.overlay_particles();
     if opts.check {
-        return check_all(&mut app, &opts, &mut log);
+        check_all(&mut app, &opts, &mut log)?;
+        return Ok(0);
     }
     if !app.entries.iter().any(|entry| entry.name == opts.scene) {
         return Err(format!("unknown scene {}", opts.scene));
@@ -357,7 +495,46 @@ fn run() -> Result<(), String> {
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    if first.closing {
+        return Ok(0);
+    }
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<genos_window::ThreadStop<bool>>,
+    ));
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    if let Some(stall) = opts.block_ms {
+        owner.plant_block(stall);
+    }
+    if opts.close_early || owner.window.pump().closing {
+        owner.quit(0);
+    }
+    {
+        let hold = std::sync::Arc::clone(&server_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            drop(guard.take());
+            true
+        });
+    }
+    {
+        let hold = std::sync::Arc::clone(&script_hold);
+        owner.add_stop(move || {
+            let mut guard = hold
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match guard.as_mut() {
+                Some(stop) => stop.release(),
+                None => true,
+            }
+        });
+    }
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let mut camera = Camera::opening();
     if app.entry().name != opts.scene {
         app.start_load(&opts.scene)?;
@@ -367,7 +544,10 @@ fn run() -> Result<(), String> {
     let load_world = loading_world();
     let mcp_host = genos_mcp::Host::new(app.scene().clone(), camera.clone());
     let mcp_port = opts.mcp_port.unwrap_or_else(mcp_port_from_env);
-    let mut server = Some(genos_mcp::Server::start_on(mcp_host, mcp_port)?);
+    let server = genos_mcp::Server::start_on(mcp_host, mcp_port)?;
+    *server_hold
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(server);
     let _ = writeln!(log, "mcp http://127.0.0.1:{mcp_port}/");
     let mut tools = genos_debug::Tools::new();
     tools.set_out_dir(opts.out.join("shots"));
@@ -378,12 +558,14 @@ fn run() -> Result<(), String> {
     if opts.frames.is_some() || opts.script.is_some() {
         tools.set_fixed_step(Some(STEP));
     }
-    let mut script_thread = opts.script.clone().map(|run| {
+    if let Some(run) = opts.script.clone() {
         let _ = writeln!(log, "script {}", run.script.display());
-        genos_debug::script::spawn(run)
-    });
-    if let Some(thread) = &script_thread {
-        let _ = writeln!(log, "script thread {:?}", thread.thread().id());
+        let handle = genos_debug::script::spawn(run);
+        let _ = writeln!(log, "script thread {:?}", handle.thread().id());
+        *script_hold
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(genos_window::ThreadStop::new(handle));
     }
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
@@ -434,15 +616,14 @@ fn run() -> Result<(), String> {
             }
         }
         app.overlay_fog();
+        app.overlay_particles();
         if frame.closing {
-            finish(
-                window,
-                renderer,
-                script_thread.take(),
-                server.take(),
-                tools.quit_code().is_some(),
-                tools.quit_code().unwrap_or(0),
-            );
+            let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
+            return Ok(code);
+        }
+        if frame.minimized {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            continue;
         }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
@@ -450,9 +631,7 @@ fn run() -> Result<(), String> {
         }
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
+        window.write_devices(&mut input, &gated);
         input.poll_gamepads();
         pull_menu(
             &mut app,
@@ -462,14 +641,7 @@ fn run() -> Result<(), String> {
             &mut tracked_collapsed,
             &mut tracked_tab,
         );
-        hotkeys(
-            &mut app,
-            &input,
-            &keys,
-            &mut camera,
-            &mut tools,
-            &mut renderer,
-        )?;
+        hotkeys(&mut app, &input, &keys, &mut camera, &mut tools, renderer)?;
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
         let page_keys = !camera.captured && menu_open;
@@ -522,7 +694,7 @@ fn run() -> Result<(), String> {
                 match *action {
                     Action::Slide { id, value } => slide(&mut app, id, value)?,
                     Action::Select { id, value } => {
-                        select(&mut app, &mut camera, &mut tools, &mut renderer, id, value)?;
+                        select(&mut app, &mut camera, &mut tools, renderer, id, value)?;
                     }
                     Action::Toggle { id, on } => toggle(&mut app, id, on)?,
                     Action::Press(id) => {
@@ -607,7 +779,7 @@ fn run() -> Result<(), String> {
         }
         let capture_ui = app.scene().debug.ui;
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
-            renderer: &mut renderer,
+            renderer,
             camera: &mut camera,
             host: &mut app,
         });
@@ -636,11 +808,12 @@ fn run() -> Result<(), String> {
             renderer.set_overlay_lines(&[]);
         }
         let draw_start = Instant::now();
+        renderer.set_particle_dt(dt);
         let drawn_world = if loading { &load_world } else { app.world() };
         let pixels =
             renderer.draw_with_overlay(drawn_world, &camera, &overlay, want_read, false)?;
         tools.after_draw(
-            &mut renderer,
+            renderer,
             pixels.as_deref(),
             genos_debug::FrameTiming {
                 frame_ms: real_dt as f64 * 1000.0,
@@ -648,7 +821,7 @@ fn run() -> Result<(), String> {
                 gpu_ms: None,
             },
         );
-        note_gi(&mut app, &mut renderer);
+        note_gi(&mut app, renderer);
         if last {
             if let Some(pixels) = pixels {
                 let path = opts
@@ -665,50 +838,29 @@ fn run() -> Result<(), String> {
             }
         }
         if last || tools.quit_code().is_some() {
-            finish(
-                window,
-                renderer,
-                script_thread.take(),
-                server.take(),
-                tools.quit_code().is_some(),
-                tools.quit_code().unwrap_or(0),
-            );
+            let code = script_exit_code(&script_hold, tools.quit_code().unwrap_or(0));
+            // The quit harness reads this line to know the run rendered.
+            println!("genos-lighting frames={drawn}");
+            return Ok(code);
         }
     }
 }
 
-/// Stop the script and MCP threads, then destroy the device, then the window.
-///
-/// `quitting` means `quit` was already answered, so the script thread will
-/// leave `command::call` and exit. Joining it first is required. A script
-/// still blocked on the command queue is not joined: that wait is the frame
-/// thread, and joining here would deadlock. The device is destroyed while the
-/// window is mapped, so the seat pump can answer pings during the idle.
-/// `process::exit` then has no live script thread and no Vulkan device for
-/// the driver to reclaim.
-fn finish(
-    window: Window,
-    renderer: Renderer,
-    mut script: Option<std::thread::JoinHandle<bool>>,
-    server: Option<genos_mcp::Server>,
-    quitting: bool,
+fn script_exit_code(
+    slot: &std::sync::Mutex<Option<genos_window::ThreadStop<bool>>>,
     code: i32,
-) -> ! {
-    if !quitting {
-        if let Some(script) = script.take() {
-            if script.is_finished() {
-                let _ = script.join();
-            }
-        }
+) -> i32 {
+    let mut guard = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(stop) = guard.as_mut() else {
+        return code;
+    };
+    if stop.try_join() && stop.result().copied() == Some(false) {
+        1
+    } else {
+        code
     }
-    genos_debug::script::join_then(script, || {
-        drop(server);
-        drop(renderer);
-    });
-    Renderer::clear_blocker();
-    window.clear_seat_pump();
-    drop(window);
-    std::process::exit(code);
 }
 
 fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(), String> {
@@ -716,13 +868,27 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, first.width, first.height)?;
+    if first.closing {
+        return Ok(());
+    }
+    let (renderer, permit) =
+        Renderer::open(window.display, window.surface, first.width, first.height)?;
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    if let Some(stall) = opts.block_ms {
+        owner.plant_block(stall);
+    }
+    if opts.close_early || owner.window.pump().closing {
+        owner.quit(0);
+    }
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let load_world = loading_world();
     let mut camera = Camera::opening();
     let mut passed = Vec::new();
     let mut skipped = Vec::new();
     let mut failed = Vec::new();
     let names: Vec<String> = app.entries.iter().map(|e| e.name.clone()).collect();
+    let mut checked_frames = 0u32;
     for name in &names {
         let _ = writeln!(log, "check {name}");
         eprintln!("genos-lighting: check {name}");
@@ -738,8 +904,11 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
         }
         let mut spins = 0u32;
         while app.loading() {
-            let _ = window.pump();
-            let _ = renderer.draw(&load_world, &camera, false);
+            let frame = window.pump();
+            if !frame.minimized {
+                renderer.set_particle_dt(STEP);
+                let _ = renderer.draw(&load_world, &camera, false);
+            }
             if let Err(err) = app.take_load() {
                 if gltf_scene(&app.entries, name) && gltf_bytes_absent(&err) {
                     let line = skip_line(name, &err);
@@ -769,7 +938,9 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
             let _ = window.pump();
             app.advance(STEP);
             let read = frame == 3;
+            renderer.set_particle_dt(STEP);
             pixels = renderer.draw(app.world(), &camera, read)?;
+            checked_frames += 1;
         }
         let pixels = pixels.ok_or_else(|| format!("{name}: no picture"))?;
         let (mean, spread) = picture_stats(&pixels);
@@ -794,12 +965,10 @@ fn check_all(app: &mut App, opts: &Options, log: &mut std::fs::File) -> Result<(
         eprintln!("genos-lighting: {line}");
         let _ = writeln!(log, "{line}");
     }
+    // The quit harness reads this line to know the run rendered.
+    println!("genos-lighting frames={checked_frames}");
     let summary = check_summary(&passed, &skipped, &failed);
     let _ = writeln!(log, "{summary}");
-    drop(renderer);
-    Renderer::clear_blocker();
-    window.clear_seat_pump();
-    drop(window);
     if failed.is_empty() {
         eprintln!("genos-lighting: {summary}");
         Ok(())
@@ -852,6 +1021,10 @@ struct App {
     fog_cli: FogCli,
     /// Mirrors for the fog arguments this launch left empty.
     fog_env: FogEnv,
+    /// Launch particle arguments. Reapplied over each loaded scene.
+    particle_cli: ParticleCli,
+    /// Mirrors for the particle arguments this launch left empty.
+    particle_env: ParticleEnv,
 }
 
 enum Show {
@@ -875,6 +1048,8 @@ impl App {
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
             fog_cli: FogCli::default(),
             fog_env: FogEnv::default(),
+            particle_cli: ParticleCli::default(),
+            particle_env: ParticleEnv::default(),
         })
     }
 
@@ -885,6 +1060,15 @@ impl App {
         let env = self.fog_env;
         let scene = self.scene();
         scene.fog = scene.fog.resolve(&cli, &env);
+    }
+
+    /// Arguments win. An omitted argument keeps the scene value, or the mirror
+    /// when that variable was set.
+    fn overlay_particles(&mut self) {
+        let cli = self.particle_cli.clone();
+        let env = self.particle_env;
+        let scene = self.scene();
+        scene.particles = scene.particles.resolve(&cli, &env);
     }
 
     fn entry(&self) -> &Entry {
@@ -979,6 +1163,7 @@ impl App {
         genos_window::retire(old);
         adopt_show(&mut self.show);
         self.overlay_fog();
+        self.overlay_particles();
         self.note(&format!("loaded {name}"));
     }
 }
@@ -1015,6 +1200,7 @@ impl Host for App {
             Show::Still(world) => {
                 let mut knobs = lighting_knobs(&world.scene.lighting);
                 knobs.extend(fog_knobs(&world.scene.fog));
+                knobs.extend(particle_knobs(&world.scene.particles));
                 knobs
             }
         }
@@ -1024,7 +1210,8 @@ impl Host for App {
         match &mut self.show {
             Show::Stress(stage) => Host::set_knob(stage, name, value),
             Show::Still(world) => {
-                if apply_fog_knob(&mut world.scene.fog, name, value)?
+                if apply_particle_knob(&mut world.scene.particles, name, value)?
+                    || apply_fog_knob(&mut world.scene.fog, name, value)?
                     || apply_lighting_knob(&mut world.scene.lighting, name, value)?
                 {
                     Ok(())
@@ -1060,6 +1247,7 @@ impl Host for App {
         self.scene().event_loop = event_loop;
         adopt_show(&mut self.show);
         self.overlay_fog();
+        self.overlay_particles();
         self.note(&format!("loaded {name}"));
         Ok(())
     }
@@ -1119,6 +1307,7 @@ fn loading_world() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -1133,6 +1322,15 @@ fn gltf_scene(entries: &[Entry], name: &str) -> bool {
 /// `--scene` still returns the error.
 fn gltf_bytes_absent(err: &str) -> bool {
     err.contains("Git LFS pointer") || err.contains("file not found")
+}
+
+static COOKED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+fn cooked_dir() -> Option<PathBuf> {
+    COOKED
+        .get()
+        .cloned()
+        .or_else(|| std::env::var_os("GENOS_COOKED").map(PathBuf::from))
 }
 
 fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
@@ -1197,6 +1395,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 reflections: ReflectionSettings::default(),
                 hdr: genos_scene::HdrSettings::legacy_bytes(),
                 fog: FogSettings::default(),
+                particles: ParticleSettings::default(),
                 menu: MenuSettings::default(),
             };
             if let Some(sun) = sun {
@@ -1216,9 +1415,25 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
             if std::env::var_os("GENOS_BAKE").is_none() {
                 bake.mode = genos_render::bake::BakeMode::OnLoad;
             }
-            world
-                .add_gltf_traced(&model, &identity_pose(), &bake)
-                .map_err(|err| format!("{}: bake: {err:?}", full.display()))?;
+            if let Some(dir) = cooked_dir() {
+                let report = world.add_cooked(&dir, &full, &identity_pose(), false, true);
+                for line in &report.fallback {
+                    eprintln!("genos-lighting: {line}");
+                }
+                eprintln!(
+                    "genos-lighting: cooked load {:.2} ms, texture bytes {}",
+                    report.load_ms, report.texture_bytes
+                );
+                if report.objects.is_empty() {
+                    world
+                        .add_gltf_traced(&model, &identity_pose(), &bake)
+                        .map_err(|err| format!("{}: bake: {err:?}", full.display()))?;
+                }
+            } else {
+                world
+                    .add_gltf_traced(&model, &identity_pose(), &bake)
+                    .map_err(|err| format!("{}: bake: {err:?}", full.display()))?;
+            }
             Ok(Show::Still(world))
         }
     }
@@ -1300,8 +1515,7 @@ fn jump_camera(app: &mut App, name: Option<&str>, camera: &mut Camera) -> Result
             .entry()
             .checkpoints
             .first()
-            .map(|c| c.name.clone())
-            .unwrap_or_default(),
+            .map_or_default(|c| c.name.clone()),
     };
     if chosen.is_empty() {
         return Ok(());
@@ -1427,6 +1641,7 @@ fn view_name(mode: ViewMode) -> &'static str {
         ViewMode::Depth => "depth",
         ViewMode::Texels => "texels",
         ViewMode::Variance => "variance",
+        ViewMode::Path => "path",
         ViewMode::Light => "light",
         ViewMode::Full => "full",
     }
@@ -1689,8 +1904,16 @@ fn setting_piece(
         )
         .map(Piece::Row),
         "fps" => Some(Piece::Row(fps_row(fps))),
-        "enabled" => Some(Piece::Row(reflection_check("enabled", ID_REFL_ENABLED, reflections(app).enabled))),
-        "water" => Some(Piece::Row(reflection_check("water", ID_REFL_WATER, reflections(app).water))),
+        "enabled" => Some(Piece::Row(reflection_check(
+            "enabled",
+            ID_REFL_ENABLED,
+            reflections(app).enabled,
+        ))),
+        "water" => Some(Piece::Row(reflection_check(
+            "water",
+            ID_REFL_WATER,
+            reflections(app).water,
+        ))),
         "rough_cutoff" => Some(Piece::Row(reflection_slider(
             "rough_cutoff",
             ID_REFL_ROUGH,
@@ -1739,7 +1962,10 @@ fn setting_piece(
                 genos_scene::Caustics::Image => 1.0,
                 genos_scene::Caustics::Cache => 2.0,
             },
-            ["off", "image", "cache"].into_iter().map(str::to_string).collect(),
+            ["off", "image", "cache"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         )
         .map(Piece::Row),
         "tracer" => drop_row(
@@ -1802,12 +2028,7 @@ fn setting_piece(
         "hdr_ev100" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(number_row(
-                "EV100",
-                ID_HDR_EV,
-                hdr.ev100,
-                -8.0,
-                16.0,
-                0.1,
+                "EV100", ID_HDR_EV, hdr.ev100, -8.0, 16.0, 0.1,
             )))
         }
         "hdr_compensation" => {
@@ -1824,12 +2045,7 @@ fn setting_piece(
         "hdr_iso" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(number_row(
-                "ISO",
-                ID_HDR_ISO,
-                hdr.iso,
-                50.0,
-                6400.0,
-                50.0,
+                "ISO", ID_HDR_ISO, hdr.iso, 50.0, 6400.0, 50.0,
             )))
         }
         "hdr_aperture" => {
@@ -2146,6 +2362,7 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_preset" => "Preset",
         "lighting_bounces" => "Bounce count",
         "lighting_direct" => "Direct light",
+        "lighting_direct_specular" => "Direct specular",
         "lighting_direct_refresh" => "Direct refresh frames",
         "lighting_gi_refresh" => "GI refresh frames",
         "lighting_budget_shift" => "Ray budget shift",
@@ -2197,7 +2414,14 @@ fn reflection_slider(label: &str, id: u32, value: f64, min: f64, max: f64, step:
     PanelRow {
         label: label.into(),
         buttons: Vec::new(),
-        slider: Some(PanelSlider::range(id, value, min, max, step, format!("{value}"))),
+        slider: Some(PanelSlider::range(
+            id,
+            value,
+            min,
+            max,
+            step,
+            format!("{value}"),
+        )),
         dropdown: None,
         checks: Vec::new(),
     }
@@ -2284,7 +2508,9 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
     } else if id == ID_HDR_EV {
         app.scene().hdr.set_key("ev100", &format!("{value}"))?;
     } else if id == ID_HDR_COMP {
-        app.scene().hdr.set_key("compensation", &format!("{value}"))?;
+        app.scene()
+            .hdr
+            .set_key("compensation", &format!("{value}"))?;
     } else if id == ID_HDR_ISO {
         app.scene().hdr.set_key("iso", &format!("{value}"))?;
     } else if id == ID_HDR_APERTURE {
@@ -2351,14 +2577,24 @@ fn select(
         } else {
             &["off", "software", "ray_query"]
         };
-        let key = if id == ID_REFL_CAUSTICS { "caustics" } else { "tracer" };
+        let key = if id == ID_REFL_CAUSTICS {
+            "caustics"
+        } else {
+            "tracer"
+        };
         let name = names.get(index).copied().unwrap_or(names[0]);
         app.scene().reflections.set_key(key, name)?;
     } else if id == ID_HDR_EXPOSURE {
-        let mode = ["auto", "camera", "fixed"].get(index).copied().unwrap_or("auto");
+        let mode = ["auto", "camera", "fixed"]
+            .get(index)
+            .copied()
+            .unwrap_or("auto");
         app.scene().hdr.set_key("exposure_mode", mode)?;
     } else if id == ID_HDR_DISPLAY {
-        let mode = ["agx", "aces", "legacy"].get(index).copied().unwrap_or("legacy");
+        let mode = ["agx", "aces", "legacy"]
+            .get(index)
+            .copied()
+            .unwrap_or("legacy");
         app.scene().hdr.set_key("display", mode)?;
     } else if id == ID_HDR_OUTPUT {
         let mode = ["auto", "sdr", "hdr10", "scrgb"]
@@ -2409,7 +2645,11 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
         return Ok(());
     }
     if id == ID_REFL_ENABLED || id == ID_REFL_WATER {
-        let key = if id == ID_REFL_ENABLED { "enabled" } else { "water" };
+        let key = if id == ID_REFL_ENABLED {
+            "enabled"
+        } else {
+            "water"
+        };
         app.scene()
             .reflections
             .set_key(key, if on { "on" } else { "off" })?;
@@ -2448,6 +2688,7 @@ fn view_from_name(name: &str) -> ViewMode {
         "depth" => ViewMode::Depth,
         "texels" => ViewMode::Texels,
         "variance" => ViewMode::Variance,
+        "path" => ViewMode::Path,
         _ => ViewMode::Full,
     }
 }
@@ -2556,11 +2797,14 @@ fn options() -> Result<Options, String> {
     let mut size = (1280u32, 720u32);
     let mut check = false;
     let mut mcp_port = None;
+    let mut block_ms = None;
+    let mut close_early = false;
     let mut fog_cli = FogCli::default();
+    let mut particle_cli = ParticleCli::default();
     while let Some(arg) = args.next() {
         if arg == "--help" || arg == "-h" {
             println!("{USAGE}");
-            std::process::exit(0);
+            genos_window::exit(0);
         }
         match arg.as_str() {
             "--scene" => scene = Some(need_arg(&mut args, "--scene")?),
@@ -2578,6 +2822,11 @@ fn options() -> Result<Options, String> {
             "--script" => script = Some(PathBuf::from(need_arg(&mut args, "--script")?)),
             "--report" => report = Some(PathBuf::from(need_arg(&mut args, "--report")?)),
             "--lighting-debug" => lighting_debug = true,
+            "--cooked" => {
+                COOKED
+                    .set(PathBuf::from(need_arg(&mut args, "--cooked")?))
+                    .ok();
+            }
             "--unfilled" => unfilled = true,
             "--full-effort" => full_effort = true,
             "--denoise-launch" => denoise_launch = Some(need_arg(&mut args, "--denoise-launch")?),
@@ -2629,10 +2878,19 @@ fn options() -> Result<Options, String> {
             "--mcp-port" => {
                 mcp_port = Some(parse_mcp_port(&need_arg(&mut args, "--mcp-port")?)?);
             }
+            "--lifecycle-block-ms" => {
+                block_ms = Some(genos_window::parse_block_ms(
+                    "--lifecycle-block-ms",
+                    Some(&need_arg(&mut args, "--lifecycle-block-ms")?),
+                )?);
+            }
+            "--lifecycle-close-early" => close_early = true,
             "--fog" | "--fog-density" | "--fog-height" | "--fog-thickness" | "--fog-albedo"
-            | "--fog-phase" | "--fog-gi" | "--fog-history" | "--fog-grid"
-            | "--fog-samples" => {
+            | "--fog-phase" | "--fog-gi" | "--fog-history" | "--fog-grid" | "--fog-samples" => {
                 take_fog(&mut fog_cli, &arg, &mut args)?;
+            }
+            "--fx-preset" | "--fx-max" | "--fx-count" | "--fx-freeze" | "--fx-spawn" => {
+                take_particles(&mut particle_cli, &arg, &mut args)?;
             }
             other => {
                 if let Some((flag, value)) = placed_flag(other) {
@@ -2650,6 +2908,8 @@ fn options() -> Result<Options, String> {
                     parse_menu_visible(value).map_err(|err| format!("bad --menu: {err}"))?;
                 } else if let Some(value) = other.strip_prefix("--mcp-port=") {
                     mcp_port = Some(parse_mcp_port(value)?);
+                } else if genos_window::block_ms_needs_value(other) == Some(false) {
+                    block_ms = Some(genos_window::parse_block_ms(other, None)?);
                 } else if genos_scene::reflection_flag_needs_value(other).is_some() {
                     let needs = genos_scene::reflection_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
@@ -2664,6 +2924,8 @@ fn options() -> Result<Options, String> {
                     genos_render::check_gi_metrics_arg(other, next.as_deref())?;
                 } else if genos_scene::fog_flag_needs_value(other).is_some() {
                     take_fog(&mut fog_cli, other, &mut args)?;
+                } else if genos_scene::particle_flag_needs_value(other).is_some() {
+                    take_particles(&mut particle_cli, other, &mut args)?;
                 } else if genos_render::gpu_times_flag_needs_value(other).is_some() {
                     let needs = genos_render::gpu_times_flag_needs_value(other).unwrap_or(false);
                     let next = needs.then(|| need_arg(&mut args, other)).transpose()?;
@@ -2723,8 +2985,12 @@ fn options() -> Result<Options, String> {
         size,
         check,
         mcp_port,
+        block_ms: genos_window::block_ms_mirror(block_ms),
+        close_early: genos_window::close_early_mirror(close_early),
         fog_cli: fog_cli.clone(),
         fog_env: fog_env_from_process(&fog_cli)?,
+        particle_cli: particle_cli.clone(),
+        particle_env: particle_env_from_process(&particle_cli)?,
     })
 }
 
@@ -2736,6 +3002,38 @@ fn take_fog(
     let needs = genos_scene::fog_flag_needs_value(arg).unwrap_or(false);
     let next = needs.then(|| need_arg(args, arg)).transpose()?;
     genos_scene::apply_fog_arg(cli, arg, next.as_deref())
+}
+
+fn take_particles(
+    cli: &mut ParticleCli,
+    arg: &str,
+    args: &mut impl Iterator<Item = String>,
+) -> Result<(), String> {
+    let needs = genos_scene::particle_flag_needs_value(arg).unwrap_or(false);
+    let next = needs.then(|| need_arg(args, arg)).transpose()?;
+    genos_scene::apply_particle_arg(cli, arg, next.as_deref())
+}
+
+fn particle_env_from_process(cli: &ParticleCli) -> Result<ParticleEnv, String> {
+    Ok(ParticleEnv {
+        preset: mirror_preset(cli.preset.is_some())?,
+        max_particles: mirror_count(cli.max_particles.is_some(), "GENOS_FX_MAX", "max_particles")?,
+        count: mirror_count(cli.count.is_some(), "GENOS_FX_COUNT", "count")?,
+        freeze: mirror_switch(cli.freeze.is_some(), "GENOS_FX_FREEZE")?,
+    })
+}
+
+fn mirror_preset(argument_set: bool) -> Result<Option<ParticlePreset>, String> {
+    if argument_set {
+        return Ok(None);
+    }
+    match std::env::var("GENOS_FX_PRESET") {
+        Err(_) => Ok(None),
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => ParticlePreset::parse(value.trim())
+            .map(Some)
+            .ok_or_else(|| format!("GENOS_FX_PRESET is low, medium, or high, got {value}")),
+    }
 }
 
 fn fog_env_from_process(cli: &FogCli) -> Result<FogEnv, String> {
@@ -2887,8 +3185,12 @@ mod tests {
             size: (320, 180),
             check: false,
             mcp_port: None,
+            block_ms: None,
+            close_early: false,
             fog_cli: genos_scene::FogCli::default(),
             fog_env: genos_scene::FogEnv::default(),
+            particle_cli: genos_scene::ParticleCli::default(),
+            particle_env: genos_scene::ParticleEnv::default(),
         };
         let mut camera = genos_scene::Camera::opening();
         super::place_camera(&opts, &mut camera).unwrap();
@@ -2955,11 +3257,8 @@ mod tests {
             .iter()
             .map(|choice| choice.name.as_str())
             .collect();
-        assert_eq!(
-            lamp_names,
-            ["off", "hits", "pixels", "both", "reuse"]
-        );
-        assert_eq!(lamp.value, 1.0, "high samples hits");
+        assert_eq!(lamp_names, ["off", "hits", "pixels", "both", "reuse"]);
+        assert_eq!(lamp.value, 4.0, "high uses the lamp reservoir (reuse)");
         let sliders: Vec<&str> = rows
             .iter()
             .filter(|row| row.slider.is_some())
@@ -2976,8 +3275,6 @@ mod tests {
             "Firefly sigma",
             "Ray budget",
             "Dormant rays",
-            "Screen probe rays",
-            "Probe stale frames",
             "Cache stale frames",
             "Denoiser iterations",
             "Denoiser variance",
@@ -2995,7 +3292,6 @@ mod tests {
             "Shadows",
             "GI",
             "Denoiser",
-            "Screen probes",
             "Surface light cache",
             "Attach movers",
             "Sky light",
@@ -3009,7 +3305,6 @@ mod tests {
         for name in [
             "lighting_bounces",
             "lighting_direct",
-            "lighting_probes",
             "lighting_world_cache",
             "lighting_denoise",
             "lighting_sky",
@@ -3040,15 +3335,7 @@ mod tests {
         assert!(names.contains(&"day-cycle"));
         assert!(names.contains(&"gi-1bounce"));
         assert!(names.contains(&"high"));
-        let rays = rows
-            .iter()
-            .find(|row| row.label == "Screen probe rays")
-            .unwrap()
-            .slider
-            .as_ref()
-            .unwrap();
-        assert!(rays.steps.is_empty());
-        assert_eq!(rays.step, 4.0);
+        assert!(rows.iter().all(|row| row.label != "Screen probe rays"), "removed from the menu");
         let denoise = rows
             .iter()
             .find(|row| row.label == "Denoiser iterations")
@@ -3186,17 +3473,9 @@ mod tests {
                 "Info"
             ]
         );
-        let scene = tabs
-            .tabs
-            .iter()
-            .find(|tab| tab.title == "Scene")
-            .unwrap();
+        let scene = tabs.tabs.iter().find(|tab| tab.title == "Scene").unwrap();
         assert!(matches!(scene.blocks[0], genos_ui::PanelBlock::Rows(_)));
-        let direct = tabs
-            .tabs
-            .iter()
-            .find(|tab| tab.title == "Lamps")
-            .unwrap();
+        let direct = tabs.tabs.iter().find(|tab| tab.title == "Lamps").unwrap();
         assert!(direct.blocks.iter().any(|block| matches!(
             block,
             genos_ui::PanelBlock::Section(section)
@@ -3207,7 +3486,7 @@ mod tests {
         let gi = tabs.tabs.iter().find(|tab| tab.title == "GI").unwrap();
         assert!(gi.blocks.iter().any(|block| matches!(
             block,
-            genos_ui::PanelBlock::Section(section) if section.title == "Probes" && !section.collapsed
+            genos_ui::PanelBlock::Section(section) if section.title == "Indirect" && !section.collapsed
         )));
         assert!(gi.blocks.iter().any(|block| matches!(
             block,
@@ -3381,7 +3660,11 @@ mod tests {
         .expect("push");
         assert_eq!(app.scene().menu.tab, "GI");
         assert!(
-            app.scene().menu.collapsed.iter().any(|name| name == "direct"),
+            app.scene()
+                .menu
+                .collapsed
+                .iter()
+                .any(|name| name == "direct"),
             "collapsed={:?}",
             app.scene().menu.collapsed
         );
@@ -3474,7 +3757,10 @@ mod tests {
         use std::time::{Duration, Instant};
         fn wait_ms(ms: u64) {
             let pair = (Mutex::new(()), Condvar::new());
-            let guard = pair.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = pair
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = pair.1.wait_timeout(guard, Duration::from_millis(ms));
         }
         let root = genos_scene_lib::repo_root();
@@ -3492,7 +3778,8 @@ mod tests {
             .as_ref()
             .err()
             .is_some_and(|err| super::gltf_bytes_absent(err));
-        let log = std::fs::File::create(std::env::temp_dir().join("genos-stall-load.log")).expect("log");
+        let log =
+            std::fs::File::create(std::env::temp_dir().join("genos-stall-load.log")).expect("log");
         let mut app = super::App::open(entries, root, log).expect("app");
         let meter = genos_window::StallMeter::new();
         meter.mark();
@@ -3504,10 +3791,7 @@ mod tests {
             meter.mark();
             match app.take_load() {
                 Ok(genos_debug::LoadPace::Pending) => {
-                    assert!(
-                        Instant::now() <= deadline,
-                        "scene load did not finish"
-                    );
+                    assert!(Instant::now() <= deadline, "scene load did not finish");
                     wait_ms(16);
                 }
                 Ok(genos_debug::LoadPace::Ready) => break,

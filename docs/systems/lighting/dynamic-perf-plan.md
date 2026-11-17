@@ -500,7 +500,7 @@ There is a second waste in the trace pass. Every kept hit of 7 strata (3.66M thr
 3. **Dormant probes**: `pp.w = 0` in `work.v[lighting_probe_at(i)]`.
    - Trace, direct, gather and filter already skip `pp.w < 0.5` probes (`lighting_filter.comp` 39, 69; `lighting_compose.comp` 48).
    - Their kept hits stay in memory.
-   - When a probe becomes active again, the fill mechanism (`lighting_fill_ray`, `lighting_common.glsl` 428) traces its missing strata in the same frame, as it does today for new probes.
+   - When a probe becomes active again, the old fill (`lighting_fill_ray`) is removed, so it does not trace missing strata.
    - Make sure a probe's stale strata are treated as foreign or empty, so it does not resume kept hits from frames ago. Use the S78K `until` mechanism: set `until = frame + STRATA` on wake.
 4. **Per-probe change cull** (also applies when F1-F3 are not built). Before the per-ray crossing loop, test the change spheres once per probe and stratum against a bound: the probe's position plus the maximum kept-hit distance of that stratum.
    - Store that maximum, a float per probe and stratum (8160 x 8 x 4 B = 255 KiB), when the stratum is traced (`lighting_trace.comp` 168-178).
@@ -597,7 +597,7 @@ Moving and still runs with and without `--gltf`, plus the direct and hit-light d
 
 Related: PR [#11](https://github.com/AnthonyPoschen/genos-engine/pull/11) (compose skip) and PR [#24](https://github.com/AnthonyPoschen/genos-engine/pull/24) (moving-scene / sun compose split) overlap H2 and the compose path.
 
-1. **H1: gate before reconstruction.** In `lighting_direct.comp` 139-158, a kept-hit thread loads its record and rebuilds its stratum ray (`lighting_stratum_ray`, 153) before the stratum gate at 178-184, which sends about 75 % of kept threads home. Move the `s != cur && s != cur + STRATA/2` test above the reconstruction. The `urgent && near_change` case needs `pos`, so keep it after; `urgent` is off by default (`GENOS_LIGHTING_URGENT`, `lighting_gpu.rs` 1370). Saves about 67 MB of reads and 3M ray rebuilds per frame, roughly 0.05-0.15 ms.
+1. **H1: gate before reconstruction.** Not live code. `lighting_stratum_ray` is removed, so a kept-hit thread no longer rebuilds that ray before the stratum gate. The old `lighting_direct.comp` 139-158 loaded the record and rebuilt it before the gate at 178-184, which sent about 75 % of kept threads home. The proposed move of `s != cur && s != cur + STRATA/2` above that reconstruction is closed with the function.
 2. **H2: compose feeds FXAA directly.** The frame does these copies:
    - colour image → `lighting.out` (`lighting_gpu.rs` 1382)
    - `lighting.out` → colour image (1592)

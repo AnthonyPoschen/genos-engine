@@ -1,0 +1,21 @@
+{
+  "class": "noisy-reference",
+  "detail": "room-a noise 0.014457642 spp 72064 is above 0.01; the spp cap does not accept it",
+  "adr_limit": 0.014,
+  "legacy_room_blotch_limit": 0.023,
+  "legacy_word": null,
+  "start": null,
+  "mid": null,
+  "mean": null,
+  "scene_sha256": "6ae0db79540c5431b8c3ea5e38c856888b76a875fade1b1d0bb3b8ab360ad180",
+  "settle_timeout_frames": 900,
+  "capture_wait_frames": 2,
+  "issues": [
+    {"class": "noisy-reference", "detail": "room-a noise 0.014457642 spp 72064 is above 0.01; the spp cap does not accept it"},
+    {"class": "missing-reference", "detail": "missing room-b.ref or room-b.json"},
+    {"class": "missing-capture", "detail": "no capture directory"}
+  ],
+  "notes": [
+
+  ]
+}

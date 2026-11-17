@@ -341,6 +341,9 @@ pub enum PackedDraw {
         normal_rect: [f32; 4],
         /// Alpha cutoff. 0 does not discard.
         cutoff: f32,
+        roughness: f32,
+        metallic: f32,
+        material_flags: u32,
         source: ShapeSource,
     },
     Dynamic(Vec<GpuVertex>),
@@ -582,6 +585,9 @@ fn pack_draw(
                 color_rect: [0.0; 4],
                 normal_rect: [0.0; 4],
                 cutoff: 0.0,
+                roughness: 1.0,
+                metallic: 0.0,
+                material_flags: 0,
                 source: ShapeSource::Floor {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
@@ -600,6 +606,9 @@ fn pack_draw(
                 color_rect: [0.0; 4],
                 normal_rect: [0.0; 4],
                 cutoff: 0.0,
+                roughness: 1.0,
+                metallic: 0.0,
+                material_flags: 0,
                 source: ShapeSource::Ceiling {
                     half_x: floor.half_x,
                     half_z: floor.half_z,
@@ -628,6 +637,9 @@ fn pack_draw(
                 color_rect: [0.0; 4],
                 normal_rect: [0.0; 4],
                 cutoff: 0.0,
+                roughness: 1.0,
+                metallic: 0.0,
+                material_flags: 0,
                 source: ShapeSource::Box {
                     half,
                     top: true,
@@ -653,6 +665,9 @@ fn pack_draw(
                         color_rect: [0.0; 4],
                         normal_rect: [0.0; 4],
                         cutoff: 0.0,
+                roughness: 1.0,
+                metallic: 0.0,
+                material_flags: 0,
                         source: ShapeSource::Box {
                             half: extent,
                             top: true,
@@ -671,6 +686,9 @@ fn pack_draw(
                         color_rect: [0.0; 4],
                         normal_rect: [0.0; 4],
                         cutoff: 0.0,
+                roughness: 1.0,
+                metallic: 0.0,
+                material_flags: 0,
                         source: ShapeSource::Cylinder {
                             radius,
                             height: solid.height,
@@ -695,7 +713,7 @@ fn pack_draw(
                 .then_some(1.2)
                 .unwrap_or(1.0);
             let key = shape_key_mesh(4, vertices, texcoords, shade);
-            let (color_rect, normal_rect, cutoff) = world
+            let (color_rect, normal_rect, cutoff, roughness, metallic, material_flags) = world
                 .surfaces
                 .get(surface.unwrap_or(usize::MAX))
                 .map(|s| {
@@ -703,9 +721,12 @@ fn pack_draw(
                         s.color.map(|v| v as f32),
                         s.normal.map(|v| v as f32),
                         s.cutoff,
+                        s.roughness,
+                        s.metallic,
+                        s.material_flags,
                     )
                 })
-                .unwrap_or(([0.0; 4], [0.0; 4], 0.0));
+                .unwrap_or(([0.0; 4], [0.0; 4], 0.0, 1.0, 0.0, 0));
             Some(PackedDraw::Shape {
                 key,
                 model: *pose,
@@ -714,6 +735,9 @@ fn pack_draw(
                 color_rect,
                 normal_rect,
                 cutoff,
+                roughness,
+                metallic,
+                material_flags,
                 source: ShapeSource::Mesh {
                     positions: vertices.clone(),
                     normals: normals.clone(),
@@ -750,6 +774,9 @@ fn pack_draw(
                 color_rect: [0.0; 4],
                 normal_rect: [0.0; 4],
                 cutoff: 0.0,
+                roughness: 1.0,
+                metallic: 0.0,
+                material_flags: 0,
                 source: ShapeSource::Baked(baked),
             })
         }
@@ -996,7 +1023,7 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     for word in &grid.words {
         push_u32(&mut bytes, *word);
     }
-    while bytes.len() % 16 != 0 {
+    while !bytes.len().is_multiple_of(16) {
         push_u32(&mut bytes, 0);
     }
     debug_assert!(
@@ -1964,6 +1991,7 @@ mod tests {
             reflections: genos_scene::ReflectionSettings::default(),
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             fog: genos_scene::FogSettings::default(),
+            particles: genos_scene::ParticleSettings::default(),
             menu: genos_scene::MenuSettings::default(),
         };
         let world = World::from_scene(scene);

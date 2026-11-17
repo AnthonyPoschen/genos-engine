@@ -48,6 +48,10 @@ A new tool signals intent with command-line arguments. An environment variable i
 
 The lighting debug binary (`debug/lighting`) writes screenshots, dumps, and logs under `./genos-debug/<kind>/` in the current working directory. `--out <dir>` changes that directory. It does not write those files under `$HOME`.
 
+## Lint before push
+
+Run `scripts/install-git-hooks.sh` once per clone. It installs a pre-push hook that runs `scripts/lint.sh` and leaves unrelated hook commands in place. Cloud bootstrap (`.cursor/install.sh`) runs the installer. A local hook is not enforcement: `git push --no-verify` skips it, and a clone does not have the hook until the installer runs. CI remains the authority. The baseline-growth check in `docs/LINT_RULES.md` is a proposal until Anthony confirms the label and the owner line.
+
 ## Lighting terminology
 
 `docs/lighting/GLOSSARY.md` is authoritative for lighting names. Code, settings keys, CLI flags, env mirrors, MCP names, debug-menu labels and docs use only its terms. A new concept gets an entry (a one- or two-line definition, its Role, its literature equivalents and a More-detail link) in the same PR that introduces it. If a change makes something behave differently from what its name says, rename it in that PR (or open a rename issue) and update the glossary. Public names (config keys, CLI flags, env vars, MCP tools) keep the old name as a deprecated alias that logs a warning for at least one release. Historical terms stay in the glossary's Historical section and are not reused. When evaluating an external technique, map it with the glossary's "How to compare a new technique" table. Pending renames are listed in `docs/lighting/RENAMES.md`.
@@ -82,6 +86,8 @@ Cloud agents bootstrap with `.cursor/install.sh` (see `.cursor/environment.json`
 There is no GPU on the cloud image. Vulkan is lavapipe (`VK_ICD_FILENAMES` / `VK_DRIVER_FILES` → `/usr/share/vulkan/icd.d/lvp_icd.json`). Picture and window tests need a Wayland compositor: use `tools/lighting/headless.sh` when that script is present (starts Weston `--backend=headless` and runs the given command), or start Weston the same way yourself with a private `XDG_RUNTIME_DIR`.
 
 `cargo test --workspace` on lavapipe: skip `the_first_click_locks_the_pointer_and_escape_releases_it` (needs Hyprland). These GPU picture checks disagree with lavapipe and are expected fails here: `a_camera_spin_does_not_recolor_the_wall`, `the_outside_lamp_and_the_fire_stop_at_the_corridor_wall`, and `walking_does_not_flip_the_light_between_states` in `crates/render/tests/gpu_frame.rs`, and both tests in `examples/stress/tests/picture.rs`. Timing on lavapipe means nothing; use it for correctness only.
+
+A new lighting or render picture gate uses the presented-frame helper in `crates/render/tests/gate_presented.rs` (it must read the presented image or a counter from it) and is added to `scripts/ci-gate-knockout.sh`. That script must stay green: the gate passes with its production guard on, and goes red when `GENOS_KNOCKOUT` removes that guard. Named guards live in `crates/render/src/gate.rs`.
 
 Vulkan validation: `scripts/vk-validation-gate.py` runs (genos-camera for 60 frames, then the gpu_frame suite) on lavapipe with `VK_LAYER_KHRONOS_validation`; any validation error fails it. CI runs it as the `vk-validation` job; run it locally before pushing a render change. Only device-limit VUIDs that cannot fire on the minimum spec go in `lint/vk-device-limits.txt`; API misuse is fixed, never listed.
 

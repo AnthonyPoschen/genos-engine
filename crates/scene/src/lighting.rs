@@ -82,9 +82,9 @@ pub enum LightingPreset {
     Potato,
     /// Direct light, shadows, and the time-of-day ambient curve. No GI.
     DayCycle,
-    /// One bounce of screen-probe GI. No surface cache, denoiser, or prefill.
+    /// One bounce of the world cache. No denoiser and no prefill.
     Gi1Bounce,
-    /// Probe GI, one bounce, coarse tile, refresh every other frame.
+    /// World-cache GI, one bounce, refresh every other frame.
     Low,
     /// Surface cache, two bounces, half the ray budget shift.
     Medium,
@@ -193,6 +193,19 @@ impl ShadowFilter {
     }
 }
 
+/// Spatial reservoirs the product pass merges. 0 skips spatial reuse.
+pub const RESTIR_SPATIAL_NEIGHBORS: u32 = 4;
+/// Chebyshev radius of that window, in reservoir pixels.
+pub const RESTIR_SPATIAL_RADIUS: u32 = 2;
+/// Screen pixels along one edge of a reservoir cell. 1 is full resolution.
+pub const RESTIR_RESOLUTION_SCALE: u32 = 1;
+/// Initial candidates per reservoir. Header word 9.
+pub const RESTIR_CANDIDATES: u32 = 4;
+/// 1 copies the even neighbour's spatial result onto odd reservoir pixels.
+pub const RESTIR_SPATIAL_CHECKERBOARD: u32 = 0;
+/// 1 keeps initial and temporal as two dispatches. 0 runs temporal in the
+/// initial invocation, on the sample just drawn.
+pub const RESTIR_SPLIT_PASSES: u32 = 0;
 /// Unshadowed reservoir candidates per pixel on Low. Design table, direct row.
 pub const LAMP_PICK_CANDIDATES_LOW: u32 = 2;
 /// Unshadowed reservoir candidates per pixel on Medium.
@@ -202,22 +215,22 @@ pub const LAMP_PICK_CANDIDATES_HIGH: u32 = 8;
 /// Previous-frame neighbour radius, in pixels, for Medium and High.
 /// Low stays at 0 (temporal only, one reservoir).
 pub const LAMP_PICK_SPATIAL_RADIUS: u32 = 16;
-/// Hold count written into an exact reservoir so the next quiet frame skips it.
-/// The shader constant `LIGHTING_DIRECT_HOLD` is this value.
-pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
-
 /// Which points sample point lamps instead of tracing every one.
 ///
-/// The sun is never a sample. It is traced on its own. `low`, `medium`, and
-/// `high` shade pixels from a reservoir ([`Reuse`](Self::Reuse)). `gi-1bounce`
-/// samples bounce hits and leaves pixels on the full sum. Potato and day-cycle
-/// stay [`Off`](Self::Off).
+/// The sun is never a sample. It is traced on its own. With `restir_di` on,
+/// every preset shades screen pixels from the ReSTIR reservoir, including
+/// [`Hits`](Self::Hits) (`gi-1bounce`) and [`Off`](Self::Off) (potato and
+/// day-cycle). A quiet view does not hold those pixels off the reservoir.
+/// `gi-1bounce` still samples bounce hits. The labelled exact path is
+/// `restir_di` off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LampPickMode {
-    /// Every lamp. Potato and day-cycle.
+    /// Every lamp on the labelled exact path. Potato and day-cycle. With
+    /// `restir_di` on, screen pixels still shade the reservoir.
     Off = 0,
-    /// Bounce hits, probe fills, and cache-ray hits. Pixels stay exact.
+    /// Bounce hits, probe fills, and cache-ray hits. `gi-1bounce`. With
+    /// `restir_di` on, screen pixels shade the reservoir, not the full sum.
     Hits = 1,
     /// Primary pixels only. No previous frame. Diagnostic.
     Pixels = 2,
@@ -255,7 +268,8 @@ impl LampPickMode {
 ///
 /// `rays` is the shadow-ray count (samples per shaded point). `candidates` is
 /// the unshadowed reservoir fill. They are not the same knob: a candidate is
-/// not a ray. `direct.max_lights` stays a hard cap and does not read these.
+/// not a ray. `direct.max_lights` caps the labelled exact walk and the hit
+/// picker. The production reservoir does not read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LampPickSettings {
     pub mode: LampPickMode,
@@ -310,12 +324,19 @@ impl LampPickSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectSettings {
     pub enabled: bool,
-    /// Lamps shaded per pixel. 0 means every lamp that reaches the point.
+    /// Lamps walked on the labelled exact path and the hit picker. 0 means
+    /// every lamp that reaches the point. Production ReSTIR samples the
+    /// reservoir and does not read this.
     pub max_lights: u32,
     /// Recompute every Nth frame. 1 is every frame. Older frames reuse the stored direct.
     pub refresh_frames: u32,
     /// Pixel step. 1 lights every pixel. 2 lights every other pixel; compose copies it across.
     pub resolution_scale: u32,
+    /// Direct light uses the Appendix B mix (diffuse `base × (1 − metallic) / π`
+    /// scaled by `1 − F`, plus the GGX lobe). Off keeps the Lambert weight
+    /// `albedo * 0.254647909` on the summed irradiance. Off until the 4070
+    /// direct-pass cost is measured.
+    pub specular: bool,
 }
 
 /// Traced shadows. They share the direct dispatch; turning them off skips the
@@ -472,6 +493,122 @@ pub struct AmbientSettings {
     pub dusk_intensity: f32,
 }
 
+/// Always-on fill (stages F2, F3, and F4a). Every cache round spends `budget` rays.
+///
+/// Keep [`FillSettings::high`] in step with `Tunables::high` in `genos-fill-ref`.
+/// F3 schedules one same-seed check ray per `check_rate` block and water-fills
+/// the rest of the budget by priority. F4a seeds other cells in the same screen
+/// tile. The seed is low confidence. It does not add a ray.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FillSettings {
+    /// Rays traced in one cache round. High starts at 100_000. `0` traces none.
+    pub budget: u32,
+    /// Screen tile, in pixels. One pick per tile that has a surface.
+    pub tile: u32,
+    /// Metres. Level 0 is this size out to `lod_near`. The world cell is the source.
+    pub lod_near: f32,
+    /// Coarsest cell. Doubling stops here and that size runs out to `far`.
+    pub cell_max: f32,
+    /// Drop radius is this times the create radius. Greater than 1 holds the boundary.
+    pub leash_scale: f32,
+    /// Seconds of player velocity the create centre leads the player by.
+    pub look_ahead: f32,
+    /// Clipmap extent, metres. Cells past this are dropped.
+    pub far: f32,
+    /// Share of `budget` reserved as the far bin of the off-screen rays.
+    pub far_share: f32,
+    /// Share of `budget` the screen cannot take. The rest of the round is off-screen too.
+    pub offscreen_floor: f32,
+    /// A cell is sufficient when its standard error over the mean is below this.
+    pub error_target: f32,
+    /// Metres. Closeness is `1 / max(distance, prox_min)`.
+    pub prox_min: f32,
+    /// Weight of the measured-change term.
+    pub change_weight: f32,
+    /// Cells per check block. 9 is one same-seed ray in each 3×3 block.
+    pub check_rate: u32,
+    /// Most fill rays one cell takes in a round.
+    pub max_picks: u32,
+    /// Per-frame multiply on a lambda that was not re-measured.
+    pub lambda_decay: f32,
+    /// Fraction of the ray history kept when lambda is 1.
+    pub window_floor: f32,
+    /// Highest blend weight the shortened window may use.
+    pub catchup_max: f32,
+    /// Noise subtracted, times two, from a check ray's relative delta.
+    pub check_sigma: f32,
+    /// Rays of plain mean before the MSME catch-up.
+    pub warmup_rays: u32,
+    /// Averaging window, in rays.
+    pub ray_cap: u32,
+    /// Seconds. The shader's look offset uses this when it has no frame delta.
+    pub frame_dt: f32,
+    /// 0 off, 1 in-tile. A ring value is rejected: that spread is not this stage.
+    pub share: u32,
+    /// Metres. A nearer hit stays on the origin cell.
+    pub share_min_hit: f32,
+    /// Own paths after which a cell stops taking a shared seed.
+    pub share_cap: u32,
+    /// Relative depth of the same-surface plane test.
+    pub share_plane: f32,
+    /// Minimum normal dot of the same-surface test.
+    pub share_normal: f32,
+    /// Highest reconnection weight written into a neighbour seed.
+    pub share_w_cap: f32,
+    /// Cosine floor in the reconnection weight.
+    pub share_cos: f32,
+    /// Confidence of the shared seed. `lighting_sc_set_seed` clamps it to 0.05..1.
+    pub share_conf: f32,
+    /// Distinct cells in the tile one sample may seed.
+    pub share_receivers: u32,
+    /// Own rays after which a fill seed's display weight is 0. High's default
+    /// is `warmup_rays`. Other seeds keep the 16-set handover. The ray cap
+    /// does not move.
+    pub share_handover: u32,
+}
+
+impl FillSettings {
+    #[must_use]
+    pub fn high() -> Self {
+        Self {
+            budget: 100_000,
+            tile: 8,
+            lod_near: 8.0,
+            cell_max: 4.0,
+            leash_scale: 1.5,
+            look_ahead: 0.5,
+            far: 200.0,
+            far_share: 0.05,
+            offscreen_floor: 0.25,
+            error_target: 0.03,
+            prox_min: 0.5,
+            change_weight: 1.0,
+            check_rate: 9,
+            max_picks: 4,
+            lambda_decay: 0.8,
+            window_floor: 0.25,
+            catchup_max: 0.5,
+            check_sigma: 0.0,
+            warmup_rays: 16,
+            ray_cap: 512,
+            frame_dt: 1.0 / 60.0,
+            share: 0,
+            share_min_hit: 2.0,
+            share_cap: 32,
+            share_plane: 0.02,
+            share_normal: 0.99,
+            share_w_cap: 2.0,
+            share_cos: 0.05,
+            share_conf: 0.25,
+            share_receivers: 3,
+            share_handover: 16,
+        }
+    }
+}
+
+/// Work-buffer ray slots (`LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS`).
+const FILL_BUDGET_MAX: u32 = 1_572_864;
+
 /// Knobs of the surface light cache. The world cache is this same cache.
 ///
 /// A cache entry is one hashed surface patch. `slot` is only its storage index.
@@ -494,12 +631,179 @@ pub struct SurfaceCacheSettings {
     /// update. `0` leaves that `0.1` floor and still clamps. The hold path
     /// does not read this.
     pub firefly_sigma: f32,
-    /// Cap on rays dispatched in one cache round. `0` keeps the existing lists.
+    /// Cap on rays dispatched in one cache round for modes other than the world
+    /// cache. `0` keeps those lists. World mode 3 spends `fill.budget` instead.
     pub ray_budget: u32,
     /// Fresh rays per frame for a dormant cache entry, a whole number from 0 to 16.
     /// `0` keeps one sweep in eight. `1` through `16` trace one new 16-ray entry
     /// every `ceil(16 / rays)` frames, which is that many rays per frame.
     pub dormant_rays: u32,
+    /// Key `surface_cache.sh_cells` (ADR 0039 stage 2). On for High and Medium.
+    /// Off for Low and for presets with no world cache. The three product bits
+    /// below do nothing unless this is on. 25 cm world
+    /// cells keep a colour SH-L1 of the light their relight rays bring in (the
+    /// same rays, no new ones). Cells stay keyed by the dominant axis. The
+    /// screen and seed read blends the eight corners at the true normal. The
+    /// corner weight is the trilinear weight times the facing dot. Equal stored
+    /// normals cancel that dot. A
+    /// corner on the far side of a thin wall, or more than half a cell off the
+    /// query plane, is left out. An axis-aligned ray hit still tilts the one
+    /// owning cell. The read does not allocate. An empty slant keeps the
+    /// probes. Off is today's per-axis read. Forces `sc_flags` bit 23.
+    pub sh_cells: bool,
+    /// Key `surface_cache.sh_texel_detail` (ADR 0039 stage 3). On for High and
+    /// Medium. Off for Low and for presets with no world cache. The knob stays.
+    /// An empty fine world texel takes its first light from the trilinear
+    /// neighbour read, at the texel's true normal. The value is a
+    /// low-confidence seed, not an own sample. The detail mark is a negative
+    /// confidence. Sun word z is not that mark. A lamp change drops the seed,
+    /// and an empty neighbour read does not keep a marked seed on screen. The
+    /// cell is not written. An empty fine texel this setting covers does not
+    /// take resample or the hit patch, even when the neighbour read accepts
+    /// nothing. The probe seed still runs for that miss. Those two stay when
+    /// the texel is not a detail candidate, including SH cells on with this
+    /// setting off. The compose parent walk is gone. Ray hits still call
+    /// `lighting_sc_parent`. A mover is not seeded. With this setting on, a mover shows the
+    /// world-cell read at its current world position and true normal, claim
+    /// false, and skips the probe irradiance read when that read accepts a
+    /// corner. Detail off still has mover trust 0 and shows the probes. A slanted
+    /// pixel shows the same read and does not run those writers. A pixel whose
+    /// displayed indirect is
+    /// this read does not read screen-probe irradiance. Requires `sh_cells`;
+    /// on without it does nothing. Head 3.w bit 17.
+    pub sh_texel_detail: bool,
+    /// Key `surface_cache.sh_texel_ray_cut` (ADR 0039 stage 4). On for High and
+    /// Medium. Off for Low and for presets with no world cache. The knob stays.
+    /// A fine world texel skips its own rays when the live 25 cm neighbour read
+    /// is complete and the accepted corners agree within the existing sparse
+    /// luminance ratio. The texel's own samples, not its seed, are what is
+    /// compared with that read. No own samples means the cell is the estimate.
+    /// A missing, empty, stale, back-facing, or off-plane corner, a corner
+    /// split past that ratio, a stale texel, a settling lamp, a nearby move,
+    /// and an object-local texel keep their rays. A 25 cm cell is never skipped.
+    /// The read does not write the cell. Requires `sh_texel_detail`; on without
+    /// it does nothing. Head 3.w bit 18.
+    pub sh_texel_ray_cut: bool,
+    /// Key `surface_cache.sh_probe_retire`. Deprecated alias. The passes are
+    /// removed, so the key parses, warns once, and does not schedule. Head 3.w
+    /// bit 19 stays in the change block and is not a dispatch.
+    pub sh_probe_retire: bool,
+    /// Drain check significance, in standard errors (ADR 0039 stage 1).
+    ///
+    /// Each round sums the mature 25 cm cells' new sample luminance and their
+    /// held luminance. A gap above 1 % between the sums keeps the cache
+    /// settling (each cell takes its new sample whole), so a lamp change drains
+    /// fast. In a noisy scene a few rays' noise alone moves the sums by more
+    /// than 1 %, so the check also needs the gap to exceed this many standard
+    /// errors of the round's own per-cell differences. `0` drops that test (the
+    /// 1 % gap alone, as before).
+    pub drain_sigma: f32,
+    /// Stage F2 scheduler. World mode 3 spends `fill.budget` every cache round.
+    pub fill: FillSettings,
+}
+
+/// Surface cache switches the renderer uses when nothing sets `sc_flags`
+/// (`lighting_cache.glsl` lighting_sc_flags).
+pub const LIGHTING_DEFAULT_SC_FLAGS: u32 = 6_007_050;
+
+/// Debug isolate toggle bits (`experiments.toggles`): attribute a change to
+/// exactly one component.
+pub const LIGHTING_TOGGLE_FREEZE_CACHE: u32 = 1;
+pub const LIGHTING_TOGGLE_DIRECT_ONLY: u32 = 2;
+pub const LIGHTING_TOGGLE_BOUNCE_ONLY: u32 = 4;
+pub const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
+/// Cache-only view (ADR 0039 stage 0/2): every pixel shows the light of the
+/// 25 cm world cells at its point, with no texels and no probes, so the
+/// cells' own blotch can be scored against the path-traced reference.
+pub const LIGHTING_TOGGLE_CELLS_ONLY: u32 = 16;
+const LIGHTING_TOGGLE_NAMES: [(&str, u32); 5] = [
+    ("freeze_cache", LIGHTING_TOGGLE_FREEZE_CACHE),
+    ("direct_only", LIGHTING_TOGGLE_DIRECT_ONLY),
+    ("bounce_only", LIGHTING_TOGGLE_BOUNCE_ONLY),
+    ("freeze_probes", LIGHTING_TOGGLE_FREEZE_PROBES),
+    ("cells_only", LIGHTING_TOGGLE_CELLS_ONLY),
+];
+
+/// Experiment and debug knobs of the lighting frame. Every preset uses the
+/// defaults, so they never change a preset's picture. All apply on the next
+/// frame without a rebuild.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightingExperimentSettings {
+    /// Key `cache_async`. Light cache rounds run on the async compute queue,
+    /// at most one in flight. Off keeps them in the frame. A failed async
+    /// submit turns it off for the rest of the run.
+    pub cache_async: bool,
+    /// Key `cache_hz`. Light cache rounds per second of wall time. `0` runs
+    /// one every frame.
+    pub cache_hz: f32,
+    /// Key `cache_picks`. Light cache rays take the weighted lamp pick.
+    pub cache_picks: bool,
+    /// Key `fill`. A pixel with no lit probe reads its lit neighbours.
+    pub fill: bool,
+    /// Key `young_only`. Once a probe-path scene's light has held a full
+    /// sweep, rounds relight young patches only. The surface cache ignores it.
+    pub young_only: bool,
+    /// Key `world_cap`. Frames a world cell (mode 2) or ray sets a surface
+    /// cache texel (mode 3) averages, 1 to 999. `0` keeps the mode's default
+    /// (32 for mode 2, 64 for mode 3).
+    pub world_cap: u32,
+    /// Key `sc_settle`. Surface cache: frames still before the debug tools
+    /// call the picture settled. `0` uses the change counter.
+    pub sc_settle: u32,
+    /// Key `sc_flags`. Surface cache switch bits (`lighting_cache.glsl`).
+    /// `surface_cache.blend` still forces bits 20 and 30.
+    pub sc_flags: u32,
+    /// Key `toggles`. Debug isolate words, comma separated: `freeze_cache`,
+    /// `direct_only`, `bounce_only`, `freeze_probes`, `cells_only`, or `none`.
+    pub toggles: u32,
+}
+
+impl Default for LightingExperimentSettings {
+    fn default() -> Self {
+        Self {
+            cache_async: false,
+            cache_hz: 0.0,
+            cache_picks: false,
+            fill: true,
+            young_only: true,
+            world_cap: 0,
+            sc_settle: 0,
+            sc_flags: LIGHTING_DEFAULT_SC_FLAGS,
+            toggles: 0,
+        }
+    }
+}
+
+/// Toggle words to bits. Unknown words fail.
+pub fn parse_lighting_toggles(text: &str) -> Result<u32, String> {
+    let mut bits = 0;
+    for word in text
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|w| !w.is_empty())
+    {
+        if word == "none" {
+            continue;
+        }
+        bits |= LIGHTING_TOGGLE_NAMES
+            .iter()
+            .find(|(name, _)| *name == word)
+            .map(|(_, bit)| *bit)
+            .ok_or_else(|| format!("unknown lighting toggle {word}"))?;
+    }
+    Ok(bits)
+}
+
+fn toggles_text(bits: u32) -> String {
+    let words: Vec<&str> = LIGHTING_TOGGLE_NAMES
+        .iter()
+        .filter(|(_, bit)| bits & bit != 0)
+        .map(|(name, _)| *name)
+        .collect();
+    if words.is_empty() {
+        "none".into()
+    } else {
+        words.join(",")
+    }
 }
 
 /// Everything the lighting frame reads. PartialEq so a live edit reallocates
@@ -520,13 +824,41 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
-    /// Weighted lamp picking. `low`, `medium`, and `high` shade each pixel from
-    /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
-    /// Potato and day-cycle trace every lamp.
+    /// Weighted lamp picking for hits and for the noise-gate sample.
+    /// Production screen pixels use [`Self::restir_di`].
     pub lamp_pick: LampPickSettings,
+    /// Screen-pixel ReSTIR DI. On in every preset. Off is the labelled exact
+    /// sum for a pixel mode that used to sample. Mode off already sums.
+    pub restir_di: bool,
+    /// Spatial reservoirs merged per pixel. 0 skips the spatial pass. 1..=16.
+    pub restir_spatial_neighbors: u32,
+    /// Chebyshev radius of that window, in reservoir pixels. 0..=8.
+    pub restir_spatial_radius: u32,
+    /// Screen pixels along one edge of a reservoir cell. 1 is one reservoir
+    /// per pixel. 2 is one reservoir per 2×2. Each screen pixel still traces
+    /// its own shadow ray.
+    pub restir_resolution_scale: u32,
+    /// Initial candidates per reservoir. 1..=32. The header word the shader reads.
+    pub restir_candidates: u32,
+    /// 1 shades odd reservoir pixels with the even neighbour's spatial sample.
+    pub restir_spatial_checkerboard: u32,
+    /// 1 keeps initial and temporal as two dispatches so each GPU stamp is one
+    /// pass. 0 runs temporal in the initial invocation.
+    pub restir_split_passes: u32,
+    /// Experiment and debug knobs. Defaults in every preset.
+    pub experiments: LightingExperimentSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
     pub time_of_day: f32,
+}
+
+/// High and Medium keep the directional product. Low and the presets with no
+/// world cache do not. The knobs stay, so a later `set_key` can turn a bit back on.
+fn clear_sh_product(cache: &mut SurfaceCacheSettings) {
+    cache.sh_cells = false;
+    cache.sh_texel_detail = false;
+    cache.sh_texel_ray_cut = false;
+    cache.sh_probe_retire = false;
 }
 
 impl Default for LightingSettings {
@@ -541,13 +873,16 @@ impl LightingSettings {
         s.preset = preset;
         match preset {
             LightingPreset::High => {
-                s.lamp_pick =
-                    LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_SPATIAL_RADIUS);
+                s.lamp_pick = LampPickSettings::reservoir(
+                    LAMP_PICK_CANDIDATES_HIGH,
+                    LAMP_PICK_SPATIAL_RADIUS,
+                );
                 // Picture wavelet. The other presets keep the hash launch
                 // stored in `high_defaults`.
                 s.denoiser.screen = true;
             }
             LightingPreset::DayCycle => {
+                clear_sh_product(&mut s.surface_cache);
                 s.gi.enabled = false;
                 s.bounce.count = 0;
                 s.probes.enabled = false;
@@ -568,14 +903,18 @@ impl LightingSettings {
             }
             LightingPreset::Gi1Bounce => {
                 s.bounce.count = 1;
+                s.probes.enabled = false;
                 s.probes.rays = 64;
-                s.world_cache.enabled = false;
+                s.world_cache.enabled = true;
+                // One bounce reads the world cache. The directional product
+                // stays a High and Medium default.
+                clear_sh_product(&mut s.surface_cache);
                 s.denoiser.enabled = false;
                 s.prefill = false;
                 s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Potato => {
-                s.direct.max_lights = 8;
+                clear_sh_product(&mut s.surface_cache);
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -590,16 +929,21 @@ impl LightingSettings {
                 s.ambient.intensity = 0.65;
             }
             LightingPreset::Low => {
-                s.direct.max_lights = 4;
+                // ADR 0039 open question 2: Low does not turn the directional
+                // product on until a 1060 measurement exists. Screen-probe
+                // passes are gone on every preset. The knobs can still turn
+                // the bits on.
+                clear_sh_product(&mut s.surface_cache);
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
+                s.probes.enabled = false;
                 s.probes.rays = 16;
                 s.probes.tile = 32;
                 s.probes.refresh_frames = 2;
-                s.world_cache.enabled = false;
+                s.world_cache.enabled = true;
                 s.denoiser.iterations = 1;
-                // The filter does not run (no surface cache). Adaptive failed
-                // the 4070 picture bar (S79), so it stays off.
+                // Adaptive failed the 4070 picture bar (S79), so it stays off.
+                // Bounce 1 still runs the world-cache filter.
                 s.denoiser.adaptive = false;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
@@ -607,9 +951,12 @@ impl LightingSettings {
                 s.ambient.mode = AmbientMode::Day;
                 s.ambient.intensity = 0.35;
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
+                s.surface_cache.fill.budget = 25_000;
+                s.surface_cache.fill.tile = 32;
             }
             LightingPreset::Medium => {
-                s.direct.max_lights = 8;
+                // High's directional product stays on: SH cells, texel detail,
+                // the ray cut, and probe retire.
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
@@ -622,6 +969,8 @@ impl LightingSettings {
                     LAMP_PICK_CANDIDATES_MEDIUM,
                     LAMP_PICK_SPATIAL_RADIUS,
                 );
+                s.surface_cache.fill.budget = 50_000;
+                s.surface_cache.fill.tile = 16;
             }
         }
         s.sanitize();
@@ -636,6 +985,7 @@ impl LightingSettings {
                 max_lights: 0,
                 refresh_frames: 1,
                 resolution_scale: 1,
+                specular: false,
             },
             shadows: ShadowSettings {
                 enabled: true,
@@ -655,12 +1005,18 @@ impl LightingSettings {
                 firefly_sigma: 8.0,
                 ray_budget: 0,
                 dormant_rays: 0,
+                sh_cells: true,
+                sh_texel_detail: true,
+                sh_texel_ray_cut: true,
+                sh_probe_retire: true,
+                drain_sigma: 4.0,
+                fill: FillSettings::high(),
             },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
             },
             probes: ProbeSettings {
-                enabled: true,
+                enabled: false,
                 rays: 64,
                 tile: 0,
                 refresh_frames: 1,
@@ -701,6 +1057,14 @@ impl LightingSettings {
                 dusk_intensity: 0.40,
             },
             lamp_pick: LampPickSettings::default(),
+            restir_di: true,
+            restir_spatial_neighbors: RESTIR_SPATIAL_NEIGHBORS,
+            restir_spatial_radius: RESTIR_SPATIAL_RADIUS,
+            restir_resolution_scale: RESTIR_RESOLUTION_SCALE,
+            restir_candidates: RESTIR_CANDIDATES,
+            restir_spatial_checkerboard: RESTIR_SPATIAL_CHECKERBOARD,
+            restir_split_passes: RESTIR_SPLIT_PASSES,
+            experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }
     }
@@ -719,8 +1083,84 @@ impl LightingSettings {
             8.0
         };
         self.surface_cache.dormant_rays = self.surface_cache.dormant_rays.min(16);
+        self.surface_cache.drain_sigma = if self.surface_cache.drain_sigma.is_finite() {
+            self.surface_cache.drain_sigma.max(0.0)
+        } else {
+            4.0
+        };
+        let fill = &mut self.surface_cache.fill;
+        fill.budget = fill.budget.min(FILL_BUDGET_MAX);
+        fill.tile = fill.tile.clamp(1, 64);
+        fill.lod_near = finite_pos(fill.lod_near, 8.0);
+        fill.cell_max = finite_pos(fill.cell_max, 4.0).max(0.25);
+        fill.leash_scale = finite_pos(fill.leash_scale, 1.5).max(1.0);
+        fill.look_ahead = if fill.look_ahead.is_finite() {
+            fill.look_ahead.max(0.0)
+        } else {
+            0.5
+        };
+        fill.far = finite_pos(fill.far, 200.0);
+        fill.far_share = finite_unit(fill.far_share, 0.05);
+        fill.offscreen_floor = finite_unit(fill.offscreen_floor, 0.25);
+        fill.error_target = finite_pos(fill.error_target, 0.03);
+        fill.prox_min = finite_pos(fill.prox_min, 0.5);
+        fill.change_weight = if fill.change_weight.is_finite() {
+            fill.change_weight.max(0.0)
+        } else {
+            1.0
+        };
+        fill.check_rate = fill.check_rate.max(1);
+        fill.max_picks = fill.max_picks.clamp(1, 8);
+        fill.lambda_decay = if fill.lambda_decay.is_finite() {
+            fill.lambda_decay.clamp(0.0, 1.0)
+        } else {
+            0.8
+        };
+        fill.window_floor = if fill.window_floor.is_finite() {
+            fill.window_floor.clamp(0.0, 1.0)
+        } else {
+            0.25
+        };
+        fill.catchup_max = if fill.catchup_max.is_finite() {
+            fill.catchup_max.clamp(0.0, 1.0)
+        } else {
+            0.5
+        };
+        fill.check_sigma = if fill.check_sigma.is_finite() {
+            fill.check_sigma.max(0.0)
+        } else {
+            0.0
+        };
+        fill.warmup_rays = fill.warmup_rays.max(1);
+        fill.ray_cap = fill.ray_cap.max(fill.warmup_rays);
+        fill.frame_dt = finite_pos(fill.frame_dt, 1.0 / 60.0);
+        fill.share = u32::from(fill.share == 1);
+        fill.share_min_hit = finite_pos(fill.share_min_hit, 2.0);
+        fill.share_cap = fill.share_cap.clamp(1, 4096);
+        fill.share_plane = finite_pos(fill.share_plane, 0.02);
+        fill.share_normal = if fill.share_normal.is_finite() {
+            fill.share_normal.clamp(0.0, 1.0)
+        } else {
+            0.99
+        };
+        fill.share_w_cap = finite_pos(fill.share_w_cap, 2.0);
+        fill.share_cos = if fill.share_cos.is_finite() {
+            fill.share_cos.clamp(1.0e-3, 1.0)
+        } else {
+            0.05
+        };
+        fill.share_conf = if fill.share_conf.is_finite() {
+            fill.share_conf.clamp(0.05, 1.0)
+        } else {
+            0.25
+        };
+        fill.share_receivers = fill.share_receivers.min(8);
+        fill.share_handover = fill.share_handover.max(1);
         if let Some(mode) = self.gi.world_mode {
-            self.gi.world_mode = Some(mode.min(3));
+            // Mode 2 pushed screen-probe irradiance into world patches.
+            // That pass is removed, so the stored mode becomes the surface cache.
+            let mode = if mode == 2 { 3 } else { mode.min(3) };
+            self.gi.world_mode = Some(mode);
         }
         if self.probes.rays != 0 {
             self.probes.rays = self.probes.rays.clamp(4, 64);
@@ -758,18 +1198,29 @@ impl LightingSettings {
         self.lamp_pick.candidates = self.lamp_pick.candidates.clamp(1, 32);
         self.lamp_pick.rays = self.lamp_pick.rays.clamp(1, 4);
         self.lamp_pick.radius = self.lamp_pick.radius.min(64);
+        self.experiments.cache_hz = if self.experiments.cache_hz.is_finite() {
+            self.experiments.cache_hz.max(0.0)
+        } else {
+            0.0
+        };
+        self.experiments.world_cap = self.experiments.world_cap.min(999);
         self.lamp_pick.history = self.lamp_pick.history.clamp(1, 64);
+        self.restir_spatial_neighbors = self.restir_spatial_neighbors.min(16);
+        self.restir_spatial_radius = self.restir_spatial_radius.min(8);
+        self.restir_resolution_scale = self.restir_resolution_scale.clamp(1, 4);
+        self.restir_candidates = self.restir_candidates.clamp(1, 32);
+        self.restir_spatial_checkerboard = u32::from(self.restir_spatial_checkerboard != 0);
+        self.restir_split_passes = u32::from(self.restir_split_passes != 0);
     }
 
-    /// World mode the shaders see. A forced mode wins once cache-to-cache is
-    /// allowed. Bounce 0 and 1 stay on the probe path (mode 0): the surface
-    /// cache is the extra bounce, so it is not live until bounce 2.
+    /// World mode the shaders see. Bounce 0 has no GI buffers. A world cache
+    /// from bounce 1 up is mode 3. Mode 2 (screen-probe push) is removed.
     pub fn world_mode(&self) -> u32 {
-        if !self.gi.enabled || self.bounce.count < 2 {
+        if !self.gi.enabled || self.bounce.count == 0 {
             return 0;
         }
         if let Some(mode) = self.gi.world_mode {
-            return mode;
+            return if mode == 2 { 3 } else { mode };
         }
         if self.world_cache.enabled {
             3
@@ -780,44 +1231,40 @@ impl LightingSettings {
 
     /// GI dispatches. Bounce 0 is direct light and flat ambient, so this is false.
     pub fn gi_passes(&self) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled && self.bounce.count > 0 && self.world_cache.enabled
     }
 
     /// The million-slot cache and its key table. Freed when GI is off or the
     /// bounce count does not use it.
     pub fn allocates_cache(&self) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled && self.bounce.count > 0 && self.world_cache.enabled
     }
 
-    /// Probe and cache-ray work buffer. Freed when bounce 0 skips GI.
+    /// Screen-probe work buffers are removed. The name stays so callers compile.
     pub fn allocates_probe_work(&self) -> bool {
-        self.gi.enabled && self.bounce.count > 0 && self.probes.enabled
+        false
     }
 
     pub fn direct_this_frame(&self, frame: u32) -> bool {
         self.direct.enabled && frame_due(frame, self.direct.refresh_frames)
     }
 
-    pub fn probes_this_frame(&self, frame: u32) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && self.probes.enabled
-            && frame_due(frame, self.probes.refresh_frames)
+    /// Screen-probe passes are removed. The key still parses and does not schedule.
+    pub fn probes_this_frame(&self, _frame: u32) -> bool {
+        false
     }
 
-    /// Surface-cache round. Recorded from bounce 2 up, where cache-to-cache runs.
+    /// Surface-cache round. Bounce 1 relights cells. Bounce 2 and above also
+    /// read the cache from a ray hit (`lighting_bounce_ok`).
     pub fn cache_round_this_frame(&self, frame: u32) -> bool {
         self.gi.enabled
-            && self.bounce.count >= 2
-            && (self.world_cache.enabled || self.probes.enabled)
+            && self.bounce.count >= 1
+            && self.world_cache.enabled
             && frame_due(frame, self.gi.refresh_frames)
     }
 
-    /// Cache-ray dispatches (cache-to-cache). Not recorded at bounce 0 or 1.
+    /// Cache-ray dispatches. Recorded from bounce 1 when the world cache is on.
+    /// Bounce 2 and above also let a hit read the cache (`lighting_bounce_ok`).
     pub fn cache_rays_this_frame(&self, frame: u32) -> bool {
         self.cache_round_this_frame(frame)
     }
@@ -847,7 +1294,7 @@ impl LightingSettings {
         self.gi.refresh_frames = 1;
         self.gi.budget_shift = 0;
         self.bounce.count = LIGHTING_BOUNCES_UNLIMITED;
-        self.probes.enabled = true;
+        self.probes.enabled = false;
         self.probes.rays = 64;
         self.probes.tile = 0;
         self.probes.refresh_frames = 1;
@@ -1009,6 +1456,7 @@ impl LightingSettings {
         let _ = writeln!(out, "direct_lights={}", self.direct.max_lights);
         let _ = writeln!(out, "direct_refresh={}", self.direct.refresh_frames);
         let _ = writeln!(out, "direct_scale={}", self.direct.resolution_scale);
+        let _ = writeln!(out, "direct_specular={}", bit(self.direct.specular));
         let _ = writeln!(out, "shadows={}", bit(self.shadows.enabled));
         let _ = writeln!(out, "shadow_filter={}", self.shadows.filter.name());
         let _ = writeln!(out, "shadow_cell={}", num_text(self.shadows.cell_metres));
@@ -1040,6 +1488,63 @@ impl LightingSettings {
             out,
             "surface_cache.dormant_rays={}",
             self.surface_cache.dormant_rays
+        );
+        let fill = &self.surface_cache.fill;
+        let _ = writeln!(out, "surface_cache.fill_budget={}", fill.budget);
+        let _ = writeln!(out, "surface_cache.fill_tile={}", fill.tile);
+        let _ = writeln!(out, "surface_cache.fill_lod_near={}", num_text(fill.lod_near));
+        let _ = writeln!(out, "surface_cache.fill_cell_max={}", num_text(fill.cell_max));
+        let _ = writeln!(out, "surface_cache.fill_leash={}", num_text(fill.leash_scale));
+        let _ = writeln!(out, "surface_cache.fill_look_ahead={}", num_text(fill.look_ahead));
+        let _ = writeln!(out, "surface_cache.fill_far={}", num_text(fill.far));
+        let _ = writeln!(out, "surface_cache.fill_far_share={}", num_text(fill.far_share));
+        let _ = writeln!(out, "surface_cache.fill_offscreen_floor={}", num_text(fill.offscreen_floor));
+        let _ = writeln!(out, "surface_cache.fill_error_target={}", num_text(fill.error_target));
+        let _ = writeln!(out, "surface_cache.fill_prox_min={}", num_text(fill.prox_min));
+        let _ = writeln!(out, "surface_cache.fill_change_weight={}", num_text(fill.change_weight));
+        let _ = writeln!(out, "surface_cache.fill_check_rate={}", fill.check_rate);
+        let _ = writeln!(out, "surface_cache.fill_max_picks={}", fill.max_picks);
+        let _ = writeln!(out, "surface_cache.fill_lambda_decay={}", num_text(fill.lambda_decay));
+        let _ = writeln!(out, "surface_cache.fill_window_floor={}", num_text(fill.window_floor));
+        let _ = writeln!(out, "surface_cache.fill_catchup_max={}", num_text(fill.catchup_max));
+        let _ = writeln!(out, "surface_cache.fill_check_sigma={}", num_text(fill.check_sigma));
+        let _ = writeln!(out, "surface_cache.fill_warmup={}", fill.warmup_rays);
+        let _ = writeln!(out, "surface_cache.fill_ray_cap={}", fill.ray_cap);
+        let _ = writeln!(out, "surface_cache.fill_frame_dt={}", num_text(fill.frame_dt));
+        let _ = writeln!(out, "surface_cache.fill_share={}", fill.share);
+        let _ = writeln!(out, "surface_cache.fill_share_min_hit={}", num_text(fill.share_min_hit));
+        let _ = writeln!(out, "surface_cache.fill_share_cap={}", fill.share_cap);
+        let _ = writeln!(out, "surface_cache.fill_share_plane={}", num_text(fill.share_plane));
+        let _ = writeln!(out, "surface_cache.fill_share_normal={}", num_text(fill.share_normal));
+        let _ = writeln!(out, "surface_cache.fill_share_w_cap={}", num_text(fill.share_w_cap));
+        let _ = writeln!(out, "surface_cache.fill_share_cos={}", num_text(fill.share_cos));
+        let _ = writeln!(out, "surface_cache.fill_share_conf={}", num_text(fill.share_conf));
+        let _ = writeln!(out, "surface_cache.fill_share_receivers={}", fill.share_receivers);
+        let _ = writeln!(out, "surface_cache.fill_share_handover={}", fill.share_handover);
+        let _ = writeln!(
+            out,
+            "surface_cache.sh_cells={}",
+            bit(self.surface_cache.sh_cells)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.sh_texel_detail={}",
+            bit(self.surface_cache.sh_texel_detail)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.sh_texel_ray_cut={}",
+            bit(self.surface_cache.sh_texel_ray_cut)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.sh_probe_retire={}",
+            bit(self.surface_cache.sh_probe_retire)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.drain_sigma={}",
+            num_text(self.surface_cache.drain_sigma)
         );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
@@ -1126,6 +1631,35 @@ impl LightingSettings {
         let _ = writeln!(out, "lamp_pick_history={}", self.lamp_pick.history);
         let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
         let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
+        let _ = writeln!(out, "restir_di={}", bit(self.restir_di));
+        let _ = writeln!(
+            out,
+            "restir_spatial_neighbors={}",
+            self.restir_spatial_neighbors
+        );
+        let _ = writeln!(out, "restir_spatial_radius={}", self.restir_spatial_radius);
+        let _ = writeln!(
+            out,
+            "restir_resolution_scale={}",
+            self.restir_resolution_scale
+        );
+        let _ = writeln!(out, "restir_candidates={}", self.restir_candidates);
+        let _ = writeln!(
+            out,
+            "restir_spatial_checkerboard={}",
+            self.restir_spatial_checkerboard
+        );
+        let _ = writeln!(out, "restir_split_passes={}", self.restir_split_passes);
+        let x = &self.experiments;
+        let _ = writeln!(out, "cache_async={}", bit(x.cache_async));
+        let _ = writeln!(out, "cache_hz={}", num_text(x.cache_hz));
+        let _ = writeln!(out, "cache_picks={}", bit(x.cache_picks));
+        let _ = writeln!(out, "fill={}", bit(x.fill));
+        let _ = writeln!(out, "young_only={}", bit(x.young_only));
+        let _ = writeln!(out, "world_cap={}", x.world_cap);
+        let _ = writeln!(out, "sc_settle={}", x.sc_settle);
+        let _ = writeln!(out, "sc_flags={}", x.sc_flags);
+        let _ = writeln!(out, "toggles={}", toggles_text(x.toggles));
         let _ = writeln!(out, "time_of_day={}", num_text(self.time_of_day));
         out
     }
@@ -1157,7 +1691,7 @@ impl LightingSettings {
                 lines.push((key.to_string(), value.to_string()));
             }
         }
-        let mut settings = preset.map(Self::preset).unwrap_or_default();
+        let mut settings = preset.map_or_else(Self::default, Self::preset);
         for (key, value) in lines {
             settings.set_key(&key, &value)?;
         }
@@ -1184,6 +1718,7 @@ impl LightingSettings {
             "direct_lights" => self.direct.max_lights = num_u32(value)?,
             "direct_refresh" => self.direct.refresh_frames = num_u32(value)?.max(1),
             "direct_scale" => self.direct.resolution_scale = num_u32(value)?.clamp(1, 8),
+            "direct_specular" => self.direct.specular = on(value)?,
             "shadows" => self.shadows.enabled = on(value)?,
             "shadow_filter" => {
                 self.shadows.filter = ShadowFilter::parse(value)
@@ -1209,14 +1744,112 @@ impl LightingSettings {
                 self.surface_cache.firefly_sigma = sigma;
             }
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
+            "surface_cache.fill_budget" => self.surface_cache.fill.budget = num_u32(value)?,
+            "surface_cache.fill_tile" => self.surface_cache.fill.tile = num_u32(value)?,
+            "surface_cache.fill_lod_near" => self.surface_cache.fill.lod_near = num_f32(value)?,
+            "surface_cache.fill_cell_max" => self.surface_cache.fill.cell_max = num_f32(value)?,
+            "surface_cache.fill_leash" => self.surface_cache.fill.leash_scale = num_f32(value)?,
+            "surface_cache.fill_look_ahead" => self.surface_cache.fill.look_ahead = num_f32(value)?,
+            "surface_cache.fill_far" => self.surface_cache.fill.far = num_f32(value)?,
+            "surface_cache.fill_far_share" => self.surface_cache.fill.far_share = num_f32(value)?,
+            "surface_cache.fill_offscreen_floor" => self.surface_cache.fill.offscreen_floor = num_f32(value)?,
+            "surface_cache.fill_error_target" => self.surface_cache.fill.error_target = num_f32(value)?,
+            "surface_cache.fill_prox_min" => self.surface_cache.fill.prox_min = num_f32(value)?,
+            "surface_cache.fill_change_weight" => self.surface_cache.fill.change_weight = num_f32(value)?,
+            "surface_cache.fill_check_rate" => self.surface_cache.fill.check_rate = num_u32(value)?,
+            "surface_cache.fill_max_picks" => self.surface_cache.fill.max_picks = num_u32(value)?,
+            "surface_cache.fill_lambda_decay" => self.surface_cache.fill.lambda_decay = num_f32(value)?,
+            "surface_cache.fill_window_floor" => self.surface_cache.fill.window_floor = num_f32(value)?,
+            "surface_cache.fill_catchup_max" => self.surface_cache.fill.catchup_max = num_f32(value)?,
+            "surface_cache.fill_check_sigma" => self.surface_cache.fill.check_sigma = num_f32(value)?,
+            "surface_cache.fill_warmup" => self.surface_cache.fill.warmup_rays = num_u32(value)?,
+            "surface_cache.fill_ray_cap" => self.surface_cache.fill.ray_cap = num_u32(value)?,
+            "surface_cache.fill_frame_dt" => self.surface_cache.fill.frame_dt = num_f32(value)?,
+            "surface_cache.fill_share" => {
+                self.surface_cache.fill.share = match value {
+                    "0" | "off" => 0,
+                    "1" | "tile" => 1,
+                    "2" | "ring" => {
+                        return Err(
+                            "surface_cache.fill_share ring is not built; use off or tile".to_string(),
+                        );
+                    }
+                    _ => {
+                        return Err(format!(
+                            "surface_cache.fill_share is off or tile, got {value}"
+                        ));
+                    }
+                };
+            }
+            "surface_cache.fill_share_min_hit" => {
+                self.surface_cache.fill.share_min_hit = num_f32(value)?;
+            }
+            "surface_cache.fill_share_cap" => self.surface_cache.fill.share_cap = num_u32(value)?,
+            "surface_cache.fill_share_plane" => self.surface_cache.fill.share_plane = num_f32(value)?,
+            "surface_cache.fill_share_normal" => {
+                self.surface_cache.fill.share_normal = num_f32(value)?;
+            }
+            "surface_cache.fill_share_w_cap" => self.surface_cache.fill.share_w_cap = num_f32(value)?,
+            "surface_cache.fill_share_cos" => self.surface_cache.fill.share_cos = num_f32(value)?,
+            "surface_cache.fill_share_conf" => self.surface_cache.fill.share_conf = num_f32(value)?,
+            "surface_cache.fill_share_receivers" => {
+                self.surface_cache.fill.share_receivers = num_u32(value)?;
+            }
+            "surface_cache.fill_share_handover" => {
+                self.surface_cache.fill.share_handover = num_u32(value)?;
+            }
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
+            "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
+            "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
+            "surface_cache.sh_texel_ray_cut" => self.surface_cache.sh_texel_ray_cut = on(value)?,
+            "surface_cache.sh_probe_retire" => {
+                warn_screen_probe_retired("surface_cache.sh_probe_retire");
+                self.surface_cache.sh_probe_retire = on(value)?;
+            }
+            "surface_cache.drain_sigma" => {
+                let sigma = num_f32(value)?;
+                if !sigma.is_finite() || sigma < 0.0 {
+                    return Err(format!(
+                        "surface_cache.drain_sigma is a non-negative number, got {value}"
+                    ));
+                }
+                self.surface_cache.drain_sigma = sigma;
+            }
+            "cache_async" => self.experiments.cache_async = on(value)?,
+            "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
+            "cache_picks" => self.experiments.cache_picks = on(value)?,
+            "fill" => self.experiments.fill = on(value)?,
+            "young_only" => self.experiments.young_only = on(value)?,
+            "world_cap" => self.experiments.world_cap = num_u32(value)?.min(999),
+            "sc_settle" => self.experiments.sc_settle = num_u32(value)?,
+            "sc_flags" => {
+                self.experiments.sc_flags = value
+                    .parse::<u32>()
+                    .map_err(|_| format!("sc_flags is a whole number, got {value}"))?
+            }
+            "toggles" => self.experiments.toggles = parse_lighting_toggles(value)?,
             "world_mode" => self.gi.world_mode = Some(num_u32(value)?.min(3)),
             "bounces" => self.bounce.count = parse_bounces(value)?,
-            "probes" => self.probes.enabled = on(value)?,
-            "probe_rays" => self.probes.rays = num_u32(value)?,
-            "probe_tile" => self.probes.tile = num_u32(value)?,
-            "probe_refresh" => self.probes.refresh_frames = num_u32(value)?.max(1),
-            "probe_stale" => self.probes.staleness_frames = num_u32(value)?.max(1),
+            "probes" => {
+                warn_screen_probe_retired("probes");
+                self.probes.enabled = on(value)?;
+            }
+            "probe_rays" => {
+                warn_screen_probe_retired("probe_rays");
+                self.probes.rays = num_u32(value)?;
+            }
+            "probe_tile" => {
+                warn_screen_probe_retired("probe_tile");
+                self.probes.tile = num_u32(value)?;
+            }
+            "probe_refresh" => {
+                warn_screen_probe_retired("probe_refresh");
+                self.probes.refresh_frames = num_u32(value)?.max(1);
+            }
+            "probe_stale" => {
+                warn_screen_probe_retired("probe_stale");
+                self.probes.staleness_frames = num_u32(value)?.max(1);
+            }
             "world_cache" => self.world_cache.enabled = on(value)?,
             "world_cell" => self.world_cache.cell_metres = num_f32(value)?,
             "world_refresh" => self.world_cache.refresh_frames = num_u32(value)?.max(1),
@@ -1285,6 +1918,13 @@ impl LightingSettings {
                     self.lamp_pick.mode = LampPickMode::Both;
                 }
             }
+            "restir_di" => self.restir_di = on(value)?,
+            "restir_spatial_neighbors" => self.restir_spatial_neighbors = num_u32(value)?,
+            "restir_spatial_radius" => self.restir_spatial_radius = num_u32(value)?,
+            "restir_resolution_scale" => self.restir_resolution_scale = num_u32(value)?,
+            "restir_candidates" => self.restir_candidates = num_u32(value)?,
+            "restir_spatial_checkerboard" => self.restir_spatial_checkerboard = num_u32(value)?,
+            "restir_split_passes" => self.restir_split_passes = num_u32(value)?,
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
@@ -1310,9 +1950,22 @@ impl LightingSettings {
         clippy::disallowed_methods,
         reason = "TODO(lint-2026-10-14): pass this settings value in from the caller. docs/LINT_RULES.md"
     )]
-    pub fn apply_env(&mut self) {
+    pub fn apply_env(&mut self) -> Result<(), String> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        self.apply_env_from(&refs, &|name| lighting_env(name).ok())
+    }
+
+    /// [`Self::apply_env`] over the given arguments and variable reader. A
+    /// malformed lighting argument or a variable its key rejects is an error,
+    /// not a silent skip. The preset, bounces, ambient and time mirrors stay
+    /// soft (an unparsable mirror is ignored).
+    fn apply_env_from(
+        &mut self,
+        refs: &[&str],
+        env: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<(), String> {
+        let lighting_env = |name: &str| env(name).ok_or(());
         let preset = lighting_env("GENOS_LIGHTING_PRESET").ok();
         let bounces = lighting_env("GENOS_LIGHTING_BOUNCES").ok();
         let ambient = lighting_env("GENOS_LIGHTING_AMBIENT").ok();
@@ -1323,8 +1976,8 @@ impl LightingSettings {
         let firefly = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA").ok();
         let ray_budget = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET").ok();
         let dormant_rays = lighting_env("GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS").ok();
-        let Ok(launch) = resolve_lighting_launch(
-            &refs,
+        let launch = resolve_lighting_launch(
+            refs,
             &LightingMirrors {
                 preset: preset.as_deref(),
                 bounces: bounces.as_deref(),
@@ -1337,15 +1990,14 @@ impl LightingSettings {
                 ray_budget: ray_budget.as_deref(),
                 dormant_rays: dormant_rays.as_deref(),
             },
-        ) else {
-            return;
-        };
+        )?;
         self.apply_launch(&launch);
         let keys = [
             ("GENOS_LIGHTING_DIRECT", "direct"),
             ("GENOS_LIGHTING_DIRECT_LIGHTS", "direct_lights"),
             ("GENOS_LIGHTING_DIRECT_REFRESH", "direct_refresh"),
             ("GENOS_LIGHTING_DIRECT_SCALE", "direct_scale"),
+            ("GENOS_LIGHTING_DIRECT_SPECULAR", "direct_specular"),
             ("GENOS_LIGHTING_SHADOWS", "shadows"),
             ("GENOS_LIGHTING_SHADOW_FILTER", "shadow_filter"),
             ("GENOS_LIGHTING_SHADOW_CELL", "shadow_cell"),
@@ -1398,10 +2050,86 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_HISTORY", "lamp_pick_history"),
             ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
+            ("GENOS_RESTIR_DI", "restir_di"),
+            ("GENOS_RESTIR_SPATIAL_NEIGHBORS", "restir_spatial_neighbors"),
+            ("GENOS_RESTIR_SPATIAL_RADIUS", "restir_spatial_radius"),
+            ("GENOS_RESTIR_RESOLUTION_SCALE", "restir_resolution_scale"),
+            ("GENOS_RESTIR_CANDIDATES", "restir_candidates"),
+            (
+                "GENOS_RESTIR_SPATIAL_CHECKERBOARD",
+                "restir_spatial_checkerboard",
+            ),
+            ("GENOS_RESTIR_SPLIT_PASSES", "restir_split_passes"),
+            ("GENOS_LIGHTING_ASYNC", "cache_async"),
+            ("GENOS_LIGHTING_CACHE_HZ", "cache_hz"),
+            ("GENOS_LIGHTING_CACHE_PICKS", "cache_picks"),
+            ("GENOS_LIGHTING_FILL", "fill"),
+            ("GENOS_LIGHTING_YOUNG_ONLY", "young_only"),
+            ("GENOS_LIGHTING_WORLD_CAP", "world_cap"),
+            ("GENOS_LIGHTING_SC_SETTLE", "sc_settle"),
+            ("GENOS_LIGHTING_SC_FLAGS", "sc_flags"),
+            ("GENOS_LIGHTING_TOGGLES", "toggles"),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS",
+                "surface_cache.sh_cells",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL",
+                "surface_cache.sh_texel_detail",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT",
+                "surface_cache.sh_texel_ray_cut",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE",
+                "surface_cache.sh_probe_retire",
+            ),
+            ("GENOS_LIGHTING_FILL_BUDGET", "surface_cache.fill_budget"),
+            ("GENOS_LIGHTING_FILL_TILE", "surface_cache.fill_tile"),
+            ("GENOS_LIGHTING_FILL_LOD_NEAR", "surface_cache.fill_lod_near"),
+            ("GENOS_LIGHTING_FILL_CELL_MAX", "surface_cache.fill_cell_max"),
+            ("GENOS_LIGHTING_FILL_LEASH", "surface_cache.fill_leash"),
+            ("GENOS_LIGHTING_FILL_LOOK_AHEAD", "surface_cache.fill_look_ahead"),
+            ("GENOS_LIGHTING_FILL_FAR", "surface_cache.fill_far"),
+            ("GENOS_LIGHTING_FILL_FAR_SHARE", "surface_cache.fill_far_share"),
+            ("GENOS_LIGHTING_FILL_OFFSCREEN_FLOOR", "surface_cache.fill_offscreen_floor"),
+            ("GENOS_LIGHTING_FILL_ERROR_TARGET", "surface_cache.fill_error_target"),
+            ("GENOS_LIGHTING_FILL_PROX_MIN", "surface_cache.fill_prox_min"),
+            ("GENOS_LIGHTING_FILL_CHANGE_WEIGHT", "surface_cache.fill_change_weight"),
+            ("GENOS_LIGHTING_FILL_CHECK_RATE", "surface_cache.fill_check_rate"),
+            ("GENOS_LIGHTING_FILL_MAX_PICKS", "surface_cache.fill_max_picks"),
+            ("GENOS_LIGHTING_FILL_LAMBDA_DECAY", "surface_cache.fill_lambda_decay"),
+            ("GENOS_LIGHTING_FILL_WINDOW_FLOOR", "surface_cache.fill_window_floor"),
+            ("GENOS_LIGHTING_FILL_CATCHUP_MAX", "surface_cache.fill_catchup_max"),
+            ("GENOS_LIGHTING_FILL_CHECK_SIGMA", "surface_cache.fill_check_sigma"),
+            ("GENOS_LIGHTING_FILL_WARMUP", "surface_cache.fill_warmup"),
+            ("GENOS_LIGHTING_FILL_RAY_CAP", "surface_cache.fill_ray_cap"),
+            ("GENOS_LIGHTING_FILL_FRAME_DT", "surface_cache.fill_frame_dt"),
+            ("GENOS_LIGHTING_FILL_SHARE", "surface_cache.fill_share"),
+            ("GENOS_LIGHTING_FILL_SHARE_MIN_HIT", "surface_cache.fill_share_min_hit"),
+            ("GENOS_LIGHTING_FILL_SHARE_CAP", "surface_cache.fill_share_cap"),
+            ("GENOS_LIGHTING_FILL_SHARE_PLANE", "surface_cache.fill_share_plane"),
+            ("GENOS_LIGHTING_FILL_SHARE_NORMAL", "surface_cache.fill_share_normal"),
+            ("GENOS_LIGHTING_FILL_SHARE_W_CAP", "surface_cache.fill_share_w_cap"),
+            ("GENOS_LIGHTING_FILL_SHARE_COS", "surface_cache.fill_share_cos"),
+            ("GENOS_LIGHTING_FILL_SHARE_CONF", "surface_cache.fill_share_conf"),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_RECEIVERS",
+                "surface_cache.fill_share_receivers",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_HANDOVER",
+                "surface_cache.fill_share_handover",
+            ),
         ];
         for (var, key) in keys {
+            if key == "direct_specular" && launch.direct_specular.is_some() {
+                continue;
+            }
             if let Ok(value) = lighting_env(var) {
-                let _ = self.set_key(key, &value);
+                self.set_key(key, &value)
+                    .map_err(|err| format!("{var}={value}: {err}"))?;
             }
         }
         if lighting_env_os("GENOS_LIGHTING_COMPOSE_ALL").is_some() {
@@ -1411,6 +2139,7 @@ impl LightingSettings {
         if lighting_env_flag("GENOS_LIGHTING_FULL_EFFORT") {
             self.apply_full_effort();
         }
+        Ok(())
     }
 
     fn apply_launch(&mut self, launch: &LightingLaunch) {
@@ -1439,6 +2168,9 @@ impl LightingSettings {
         if let Some(rays) = launch.dormant_rays {
             self.surface_cache.dormant_rays = rays;
         }
+        if let Some(specular) = launch.direct_specular {
+            self.direct.specular = specular;
+        }
         self.time_of_day = launch.time_mirror.unwrap_or(clock);
         self.sanitize();
         self.sync_preset_field();
@@ -1450,20 +2182,19 @@ impl LightingSettings {
         GpuBuckets {
             direct: self.direct_this_frame(frame),
             shadows: self.shadows.enabled && (self.direct.enabled || self.gi_passes()),
-            place: self.probes_this_frame(frame),
-            probe_trace: self.probes_this_frame(frame),
-            gather: self.probes_this_frame(frame),
-            filter: self.probes_this_frame(frame),
+            place: false,
+            probe_trace: false,
+            gather: false,
+            filter: false,
             compact: self.cache_round_this_frame(frame),
             cache: self.cache_round_this_frame(frame),
             cache_rays: self.cache_rays_this_frame(frame),
             atrous: self.atrous_this_frame(frame),
-            // True when hits are shaded. The separate hit-light dispatch is only
-            // recorded for cache rays (bounce 2 and up). One bounce shades kept
-            // hits inside the direct dispatch.
+            // True when cache rays are shaded. Bounce 1 records that dispatch.
+            // A hit reads the cache only from bounce 2 (`lighting_bounce_ok`).
             hit_light: self.gi.enabled
                 && self.bounce.count > 0
-                && (self.probes.enabled || self.cache_rays_this_frame(frame)),
+                && self.cache_rays_this_frame(frame),
             compose_indirect: self.compose_reuse && self.world_mode() == 3,
             prefill: self.prefill_this_frame(),
             sky: self.sky && self.gi.enabled,
@@ -1508,6 +2239,7 @@ struct LightingLaunch {
     firefly_sigma: Option<f32>,
     ray_budget: Option<u32>,
     dormant_rays: Option<u32>,
+    direct_specular: Option<bool>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1535,6 +2267,7 @@ enum LightingKind {
     FireflySigma,
     RayBudget,
     DormantRays,
+    DirectSpecular,
 }
 
 enum LightingFlag {
@@ -1547,6 +2280,7 @@ enum LightingFlag {
     FireflySigma(f32),
     RayBudget(u32),
     DormantRays(u32),
+    DirectSpecular(bool),
 }
 
 /// `Some(true)` when `arg` is a lighting flag that reads the next argument.
@@ -1622,6 +2356,7 @@ fn resolve_lighting_launch(
         dormant_rays: chosen
             .dormant_rays
             .or_else(|| env.dormant_rays.and_then(|value| num_u32(value).ok())),
+        direct_specular: chosen.direct_specular,
     })
 }
 
@@ -1636,6 +2371,7 @@ struct ChosenLighting {
     firefly_sigma: Option<f32>,
     ray_budget: Option<u32>,
     dormant_rays: Option<u32>,
+    direct_specular: Option<bool>,
 }
 
 impl ChosenLighting {
@@ -1650,6 +2386,7 @@ impl ChosenLighting {
             LightingFlag::FireflySigma(sigma) => self.firefly_sigma = Some(sigma),
             LightingFlag::RayBudget(count) => self.ray_budget = Some(count),
             LightingFlag::DormantRays(count) => self.dormant_rays = Some(count),
+            LightingFlag::DirectSpecular(on) => self.direct_specular = Some(on),
         }
     }
 }
@@ -1676,6 +2413,7 @@ fn lighting_kind(name: &str) -> Option<LightingKind> {
         "surface-cache-firefly-sigma" => Some(LightingKind::FireflySigma),
         "surface-cache-ray-budget" => Some(LightingKind::RayBudget),
         "surface-cache-dormant-rays" => Some(LightingKind::DormantRays),
+        "lighting-direct-specular" => Some(LightingKind::DirectSpecular),
         _ => None,
     }
 }
@@ -1728,6 +2466,9 @@ fn parse_lighting_flag(arg: &str, next: Option<&str>) -> Result<Option<LightingF
         ),
         LightingKind::DormantRays => LightingFlag::DormantRays(
             num_u32(value).map_err(|_| format!("{flag} {value} is not a number"))?,
+        ),
+        LightingKind::DirectSpecular => LightingFlag::DirectSpecular(
+            on(value).map_err(|_| format!("{flag} {value} is not on or off"))?,
         ),
     };
     Ok(Some(parsed))
@@ -1889,7 +2630,6 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_TILE", "GENOS_LIGHTING_TILE"),
     ("GENOS_GI2_TIME", "GENOS_LIGHTING_TIME"),
     ("GENOS_GI2_TOGGLES", "GENOS_LIGHTING_TOGGLES"),
-    ("GENOS_GI2_TOGGLES_FILE", "GENOS_LIGHTING_TOGGLES_FILE"),
     ("GENOS_GI2_UNFILLED", "GENOS_LIGHTING_UNFILLED"),
     ("GENOS_GI2_UNFILLED_DUMP", "GENOS_LIGHTING_UNFILLED_DUMP"),
     ("GENOS_GI2_UNFILLED_TINT", "GENOS_LIGHTING_UNFILLED_TINT"),
@@ -1903,6 +2643,21 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_YOUNG_ONLY", "GENOS_LIGHTING_YOUNG_ONLY"),
     ("GENOS_GI_DEBUG", "GENOS_LIGHTING_DEBUG"),
 ];
+
+fn warn_screen_probe_retired(key: &'static str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(key) {
+        eprintln!(
+            "warning: {key} is deprecated; screen-probe passes are removed and the world cache is the indirect light (alias kept for one release)"
+        );
+    }
+}
 
 fn warn_lamp_pick_reuse_alias() {
     use std::sync::Once;
@@ -2008,6 +2763,22 @@ fn parse_firefly_sigma(value: &str) -> Result<f32, String> {
     }
 }
 
+fn finite_pos(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn finite_unit(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        fallback
+    }
+}
+
 fn num_f32(value: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
@@ -2060,6 +2831,23 @@ mod launch_tests {
 
     fn empty() -> LightingMirrors<'static> {
         LightingMirrors::default()
+    }
+
+    #[test]
+    fn apply_env_reports_a_bad_argument_or_key() {
+        let none = |_: &str| None;
+        let mut settings = LightingSettings::default();
+        let bad_arg = settings.apply_env_from(&["--bounces", "nope"], &none);
+        assert!(bad_arg.is_err_and(|err| err.contains("--bounces")));
+
+        let gi = |name: &str| (name == "GENOS_LIGHTING_GI").then(|| "nope".to_owned());
+        let bad_key = settings.apply_env_from(&[], &gi);
+        assert!(bad_key.is_err_and(|err| err.contains("GENOS_LIGHTING_GI=nope")));
+
+        let good = |name: &str| (name == "GENOS_LIGHTING_GI").then(|| "off".to_owned());
+        assert!(settings.apply_env_from(&["--bounces", "2"], &good).is_ok());
+        assert_eq!(settings.bounce.count, 2);
+        assert!(!settings.gi.enabled);
     }
 
     fn hours_near(value: f32, hours: f32) {
@@ -2212,6 +3000,19 @@ mod launch_tests {
     }
 
     #[test]
+    fn direct_specular_argument_is_on_or_off() {
+        let on = resolve_lighting_launch(&["--lighting-direct-specular", "on"], &empty()).unwrap();
+        let mut settings = LightingSettings::default();
+        assert!(!settings.direct.specular);
+        settings.apply_launch(&on);
+        assert!(settings.direct.specular);
+        let off = resolve_lighting_launch(&["--lighting-direct-specular=off"], &empty()).unwrap();
+        settings.apply_launch(&off);
+        assert!(!settings.direct.specular);
+        assert!(check_lighting_arg("--lighting-direct-specular", Some("maybe")).is_err());
+    }
+
+    #[test]
     fn blend_and_firefly_arguments_win_over_the_mirrors() {
         let mut settings = LightingSettings::default();
         assert_eq!(settings.surface_cache.blend, SurfaceCacheBlend::Msme);
@@ -2333,5 +3134,57 @@ mod launch_tests {
 
         std::env::remove_var("GENOS_LIGHTING_PRESET");
         std::env::remove_var("GENOS_GI2_PRESET");
+    }
+
+    #[test]
+    fn restir_env_defaults_match_the_preset() {
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "GENOS_RESTIR_DI" => Some("on".to_string()),
+                "GENOS_RESTIR_SPATIAL_NEIGHBORS" => Some(RESTIR_SPATIAL_NEIGHBORS.to_string()),
+                "GENOS_RESTIR_SPATIAL_RADIUS" => Some(RESTIR_SPATIAL_RADIUS.to_string()),
+                "GENOS_RESTIR_RESOLUTION_SCALE" => Some(RESTIR_RESOLUTION_SCALE.to_string()),
+                "GENOS_RESTIR_CANDIDATES" => Some(RESTIR_CANDIDATES.to_string()),
+                "GENOS_RESTIR_SPATIAL_CHECKERBOARD" => {
+                    Some(RESTIR_SPATIAL_CHECKERBOARD.to_string())
+                }
+                "GENOS_RESTIR_SPLIT_PASSES" => Some(RESTIR_SPLIT_PASSES.to_string()),
+                _ => None,
+            }
+        };
+        for preset in [
+            LightingPreset::High,
+            LightingPreset::Potato,
+            LightingPreset::Gi1Bounce,
+        ] {
+            let mut base = LightingSettings::preset(preset);
+            base.sanitize();
+            let mut over = base.clone();
+            over.apply_env_from(&[], &env).unwrap();
+            assert_eq!(over, base, "{}", preset.name());
+        }
+        // The picture gate's direct settings, then the same strings.
+        let mut gate = LightingSettings::preset(LightingPreset::Potato);
+        gate.direct.max_lights = 0;
+        gate.direct.refresh_frames = 1;
+        gate.direct.resolution_scale = 1;
+        gate.sky = false;
+        gate.ambient.mode = AmbientMode::Off;
+        gate.shadows.enabled = true;
+        gate.gi.enabled = false;
+        gate.bounce.count = 0;
+        gate.probes.enabled = false;
+        gate.world_cache.enabled = false;
+        gate.lamp_pick.mode = LampPickMode::Off;
+        gate.lamp_pick.radius = 0;
+        gate.compose_reuse = false;
+        gate.restir_di = true;
+        gate.sanitize();
+        let mut over = gate.clone();
+        over.apply_env_from(&[], &env).unwrap();
+        assert_eq!(over.restir_resolution_scale, RESTIR_RESOLUTION_SCALE);
+        assert_eq!(over.restir_spatial_neighbors, RESTIR_SPATIAL_NEIGHBORS);
+        assert_eq!(over.direct.resolution_scale, 1);
+        assert_eq!(over, gate);
     }
 }

@@ -1,6 +1,7 @@
 #version 450
-// Log-luminance histogram of every scene pixel, plus a stride-32 still check.
+// Log-luminance histogram of every scene pixel, plus a short still check.
 // The CPU reads the header after the fence and clips the tails. Luma stays here.
+#extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 
 layout(push_constant) uniform Push {
@@ -9,18 +10,12 @@ layout(push_constant) uniform Push {
     uvec4 lamp;
 } pc;
 
-layout(std430, set = 0, binding = 13) restrict readonly buffer SceneReferred {
-    vec4 px[];
-} scene_lin;
+#include "hdr_scene.glsl"
 
-// counts[4096], moved, total, pad0, pad1, then two luma halves. 16400 header bytes.
+// words[0..bins) counts, words[bins] moved, words[bins + 1] total, two pads,
+// then two luma halves at `luma_base`. The CPU sizes the buffer to the preset.
 layout(std430, set = 0, binding = 18) buffer HdrMeter {
-    uint counts[4096];
-    uint moved;
-    uint total;
-    uint pad0;
-    uint pad1;
-    float luma[];
+    uint words[];
 } meter;
 
 const float REC709_R = 0.2126;
@@ -53,13 +48,13 @@ void main() {
     if (i >= pixels) {
         return;
     }
-    float y = scene_y(scene_lin.px[i].rgb);
+    float y = scene_y(scene_load(i).rgb);
     uint bins = pc.dims.z;
     if (pc.params.w != 0u && y > 0.0 && bins > 0u) {
-        if (bins > 4096u) {
-            bins = 4096u;
+        if (bins > 256u) {
+            bins = 256u;
         }
-        atomicAdd(meter.counts[bin_of(y, bins)], 1u);
+        atomicAdd(meter.words[bin_of(y, bins)], 1u);
     }
     uint stride = pc.params.z;
     if (stride == 0u || (i % stride) != 0u) {
@@ -72,12 +67,13 @@ void main() {
     }
     uint ping = pc.params.y & 1u;
     uint next = 1u - ping;
+    uint luma_base = pc.lamp.x;
     if (pc.params.x != 0u) {
-        float prev = meter.luma[ping * slots + slot];
-        atomicAdd(meter.total, 1u);
+        float prev = uintBitsToFloat(meter.words[luma_base + ping * slots + slot]);
+        atomicAdd(meter.words[bins + 1u], 1u);
         if (abs(prev - y) > STILL_MOVE) {
-            atomicAdd(meter.moved, 1u);
+            atomicAdd(meter.words[bins], 1u);
         }
     }
-    meter.luma[next * slots + slot] = y;
+    meter.words[luma_base + next * slots + slot] = floatBitsToUint(y);
 }
