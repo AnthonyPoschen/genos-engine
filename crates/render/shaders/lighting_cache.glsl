@@ -1374,6 +1374,9 @@ vec4 lighting_mover_texel_mean(uint tex) {
         uintBitsToFloat(movers_gpu.header[at + 7u])); // samples in w
 }
 
+// Tiny length for normalize / weight divides on mover texels.
+const float LIGHTING_MOVER_EPS = 1.0e-6;
+
 // Stage H fill/deposit stays out of compose (GENOS_COMPOSE_NO_WALK) to keep
 // lighting_compose.comp under the 248k SPIR-V ceiling.
 #ifndef GENOS_COMPOSE_NO_WALK
@@ -1407,7 +1410,8 @@ vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
     float yc = uintBitsToFloat(movers_gpu.header[rt + 11u]);
     float ys = uintBitsToFloat(movers_gpu.header[rt + 15u]);
     vec3 w = vec3(yc * local.x + ys * local.z, local.y, -ys * local.x + yc * local.z) + centre;
-    world_n = normalize(vec3(yc * ln.x + ys * ln.z, ln.y, -ys * ln.x + yc * ln.z) + vec3(1.0e-6));
+    world_n = normalize(
+        vec3(yc * ln.x + ys * ln.z, ln.y, -ys * ln.x + yc * ln.z) + vec3(LIGHTING_MOVER_EPS));
     return w;
 }
 
@@ -1421,7 +1425,7 @@ void lighting_mover_deposit(uint tex, vec3 rgb, float w) {
     }
     float prev = uintBitsToFloat(movers_gpu.header[at + 7u]);
     float next = prev + w;
-    float a = w / max(next, 1.0e-6);
+    float a = w / max(next, LIGHTING_MOVER_EPS);
     vec3 mean = vec3(
         uintBitsToFloat(movers_gpu.header[at + 4u]),
         uintBitsToFloat(movers_gpu.header[at + 5u]),
@@ -6474,7 +6478,7 @@ bool lighting_sc_drop_stale_mover_world(uint slot) {
     float size = cache.v[3u * slot + 1u].w;
     bool on = lighting_mover_on(p, n) != ~0u;
     bool aged = false;
-    if (!on && size > 0.2 && lighting_near_change(p)) {
+    if (!on && size > LIGHTING_HIT_PATCH && lighting_near_change(p)) {
         uint last = floatBitsToUint(cache.v[3u * slot].w);
         aged = last == 0u || int(lighting_frame() - last) > 2;
     }

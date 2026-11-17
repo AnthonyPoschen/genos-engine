@@ -566,6 +566,13 @@ const uint PROD_SLIDE_SAMPLES = 16u;
 const float PROD_LUMA_R = 0.2126;
 const float PROD_LUMA_G = 0.7152;
 const float PROD_LUMA_B = 0.0722;
+const float PROD_SLIDE_HIT = 5200.125;
+const float PROD_SLIDE_BOX = 5400.0;
+const float PROD_SLIDE_FLOOR_Y = -1.2;
+const float PROD_SLIDE_FAR = 100.125;
+const float PROD_SLIDE_MM = 0.001;
+const float PROD_SLIDE_EPS = 0.05;
+const float PROD_SLIDE_HAS_W = 0.5;
 
 float prod_luma(vec3 c) {
     return dot(max(c, vec3(0.0)), vec3(PROD_LUMA_R, PROD_LUMA_G, PROD_LUMA_B));
@@ -599,7 +606,7 @@ vec3 prod_slide_pos(uint rel) {
     if (hit) {
         prod_head(1u);
         gstats.ctrl_bounce = 2u;
-        vec3 hit_pos = vec3(5200.125, 0.0, 5200.125);
+        vec3 hit_pos = vec3(PROD_SLIDE_HIT, 0.0, PROD_SLIDE_HIT);
         prod_mover(hit_pos);
         gbuf.words[5] = PROD_MOVER_OID;
         return hit_pos;
@@ -624,7 +631,7 @@ vec3 prod_slide_pos(uint rel) {
         g_slide_prev_b0 = -1.0;
     }
     uint mm = prod_slide_mm(i);
-    vec3 pos = PROD_SLIDE_ORIGIN + vec3(float(mm) * 0.001, 0.0, 0.0);
+    vec3 pos = PROD_SLIDE_ORIGIN + vec3(float(mm) * PROD_SLIDE_MM, 0.0, 0.0);
     if (world) {
         uint at = lighting_change_at();
         work.v[at].w = mod(work.v[at].w, PROD_ATTACH_MOD);
@@ -644,7 +651,7 @@ void prod_slide_note(uint rel, vec3 shown) {
     if (rel >= 134u) {
         gstats.ctrl_bounce = 0u;
         vec3 n = PROD_UP;
-        vec3 hit_pos = vec3(5200.125, 0.0, 5200.125);
+        vec3 hit_pos = vec3(PROD_SLIDE_HIT, 0.0, PROD_SLIDE_HIT);
         uint world_hit = lighting_cache_find_sized(hit_pos, n, false, LIGHTING_SH_CELL, hit_pos);
         uint world_fine = lighting_cache_find_sized(hit_pos, n, false, LIGHTING_SC_TEXEL, hit_pos);
         // Pool lookup needs attach_movers still on (prod_head would clear it).
@@ -653,7 +660,7 @@ void prod_slide_note(uint rel, vec3 shown) {
         float object_salt = 0.0;
         if (tex != ~0u) {
             vec4 mean = lighting_mover_texel_mean(tex);
-            if (mean.w > 0.5) {
+            if (mean.w > PROD_SLIDE_HAS_W) {
                 object_hit = 1.0;
                 object_salt = float(PROD_MOVER_OID);
             }
@@ -664,7 +671,7 @@ void prod_slide_note(uint rel, vec3 shown) {
         uint at = lighting_change_at();
         work.v[at].w = mod(work.v[at].w, PROD_ATTACH_MOD);
         movers_gpu.header[12] = 0u;
-        vec3 box = vec3(5400.0, 1.0, 5400.0);
+        vec3 box = vec3(PROD_SLIDE_BOX, 1.0, PROD_SLIDE_BOX);
         vec3 on_p = box + vec3(0.0, 1.0, 0.0);
         uint on_slot = lighting_cache_find_sized(on_p, n, true, LIGHTING_SH_CELL, on_p);
         if (on_slot != ~0u) {
@@ -672,7 +679,7 @@ void prod_slide_note(uint rel, vec3 shown) {
             cache.v[3u * on_slot + 2u] = vec4(PROD_RED, PROD_CELL_N);
             cache.v[LIGHTING_SC_OBJ_AT + on_slot] = vec4(0.0);
         }
-        vec3 floor_p = box + vec3(0.0, -1.2, 0.0);
+        vec3 floor_p = box + vec3(0.0, PROD_SLIDE_FLOOR_Y, 0.0);
         uint floor_slot = lighting_cache_find_sized(floor_p, n, true, LIGHTING_SH_CELL, floor_p);
         if (floor_slot != ~0u) {
             cache.v[3u * floor_slot].w = uintBitsToFloat(lighting_frame());
@@ -692,7 +699,7 @@ void prod_slide_note(uint rel, vec3 shown) {
         float drop_stale = floor_slot != ~0u && lighting_sc_drop_stale_mover_world(floor_slot) ? 1.0 : 0.0;
         // #288 black-slab regression: colliding mover oid on a far static
         // point must not return the pool colour as full-trust irradiance.
-        vec3 far_p = vec3(100.125, 1.0, 100.125);
+        vec3 far_p = vec3(PROD_SLIDE_FAR, 1.0, PROD_SLIDE_FAR);
         uint far_slot = lighting_cache_find_sized(far_p, n, true, LIGHTING_SH_CELL, far_p);
         if (far_slot != ~0u) {
             cache.v[3u * far_slot].w = uintBitsToFloat(lighting_frame());
@@ -703,7 +710,8 @@ void prod_slide_note(uint rel, vec3 shown) {
         lighting_px_object_id = PROD_MOVER_OID;
         vec4 far_irr = lighting_world_irradiance(far_p, n);
         lighting_px_object_id = 0u;
-        float static_pool = distance(far_irr.rgb, PROD_MOVER_FINE) < 0.05 ? 1.0 : 0.0;
+        float static_pool =
+            distance(far_irr.rgb, PROD_MOVER_FINE) < PROD_SLIDE_EPS ? 1.0 : 0.0;
         uint out_at = PROD_STEP_AT + 100u;
         prod_f(out_at, (world_hit == ~0u && world_fine == ~0u) ? 0.0 : 1.0);
         prod_f(out_at + 1u, object_hit);
@@ -717,7 +725,9 @@ void prod_slide_note(uint rel, vec3 shown) {
     bool world = rel >= 67u;
     uint i = world ? rel - 67u : rel;
     uint mm = prod_slide_mm(i);
-    if (!world && (distance(shown, PROD_RED) < 0.05 || distance(shown, PROD_BLUE) < 0.05)) {
+    if (!world
+        && (distance(shown, PROD_RED) < PROD_SLIDE_EPS
+            || distance(shown, PROD_BLUE) < PROD_SLIDE_EPS)) {
         g_slide_bleed = 1.0;
     }
     if (i < PROD_SLIDE_SAMPLES) {
@@ -781,7 +791,7 @@ vec3 prod_slide_shade(uint rel, vec3 pos) {
         return vec3(0.0);
     }
     vec4 mean = lighting_mover_texel_mean(tex);
-    return mean.w > 0.5 ? max(mean.rgb, vec3(0.0)) : vec3(0.0);
+    return mean.w > PROD_SLIDE_HAS_W ? max(mean.rgb, vec3(0.0)) : vec3(0.0);
 }
 
 void prod_slide_run() {
