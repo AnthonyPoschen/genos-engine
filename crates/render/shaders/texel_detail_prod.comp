@@ -18,8 +18,8 @@ const uint PROD_TRAILER_AT = 8u + PROD_ROWS * 17u;
 const uint PROD_TRAILER = 40u;
 const uint PROD_PARITY = 32u;
 // Slide block after the parity words. 16 after-samples, the after step, 16
-// before-samples, the before step, then the hit, drop, and static-pool flags.
-// 108 floats.
+// before-samples, the before step, then the hit, drop, static-pool, and
+// warm-up flags. 109 floats.
 const uint PROD_STEP_AT = PROD_TRAILER_AT + PROD_TRAILER + PROD_PARITY;
 const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
@@ -460,6 +460,11 @@ void prod_mover_gpu_ensure() {
     movers_gpu.header[15] = 0u;
 }
 
+// Full-trust plant for the after curve (≥ LIGHTING_MOVER_FULL_SETS). The
+// warm-up probe (samples = 2 + outside prior) lives in prod_slide_note.
+const float PROD_MOVER_FULL_SETS = 8.0;
+const float PROD_MOVER_WARM_SETS = 2.0;
+
 void prod_mover_plant_pool_texel() {
     uint at = lighting_mover_pool_off();
     movers_gpu.header[at + 0u] = floatBitsToUint(0.0);
@@ -469,7 +474,7 @@ void prod_mover_plant_pool_texel() {
     movers_gpu.header[at + 4u] = floatBitsToUint(PROD_MOVER_FINE.r);
     movers_gpu.header[at + 5u] = floatBitsToUint(PROD_MOVER_FINE.g);
     movers_gpu.header[at + 6u] = floatBitsToUint(PROD_MOVER_FINE.b);
-    movers_gpu.header[at + 7u] = floatBitsToUint(1.0);
+    movers_gpu.header[at + 7u] = floatBitsToUint(PROD_MOVER_FULL_SETS);
     movers_gpu.header[at + 8u] = floatBitsToUint(0.0);
     movers_gpu.header[at + 9u] = floatBitsToUint(1.0);
     movers_gpu.header[at + 10u] = floatBitsToUint(0.0);
@@ -712,6 +717,35 @@ void prod_slide_note(uint rel, vec3 shown) {
         lighting_px_object_id = 0u;
         float static_pool =
             distance(far_irr.rgb, PROD_MOVER_FINE) < PROD_SLIDE_EPS ? 1.0 : 0.0;
+        // Warm-up probe: samples = 2 (< 8) + blue prior just outside along +Y.
+        // Expect mix(blue, fine, 2/8) through lighting_world_irradiance — not
+        // the old samples=1 / mean.w>0.5 full-trust bypass, and not dark.
+        float warm_ok = 0.0;
+        {
+            uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0));
+            if (tex != ~0u) {
+                uint pat = lighting_mover_pool_off() + tex * 16u;
+                movers_gpu.header[pat + 7u] = floatBitsToUint(PROD_MOVER_WARM_SETS);
+                vec3 warm_pos = box + vec3(0.0, 1.0, 0.0);
+                vec3 outside = warm_pos + n * LIGHTING_SC_TEXEL;
+                uint prior_slot =
+                    lighting_cache_find_sized(outside, n, true, LIGHTING_SH_CELL, outside);
+                if (prior_slot != ~0u) {
+                    cache.v[3u * prior_slot].w = uintBitsToFloat(lighting_frame());
+                    cache.v[3u * prior_slot + 2u] = vec4(PROD_BLUE, LIGHTING_SC_FULL_SETS);
+                    cache.v[LIGHTING_SC_OBJ_AT + prior_slot] = vec4(0.0);
+                }
+                gbuf.words[5] = PROD_MOVER_OID;
+                lighting_px_object_id = PROD_MOVER_OID;
+                vec4 warm = lighting_world_irradiance(warm_pos, n);
+                lighting_px_object_id = 0u;
+                vec3 expect = mix(PROD_BLUE, PROD_MOVER_FINE, PROD_MOVER_WARM_SETS / PROD_MOVER_FULL_SETS);
+                if (distance(warm.rgb, expect) < PROD_SLIDE_EPS && warm.w > 0.0
+                    && distance(warm.rgb, PROD_MOVER_FINE) > PROD_SLIDE_EPS) {
+                    warm_ok = 1.0;
+                }
+            }
+        }
         uint out_at = PROD_STEP_AT + 100u;
         prod_f(out_at, (world_hit == ~0u && world_fine == ~0u) ? 0.0 : 1.0);
         prod_f(out_at + 1u, object_hit);
@@ -720,6 +754,7 @@ void prod_slide_note(uint rel, vec3 shown) {
         prod_f(out_at + 5u, drop_stale);
         prod_f(out_at + 6u, drop_kept);
         prod_f(out_at + 7u, static_pool);
+        prod_f(out_at + 8u, warm_ok);
         return;
     }
     bool world = rel >= 67u;
@@ -769,7 +804,8 @@ void prod_slide_diag_restore() {
     g_slide_diag = false;
 }
 
-// Lean slide shade: after = pool mean, before = salt-0 lattice, hit = claim probe.
+// Lean slide shade: after = lighting_world_irradiance (warm-up trust path),
+// before = salt-0 lattice, hit = claim probe.
 vec3 prod_slide_shade(uint rel, vec3 pos) {
     bool hit = rel >= 134u;
     bool world = !hit && rel >= 67u;
@@ -786,12 +822,11 @@ vec3 prod_slide_shade(uint rel, vec3 pos) {
         lighting_obj_salt = saved;
         return sh.w > LIGHTING_CACHE_HAS_W ? max(sh.rgb, vec3(0.0)) : vec3(0.0);
     }
-    uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0));
-    if (tex == ~0u) {
-        return vec3(0.0);
-    }
-    vec4 mean = lighting_mover_texel_mean(tex);
-    return mean.w > PROD_SLIDE_HAS_W ? max(mean.rgb, vec3(0.0)) : vec3(0.0);
+    // Production compose path: G-buffer oid + lighting_world_irradiance.
+    lighting_px_object_id = PROD_MOVER_OID;
+    vec4 irr = lighting_world_irradiance(pos, PROD_UP);
+    lighting_px_object_id = 0u;
+    return irr.w > 0.0 ? max(irr.rgb, vec3(0.0)) : vec3(0.0);
 }
 
 void prod_slide_run() {

@@ -1523,7 +1523,8 @@ impl Gpu {
                 self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
             }
             let packed = self.lighting.mover_cache.pack_gpu();
-            let n = packed.len().min(self.lighting.mover_buf.size as usize);
+            let cap = usize::try_from(self.lighting.mover_buf.size).unwrap_or(0);
+            let n = packed.len().min(cap);
             self.write_buffer(&self.lighting.mover_buf, &packed[..n])?;
             self.lighting.mover_cache.clear_dirty();
         }
@@ -4236,9 +4237,10 @@ impl Gpu {
                     // Centre is the world bounds centre (sphere xyz), not origin.
                     // Centre=[0,0,0] made every draw near the origin match the
                     // first mesh mover and broke the local texel frame.
+                    let mesh_id = 10_001u32.saturating_add(u32::try_from(i).unwrap_or(0));
                     records.push([
                         *sph,
-                        [sph[0], sph[1], sph[2], (10001 + i) as f32],
+                        [sph[0], sph[1], sph[2], f32::from_bits(mesh_id)],
                         [0.0; 4],
                         [1.0, 0.0, 0.0, 0.0],
                     ]);
@@ -5623,7 +5625,7 @@ impl Gpu {
         let want: std::collections::BTreeSet<u32> = records
             .iter()
             .filter_map(|m| {
-                let id = m[1][3] as u32;
+                let id = m[1][3].to_bits();
                 (id != MOVER_ID_NONE).then_some(id)
             })
             .collect();
@@ -5638,7 +5640,7 @@ impl Gpu {
             self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
         }
         for m in records {
-            let id = m[1][3] as u32;
+            let id = m[1][3].to_bits();
             if id == MOVER_ID_NONE {
                 continue;
             }
@@ -5730,9 +5732,10 @@ pub(crate) fn lighting_movers(old: &[u8], new: &[u8], set: &mut std::collections
             // radius r. Cosine and sine of the yaw sit in the bounce vec4 (z, w).
             let (hx, hz) = if f(3) < 0.5 { (f(4).abs(), f(6).abs()) } else { (rad, rad) };
             let (c, s) = if f(3) < 0.5 { (f(14), f(15)) } else { (1.0, 0.0) };
+            let oid = u32::try_from(i.saturating_add(1)).unwrap_or(u32::MAX);
             [
                 lighting_occ_bounds(r),
-                [f(0), f(1), f(2), (i + 1) as f32],
+                [f(0), f(1), f(2), f32::from_bits(oid)],
                 [hx, f(5).abs() * 0.5, hz, 0.0],
                 [c, s, 0.0, 0.0],
             ]

@@ -14,18 +14,6 @@
     reason = "brick indices and pool lengths use small integer casts"
 )]
 #![expect(
-    clippy::cast_precision_loss,
-    reason = "pool indices and brick coords fit the float mantissa in practice"
-)]
-#![expect(
-    clippy::cast_possible_truncation,
-    reason = "brick indices and packed colour channels are clamped"
-)]
-#![expect(
-    clippy::cast_sign_loss,
-    reason = "exp bias and clamped colour packing stay non-negative"
-)]
-#![expect(
     clippy::missing_errors_doc,
     reason = "MoverCache Error variants are named; callers match on the enum"
 )]
@@ -33,11 +21,26 @@
     clippy::unreadable_literal,
     reason = "hash golden multipliers match the GPU path literals"
 )]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "pool indices and brick coords fit the float mantissa in practice"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::too_many_lines,
+        reason = "rotating-box face convergence asserts layout, sets, and ratios together"
+    )
+)]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(
     test,
     expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
 )]
+#![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(
     test,
     expect(clippy::assert_is_empty, reason = "fixtures assert empty dirty/fill lists")
@@ -699,6 +702,8 @@ impl MoverCache {
             dst.texel_count = want;
             if want == 0 {
                 dst.texel_base = u32::MAX;
+            } else {
+                self.layout_local_positions(slot);
             }
             return Ok(());
         }
@@ -714,6 +719,8 @@ impl MoverCache {
             let dst = &mut self.table[usize_from_u32(slot)];
             dst.texel_count = want;
             dst.texel_base = owned.first().copied().unwrap_or(u32::MAX);
+            self.mark_table_dirty(slot);
+            self.layout_local_positions(slot);
             return Ok(());
         }
         // Grow: claim more empty texels; keep existing bodies.
@@ -741,31 +748,92 @@ impl MoverCache {
         Ok(())
     }
 
-    /// Spreads owned texels across the mover's local AABB (deterministic grid).
+    /// Places owned texels on the AABB surface with outward normals, hashed into
+    /// the same buckets compose uses (`hash_cell3(floor(local / texel)) % count`).
+    /// A volume grid with every normal = +Y left side faces dark and put ray
+    /// origins inside the mesh (self-shadow).
     fn layout_local_positions(&mut self, slot: u32) {
         let rec = self.table[usize_from_u32(slot)];
         if rec.texel_count == 0 || rec.texel_base == u32::MAX {
             return;
         }
         let n = rec.texel_count;
-        let hx = rec.half_extents[0].abs().max(0.05);
-        let hy = rec.half_extents[1].abs().max(0.05);
-        let hz = rec.half_extents[2].abs().max(0.05);
+        let hx = rec.half_extents[0].abs().max(MOVER_SURFACE_TEXEL_M);
+        let hy = rec.half_extents[1].abs().max(MOVER_SURFACE_TEXEL_M);
+        let hz = rec.half_extents[2].abs().max(MOVER_SURFACE_TEXEL_M);
+        let extents = [hx, hy, hz];
+        // Clear so we can detect unfilled hash buckets after the face pass.
         for i in 0..n {
-            let u = (i as f32 + 0.5) / n as f32;
-            let local = [
-                (u * 2.0 - 1.0) * hx,
-                ((i * 5) % 7) as f32 / 6.0 * 2.0 * hy - hy,
-                ((i * 3) % 5) as f32 / 4.0 * 2.0 * hz - hz,
-            ];
             let idx = rec.texel_base.saturating_add(i);
             if let Some(t) = self.texels.get_mut(usize_from_u32(idx)) {
                 if t.object_id == rec.object_id {
-                    t.local_pos = local;
-                    t.local_n = [0.0, 1.0, 0.0];
+                    t.local_pos = [0.0; 3];
+                    t.local_n = [0.0; 3];
                     self.mark_texel_dirty(idx);
                 }
             }
+        }
+        // Six faces: (outward normal axis, sign, vary-u axis, vary-v axis).
+        let faces: [(usize, f32, usize, usize); 6] = [
+            (0, 1.0, 1, 2),
+            (0, -1.0, 1, 2),
+            (1, 1.0, 0, 2),
+            (1, -1.0, 0, 2),
+            (2, 1.0, 0, 1),
+            (2, -1.0, 0, 1),
+        ];
+        for &(axis, sign, u_ax, v_ax) in &faces {
+            let mut normal = [0.0f32; 3];
+            normal[axis] = sign;
+            let u_ext = extents[u_ax];
+            let v_ext = extents[v_ax];
+            let u_steps = surface_steps(u_ext);
+            let v_steps = surface_steps(v_ext);
+            for ui in 0..u_steps {
+                for vi in 0..v_steps {
+                    let mut local = [0.0f32; 3];
+                    local[axis] = sign * extents[axis];
+                    local[u_ax] = surface_coord(ui, u_steps, u_ext);
+                    local[v_ax] = surface_coord(vi, v_steps, v_ext);
+                    let cell = [
+                        crate::cache_probe::floor_i32(local[0] / MOVER_SURFACE_TEXEL_M),
+                        crate::cache_probe::floor_i32(local[1] / MOVER_SURFACE_TEXEL_M),
+                        crate::cache_probe::floor_i32(local[2] / MOVER_SURFACE_TEXEL_M),
+                    ];
+                    let bucket = mover_hash_cell3(cell, rec.object_id) % n;
+                    let idx = rec.texel_base.saturating_add(bucket);
+                    let Some(t) = self.texels.get_mut(usize_from_u32(idx)) else {
+                        continue;
+                    };
+                    if t.object_id != rec.object_id {
+                        continue;
+                    }
+                    // First writer wins; later faces keep the existing sample.
+                    if t.local_n[0] == 0.0 && t.local_n[1] == 0.0 && t.local_n[2] == 0.0 {
+                        t.local_pos = local;
+                        t.local_n = normal;
+                        self.mark_texel_dirty(idx);
+                    }
+                }
+            }
+        }
+        // Fill any hash bucket the face grid missed so compose never hits a
+        // zero-normal / never-filled slot for a live span index.
+        for i in 0..n {
+            let idx = rec.texel_base.saturating_add(i);
+            let Some(t) = self.texels.get_mut(usize_from_u32(idx)) else {
+                continue;
+            };
+            if t.object_id != rec.object_id {
+                continue;
+            }
+            if t.local_n[0] != 0.0 || t.local_n[1] != 0.0 || t.local_n[2] != 0.0 {
+                continue;
+            }
+            let (local, normal) = box_surface_from_index(i, n, extents);
+            t.local_pos = local;
+            t.local_n = normal;
+            self.mark_texel_dirty(idx);
         }
     }
 
@@ -1079,24 +1147,12 @@ fn pack_texel(tex: &MoverTexel) -> GpuMoverTexel {
         local_n: tex.local_n,
         next_free: tex.next_free,
         sh_packed: [
-            pack_rgb9e5(tex.sh1[0]),
-            pack_rgb9e5(tex.sh1[1]),
-            pack_rgb9e5(tex.sh1[2]),
+            crate::mesh_field::pack_rgb9e5(tex.sh1[0]),
+            crate::mesh_field::pack_rgb9e5(tex.sh1[1]),
+            crate::mesh_field::pack_rgb9e5(tex.sh1[2]),
             0,
         ],
     }
-}
-
-fn pack_rgb9e5(rgb: [f32; 3]) -> u32 {
-    // Shared-exponent RGB9E5 (RGB9E5_FLOAT). Enough for SH band-1 transport.
-    let max_c = rgb[0].abs().max(rgb[1].abs()).max(rgb[2].abs()).max(1.0e-6);
-    let exp = (max_c.log2().ceil() as i32).clamp(-15, 15);
-    let scale = 2.0f32.powi(exp);
-    let enc = |c: f32| -> u32 {
-        ((c / scale) * 511.0).round().clamp(0.0, 511.0) as u32
-    };
-    let e = (exp + 15) as u32;
-    enc(rgb[0]) | (enc(rgb[1]) << 9) | (enc(rgb[2]) << 18) | (e << 27)
 }
 
 fn write_bytes<T: Copy>(out: &mut [u8], offset: u64, value: &T) {
@@ -1216,7 +1272,80 @@ fn bricks_covering(lo: [f32; 3], hi: [f32; 3], brick: f32) -> Vec<[i32; 3]> {
 
 /// Floor of `v / brick` as `i32`, toward −∞.
 fn floor_brick(v: f32, brick: f32) -> i32 {
-    (v / brick).floor() as i32
+    crate::cache_probe::floor_i32(v / brick)
+}
+
+/// Matches `LIGHTING_SC_TEXEL` — compose hashes `floor(local / this)`.
+const MOVER_SURFACE_TEXEL_M: f32 = 0.125;
+
+fn surface_steps(extent: f32) -> u32 {
+    let span = (extent * 2.0) / MOVER_SURFACE_TEXEL_M;
+    let n = crate::cache_probe::floor_i32(span);
+    u32::try_from(n.max(1)).unwrap_or(1)
+}
+
+fn surface_coord(i: u32, steps: u32, extent: f32) -> f32 {
+    let steps_f = f32_from_u32(steps.max(1));
+    let i_f = f32_from_u32(i);
+    ((i_f + 0.5) / steps_f) * 2.0 * extent - extent
+}
+
+fn f32_from_u32(v: u32) -> f32 {
+    // Small counters (face grid) fit the f32 mantissa exactly.
+    let mut acc = 0.0f32;
+    let mut bit = 1.0f32;
+    let mut n = v;
+    while n != 0 {
+        if n & 1 == 1 {
+            acc += bit;
+        }
+        bit += bit;
+        n >>= 1;
+    }
+    acc
+}
+
+fn mover_lighting_hash(mut v: u32) -> u32 {
+    v ^= v >> 16;
+    v = v.wrapping_mul(0x7feb_352d);
+    v ^= v >> 15;
+    v = v.wrapping_mul(0x846c_a68b);
+    v ^= v >> 16;
+    v
+}
+
+fn mover_hash_cell3(cell: [i32; 3], salt: u32) -> u32 {
+    let x = u32::from_le_bytes(cell[0].to_le_bytes());
+    let y = u32::from_le_bytes(cell[1].to_le_bytes());
+    let z = u32::from_le_bytes(cell[2].to_le_bytes());
+    mover_lighting_hash(x ^ mover_lighting_hash(y ^ mover_lighting_hash(z ^ mover_lighting_hash(salt))))
+}
+
+/// Deterministic box-surface point for a leftover hash bucket.
+fn box_surface_from_index(i: u32, n: u32, extents: [f32; 3]) -> ([f32; 3], [f32; 3]) {
+    let face = i % 6;
+    let along = f32_from_u32(i / 6) / f32_from_u32((n / 6).max(1));
+    let t = along.mul_add(2.0, -1.0);
+    let (axis, sign) = match face {
+        0 => (0usize, 1.0f32),
+        1 => (0, -1.0),
+        2 => (1, 1.0),
+        3 => (1, -1.0),
+        4 => (2, 1.0),
+        _ => (2, -1.0),
+    };
+    let (u_ax, v_ax) = match axis {
+        0 => (1usize, 2usize),
+        1 => (0, 2),
+        _ => (0, 1),
+    };
+    let mut local = [0.0f32; 3];
+    let mut normal = [0.0f32; 3];
+    local[axis] = sign * extents[axis];
+    local[u_ax] = t * extents[u_ax];
+    local[v_ax] = (1.0 - t.abs()) * extents[v_ax];
+    normal[axis] = sign;
+    (local, normal)
 }
 
 impl MoverCache {
@@ -1704,5 +1833,143 @@ mod tests {
         assert_eq!(u1000, 32_000);
         assert_eq!(c1000, 32_000);
         assert_eq!(r1000, 4096);
+    }
+
+    fn face_index(n: [f32; 3]) -> Option<usize> {
+        if n[0] > 0.5 {
+            Some(0)
+        } else if n[0] < -0.5 {
+            Some(1)
+        } else if n[1] > 0.5 {
+            Some(2)
+        } else if n[1] < -0.5 {
+            Some(3)
+        } else if n[2] > 0.5 {
+            Some(4)
+        } else if n[2] < -0.5 {
+            Some(5)
+        } else {
+            None
+        }
+    }
+
+    /// Rotating box under a uniform sky + overhead sun: every face has surface
+    /// texels, none stay below N sets after M deposits, and top/side brightness
+    /// matches the light (not the old all-+Y volume layout).
+    #[test]
+    fn rotating_box_face_texels_converge_under_uniform_sky() {
+        const MIN_SETS: f32 = 8.0;
+        const FRAMES: u32 = 12;
+        let mut cache = MoverCache::new(512);
+        let mut rec = record(1);
+        rec.half_extents = [0.5, 0.5, 0.5];
+        cache.upsert(rec).expect("box");
+        cache
+            .update_tier_and_alloc(1, 2.0, 80.0)
+            .expect("near share");
+        let (base, count) = {
+            let r = cache.get(1).expect("live");
+            (r.texel_base, r.texel_count)
+        };
+        assert!(count >= 24, "expected a surface share, got {count}");
+        let mut face_hits = [0u32; 6];
+        for i in 0..count {
+            let t = cache.texel(base.saturating_add(i)).expect("span texel");
+            let n = t.local_n;
+            let face = face_index(n).unwrap_or_else(|| {
+                panic!("texel {i} has no outward face normal {n:?}")
+            });
+            face_hits[face] = face_hits[face].saturating_add(1);
+            let on_face = (t.local_pos[0].abs() - 0.5).abs() < 1.0e-3
+                || (t.local_pos[1].abs() - 0.5).abs() < 1.0e-3
+                || (t.local_pos[2].abs() - 0.5).abs() < 1.0e-3;
+            assert!(
+                on_face,
+                "texel {i} local_pos {:?} is not on the AABB surface",
+                t.local_pos
+            );
+        }
+        assert!(
+            face_hits.iter().all(|&h| h > 0),
+            "every face needs texels, hits={face_hits:?}"
+        );
+
+        let mut yaw = 0.0f32;
+        for _ in 0..FRAMES {
+            let yc = yaw.cos();
+            let ys = yaw.sin();
+            {
+                let slot = cache.find_slot(1).expect("slot");
+                let dst = &mut cache.table[usize_from_u32(slot)];
+                dst.yaw_cos = yc;
+                dst.yaw_sin = ys;
+            }
+            for i in 0..count {
+                let idx = base.saturating_add(i);
+                let n = cache.texel(idx).expect("texel").local_n;
+                // World normal under yaw; overhead sun + dim ambient.
+                let wn = [yc * n[0] + ys * n[2], n[1], -ys * n[0] + yc * n[2]];
+                let l = 0.2 + 0.8 * wn[1].max(0.0);
+                assert!(
+                    cache.deposit(idx, [l, l, l], 1.0),
+                    "deposit into texel {idx}"
+                );
+            }
+            yaw += 0.35;
+        }
+
+        let mut top_sum = 0.0f32;
+        let mut top_n = 0u32;
+        let mut side_sum = 0.0f32;
+        let mut side_n = 0u32;
+        let mut stuck = 0u32;
+        for i in 0..count {
+            let t = cache.texel(base.saturating_add(i)).expect("texel");
+            if t.samples < MIN_SETS {
+                stuck = stuck.saturating_add(1);
+            }
+            let luma = (t.mean[0] + t.mean[1] + t.mean[2]) / 3.0;
+            if t.local_n[1] > 0.5 {
+                top_sum += luma;
+                top_n = top_n.saturating_add(1);
+            } else if t.local_n[1].abs() <= 0.5 {
+                side_sum += luma;
+                side_n = side_n.saturating_add(1);
+            }
+        }
+        assert_eq!(stuck, 0, "{stuck} texels stuck below {MIN_SETS} sets after {FRAMES} frames");
+        assert!(top_n > 0 && side_n > 0, "top={top_n} side={side_n}");
+        let top_mean = top_sum / f32_from_u32(top_n);
+        let side_mean = side_sum / f32_from_u32(side_n);
+        // Top faces the sun (≈1.0); sides get ambient only (≈0.2). Ratio ≈ 5.
+        let ratio = top_mean / side_mean.max(1.0e-3);
+        assert!(
+            ratio > 2.5 && ratio < 8.0,
+            "top/side brightness ratio {ratio} (top={top_mean} side={side_mean}) not sun-consistent"
+        );
+
+        // After a yaw, a world point on the +X face maps through inverse yaw to
+        // a texel whose local normal is still +X (object-local addressing).
+        let yc = yaw.cos();
+        let ys = yaw.sin();
+        let local_x = [0.5f32, 0.0, 0.0];
+        let world_off = [
+            yc * local_x[0] + ys * local_x[2],
+            local_x[1],
+            -ys * local_x[0] + yc * local_x[2],
+        ];
+        let back = [
+            yc * world_off[0] - ys * world_off[2],
+            world_off[1],
+            ys * world_off[0] + yc * world_off[2],
+        ];
+        let (_idx, hit) = cache
+            .lookup_texel(1, back)
+            .expect("lookup after yaw");
+        assert!(
+            hit.local_n[0] > 0.5,
+            "yaw-local lookup hit normal {:?}, wanted +X face",
+            hit.local_n
+        );
     }
 }

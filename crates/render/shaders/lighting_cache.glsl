@@ -1377,6 +1377,19 @@ vec4 lighting_mover_texel_mean(uint tex) {
 // Tiny length for normalize / weight divides on mover texels.
 const float LIGHTING_MOVER_EPS = 1.0e-6;
 
+// Object-local → world (yaw about Y). Inverse is lighting_mover_world_to_local.
+// Compose needs these under GENOS_COMPOSE_NO_WALK; fill uses them too.
+vec3 lighting_mover_yaw_local(vec3 local, float yc, float ys) {
+    return vec3(yc * local.x + ys * local.z, local.y, -ys * local.x + yc * local.z);
+}
+
+vec3 lighting_mover_world_to_local(vec3 world_off, float yc, float ys) {
+    return vec3(yc * world_off.x - ys * world_off.z, world_off.y, ys * world_off.x + yc * world_off.z);
+}
+
+// Push fill origins just outside the surface so lattice reads are not self-shadowed.
+const float LIGHTING_MOVER_RAY_BIAS = 0.02;
+
 // Stage H fill/deposit stays out of compose (GENOS_COMPOSE_NO_WALK) to keep
 // lighting_compose.comp under the 248k SPIR-V ceiling.
 #ifndef GENOS_COMPOSE_NO_WALK
@@ -1399,8 +1412,8 @@ vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
     uint oid = movers_gpu.header[at + 3u];
     uint slot = lighting_mover_find_slot(oid);
     if (slot == ~0u) {
-        world_n = vec3(0.0, 1.0, 0.0);
-        return local;
+        world_n = normalize(ln + vec3(LIGHTING_MOVER_EPS));
+        return local + world_n * LIGHTING_MOVER_RAY_BIAS;
     }
     uint rt = lighting_mover_table_off() + slot * 16u;
     vec3 centre = vec3(
@@ -1409,10 +1422,9 @@ vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
         uintBitsToFloat(movers_gpu.header[rt + 10u]));
     float yc = uintBitsToFloat(movers_gpu.header[rt + 11u]);
     float ys = uintBitsToFloat(movers_gpu.header[rt + 15u]);
-    vec3 w = vec3(yc * local.x + ys * local.z, local.y, -ys * local.x + yc * local.z) + centre;
-    world_n = normalize(
-        vec3(yc * ln.x + ys * ln.z, ln.y, -ys * ln.x + yc * ln.z) + vec3(LIGHTING_MOVER_EPS));
-    return w;
+    vec3 w = lighting_mover_yaw_local(local, yc, ys) + centre;
+    world_n = normalize(lighting_mover_yaw_local(ln, yc, ys) + vec3(LIGHTING_MOVER_EPS));
+    return w + world_n * LIGHTING_MOVER_RAY_BIAS;
 }
 
 void lighting_mover_deposit(uint tex, vec3 rgb, float w) {
@@ -4588,16 +4600,31 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
                     uintBitsToFloat(movers_gpu.header[at + 8u]),
                     uintBitsToFloat(movers_gpu.header[at + 9u]),
                     uintBitsToFloat(movers_gpu.header[at + 10u]));
-                uint tex = lighting_mover_texel_lookup(lighting_px_object_id, pos - centre);
+                float yc = uintBitsToFloat(movers_gpu.header[at + 11u]);
+                float ys = uintBitsToFloat(movers_gpu.header[at + 15u]);
+                // Compose must use object-local coords (inverse yaw). A world
+                // offset here keyed rotating faces to the wrong hash buckets.
+                vec3 local = lighting_mover_world_to_local(pos - centre, yc, ys);
+                uint tex = lighting_mover_texel_lookup(lighting_px_object_id, local);
                 if (tex != ~0u) {
                     vec4 mean = lighting_mover_texel_mean(tex);
-                    // Trust follows sample sets. A binary full-trust at
-                    // samples > 0.5 painted dark bands on underfilled mover
-                    // faces (red box @ frames 180/400). Eight sets → full trust;
-                    // fewer fall through to world cells.
+                    // Trust follows sample sets. Eight sets → full trust.
+                    // Below that, blend with a world prior just outside the
+                    // surface along the shading normal (on-mover world cells
+                    // are dropped, so hollow fallthrough stayed dark).
                     const float LIGHTING_MOVER_FULL_SETS = 8.0;
                     if (mean.w >= LIGHTING_MOVER_FULL_SETS) {
                         return vec4(mean.rgb, 1.0);
+                    }
+                    vec3 nn = normalize(n + vec3(LIGHTING_MOVER_EPS));
+                    vec3 outside = pos + nn * LIGHTING_SC_TEXEL;
+                    uint saved_oid = lighting_px_object_id;
+                    lighting_px_object_id = 0u;
+                    vec4 prior = lighting_world_irradiance_in(outside, n, outside, false);
+                    lighting_px_object_id = saved_oid;
+                    float w = mean.w / LIGHTING_MOVER_FULL_SETS;
+                    if (mean.w > 0.0 || prior.w > 0.0) {
+                        return vec4(mix(prior.rgb, mean.rgb, w), mix(prior.w, 1.0, w));
                     }
                 }
             }

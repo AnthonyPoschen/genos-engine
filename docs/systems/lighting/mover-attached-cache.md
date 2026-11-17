@@ -57,7 +57,9 @@ Moving objects must carry their own lighting records so a spin or slide does not
 
 2. **Instance SSBO stride (geometry, the transparent/sky holes):** First bad commit `eb154989` added `ids: [u32;4]` to `InstanceRec` (128→144 B) but only `gbuffer.vert` grew. `scene.vert` / `reflections_portal.vert` kept a 128 B local struct → depth and G-buffer disagreed; triangles after instance 0 vanished. Validation: 0 errors (in-bounds misread). Fix: one shared `instance_ssbo.glsl` included by all three verts; CI `instance_stride` asserts GLSL size/offsets == `InstanceRec` and bans local `struct Instance`. Coverage + `GENOS_BUFFER_POISON` stay.
 
-3. **Red-box dark bands (mover faces):** Compose returned `w = 1` whenever mover texel `samples > 0.5`, so underfilled pool texels painted full-trust dark patches. Trust now requires ≥ 8 sample sets before full-trust; otherwise fall through to world cells.
+3. **Red-box dark bands (mover faces):** Compose returned `w = 1` whenever mover texel `samples > 0.5`, so underfilled pool texels painted full-trust dark patches. Trust now requires ≥ 8 sample sets before full-trust; below that, blend with a world prior just outside the surface along the normal (on-mover world cells are dropped, so hollow fallthrough stayed dark).
+
+4. **Persistent blocky dark faces (orbit/spin @ 4070):** Root causes were (a) compose looked up `pos - centre` without inverse yaw, so rotating faces keyed the wrong hash buckets; (b) host layout was a volume grid with every normal = `+Y`, so side-face fill origins sat inside the mesh and self-shadowed; (c) fill ray origins had no outward bias. Fix: object-local lookup via inverse yaw, AABB-surface layout with outward normals hashed into compose buckets, and `LIGHTING_MOVER_RAY_BIAS` along the world normal.
 
 ## Review follow-ups (#288)
 

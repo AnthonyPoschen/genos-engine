@@ -23,7 +23,7 @@ const STRIDE: usize = 17;
 const ROWS: usize = 37;
 const TRAILER: usize = 40;
 const PARITY: usize = 32;
-const SLIDE: usize = 108;
+const SLIDE: usize = 109;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -167,10 +167,11 @@ fn a_mover_slides_without_stepping_on_world_cells() {
     // 1 mm steps across 75 cm. The before samples are the salt-0 world gather,
     // which is the picture a detail-on mover showed: one lone corner stays
     // full until it leaves the window, then the colour pops by the cell gap.
-    // The after samples are the mover-pool read. It stays on the object's
-    // colour. A mover hit must not claim a world cell. A world cell on the
-    // mover drops now; one inside the change volume drops after two unread
-    // frames and a fresh floor cell stays.
+    // The after samples go through lighting_world_irradiance (≥8 sets). A
+    // trailer probe exercises warm-up (samples=2 + outside prior). A mover
+    // hit must not claim a world cell. A world cell on the mover drops now;
+    // one inside the change volume drops after two unread frames and a fresh
+    // floor cell stays.
     let mut owner = open().expect("lavapipe device");
     let renderer = &mut *owner.device;
     assert_eq!(renderer.gpu_kind(), GpuKind::Software);
@@ -251,6 +252,11 @@ fn a_mover_slides_without_stepping_on_world_cells() {
         "a static pixel with a colliding mover object id read the pool ({})",
         slide.static_pool
     );
+    assert!(
+        (slide.warm_up - 1.0).abs() <= ABS,
+        "warm-up blend through lighting_world_irradiance failed ({})",
+        slide.warm_up
+    );
 }
 
 struct Slide {
@@ -269,6 +275,8 @@ struct Slide {
     drop_kept: f32,
     /// 1 when a far static sample with a colliding oid returned the pool colour.
     static_pool: f32,
+    /// 1 when samples=2 + outside prior blends through `lighting_world_irradiance`.
+    warm_up: f32,
 }
 
 fn slide_block(words: &[f32]) -> Slide {
@@ -281,9 +289,9 @@ fn slide_block(words: &[f32]) -> Slide {
     }
     let after_step = w[48];
     let after_mm = w[49];
-    for i in 0..16 {
+    for (i, slot) in before.iter_mut().enumerate() {
         let b = 50 + i * 3;
-        before[i] = [w[b], w[b + 1], w[b + 2]];
+        *slot = [w[b], w[b + 1], w[b + 2]];
     }
     let tail = 50 + 48;
     Slide {
@@ -301,6 +309,7 @@ fn slide_block(words: &[f32]) -> Slide {
         drop_stale: w[tail + 7],
         drop_kept: w[tail + 8],
         static_pool: w[tail + 9],
+        warm_up: w[tail + 10],
     }
 }
 
