@@ -6270,7 +6270,7 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
+        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_CACHE_SLOTS, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
         LIGHTING_COMPOSE_SPV, LIGHTING_SH_DRAIN_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
     };
 
@@ -6370,6 +6370,31 @@ mod sun_step {
             "sun compose grew by {extra} bytes (compose {}, sun {})",
             LIGHTING_COMPOSE_SPV.len(),
             SUN_COMPOSE_SPV.len()
+        );
+    }
+
+    /// The compose module compiles the slot count as a literal. The host table
+    /// and the specialization-constant default are the same number. Changing
+    /// one arm and not the others desyncs compose from the buffer.
+    #[test]
+    fn compose_slot_literal_matches_the_host() {
+        let src = include_str!("../shaders/lighting_cache_slots.glsl");
+        let literals = slot_literals(src);
+        assert_eq!(
+            literals.len(),
+            2,
+            "compose literal and constant-id default, got {literals:?}"
+        );
+        let host = LIGHTING_CACHE_SLOTS;
+        let probe = u64::from(crate::cache_probe::SLOTS);
+        assert_eq!(host, probe, "host table and the cache probe disagree");
+        for n in literals {
+            assert_eq!(n, host, "shader slot count {n} is not the host {host}");
+        }
+        let want = u32::try_from(host).expect("slot count fits in a SPIR-V word");
+        assert!(
+            spirv_has_u32(LIGHTING_COMPOSE_SPV, want),
+            "compose SPIR-V does not contain the host slot count {want}"
         );
     }
 
@@ -6476,6 +6501,51 @@ fn reachable_from_main(bytes: &[u8]) -> Vec<String> {
         }
     }
     reached
+}
+
+fn slot_literals(src: &str) -> Vec<u64> {
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let line = line.trim();
+        if line.starts_with("//") || !line.contains("LIGHTING_CACHE_SLOTS =") {
+            continue;
+        }
+        let Some(eq) = line.rfind('=') else {
+            continue;
+        };
+        let rest = line[eq + 1..].trim().trim_end_matches(';').trim();
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse() {
+            out.push(n);
+        }
+    }
+    out
+}
+
+fn spirv_has_u32(bytes: &[u8], want: u32) -> bool {
+    if bytes.len() < 20 || bytes.len() % 4 != 0 {
+        return false;
+    }
+    let mut words = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let raw = [chunk[0], chunk[1], chunk[2], chunk[3]];
+        words.push(u32::from_le_bytes(raw));
+    }
+    let mut i = 5usize;
+    while i < words.len() {
+        let word = words[i];
+        let count = usize::try_from(word >> 16).unwrap_or(0);
+        let op = word & 0xffff;
+        if count == 0 || i + count > words.len() {
+            return false;
+        }
+        // OpConstant: result type, result id, literal.
+        if op == 43 && count >= 4 && words[i + 3] == want {
+            return true;
+        }
+        i += count;
+    }
+    false
 }
 }
 
