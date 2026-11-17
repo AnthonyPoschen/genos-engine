@@ -1089,8 +1089,12 @@ impl Renderer {
                         continue;
                     };
                     let instance = instances.len() as u32;
-                    // Object id matches the mover table (1-based instance index).
-                    let object_id = instance;
+                    // 0 = not a mover. Non-zero must match MoverCache (occluder
+                    // index + 1). Matching by translation tags the live movers;
+                    // static draws stay 0 so compose never reads the pool for them.
+                    let object_id = self.gpu.mover_object_id_at([
+                        model[12], model[13], model[14],
+                    ]);
                     instances.push(InstanceRec {
                         model: *model,
                         // w: emitted light as shared-exponent bits (0: none) for the

@@ -47,6 +47,12 @@ Moving objects must carry their own lighting records so a spin or slide does not
 
 - Slide: before max step **1.7008** at 250 mm; after **0** (pool fine `[7,3,1]`). world_hit 0, object_hit 1, drops 1.
 - Rays/frame at 10/100/1000 Near movers (budget 4096): **4096 / 4096 / 4096**.
-- Compose SPIR-V: **246728** B (ceiling 248000).
+- Compose SPIR-V: **247488** B (ceiling 248000; after black-slab sphere check).
 - ReSTIR `REF_ERR` 0.05 gate scenes: pass (merge oracle still fails on lighting-v3).
 - fill_knockout: early→late error 0.8244→0.5557 (gain ok). Knockout late ceiling 0.213 is a doc note, not a code constant.
+
+## Black-slab fix (RTX 4070 / #288)
+
+**Root cause:** G-buffer object id used the draw instance index (and `ids.x == 0` fell back to `instance + 1`), so static meshes collided with `MoverCache` keys (occluder index + 1). Compose then returned full-trust pool irradiance (`w = 1`) for those pixels — often empty/dark texels — as solid black slabs over walls/floor/ceiling. The moving box itself looked fine because its id matched.
+
+**Fix:** `ids.x == 0` means not a mover (no instance fallback); live movers are tagged by matching model translation to the mover table; compose also requires the pixel inside the mover sphere before accepting a pool read. Regression: slide prod `static_pool == 0` (colliding oid on a far static point must not return the pool colour).

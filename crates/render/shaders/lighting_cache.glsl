@@ -4566,19 +4566,30 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     uint mode = lighting_world_mode();
     lighting_obj_salt = 0.0;
     // Mover texel pool via G-buffer object id (O(1)). Far → world cells.
+    // The pixel must also lie inside the mover's sphere: a stale or colliding
+    // object id on static geometry must not read empty/wrong pool texels as
+    // full-trust black (w = 1) over walls, floor and ceiling.
     if (mode == 3u && lighting_px_object_id != 0u && lighting_sc_local_on()) {
         uint slot = lighting_mover_find_slot(lighting_px_object_id);
         if (slot != ~0u && lighting_mover_tier(slot) < 2u) {
             uint at = lighting_mover_table_off() + slot * 16u;
-            vec3 centre = vec3(
-                uintBitsToFloat(movers_gpu.header[at + 8u]),
-                uintBitsToFloat(movers_gpu.header[at + 9u]),
-                uintBitsToFloat(movers_gpu.header[at + 10u]));
-            uint tex = lighting_mover_texel_lookup(lighting_px_object_id, pos - centre);
-            if (tex != ~0u) {
-                vec4 mean = lighting_mover_texel_mean(tex);
-                if (mean.w > 0.5) {
-                    return vec4(mean.rgb, 1.0);
+            vec3 sphere_c = vec3(
+                uintBitsToFloat(movers_gpu.header[at + 4u]),
+                uintBitsToFloat(movers_gpu.header[at + 5u]),
+                uintBitsToFloat(movers_gpu.header[at + 6u]));
+            float sphere_r = uintBitsToFloat(movers_gpu.header[at + 7u]);
+            vec3 d_sph = pos - sphere_c;
+            if (dot(d_sph, d_sph) < sphere_r * sphere_r) {
+                vec3 centre = vec3(
+                    uintBitsToFloat(movers_gpu.header[at + 8u]),
+                    uintBitsToFloat(movers_gpu.header[at + 9u]),
+                    uintBitsToFloat(movers_gpu.header[at + 10u]));
+                uint tex = lighting_mover_texel_lookup(lighting_px_object_id, pos - centre);
+                if (tex != ~0u) {
+                    vec4 mean = lighting_mover_texel_mean(tex);
+                    if (mean.w > 0.5) {
+                        return vec4(mean.rgb, 1.0);
+                    }
                 }
             }
         }

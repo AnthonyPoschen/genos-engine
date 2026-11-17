@@ -18,7 +18,8 @@ const uint PROD_TRAILER_AT = 8u + PROD_ROWS * 17u;
 const uint PROD_TRAILER = 40u;
 const uint PROD_PARITY = 32u;
 // Slide block after the parity words. 16 after-samples, the after step, 16
-// before-samples, the before step, then the hit and drop flags. 107 floats.
+// before-samples, the before step, then the hit, drop, and static-pool flags.
+// 108 floats.
 const uint PROD_STEP_AT = PROD_TRAILER_AT + PROD_TRAILER + PROD_PARITY;
 const uint PROD_OUT_HEAD = 8u;
 const uint PROD_DENOISE = 64u;
@@ -689,6 +690,20 @@ void prod_slide_note(uint rel, vec3 shown) {
             cache.v[3u * floor_slot].w = uintBitsToFloat(lighting_frame() - 5u);
         }
         float drop_stale = floor_slot != ~0u && lighting_sc_drop_stale_mover_world(floor_slot) ? 1.0 : 0.0;
+        // #288 black-slab regression: colliding mover oid on a far static
+        // point must not return the pool colour as full-trust irradiance.
+        vec3 far_p = vec3(100.125, 1.0, 100.125);
+        uint far_slot = lighting_cache_find_sized(far_p, n, true, LIGHTING_SH_CELL, far_p);
+        if (far_slot != ~0u) {
+            cache.v[3u * far_slot].w = uintBitsToFloat(lighting_frame());
+            cache.v[3u * far_slot + 2u] = vec4(PROD_BLUE, PROD_CELL_N);
+            cache.v[LIGHTING_SC_OBJ_AT + far_slot] = vec4(0.0);
+        }
+        gbuf.words[5] = PROD_MOVER_OID;
+        lighting_px_object_id = PROD_MOVER_OID;
+        vec4 far_irr = lighting_world_irradiance(far_p, n);
+        lighting_px_object_id = 0u;
+        float static_pool = distance(far_irr.rgb, PROD_MOVER_FINE) < 0.05 ? 1.0 : 0.0;
         uint out_at = PROD_STEP_AT + 100u;
         prod_f(out_at, (world_hit == ~0u && world_fine == ~0u) ? 0.0 : 1.0);
         prod_f(out_at + 1u, object_hit);
@@ -696,6 +711,7 @@ void prod_slide_note(uint rel, vec3 shown) {
         prod_f(out_at + 4u, drop_on);
         prod_f(out_at + 5u, drop_stale);
         prod_f(out_at + 6u, drop_kept);
+        prod_f(out_at + 7u, static_pool);
         return;
     }
     bool world = rel >= 67u;

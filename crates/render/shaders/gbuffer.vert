@@ -61,7 +61,9 @@ void main() {
     v_rough = rough;
     v_metal = item.extra.z;
     v_mat = floatBitsToUint(item.extra.w);
-    // GIBS §1.5: skinned meshes attach to the top-weight bone id.
-    uint oid = item.ids.x != 0u ? item.ids.x : (gl_InstanceIndex + 1u);
-    v_object_id = item.ids.y != 0u ? item.ids.y : oid;
+    // Object id 0 = not a mover (compose uses world cells). A non-zero id must
+    // match MoverCache (occluder index + 1). Never fall back to instance index:
+    // that collided with mover keys and painted static geometry from the pool.
+    // GIBS §1.5: skinned meshes attach to the top-weight bone id when set.
+    v_object_id = item.ids.y != 0u ? item.ids.y : item.ids.x;
 }

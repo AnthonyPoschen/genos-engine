@@ -5570,6 +5570,24 @@ fn lighting_occ_bounds(rec: &[u8]) -> [f32; 4] {
 
 
 impl Gpu {
+    /// Object id for a draw whose model translation matches a live mover centre.
+    /// Returns 0 when no mover owns that pose (static geometry / first frame).
+    pub(crate) fn mover_object_id_at(&self, translation: [f32; 3]) -> u32 {
+        const EPS2: f32 = 0.05 * 0.05;
+        for id in self.lighting.mover_cache.table_object_ids() {
+            let Some(rec) = self.lighting.mover_cache.get(id) else {
+                continue;
+            };
+            let dx = translation[0] - rec.centre[0];
+            let dy = translation[1] - rec.centre[1];
+            let dz = translation[2] - rec.centre[2];
+            if dx * dx + dy * dy + dz * dz <= EPS2 {
+                return id;
+            }
+        }
+        0
+    }
+
     /// Rebuilds the host mover table from this frame's KEEP hitch records.
     /// Drops movers that left the list so their texels are freed (no orphans).
     fn sync_mover_cache(&mut self, records: &[[[f32; 4]; 4]]) {

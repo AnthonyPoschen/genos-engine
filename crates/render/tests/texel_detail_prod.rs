@@ -23,7 +23,7 @@ const STRIDE: usize = 17;
 const ROWS: usize = 37;
 const TRAILER: usize = 40;
 const PARITY: usize = 32;
-const SLIDE: usize = 107;
+const SLIDE: usize = 108;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -246,6 +246,11 @@ fn a_mover_slides_without_stepping_on_world_cells() {
         (slide.drop_kept - 1.0).abs() <= ABS,
         "a fresh floor cell in the change volume was dropped"
     );
+    assert!(
+        slide.static_pool.abs() <= ABS,
+        "a static pixel with a colliding mover object id read the pool ({})",
+        slide.static_pool
+    );
 }
 
 struct Slide {
@@ -262,6 +267,8 @@ struct Slide {
     drop_on: f32,
     drop_stale: f32,
     drop_kept: f32,
+    /// 1 when a far static sample with a colliding oid returned the pool colour.
+    static_pool: f32,
 }
 
 fn slide_block(words: &[f32]) -> Slide {
@@ -293,6 +300,7 @@ fn slide_block(words: &[f32]) -> Slide {
         drop_on: w[tail + 6],
         drop_stale: w[tail + 7],
         drop_kept: w[tail + 8],
+        static_pool: w[tail + 9],
     }
 }
 
