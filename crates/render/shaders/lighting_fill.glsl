@@ -1558,8 +1558,10 @@ void lighting_fine_adopt(uint slot) {
     lighting_fine_publish(slot);
 }
 #endif
-// Off-screen band children keep the parent-prior blend in the filtered field.
-// A child the frustum can see is published by the screen push.
+// Off-screen, the field is the fading parent prior until four own sets. That
+// pass stores the child's own field and clears the mark. Later off-screen
+// samples keep the store on the current own mean until a pixel shows the
+// child. A child the frustum can see is published by the screen push.
 void lighting_fine_world_filter(uint slot) {
     if (slot >= LIGHTING_CACHE_SLOTS || cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
         return;
@@ -1574,5 +1576,9 @@ void lighting_fine_world_filter(uint slot) {
 #endif
     if (lighting_fine_has_prior(slot)) {
         lighting_fine_publish(slot);
+    } else if (cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
+        && floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_FINE_READY_SETS
+        && floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z) == 0u) {
+        lighting_fine_store_own(slot);
     }
 }

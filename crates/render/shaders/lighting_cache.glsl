@@ -3736,11 +3736,24 @@ bool lighting_fine_has_prior(uint slot) {
     return cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
         && cache.v[LIGHTING_SC_SHOWN_AT + slot].z > LIGHTING_SC_SET_HALF;
 }
+// The child's own mean, in the same sun scale as the prior blend. The
+// radiance is not clamped; the pack rejects a negative.
+void lighting_fine_store_own(uint slot) {
+    vec4 own = cache.v[3u * slot + 2u];
+    float ls = lighting_sc_sun_gain(slot);
+    vec3 outc = own.rgb * ls;
+    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(outc, vec3(0.0))));
+    if (!(abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].w) > 0.0)) {
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].w = 1.0;
+    }
+}
 // Parent prior plus the child's own mean. The prior counts as at most the
 // four sets the child's own filter needs, and that weight fades as the child
 // gains sets. A frozen parent variance is not a weight: dividing by it kept a
-// settled parent in the field forever. At four own sets the prior mark clears
-// and the caller runs the screen filter. The radiance is not clamped.
+// settled parent in the field forever. At four own sets this pass stores the
+// child's own field and clears the prior mark, on screen or off. Once a pixel
+// shows the child, the screen filter may walk that field closer to the own
+// mean. A step that leaves the mean is not stored. The radiance is not clamped.
 void lighting_fine_publish(uint slot) {
     if (!lighting_fine_has_prior(slot)) {
         return;
@@ -3748,6 +3761,7 @@ void lighting_fine_publish(uint slot) {
     vec4 own = cache.v[3u * slot + 2u];
     float child_sets = floor(max(own.w, 0.0));
     if (child_sets >= LIGHTING_FINE_READY_SETS) {
+        lighting_fine_store_own(slot);
         vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + slot];
         mark.z = 0.0;
         mark.w = 0.0;
@@ -5890,7 +5904,8 @@ void lighting_svgf_push(uint slot) {
         float child_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
         lighting_fine_publish(slot);
         // Below four own sets the blend is the field. At four the publish
-        // clears the prior, and this push is the screen filter.
+        // stores the child's own field and clears the prior, and this push
+        // is the screen filter.
         if (child_sets < LIGHTING_FINE_READY_SETS) {
             return;
         }
@@ -6024,6 +6039,24 @@ void lighting_svgf_push(uint slot) {
                 catch_up = (1.0 - lam) * catch_up + lam;
             }
             outc = mix(prev, outc, catch_up);
+        }
+    }
+    // A retired band child already stored its own field, off screen or on.
+    // The wavelet may walk that field closer to the own mean. A step that
+    // leaves the mean puts the parent blend back, so the stored field stays.
+    float retired_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    if (cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
+        && retired_sets >= LIGHTING_FINE_READY_SETS && !(nb.w > LIGHTING_HIT_PATCH)) {
+        float raw_var = 0.0;
+        vec4 raw = lighting_svgf_in(slot, raw_var);
+        if (raw.w > 0.0) {
+            vec3 stored = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+            float y_own = dot(max(raw.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+            float y_stored = dot(max(stored, vec3(0.0)), LIGHTING_SVGF_LW);
+            float y_new = dot(max(outc, vec3(0.0)), LIGHTING_SVGF_LW);
+            if (abs(y_new - y_own) > abs(y_stored - y_own)) {
+                outc = stored;
+            }
         }
     }
     uint field_pack = lighting_pack_rgb9e5(outc);

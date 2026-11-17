@@ -914,9 +914,55 @@ fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: b
     }
 }
 
+fn worst_retired(cells: &[StoredCell]) -> Option<usize> {
+    let mut pick = None;
+    let mut pick_gap = 0.0f32;
+    for (i, cell) in cells.iter().enumerate() {
+        if cell.weight + 1.0e-3 < 4.0 {
+            continue;
+        }
+        let own = cell_luma(cell);
+        let seed = luma(cell.seed);
+        let gap = (seed - own).abs();
+        let scale = own.max(seed).max(0.05);
+        if gap < scale * 0.25 {
+            continue;
+        }
+        if pick.is_none() || gap > pick_gap {
+            pick = Some(i);
+            pick_gap = gap;
+        }
+    }
+    pick
+}
+
+fn assert_retired_fields_on_own(cells: &[StoredCell]) -> u32 {
+    let mut checked = 0u32;
+    for (i, cell) in cells.iter().enumerate() {
+        if cell.weight + 1.0e-3 < 4.0 {
+            continue;
+        }
+        let own = cell_luma(cell);
+        let seed = luma(cell.seed);
+        let field = luma(cell.field);
+        let gap_seed = (seed - own).abs();
+        let scale = own.max(seed).max(0.05);
+        if gap_seed < scale * 0.25 {
+            continue;
+        }
+        checked += 1;
+        let gap_field = (field - own).abs();
+        assert!(
+            gap_field < scale * 0.02,
+            "off-screen spot {i} kept the parent blend after four own sets: own {own:.4} seed {seed:.4} field {field:.4}"
+        );
+    }
+    checked
+}
+
 /// A fine child whose own samples disagree with the parent prior moves onto
-/// its own value. The prior counts as at most four sets and clears at four
-/// own sets, so the field is not stuck on the parent.
+/// its own value before a pixel shows it. At four own sets the store is the
+/// child's field. After the camera aims at it, the screen filter stays there.
 #[test]
 fn a_fine_child_replaces_a_wrong_parent_prior() {
     const HAND: usize = 96;
@@ -952,29 +998,12 @@ fn a_fine_child_replaces_a_wrong_parent_prior() {
             luma(cell.field)
         );
     }
-    let mut pick = None;
-    let mut pick_gap = 0.0f32;
-    for (i, cell) in before.iter().enumerate() {
-        if cell.weight + 1.0e-3 < READY {
-            continue;
-        }
-        let own = cell_luma(cell);
-        let seed = luma(cell.seed);
-        let gap = (seed - own).abs();
-        let scale = own.max(seed).max(0.05);
-        if gap < scale * 0.25 {
-            continue;
-        }
-        if pick.is_none() || gap > pick_gap {
-            pick = Some(i);
-            pick_gap = gap;
-        }
-    }
+    let retired = assert_retired_fields_on_own(&before);
     assert!(
-        pick.is_some(),
-        "no fine child reached {READY} own sets and differed from the parent in {HAND} frames"
+        retired > 0,
+        "no fine child reached 4 own sets and differed from the parent in {HAND} off-screen frames"
     );
-    let pick = pick.unwrap_or(0);
+    let pick = worst_retired(&before).unwrap_or(0);
     let (yaw, pitch) = aim(eye_of(&camera), spots[pick].position);
     camera.set_pose(camera.position, yaw, pitch);
     assert!(
