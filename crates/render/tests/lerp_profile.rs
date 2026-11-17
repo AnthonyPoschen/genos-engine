@@ -6,7 +6,6 @@
 #![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::format_push_string, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::needless_range_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::no_effect_underscore_binding, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
