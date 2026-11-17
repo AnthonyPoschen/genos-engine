@@ -1778,8 +1778,7 @@ fn sidecar_text(
 fn partial_path(path: &Path) -> PathBuf {
     let mut name = path
         .file_name()
-        .map(|text| text.to_os_string())
-        .unwrap_or_default();
+        .map_or_default(|text| text.to_os_string());
     name.push(".partial");
     path.with_file_name(name)
 }

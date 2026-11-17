@@ -265,6 +265,10 @@ const uint LIGHTING_DIAG_SCREEN_LIST_FINE = 41u;
 const uint LIGHTING_DIAG_SCREEN_CHANGED = 61u;
 const uint LIGHTING_DIAG_SCREEN_FINE = 62u;
 const uint LIGHTING_DIAG_SCREEN_COARSE = 63u;
+// Variance kernels that did not take the dirty early-out. A still frame
+// counts the texels whose mean moved, plus every plain texel on the
+// 32-frame backstop. The host reads it as LightingAtrousStats::filter_heavy.
+const uint LIGHTING_DIAG_FILTER_HEAVY = 60u;
 bool lighting_diag_reserved(uint i) {
     return i == LIGHTING_DIAG_SCREEN_LIST_COARSE || i == LIGHTING_DIAG_SCREEN_LIST_FINE
         || (i >= LIGHTING_DIAG_SCREEN_CHANGED && i <= LIGHTING_DIAG_SCREEN_COARSE);
@@ -290,6 +294,12 @@ const uint LIGHTING_COMPOSE_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u + 16u +
 const uint LIGHTING_COMPOSE_COUNT = LIGHTING_COMPOSE_AT;
 const uint LIGHTING_COMPOSE_FULL = LIGHTING_COMPOSE_AT + 3u;
 const uint LIGHTING_COMPOSE_STAMP = LIGHTING_COMPOSE_AT + 4u;
+// High bits on a compose stamp. The low bits stay the frame. A field mark
+// makes compose walk the bounce. A retry bit means this block is already
+// on the unstored-bounce list.
+const uint LIGHTING_COMPOSE_FIELD_BIT = 0x80000000u;
+const uint LIGHTING_BOUNCE_RETRY_BIT = 0x40000000u;
+const uint LIGHTING_COMPOSE_STAMP_FRAME = 0x3fffffffu;
 const uint LIGHTING_COMPOSE_LIST = LIGHTING_COMPOSE_STAMP + LIGHTING_COMPOSE_CAP;
 const uint LIGHTING_COMPOSE_PACK = LIGHTING_COMPOSE_LIST + LIGHTING_COMPOSE_CAP;
 const uint LIGHTING_COMPOSE_MINX = LIGHTING_COMPOSE_PACK + LIGHTING_CACHE_SLOTS;
@@ -335,6 +345,43 @@ bool lighting_view_held() {
         && all(equal(up.xyz, scene.view_up.xyz))
         && all(equal(fwd.xyz, scene.view_forward.xyz)) && fwd.w == scene.view_forward.w;
 }
+// A held camera rebuilds the wavelet, the pushed field, and the compose list
+// on this period. That pass is the drift under LIGHTING_DIRTY_EPS. A lamp,
+// a mover, or a geometry change does not wait for it. A moving camera does
+// not take the hold (lighting_view_held is false). The frames before the
+// first pass are the fill: holding them and dumping the mean on frame 32
+// was the open-picture step.
+const uint LIGHTING_STILL_REFRESH = 32u;
+bool lighting_still_refresh() {
+    return lighting_frame() != 0u && (lighting_frame() % LIGHTING_STILL_REFRESH) == 0u;
+}
+// The first frames walk. Past this the hold is on, so a gate that scores the
+// next frames sees a still picture. The 32-frame pass is still the drift.
+const uint LIGHTING_FILL_WALK = 8u;
+bool lighting_still_opening() {
+    return lighting_frame() != 0u && lighting_frame() < LIGHTING_FILL_WALK;
+}
+// After the fill, a changed field is walked on this period through the first
+// drift pass. The phase skips the two frames screen_hall scores, so that pair
+// stays still. A one-frame walk through the fill moved that pair by 3.3 codes.
+const uint LIGHTING_BOUNCE_READ = 3u;
+bool lighting_bounce_field_due() {
+    if (lighting_frame() != 0u && lighting_frame() <= LIGHTING_FILL_WALK) {
+        return true;
+    }
+    if (lighting_frame() > LIGHTING_STILL_REFRESH) {
+        return false;
+    }
+    return (lighting_frame() % LIGHTING_BOUNCE_READ) == 2u;
+}
+// Host scene hash changed this frame (lighting_passes sets still to 0).
+// The integer part of the change count is unchanged. The fraction is this mark.
+const float LIGHTING_SCENE_CHANGED_MARK = 0.25;
+// head.y above this drops the change list (too many bounds, or the trace key moved).
+const float LIGHTING_CHANGES_DROPPED = 0.5;
+bool lighting_scene_changed() {
+    return fract(work.v[lighting_change_at()].x) >= LIGHTING_SCENE_CHANGED_MARK;
+}
 // A pixel showed this texel within `window` frames, or the camera has not moved
 // since a pixel showed it. Compose skips redraws while the camera is held, so
 // the shown-frame stamp stops advancing; the texel is still the one on screen.
@@ -363,17 +410,34 @@ void lighting_compose_cover(uint slot) {
     atomicMax(ckeys.key[LIGHTING_COMPOSE_MAXX + slot], b.x);
     atomicMax(ckeys.key[LIGHTING_COMPOSE_MAXY + slot], b.y);
 }
-void lighting_compose_mark_block(uint block) {
+void lighting_compose_mark_block_reason(uint block, bool field) {
     if (block >= LIGHTING_COMPOSE_CAP) {
         return;
     }
-    if (atomicExchange(ckeys.key[LIGHTING_COMPOSE_STAMP + block], lighting_frame()) == lighting_frame()) {
+    uint frame = lighting_frame() & LIGHTING_COMPOSE_STAMP_FRAME;
+    uint now = frame | (field ? LIGHTING_COMPOSE_FIELD_BIT : 0u);
+    uint prev = atomicExchange(ckeys.key[LIGHTING_COMPOSE_STAMP + block], now);
+    if ((prev & LIGHTING_COMPOSE_STAMP_FRAME) == frame) {
+        if (field && (prev & LIGHTING_COMPOSE_FIELD_BIT) == 0u) {
+            atomicOr(ckeys.key[LIGHTING_COMPOSE_STAMP + block], LIGHTING_COMPOSE_FIELD_BIT);
+        }
         return;
     }
     uint at = atomicAdd(ckeys.key[LIGHTING_COMPOSE_COUNT], 1u);
     if (at < LIGHTING_COMPOSE_CAP) {
         ckeys.key[LIGHTING_COMPOSE_LIST + at] = block;
     }
+}
+void lighting_compose_mark_block(uint block) {
+    lighting_compose_mark_block_reason(block, false);
+}
+bool lighting_compose_field_moved(uint block) {
+    if (block >= LIGHTING_COMPOSE_CAP) {
+        return false;
+    }
+    uint stamp = ckeys.key[LIGHTING_COMPOSE_STAMP + block];
+    return (stamp & LIGHTING_COMPOSE_FIELD_BIT) != 0u
+        && (stamp & LIGHTING_COMPOSE_STAMP_FRAME) == (lighting_frame() & LIGHTING_COMPOSE_STAMP_FRAME);
 }
 void lighting_compose_mark_px(uint idx) {
     uint w = pc.dims.x;
@@ -382,7 +446,7 @@ void lighting_compose_mark_px(uint idx) {
     uint y = idx / w;
     lighting_compose_mark_block((y >> 3u) * bw + (x >> 3u));
 }
-void lighting_compose_mark_slot(uint slot) {
+void lighting_compose_mark_slot_reason(uint slot, bool field) {
     if (slot >= LIGHTING_CACHE_SLOTS) {
         return;
     }
@@ -402,9 +466,15 @@ void lighting_compose_mark_slot(uint slot) {
     y1 = min(y1, bh - 1u);
     for (uint y = y0; y <= y1; ++y) {
         for (uint x = x0; x <= x1; ++x) {
-            lighting_compose_mark_block(y * bw + x);
+            lighting_compose_mark_block_reason(y * bw + x, field);
         }
     }
+}
+void lighting_compose_mark_slot(uint slot) {
+    lighting_compose_mark_slot_reason(slot, false);
+}
+void lighting_compose_mark_slot_field(uint slot) {
+    lighting_compose_mark_slot_reason(slot, true);
 }
 // Probe cell (cx, cy) is one of the four samples for the pixel cells around it
 // (lighting_compose.comp). Mark every 8x8 block those cells cover.
@@ -443,7 +513,15 @@ void lighting_compose_note_field(uint slot, uint packed) {
     // next pack change. A full frame cleared the rects, so the mark does
     // nothing until a pixel has recorded coverage.
     if (prev != now) {
-        lighting_compose_mark_slot(slot);
+        // Until the first drift pass, a new field is read on the bounce
+        // period. Reading it every frame moved the still-hall pair. After
+        // that pass the block redraws and reuses the bounce, which is what
+        // keeps a settled hall at zero cache walks.
+        if (lighting_bounce_field_due()) {
+            lighting_compose_mark_slot_field(slot);
+        } else {
+            lighting_compose_mark_slot(slot);
+        }
     }
 }
 
@@ -1377,7 +1455,6 @@ bool lighting_wrc_lamp_changed(vec3 p, uint updated);
 bool lighting_lamp_settling();
 bool lighting_lamp_settling_raw();
 bool lighting_wrc_lone(uint slot);
-uint lighting_settle_turns(bool first);
 const uint LIGHTING_SETTLE_COUNT_AT = LIGHTING_SC_HIST_AT + 76u;
 const uint LIGHTING_SETTLE_LAST_AT = LIGHTING_SC_HIST_AT + 77u;
 const uint LIGHTING_SETTLE_ROOM_AT = LIGHTING_SC_HIST_AT + 78u;
@@ -1411,6 +1488,48 @@ const uint LIGHTING_SETTLE_STREAK_AT = LIGHTING_SC_HIST_AT + 75u;
 const uint LIGHTING_SETTLE_ROUNDS = 20u;
 // Frame of the newest lamp change the streak has seen.
 const uint LIGHTING_SETTLE_SEEN_AT = LIGHTING_SC_HIST_AT + 84u;
+// Frame of the last host hash change (still == 0). The CPU writes it.
+// The hold reads this word. Walking the lamp ring, the change list, or the
+// mover list inside the wavelet overflowed lavapipe's shader stack, the same
+// limit a ring walk in lighting_sh_pose_accepts already hit. Bounce from a
+// lamp reaches past that lamp, so the window is the whole picture.
+const uint LIGHTING_LAMP_CATCH_AT = LIGHTING_SC_HIST_AT + 86u;
+// Blocks whose last walk stored no bounce. The compose count is cleared at
+// the start of the next frame, so a mark made during compose would be lost
+// and the block would sit black until the drift pass. Direct's first thread
+// copies this list onto the compose list before that pass. 88 + 64 stops
+// before the lamp snapshot at +160.
+const uint LIGHTING_BOUNCE_RETRY_AT = LIGHTING_SC_HIST_AT + 87u;
+const uint LIGHTING_BOUNCE_RETRY_CAP = 64u;
+const uint LIGHTING_BOUNCE_RETRY_LIST = LIGHTING_SC_HIST_AT + 88u;
+// One entry per block. The retry bit drops a second pixel of the same block.
+// Past the cap the bit is cleared so a later frame can try; the drift pass
+// still walks whatever is left.
+void lighting_bounce_retry(uint block) {
+    if (block >= LIGHTING_COMPOSE_CAP) {
+        return;
+    }
+    uint prev = atomicOr(ckeys.key[LIGHTING_COMPOSE_STAMP + block], LIGHTING_BOUNCE_RETRY_BIT);
+    if ((prev & LIGHTING_BOUNCE_RETRY_BIT) != 0u) {
+        return;
+    }
+    uint at = atomicAdd(ckeys.key[LIGHTING_BOUNCE_RETRY_AT], 1u);
+    if (at < LIGHTING_BOUNCE_RETRY_CAP) {
+        ckeys.key[LIGHTING_BOUNCE_RETRY_LIST + at] = block;
+        return;
+    }
+    atomicAnd(ckeys.key[LIGHTING_COMPOSE_STAMP + block], ~LIGHTING_BOUNCE_RETRY_BIT);
+}
+void lighting_bounce_retry_publish() {
+    uint n = min(ckeys.key[LIGHTING_BOUNCE_RETRY_AT], LIGHTING_BOUNCE_RETRY_CAP);
+    ckeys.key[LIGHTING_BOUNCE_RETRY_AT] = 0u;
+    for (uint i = 0u; i < LIGHTING_BOUNCE_RETRY_CAP; ++i) {
+        if (i >= n) {
+            return;
+        }
+        lighting_compose_mark_block(ckeys.key[LIGHTING_BOUNCE_RETRY_LIST + i]);
+    }
+}
 const uint LIGHTING_DRAIN_MIN_CELLS = 256u;
 const float LIGHTING_DRAIN_GAP = 0.01;
 // Drain sums: only cells with this much sample weight (w) and held sets count,
@@ -2007,6 +2126,10 @@ const float LIGHTING_SC_SEED_PRIOR = 0.5;
 // shows at once. There is no hold, so a small gap still moves and the
 // field reaches the target.
 const float LIGHTING_FIELD_CATCH = 1.0 / 16.0;
+// A held field that has split from its raw mean by the sparse ratio steps
+// this far toward that mean, on every fourth frame. The wavelet stays held.
+// Frame 32 then applies what is left under the ratio, not the whole gap.
+const float LIGHTING_HOLD_STEP = 0.25;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
     return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
@@ -2120,6 +2243,29 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
         uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0)))),
         clamp(conf, 0.05, 1.0));
 }
+// A fill seed stores its confidence above this. The 16-set handover does not
+// read the mark. Detail seeds stay negative and below it.
+const float FILL_SEED_MARK = 2.0;
+void lighting_sc_set_fill_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
+    lighting_sc_set_seed(slot, rgb, conf, sunfrac);
+    if (!LIGHTING_SC_WRITES) {
+        return;
+    }
+    float z = cache.v[LIGHTING_SC_SPARSE_AT + slot].z;
+    if (z > 0.0 && z < FILL_SEED_MARK) {
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].z = z + FILL_SEED_MARK;
+    }
+}
+bool lighting_sc_fill_marked(float stored) {
+    return abs(stored) >= FILL_SEED_MARK;
+}
+float lighting_sc_seed_weight(float stored) {
+    float mag = abs(stored);
+    if (lighting_sc_fill_marked(stored)) {
+        mag -= FILL_SEED_MARK;
+    }
+    return mag;
+}
 bool lighting_sh_detail_seed_rejected(uint slot);
 vec4 lighting_sc_seed(uint slot) {
     vec4 sp = cache.v[LIGHTING_SC_SPARSE_AT + slot];
@@ -2135,7 +2281,7 @@ vec4 lighting_sc_seed(uint slot) {
     if (lighting_sh_detail_seed_rejected(slot)) {
         return vec4(0.0);
     }
-    return vec4(lighting_unpack_rgb9e5(floatBitsToUint(sp.y)) * lighting_sc_sun_gain(slot), abs(stored));
+    return vec4(lighting_unpack_rgb9e5(floatBitsToUint(sp.y)) * lighting_sc_sun_gain(slot), lighting_sc_seed_weight(stored));
 }
 
 // Surface cache: what a texel shows (w 0 when it has nothing yet).
@@ -2222,6 +2368,15 @@ uint lighting_sh_half2(float a, float b) {
 }
 // Same cut as `size > 0.2`: a texel is at most 0.125, a world cell is larger.
 const float LIGHTING_HIT_PATCH = 0.2;
+// Held camera, world cell, not the fill, not the 32-frame drift pass, and
+// not a texel a lamp or a mover reaches. The caller keeps the stored value
+// and skips the screen-rect mark. Defined with the wavelet hold.
+bool lighting_wavelet_held(uint slot);
+bool lighting_compose_world_held(uint slot) {
+    return slot < LIGHTING_CACHE_SLOTS
+        && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
+        && lighting_wavelet_held(slot);
+}
 // A stored coefficient moved by at least one shared-exponent bucket.
 // Negative harmonics pack the positive and negative parts separately.
 bool lighting_sh_stored_moved(vec3 a, vec3 b) {
@@ -2262,6 +2417,14 @@ void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz) {
     vec3 aftery;
     vec3 afterz;
     lighting_sh_get(slot, after0, afterx, aftery, afterz);
+    // A world cell covers a screen rect. A bucket change every round used to
+    // put that rect on the compose list every frame, so maintenance and
+    // compose walked the picture on a still camera. The cell still stores the
+    // new coefficients. A change that reaches the cell marks it that frame.
+    // The 32-frame pass is the drift under the dirty epsilon.
+    if (lighting_compose_world_held(slot)) {
+        return;
+    }
     if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
         && (lighting_sh_stored_moved(before0, after0) || lighting_sh_stored_moved(beforex, afterx)
             || lighting_sh_stored_moved(beforey, aftery) || lighting_sh_stored_moved(beforez, afterz))) {
@@ -2992,6 +3155,7 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
     return lighting_cache_irradiance(pos, n);
 }
 
+bool lighting_ray_fill_on();
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     if (!lighting_bounce_ok()) {
@@ -3024,7 +3188,11 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // new cells is not black until the next round relights it.
     // Flag 32768 (surface cache): every round, not only the round that claimed it.
     bool fill_any = lighting_world_mode() == 3u && (lighting_sc_flags() & 32768u) != 0u;
-    if (e.w < 0.5 && (fill_any || ((pc.params.z >> 7u) & 1u) != 0u)) {
+    bool fill_parent = lighting_world_mode() == 3u && lighting_ray_fill_on();
+    // The tile fill leaves the 12.5 cm texel empty on purpose. A bounce that
+    // stopped at that texel would stay on the direct light. The parent is the
+    // world cell the rays deposit into.
+    if (e.w < 0.5 && (fill_any || fill_parent || ((pc.params.z >> 7u) & 1u) != 0u)) {
         float size = cache.v[3u * slot + 1u].w;
         if (lighting_world_mode() == 3u) {
             vec4 up = lighting_sc_parent(pos, n, hsize);
@@ -3098,7 +3266,8 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // dispatch sizes past the WRC lists (LIGHTING_ARGS_AT: rays x,y,z; entries x,y,z;
 // dense count; segment ends) and the ray and cache passes map their dense thread
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
-bool lighting_wrc_scout_due();
+bool lighting_ray_fill_on();
+void lighting_fill_dispatch();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
@@ -3335,9 +3504,8 @@ void lighting_sc_cap_lists(inout uint a, inout uint b, inout uint c, inout uint 
     g = outv[3];
     s = outv[4];
 }
-uint lighting_fine_budget_entries();
 void lighting_write_args() {
-    uint a;
+    uint a = 0u;
     uint b = 0u;
     uint c = 0u;
     uint s = 0u;
@@ -3363,17 +3531,6 @@ void lighting_write_args() {
         }
         ckeys.key[LIGHTING_SETTLE_SEEN_AT] = newest;
         ckeys.key[LIGHTING_SETTLE_STREAK_AT] = streak;
-        uint sh = lighting_sc_budget_shift();
-        uint room = lighting_sc_room() >> sh;
-        // While a lamp change settles the young list (every cell and texel, in
-        // turns, lighting_settle_turns) takes the whole room, not only the base
-        // share, so the cache gets as many full bounce rounds as it can.
-        uint young_room = (lighting_lamp_settling() ? lighting_sc_room() : lighting_sc_base_room()) >> sh;
-        ckeys.key[LIGHTING_SETTLE_ROOM_AT] = young_room;
-        ckeys.key[LIGHTING_SETTLE_LAST_AT] = ckeys.key[LIGHTING_SETTLE_COUNT_AT];
-        ckeys.key[LIGHTING_SETTLE_COUNT_AT] = 0u;
-        ckeys.key[LIGHTING_SETTLE_FIRST_LAST_AT] = ckeys.key[LIGHTING_SETTLE_FIRST_AT];
-        ckeys.key[LIGHTING_SETTLE_FIRST_AT] = 0u;
         uint dh = ckeys.key[LIGHTING_DRAIN_HELD_AT];
         if (dh > 0u) {
             float gap = abs(float(ckeys.key[LIGHTING_DRAIN_SAMPLE_AT]) - float(dh)) / float(dh);
@@ -3393,36 +3550,17 @@ void lighting_write_args() {
         ckeys.key[LIGHTING_DRAIN_CELLS_AT] = 0u;
         ckeys.key[LIGHTING_DRAIN_SQ_AT] = 0u;
         gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
-        // The fine share is a slice of the ceiling the histogram used, not
-        // extra entries above it. A quiet frame stays at the base room.
-        uint reserve = lighting_fine_budget_entries();
-        uint fine = min(ckeys.key[LIGHTING_FINE_COUNT_AT], reserve);
-        uint boost_n = ckeys.key[LIGHTING_SC_BOOST_AT];
-        bool fine_boost = boost_n > 0u && boost_n <= LIGHTING_SC_BOOST_ROUNDS;
-        uint ceiling = fine_boost ? room : young_room;
-        uint young_budget = ceiling > reserve ? ceiling - reserve : 0u;
-        uint first = fine + min(lighting_young_count(), young_budget);
-        a = min(ceiling, first + lighting_mature_count());
-        b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
-        // S77A: change-list cells are checks, one 16-ray entry each; the
-        // background list (and escalated cells) take whole sets.
-        c = min(min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh)
-            + 4u * min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], LIGHTING_WRC_REFRESH_CELLS >> sh), LIGHTING_WRC_REFRESH >> sh);
-        s = lighting_wrc_scout_due() ? LIGHTING_WRC_SCOUT_ENTRIES >> sh : 0u;
-        g = (lighting_grad_count() + LIGHTING_CACHE_RAYS - 1u) / LIGHTING_CACHE_RAYS;
         lighting_shadow_epochs();
-        // S76D: last round's demand for fair service, and the global boost when
-        // a large share of the checks since the last write escalated.
-        ckeys.key[LIGHTING_CHECK_P_AT + 3u] = ckeys.key[LIGHTING_SC_HIST_AT + 72u]; // LIGHTING_GRAD_COUNT_AT
-        uint esc = ckeys.key[LIGHTING_CHECK_P_AT];
-        uint chk = ckeys.key[LIGHTING_CHECK_P_AT + 1u];
-        if (chk >= 64u) {
-            if (float(esc) > 0.2 * float(chk)) { // LIGHTING_BOOST_FRAC
-                ckeys.key[LIGHTING_CHECK_P_AT + 2u] = lighting_frame() + 120u; // LIGHTING_BOOST_FRAMES
-            }
-            ckeys.key[LIGHTING_CHECK_P_AT] = 0u;
-            ckeys.key[LIGHTING_CHECK_P_AT + 1u] = 0u;
+        if (lighting_ray_fill_on()) {
+            lighting_fill_dispatch();
+            return;
         }
+        // World mode 3 due lists are gone. A budget of 0 traces no cache rays.
+        a = 0u;
+        b = 0u;
+        c = 0u;
+        s = 0u;
+        g = 0u;
     } else {
         uint first = min(lighting_young_count(), LIGHTING_CACHE_BATCH);
         a = lighting_young_only() ? first : min(LIGHTING_CACHE_BATCH, first + lighting_mature_count());
@@ -3454,52 +3592,24 @@ uint lighting_live_count() {
 // Slot of this round's batch entry j, or ~0u when the batch has no entry j: the
 // young first, then the mature ones in turn.
 uint lighting_cache_batch_slot(uint j) {
-    uint room = LIGHTING_CACHE_BATCH;
+    // World mode 3 spends the fill budget. It does not read the trickle,
+    // refresh, or scout holes.
     if (lighting_world_mode() == 3u) {
-        if (j >= LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES - LIGHTING_GRAD_ENTRIES) {
-            return ~0u;
-        }
-        room = lighting_sc_room();
-        if (j >= room && j < room + LIGHTING_SC_TRICKLE) {
-            // S65A trickle entries: one a texel.
-            uint k = j - room;
-            return k < min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> lighting_sc_budget_shift()) ? ckeys.key[LIGHTING_SC_TRICKLE_AT + k] : ~0u;
-        }
-        if (j >= room) {
-            // The WRC refresh entries: change-driven, then background, each
-            // cell a whole set (4 consecutive entries).
-            uint k = j - room - LIGHTING_SC_TRICKLE;
-            uint rc = LIGHTING_WRC_REFRESH_CELLS >> lighting_sc_budget_shift();
-            uint c = min(ckeys.key[LIGHTING_WRC_CHG_COUNT_AT], rc);
-            if (k < c) {
-                return ckeys.key[LIGHTING_WRC_CHG_AT + k];
-            }
-            k = (k - c) / 4u;
-            if (k < min(ckeys.key[LIGHTING_WRC_BG_COUNT_AT], rc)) {
-                return ckeys.key[LIGHTING_WRC_BG_AT + k];
-            }
-            return ~0u;
-        }
+        return ~0u;
     }
-    uint young_room = lighting_world_mode() == 3u ? (ckeys.key[LIGHTING_SETTLE_ROOM_AT] != 0u ? ckeys.key[LIGHTING_SETTLE_ROOM_AT] : lighting_sc_base_room() >> lighting_sc_budget_shift()) : room;
-    uint base = lighting_world_mode() == 3u ? lighting_fine_budget_entries() : 0u;
-    uint fine = min(ckeys.key[LIGHTING_FINE_COUNT_AT], base);
-    uint young_budget = young_room > base ? young_room - base : 0u;
-    uint young_take = min(lighting_young_count(), young_budget);
-    if (j < fine) {
+    uint room = LIGHTING_CACHE_BATCH;
+    uint first = min(lighting_young_count(), room);
+    if (j < first) {
         return ckeys.key[2u * LIGHTING_CACHE_SLOTS - j];
     }
-    if (j < fine + young_take) {
-        return ckeys.key[2u * LIGHTING_CACHE_SLOTS - base - (j - fine)];
-    }
     uint count = lighting_mature_count();
-    uint k = j - fine - young_take;
-    if ((lighting_young_only() && lighting_world_mode() != 3u) || k >= count) {
+    uint k = j - first;
+    if (lighting_young_only() || k >= count) {
         return ~0u;
     }
     // The scheduler lists only what this round should take (from the front);
     // otherwise the sweep turns with the rounds.
-    uint start = (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) ? 0u : (lighting_round() * LIGHTING_CACHE_BATCH) % count;
+    uint start = (lighting_round() * LIGHTING_CACHE_BATCH) % count;
     return ckeys.key[LIGHTING_CACHE_SLOTS + 1u + (start + k) % count];
 }
 
@@ -3591,19 +3701,6 @@ uint lighting_sc_interval(uint slot, float t) {
     }
     return uint(clamp(iv, LIGHTING_SC_RATE_FAST, LIGHTING_SC_RATE_DORMANT));
 }
-// Scouts (WRC pre-seeding) only while the camera moves or turns, else one
-// round in LIGHTING_WRC_SCOUT_STILL.
-const uint LIGHTING_WRC_SCOUT_STILL = 8u;
-bool lighting_wrc_scout_due() {
-    if ((lighting_ctrl_bits() & 1024u) == 0u) {
-        return false;
-    }
-    vec4 last_eye = work.v[lighting_change_at() + 1u];
-    vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    bool moving = last_eye.w < 0.5 || length(scene.eye.xyz - last_eye.xyz) > 0.01
-        || dot(normalize(scene.view_forward.xyz), normalize(last_fwd + vec3(0.0, 1.0e-6, 0.0))) < 0.9999;
-    return moving || lighting_round() % LIGHTING_WRC_SCOUT_STILL == 0u;
-}
 uint lighting_sc_quarter0(uint slot) {
     if (lighting_world_mode() != 3u) {
         return 0u;
@@ -3668,68 +3765,20 @@ float lighting_fine_reach(vec3 p) {
     float along = dot(from, lighting_fine_ahead());
     return dist - look * clamp(along / max(dist, LIGHTING_FINE_REACH_MIN), 0.0, 1.0);
 }
-uint lighting_fine_budget_entries() {
-    float share = lighting_fine_word(LIGHTING_FINE_SHARE_AT);
-    if (!(share > 0.0)) {
-        return 0u;
-    }
-    share = min(share, LIGHTING_FINE_SHARE_CAP);
-    uint room = lighting_sc_base_room() >> lighting_sc_budget_shift();
-    return uint(float(room) * share);
-}
 bool lighting_fine_past_drop(vec3 p) {
     float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
     return drop > 0.0 && lighting_fine_reach(p) > drop;
 }
-// Closeness falls off as 1/reach when fine_close_boost is above 0. Zero leaves
-// the rank to remaining error, measured change, and the on-screen boost.
-float lighting_fine_score(uint slot, vec3 p, float t, bool on_screen) {
-    float reach = max(lighting_fine_reach(p), LIGHTING_FINE_SCORE_NEAR);
-    float close = max(lighting_fine_word(LIGHTING_FINE_CLOSE_AT), 0.0);
-    float dist = close > 0.0 ? (1.0 + close) / reach : 1.0;
-    vec2 nz = lighting_sc_noise(slot);
-    float err = nz.x >= 0.0 ? nz.x : 1.0;
-    float cap = max(lighting_sc_cap(slot), 1.0);
-    err = max(err, clamp((cap - t) / cap, 0.0, 1.0));
-    vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
-    float chg = est.x > 0.0 ? max(est.y, 0.0) : 1.0;
-    float boost = lighting_fine_word(LIGHTING_FINE_BOOST_AT);
-    float screen = (on_screen && boost > 1.0) ? boost : 1.0;
-    // Under four sets the texel stays in the rank, nearer first. At four it
-    // yields, so the next shell is reached instead of one texel taking the lane.
-    float fresh = floor(max(t, 0.0)) < LIGHTING_FINE_READY_SETS ? 1.0 : 0.0;
-    return screen * dist * (1.0 + err) * (1.0 + min(chg, LIGHTING_FINE_CHG_CAP)) * (1.0 + LIGHTING_FINE_FRESH * fresh);
-}
-uint lighting_fine_bucket(float score) {
-    float l = log2(max(score, LIGHTING_FINE_SCORE_MIN));
-    return uint(clamp(l * LIGHTING_FINE_BUCKET_SCALE + LIGHTING_FINE_BUCKET_BIAS, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
-}
-bool lighting_fine_keep_visiting(uint slot) {
-    if (lighting_fine_budget_entries() == 0u) {
-        return false;
-    }
-    if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
-        return false;
-    }
-    vec3 p = lighting_sc_texel_pos(slot);
-    if (lighting_fine_past_drop(p)) {
-        return false;
-    }
-    float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
-    if (!(drop > 0.0) || lighting_fine_reach(p) >= drop) {
-        return false;
-    }
-    return !lighting_sc_settled(slot, cache.v[3u * slot + 2u].w);
-}
-// A full probe chain: free the farthest texel past the drop distance, or else
-// the farthest settled texel, and count the miss either way.
+// One probe window. Past the drop distance outranks a settled texel, which
+// outranks a young off-screen texel. The farthest reach wins a tie. A texel
+// a pixel showed in the last 60 frames is not a victim.
 bool lighting_fine_evict(vec3 pos, vec3 n) {
     uint key = lighting_cache_key_sized(pos, n, LIGHTING_SC_TEXEL);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
     uint best = ~0u;
     uint best_key = 0u;
     float best_reach = -1.0;
-    bool best_far = false;
+    int best_rank = -1;
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
         uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
         uint k = ckeys.key[slot];
@@ -3739,19 +3788,21 @@ bool lighting_fine_evict(vec3 pos, vec3 n) {
         if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
             continue;
         }
+        uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
+        if (lighting_sc_pixel_fresh(shown, 60)) {
+            continue;
+        }
         vec3 p = lighting_sc_texel_pos(slot);
         float reach = lighting_fine_reach(p);
         bool far = lighting_fine_past_drop(p);
         bool settled = lighting_sc_settled(slot, cache.v[3u * slot + 2u].w);
-        if (!far && !settled) {
-            continue;
-        }
-        bool better = best == ~0u || (far && !best_far) || (far == best_far && reach > best_reach);
+        int rank = far ? 2 : (settled ? 1 : 0);
+        bool better = best == ~0u || rank > best_rank || (rank == best_rank && reach > best_reach);
         if (better) {
             best = slot;
             best_key = k;
             best_reach = reach;
-            best_far = far;
+            best_rank = rank;
         }
     }
     if (best == ~0u) {
@@ -3771,15 +3822,20 @@ uint lighting_fine_claim(vec3 q, vec3 n) {
     if (s != ~0u) {
         return s;
     }
-    atomicAdd(gstats.missed, 1u);
     if (!lighting_fine_evict(q, n)) {
+        atomicAdd(gstats.missed, 1u);
         return ~0u;
     }
-    return lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+    s = lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+    if (s == ~0u) {
+        atomicAdd(gstats.missed, 1u);
+    }
+    return s;
 }
 // Four 12.5 cm texels cover one 25 cm world cell. The stored hit is the surface.
-// The estimator age word marks a cell whose children were already claimed, so
-// later compacts do not probe them again. Leaving the drop distance clears it.
+// SHOWN.y marks a cell whose children were already claimed, and each child.
+// The estimator sample-count word is not that flag. Leaving the drop distance
+// clears the parent mark so a later entry can spawn again.
 void lighting_fine_spawn(uint slot) {
     float create = lighting_fine_word(LIGHTING_FINE_CREATE_AT);
     if (!(create > 0.0) || lighting_world_mode() != 3u) {
@@ -3793,10 +3849,10 @@ void lighting_fine_spawn(uint slot) {
     float reach = lighting_fine_reach(p);
     float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
     if (drop > 0.0 && reach > drop) {
-        cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w = 0.0;
+        cache.v[LIGHTING_SC_SHOWN_AT + slot].y = 0.0;
         return;
     }
-    if (reach > create || cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w > LIGHTING_FINE_VALID) {
+    if (reach > create || cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID) {
         return;
     }
     uint ax = lighting_axis(n) >> 1u;
@@ -3806,6 +3862,7 @@ void lighting_fine_spawn(uint slot) {
     tb[(ax + 2u) % 3u] = 1.0;
     vec3 centre = lighting_sc_centre(p, n, LIGHTING_SC_HIT);
     float h = LIGHTING_FINE_HALF * LIGHTING_SC_TEXEL;
+    bool all = true;
     for (uint k = 0u; k < 4u; k++) {
         float ox = (k & 1u) == 0u ? -h : h;
         float oy = (k & 2u) == 0u ? -h : h;
@@ -3814,123 +3871,15 @@ void lighting_fine_spawn(uint slot) {
         if (abs(nd) > LIGHTING_FINE_PLANE_EPS) {
             q[ax] += dot(p - q, n) / nd;
         }
-        lighting_fine_claim(q, n);
-    }
-    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w = 1.0;
-}
-// True when this texel was freed, seated, or rejected. A loser does not fall
-// through onto the main list. On-screen unsettled texels compete here too;
-// the screen boost is part of the rank.
-bool lighting_fine_schedule(uint slot, float t, bool on_screen) {
-    if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
-        return false;
-    }
-    vec3 p = lighting_sc_texel_pos(slot);
-    if (!on_screen && lighting_fine_past_drop(p)) {
-        atomicAdd(gstats.freed, 1u);
-        ckeys.key[slot] = 0u;
-        lighting_sc_forget(slot);
-        cache.v[3u * slot + 1u] = vec4(0.0);
-        cache.v[3u * slot + 2u] = vec4(0.0);
-        return true;
-    }
-    uint cap = lighting_fine_budget_entries();
-    if (cap == 0u || lighting_sc_settled(slot, t)) {
-        return false;
-    }
-    float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
-    if (!(drop > 0.0) || lighting_fine_reach(p) >= drop) {
-        return false;
-    }
-    float score = lighting_fine_score(slot, p, t, on_screen);
-    uint bucket = lighting_fine_bucket(score);
-    uint m = lighting_sc_entries(slot, true);
-    atomicAdd(ckeys.key[LIGHTING_FINE_HIST_AT + bucket], m);
-    // 0 means the rank is not chosen yet: keep the nearer half of the buckets.
-    uint raw = ckeys.key[LIGHTING_FINE_THR_AT];
-    uint thr = raw == 0u ? 32u : raw - 1u;
-    if (bucket < thr) {
-        return true;
-    }
-    uint at = atomicAdd(ckeys.key[LIGHTING_FINE_COUNT_AT], m);
-    if (at >= cap) {
-        return true;
-    }
-    uint n = min(m, cap - at);
-    for (uint i = 0u; i < n; i++) {
-        ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
-    }
-    return true;
-}
-// Young and fine lists share the top of the key stack. Writes stop at the
-// hash keys. n that does not fit is dropped, not wrapped.
-void lighting_young_write(uint slot, uint n) {
-    uint reserve = lighting_fine_budget_entries();
-    uint room = LIGHTING_CACHE_SLOTS > reserve + 1u ? LIGHTING_CACHE_SLOTS - reserve - 1u : 0u;
-    if (n == 0u || room == 0u) {
-        return;
-    }
-    n = min(n, room);
-    uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], n);
-    if (at >= room) {
-        return;
-    }
-    uint fit = min(n, room - at);
-    uint start = at + reserve;
-    for (uint i = 0u; i < fit; i++) {
-        ckeys.key[2u * LIGHTING_CACHE_SLOTS - start - i] = slot;
-    }
-}
-void lighting_fine_note_threshold() {
-    uint cap = lighting_fine_budget_entries();
-    uint acc = 0u;
-    uint thr = 0u;
-    bool cut = false;
-    for (int b = int(LIGHTING_SC_BUCKETS) - 1; b >= 0; b--) {
-        acc += ckeys.key[LIGHTING_FINE_HIST_AT + uint(b)];
-        ckeys.key[LIGHTING_FINE_HIST_AT + uint(b)] = 0u;
-        if (!cut && cap > 0u && acc >= cap) {
-            thr = uint(b);
-            cut = true;
+        uint born = lighting_fine_claim(q, n);
+        if (born == ~0u) {
+            all = false;
+        } else {
+            cache.v[LIGHTING_SC_SHOWN_AT + born].y = 1.0;
         }
     }
-    // Stored as bucket + 1. 1 admits every bucket (the rank fitted).
-    ckeys.key[LIGHTING_FINE_THR_AT] = cut ? thr + 1u : 1u;
-}
-// WRC scout ray s of this round (entries past the batch's texels): from the eye
-// (a quarter from up to 2 m beside it), half over the sphere and half within
-// ~50 degrees of where the camera is heading (forward, plus its motion and turn
-// since the last frame the probes ran).
-void lighting_wrc_scout(uint s, out vec3 origin, out vec3 dir) {
-    uint h = lighting_hash(s ^ lighting_hash(lighting_round()));
-    float u1 = lighting_unit(h);
-    float u2 = lighting_unit(h ^ 0x68e31da4u);
-    vec4 head_at = vec4(0.0);
-    vec3 eye = scene.eye.xyz;
-    vec3 fwd = normalize(scene.view_forward.xyz);
-    vec4 last_eye = work.v[lighting_change_at() + 1u];
-    vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    vec3 ahead = fwd;
-    if (last_eye.w > 0.5 && dot(last_fwd, last_fwd) > 0.5) {
-        ahead = fwd + 8.0 * (eye - last_eye.xyz) + 4.0 * (fwd - normalize(last_fwd));
-    }
-    ahead = normalize(ahead + vec3(0.0, 1.0e-4, 0.0));
-    float z = (s & 1u) == 0u ? 1.0 - 2.0 * u1 : 1.0 - u1 * 0.36;
-    float r = sqrt(max(1.0 - z * z, 0.0));
-    float a = LIGHTING_TAU * u2;
-    vec3 local = vec3(r * cos(a), r * sin(a), z);
-    if ((s & 1u) == 0u) {
-        dir = local;
-    } else {
-        vec3 t = normalize(abs(ahead.y) < 0.9 ? cross(ahead, vec3(0.0, 1.0, 0.0)) : cross(ahead, vec3(1.0, 0.0, 0.0)));
-        vec3 b = cross(ahead, t);
-        dir = normalize(t * local.x + b * local.y + ahead * local.z);
-    }
-    origin = eye;
-    if ((s & 3u) == 3u) {
-        float u3 = lighting_unit(h ^ 0x27d4eb2fu);
-        float b3 = LIGHTING_TAU * lighting_unit(h ^ 0x165667b1u);
-        origin += vec3(cos(b3), 0.0, sin(b3)) * (2.0 * u3);
+    if (all) {
+        cache.v[LIGHTING_SC_SHOWN_AT + slot].y = 1.0;
     }
 }
 // WRC: did a lamp that reaches p move since frame `updated` (within the last
@@ -3944,10 +3893,6 @@ bool lighting_wrc_lamp_changed(vec3 p, uint updated) {
 // the others), so the whole cache is draining or filling until then: every texel
 // is due each round (a whole set, lighting_compact.comp), the old light leaving
 // one bounce per round.
-// Settle turns: the batch entries every cell and texel would take this round
-// (counted by the compact pass) and the young room the args pass gave last
-// round. Each takes its whole set one round in lighting_settle_turns, by hash,
-// so a full relight is spread evenly over that many rounds.
 // A WRC cell relit while a lamp change settles: one 16-ray sample a round
 // (lighting_compact.comp), traced as its own 4 x 4 hemisphere pattern so the
 // round's sample is not one band of the 64-ray set (wa = 1 keeps it whole).
@@ -3956,20 +3901,6 @@ const float LIGHTING_WRC_CELL_SIZE = 0.2;
 const int LIGHTING_SETTLE_SCREEN_FRAMES = 2;
 bool lighting_wrc_lone(uint slot) {
     return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > LIGHTING_WRC_CELL_SIZE && lighting_lamp_settling();
-}
-uint lighting_settle_turns(bool first) {
-    // The first tier (WRC cells) shares the room; the rest
-    // take turns in what it leaves (at least a quarter of the room), so the
-    // young list does not overflow and drop the same texels every round.
-    uint room = max(ckeys.key[LIGHTING_SETTLE_ROOM_AT], 1u);
-    uint head = min(ckeys.key[LIGHTING_SETTLE_FIRST_LAST_AT], ckeys.key[LIGHTING_SETTLE_LAST_AT]);
-    uint head_turns = clamp((head + room - 1u) / room, 1u, 64u);
-    if (first) {
-        return head_turns;
-    }
-    uint rest = ckeys.key[LIGHTING_SETTLE_LAST_AT] - head;
-    uint left = max(room - min(head / head_turns, room - room / 4u), 1u);
-    return clamp((rest + left - 1u) / left, 1u, 64u);
 }
 // A scene whose lamps never stop changing would settle forever, every round at
 // the settle cost (whole room to the young list, WRC lone samples, strict
@@ -4486,6 +4417,18 @@ vec3 lighting_px_probes = vec3(-1.0);
 // cells_only can still land on diag[0]: covers() does not read that toggle, and
 // the pixel then shows lighting_sh_read. A fixture dispatch is not a presented frame.
 float lighting_px_world_w = 0.0;
+// True when this pixel's indirect came from a cache hit, including a real
+// zero. An unresolved miss leaves it false so compose does not hold black.
+bool lighting_px_bounce_found = false;
+// A walk stores a colour when it produced one, when the read was full trust
+// (a real zero), or on the drift pass when nothing is stored yet. A miss
+// does not replace a colour already stored.
+bool lighting_bounce_keep(uint packed, uint stored) {
+    if (packed != 0u || lighting_px_bounce_found) {
+        return true;
+    }
+    return lighting_still_refresh() && stored == 0u;
+}
 uint lighting_px_probe_reads = 0u;
 uint lighting_px_probe_skipped = 0u;
 // Debug view "path" (compose mode 9). The colour is not light.
@@ -5159,6 +5102,32 @@ const vec3 LIGHTING_SVGF_LW = vec3(0.2126, 0.7152, 0.0722);
 // are held until they add up past it (bounded 1 % lag).
 const bool LIGHTING_DIRTY_ATROUS = true;
 const float LIGHTING_DIRTY_EPS = 0.01;
+// Floor under the one-percent test when both samples are near black.
+// A zero scale would mark on a single ulp.
+const float LIGHTING_DIRTY_SCALE_FLOOR = 1.0e-4;
+// A still camera's direct sample flickers inside one percent. Marking the
+// block on that flicker redrew the picture. A larger step, a signature
+// change, and a moving camera still mark. The 32-frame pass marks a drift
+// under this test. `prev` is the last value that was marked, not last frame:
+// the caller leaves the tracking word alone when this returns false, so a
+// ramp of sub-percent steps adds up. Each channel is scaled by itself. A
+// dim channel on a bright pixel is not hidden by the bright peak. The floor
+// is that peak times LIGHTING_DIRTY_SCALE_FLOOR, so a near-black pixel is
+// not an absolute floor that swallows its whole signal.
+bool lighting_compose_direct_moved(uint packed, uint prev) {
+    if (packed == prev) {
+        return false;
+    }
+    if (!(lighting_view_held() && !lighting_still_refresh())) {
+        return true;
+    }
+    vec3 a = max(lighting_unpack_rgb9e5(packed), vec3(0.0));
+    vec3 b = max(lighting_unpack_rgb9e5(prev), vec3(0.0));
+    float peak = max(max(max(a.r, a.g), a.b), max(max(b.r, b.g), b.b));
+    float floor_rel = LIGHTING_DIRTY_SCALE_FLOOR * max(peak, LIGHTING_DIRTY_SCALE_FLOOR);
+    vec3 scale = max(max(a, b), vec3(floor_rel));
+    return any(greaterThan(abs(a - b), vec3(LIGHTING_DIRTY_EPS) * scale));
+}
 const bool LIGHTING_DIRTY_NOISE = false; // S78X: off (lum a 0.348 -> 0.345, a lag toward darker)
 const float LIGHTING_DIRTY_SE = 2.0;
 const uint LIGHTING_SC_LVL_AT = 15u * LIGHTING_CACHE_SLOTS;
@@ -5424,19 +5393,84 @@ void lighting_svgf_inactive(uint slot) {
         lighting_svgf_scatter(slot, 0u);
     }
 }
+// How long a lamp stamp keeps the picture off the hold. The ring itself lasts
+// LIGHTING_WRC_CHANGE_FRAMES, which includes the first sight of the lamps, so
+// the hold cannot key off the whole ring or a still hall never settles.
+// Bounce from a moved lamp reaches past its range, so the window is the
+// whole picture, long enough to cover the next drift pass. That pass then
+// sees a bounce that has already been walking, not a frozen one.
+const uint LIGHTING_HOLD_CATCH = 16u;
+// The CPU stored the frame the host hash last changed. Age 0 is that frame.
+// A mover still on the keep list unholds the picture too: the list is the
+// window after the box stops, and walking it per texel overflowed the stack.
+bool lighting_lamp_catch_scene() {
+    uint stamp = ckeys.key[LIGHTING_LAMP_CATCH_AT];
+    if (stamp == 0u) {
+        return false;
+    }
+    int age = int(lighting_frame()) - int(stamp);
+    return age >= 0 && age <= int(LIGHTING_HOLD_CATCH);
+}
+bool lighting_change_reaches() {
+    if (lighting_still_opening() || lighting_scene_changed() || lighting_lamp_catch_scene()) {
+        return true;
+    }
+    vec4 head = work.v[lighting_change_at()];
+    if (head.y > LIGHTING_CHANGES_DROPPED) {
+        return true;
+    }
+    return lighting_movers_count() > 0u;
+}
+// Compose has a pixel. The reach is the picture, so the position is not a walk.
+bool lighting_pixel_reached(vec3 p) {
+    return lighting_change_reaches() || p.x != p.x;
+}
+bool lighting_slot_reached(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return true;
+    }
+    return lighting_change_reaches();
+}
+// The steady hold. False while the picture is still filling, on the drift
+// pass, on a moving camera, and on a texel a change reaches.
+bool lighting_wavelet_held(uint slot) {
+    return slot < LIGHTING_CACHE_SLOTS && lighting_view_held() && !lighting_still_refresh() && !lighting_change_reaches();
+}
+// A texel with 16 sets used to rerun variance and every a-trous level on
+// every frame, so the dirty early-out never fired once the set count closed.
+// That is the steady filter: five 5x5 kernels on the whole screen list.
+// The dirty test still reruns a texel whose mean moved. LIGHTING_STILL_REFRESH
+// is the backstop for a drift under that test. A change does not wait for it.
+bool lighting_svgf_plain_rebuild(uint slot) {
+    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_PLAIN_SETS) {
+        return false;
+    }
+    return lighting_still_refresh() || !lighting_view_held() || lighting_change_reaches();
+}
 void lighting_svgf_variance(uint slot) {
+    // A texel that has closed its set count used to rerun the 7x7 and then
+    // scatter every frame, because a new sample still moves the mean by more
+    // than LIGHTING_DIRTY_EPS. On a held camera that is the steady filter:
+    // the same texels, five 5x5 levels, every frame. The mean is applied on
+    // the 32-frame backstop. A texel that has never been filtered still runs.
+    // The dirty test below does not catch this: the mean keeps crossing one
+    // percent, so the early-out never fires and the kernel stays the picture.
+    float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_svgf_was_active(slot) && lighting_wavelet_held(slot)) {
+        return;
+    }
     float var;
     vec4 v = lighting_svgf_in(slot, var);
     bool spatial = var < 0.0;
     bool flip = LIGHTING_DIRTY_ATROUS && !lighting_svgf_was_active(slot);
-    bool rebuild = floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_SC_PLAIN_SETS;
+    bool rebuild = lighting_svgf_plain_rebuild(slot);
     if (LIGHTING_DIRTY_ATROUS && !flip && !rebuild) {
         float vo;
         vec4 o = lighting_svgf_load(lighting_svgf_lvl(0u), slot, vo);
-        // A one-frame step under LIGHTING_DIRTY_EPS still leaves the stored
-        // level behind the mean. The 16-set rebuild is that backstop. A mean
-        // that has already crossed the edge test is the same case earlier:
-        // the small emitter's cell stays in the held blur until then.
+        // A step under LIGHTING_DIRTY_EPS leaves the stored level behind the
+        // mean until LIGHTING_STILL_REFRESH. A mean that has already crossed
+        // the edge test is the same case earlier: the small emitter's cell
+        // stays in the held blur until then.
         float y_now = dot(max(v.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
         float y_old = dot(max(o.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
         bool drifted = lighting_sh_lum_disagrees(max(y_now, y_old), min(y_now, y_old));
@@ -5458,6 +5492,7 @@ void lighting_svgf_variance(uint slot) {
             }
         }
     }
+    atomicAdd(gstats.diag[LIGHTING_DIAG_FILTER_HEAVY], 1u);
     if (var < 0.0) {
         // Spatial estimate, 7 x 7 moments weighted by w_z w_n.
         float s1 = 0.0;
@@ -5526,8 +5561,7 @@ void lighting_svgf_iter(uint slot, uint it) {
         }
     }
 #endif
-    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u)
-        && floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_PLAIN_SETS) {
+    if (LIGHTING_DIRTY_ATROUS && !lighting_svgf_is_dirty(slot, it + 1u) && !lighting_svgf_plain_rebuild(slot)) {
         return;
     }
     uint src = LIGHTING_DIRTY_ATROUS ? lighting_svgf_lvl(it) : ((it & 1u) == 0u ? LIGHTING_SC_ATROUS_B : LIGHTING_SC_ATROUS_A);
@@ -5678,6 +5712,40 @@ void lighting_svgf_push(uint slot) {
     if (nb.w > 0.2) {
         return;
     }
+    // The wavelet hold leaves this field where the last rebuild wrote it.
+    // Pushing the raw mean on the frames in between was the frame-to-frame
+    // step. A moving camera still pushes.
+    float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_wavelet_held(slot)) {
+        // The wavelet stays put. Every fourth frame, until the first drift
+        // pass, a field that has split from its raw mean by the sparse ratio
+        // steps toward that mean. After that pass the filter owns the field:
+        // stepping toward the raw mean would mark edge texels forever.
+        // Consecutive frames stay still, so the still-hall pair does not see
+        // the step. A gap under the ratio waits for the drift pass.
+        if (lighting_frame() > LIGHTING_STILL_REFRESH || (lighting_frame() & 3u) != 0u) {
+            return;
+        }
+        float raw_var = 0.0;
+        vec4 raw = lighting_svgf_in(slot, raw_var);
+        if (raw.w <= 0.0) {
+            return;
+        }
+        vec3 prev = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+        float y_raw = dot(max(raw.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        float y_prev = dot(max(prev, vec3(0.0)), LIGHTING_SVGF_LW);
+        if (!lighting_sh_lum_disagrees(max(y_raw, y_prev), min(y_raw, y_prev))) {
+            return;
+        }
+        vec3 stepped = mix(prev, raw.rgb, LIGHTING_HOLD_STEP);
+        uint field_pack = lighting_pack_rgb9e5(stepped);
+        cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(field_pack);
+        // The plain mark redraws the block and reuses the old bounce. This
+        // step has to be read, so the same rect is marked as a field change.
+        lighting_compose_note_field(slot, field_pack);
+        lighting_compose_mark_slot_field(slot);
+        return;
+    }
     float varp = 0.0;
     vec4 f = lighting_svgf_load(LIGHTING_SC_ATROUS_A, slot, varp);
     float W = clamp(f.w, 0.0, 1.0);
@@ -5757,7 +5825,9 @@ void lighting_svgf_push(uint slot) {
             // A lamp that left, or a field the filter has left by the edge
             // test, takes the target on this push. A quiet texel keeps the
             // 1/16 step. The idle hash would otherwise show the old field
-            // for LIGHTING_PUSH_IDLE frames.
+            // for LIGHTING_PUSH_IDLE frames. The fill and a change take the
+            // target too: leaving the 1/16 step to pile up and then snap was
+            // the open-picture pop.
             if (field_behind
                 || lighting_sh_lum_disagrees(max(y_target, y_prev), min(y_target, y_prev))
                 || lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
@@ -5765,20 +5835,6 @@ void lighting_svgf_push(uint slot) {
             } else {
                 float lam = clamp(lighting_sc_lambda(slot), 0.0, 1.0);
                 catch_up = (1.0 - lam) * catch_up + lam;
-                // A young fine texel keeps its parent seed in the picture and
-                // lets its own sets take over by count, so a handful of sets
-                // cannot walk the surface once it is on screen.
-                if (lighting_fine_budget_entries() > 0u
-                    && sets < LIGHTING_SC_FULL_SETS
-                    && cache.v[3u * slot + 1u].w <= LIGHTING_HIT_PATCH
-                    && !lighting_fine_past_drop(lighting_sc_texel_pos(slot))) {
-                    vec4 sd = lighting_sc_seed(slot);
-                    float held = sets / LIGHTING_SC_FULL_SETS;
-                    if (sd.w > 0.0) {
-                        outc = mix(sd.rgb, outc, held);
-                    }
-                    catch_up = min(catch_up, mix(LIGHTING_FIELD_CATCH * LIGHTING_FINE_FIELD_SLOW, catch_up, held));
-                }
             }
             outc = mix(prev, outc, catch_up);
         }
@@ -6500,3 +6556,4 @@ void lighting_sc_seed_apply(uint slot) {
 void lighting_gdirty_mark(uint probe) {
     work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());
 }
+#include "lighting_fill.glsl"

@@ -620,8 +620,7 @@ impl Broadphase {
             push_hits(bodies, layers, id, &self.found, pairs);
         }
         for &plane in planes.iter() {
-            for slot in 0..self.sources.len() {
-                let id = self.sources[slot];
+            for &id in &self.sources {
                 if id == plane {
                     continue;
                 }

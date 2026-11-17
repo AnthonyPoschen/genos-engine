@@ -165,7 +165,50 @@ void main() {
     vec3 bounce = vec3(0.0);
     bool gi = (gstats.ctrl_bits & 4u) != 0u;
     if (gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u)) {
+#ifdef GENOS_COMPOSE_MAINT
+        // Maintenance has to walk. It enqueues the lattice. The picture
+        // compile below reuses that result on a held frame.
         bounce = indirect(p, pos, n);
+#else
+        // The linear-bounce slice holds the last full walk. A held frame
+        // reuses it. The fill (the frames before the first 32-frame pass),
+        // that pass, a camera move, and a pixel a lamp or a mover reaches
+        // walk again. Direct still updates. The walk is four cache finds per
+        // pixel; it was the steady compose. A cache clear zeros the slice
+        // for the next three frames (BOUNCE_FILL_FRAMES): the clear frame's
+        // walk is empty, and a held frame would keep that empty store, which
+        // is the direct picture.
+        uint pixels = pc.dims.x * pc.dims.y;
+        uint slices = 2u + (gstats.ctrl_history != 0u ? 1u : 0u);
+        uint at = slices * pixels + index;
+        // This compile is not the sun shader, so the linear-bounce slice is free.
+        uint bw = (pc.dims.x + 7u) / 8u;
+        uint block = (p.y >> 3u) * bw + (p.x >> 3u);
+        // A field step this frame has to be read. Reusing the stored bounce
+        // would keep the value the step just replaced.
+        bool reuse_bounce = mode == 0u && lighting_view_held() && !lighting_still_refresh()
+            && !lighting_still_opening() && !lighting_pixel_reached(pos)
+            && !lighting_compose_field_moved(block);
+        uint stored = outc.px[at];
+        if (reuse_bounce && stored != 0u) {
+            bounce = lighting_unpack_rgb9e5(stored - 1u);
+        } else {
+            bounce = indirect(p, pos, n);
+            if (mode == 0u) {
+                // An unresolved miss is not a colour. Storing pack(black)+1
+                // froze that first miss until the drift pass. A full-trust
+                // black is a real zero. A miss does not replace a colour
+                // already stored. A block that still has no colour is queued
+                // so the next frame visits it after the dirty list goes idle.
+                uint packed = lighting_pack_rgb9e5(max(bounce, vec3(0.0)));
+                if (lighting_bounce_keep(packed, stored)) {
+                    outc.px[at] = packed + 1u;
+                } else if (stored == 0u) {
+                    lighting_bounce_retry(block);
+                }
+            }
+        }
+#endif
     }
 #ifdef GENOS_COMPOSE_MAINT
     return;

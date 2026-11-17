@@ -1,6 +1,5 @@
 #![cfg_attr(test, expect(clippy::as_conversions, reason = "pixel index from a projected point"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![cfg_attr(test, expect(clippy::needless_range_loop, reason = "three channels"))]
 
 //! Path-traced reference for the fire test in genos-render `gpu_frame.rs`
 //! (`the_outside_lamp_and_the_fire_stop_at_the_corridor_wall`): how bright the

@@ -27,6 +27,12 @@ const uint RESTIR_DIAG_POINT_ADD = 45u;
 const float LAMP_PICK_DEPTH_FLOOR = 1.0e-4;
 const float DIRECT_DIR_EPS = 1.0e-6;
 void main() {
+    if (gl_GlobalInvocationID.x == 0u) {
+        // Unstored bounce blocks from last frame. The compose count was
+        // cleared at the start of this frame, so this is what puts them
+        // back on the list before compose.
+        lighting_bounce_retry_publish();
+    }
     lighting_sun_mark();
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;
@@ -46,6 +52,13 @@ void main() {
         uint sx = (idx % lw) * scale;
         uint sy = (idx / lw) * scale;
         idx = sy * pc.dims.x + sx;
+    } else if (lighting_ray_fill_on() && lighting_dense()) {
+        // The cache-ray dispatch only. The picture dispatch is not dense, and
+        // taking this branch there would shade cache rays instead of pixels.
+        if (idx >= lighting_fill_u(0)) {
+            return;
+        }
+        idx = pixels + kept + idx;
     } else if (lighting_dense()) {
         // S70A: this round's light cache rays only, live entries only.
         // Bias is a pixel skip for the kept-hit dispatch. Applying it here
@@ -95,6 +108,9 @@ void main() {
         bool live;
         rec = work.v[lighting_hit_at(ray)];
         live = lighting_ray(ray, origin, dir, from_n);
+        if (live && lighting_ray_fill_on()) {
+            atomicAdd(gstats.rays, 1u);
+        }
         if (rec.x < 0.0 || !live) {
             return;
         }
@@ -245,7 +261,12 @@ void main() {
     uint lit = 0u;
     float u = 0.0;
     if (pick) {
-        if (cache_pick) {
+        uint fill_r = ray >= lighting_probe_rays() ? ray - lighting_probe_rays() : ~0u;
+        uint fill_checks = lighting_ray_fill_on() ? ckeys.key[lighting_fill_header_at() + 2u] : 0u;
+        if (fill_r < fill_checks) {
+            // Same lamp sample every frame. A texel-direct check must not mix the frame in.
+            u = lighting_fill_check_u(ckeys.key[lighting_fill_pick_at() + fill_r]);
+        } else if (cache_pick) {
             uint r = ray - lighting_probe_rays();
             uint ent = r / LIGHTING_CACHE_RAYS;
             if (lighting_world_mode() == 3u && ent >= lighting_grad_first() && ent < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
@@ -971,13 +992,20 @@ void main() {
         gbuf.words[idx * 5u + 3u] = packed;
         if (tracked) {
             uint c = (idx & 1u) * 2u;
-            work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
-            work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
             // Packed direct moved because the sun did. The sun compose writes
             // this frame's direct on every pixel. The block is not a GI dirty.
-            // Flag off: same mark.
+            // Flag off: same mark. The tracking word is the last marked sample.
+            // Writing it before the test made a sub-percent ramp the new
+            // previous value, so the steps never added up and the 32-frame
+            // pass saw packed == prev.
+            bool moved = lighting_compose_direct_moved(packed, prev_d);
+            bool other = glow != prev_e || pix_sig != prev_sig;
             bool sun_only = lighting_sun_small() && glow == prev_e && pix_sig == prev_sig;
-            if (!sun_only && (glow != prev_e || packed != prev_d || pix_sig != prev_sig)) {
+            if (other || moved) {
+                work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
+                work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
+            }
+            if (!sun_only && (other || moved)) {
                 lighting_compose_mark_px(idx);
             }
         }

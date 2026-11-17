@@ -144,7 +144,7 @@ Role: STORE · Literature: Lumen card seeded from the world radiance cache · Mo
 **SH texel ray cut**: (ADR 0039 stage 4, `surface_cache.sh_texel_ray_cut`, on for High and Medium) a fine world texel skips its own rays when the live 25 cm neighbour read is complete and the accepted corners agree within the sparse luminance ratio. The texel's own samples, when it has any, are compared with that live read. The stored seed is not. A world cell is not skipped, and the read does not write the cell. A lamp change that reaches the texel since it was sampled is a miss: the sparse ratio stays true across a small dim, so the texel keeps its rays until that ring entry expires. A noted lamp takes the new set whole. The drain flag is not a note, so a still texel keeps its blend. Compose skips the probe evaluate for a covered pixel during that settle. The picture stays one estimate: the filtered field when it is stored, and the neighbour read when it is not. A quiet stored field moves toward a later filter target on each push by α' = (1 − λ) α + λ, where α is 1/16 and λ is the block's same-seed check (noise already subtracted), and reaches it. λ of 0 keeps the sixteenth. While a lamp is noted, the settle does not skip that check. A lamp that left (`lighting_lamp_keep` is 0) takes that target on the push. A stored field the filter has left by the sparse luminance ratio takes that target on the push as well, and the first stored field marks the blocks that read the texel. There is no hold. An empty texel still shows the neighbour read. Requires `surface_cache.sh_texel_detail`. The comparison is Rec.709 luminance within that existing ratio. It is not an RGB match and it is not a match of the whole SH field.
 Role: SCHED · Literature: Lumen final gather where the world cache already agrees · More detail: ADR 0039 stage 4, `docs/systems/lighting/adr-0039-remaining.md`
 
-**Fine band**: (`surface_cache.fine_lod_create`, `surface_cache.fine_lod_drop`, `surface_cache.fine_lod_lookahead`, `surface_cache.fine_budget_share`) 12.5 cm texels are created for surfaces the cache already hit, by distance from the player, in every direction. The camera only raises priority. The create distance claims them. The drop distance is farther, and an off-screen fine texel past it is freed. Lookahead stretches that band along motion and a turn, not along a still view. The size stays 12.5 cm. A share of the existing texel ray room is reserved inside that room for fine texels that are not yet settled, ranked by closeness, remaining error, measured change, and `surface_cache.fine_screen_boost`. A texel that loses the rank is not also queued on the main list. `surface_cache.fine_close_boost` of 0 leaves the rank to error and change.
+**Fine band**: (`surface_cache.fine_lod_create`, `surface_cache.fine_lod_drop`, `surface_cache.fine_lod_lookahead`) 12.5 cm texels are created for surfaces the cache already hit, by distance from the player, in every direction. The create distance claims them. The drop distance is farther, and an off-screen fine texel past it is freed. Lookahead stretches that band along motion and a turn, not along a still view. The size stays 12.5 cm. A spawned child is a candidate in the tile-fill histogram, under `surface_cache.fill_budget`. The rank is that scheduler's closeness times remaining error and measured change. A screen texel the band did not spawn still claims its parent cell and takes no ray of its own. `surface_cache.fine_budget_share`, `surface_cache.fine_screen_boost`, and `surface_cache.fine_close_boost` stay as settings. They do not split the budget and they do not scale this rank.
 Role: SCHED · Literature: Lumen card residency around the camera, with a farther drop distance · More detail: [../systems/lighting/v3-direct-cost.md](../systems/lighting/v3-direct-cost.md)
 
 **SH probe retire**: (`surface_cache.sh_probe_retire`) a deprecated alias. Screen-probe passes are removed, so the key parses, warns once, and does not schedule a pass. Indirect light is the SH-L1 world cache, with texel detail as a one-way seed.
@@ -192,6 +192,9 @@ Role: DENOISE · Literature: variance-guided SVGF · More detail: `denoise_varia
 
 **Screen denoise**: the picture-sized launch of the denoiser (`denoise_launch=screen`). Preset high uses it. The other presets keep `hash`. `--denoise-launch` and `GENOS_LIGHTING_DENOISE_LAUNCH` override the preset.
 Role: DENOISE · Literature: Lumen/GIBS screen denoise; the kernel is still SVGF (Schied 2017) · More detail: [`lighting_screen.comp`](../../crates/render/shaders/lighting_screen.comp); S80
+
+**Still refresh**: on a camera that has not moved, a texel with 16 sets keeps its wavelet and its pushed field. The first 8 frames do not take that hold. Walking longer than that moved the still-hall pair that `screen_hall` scores (flicker 3.39 against a 1.5 bar). A host hash change after frame 32 (`still` is 0) drops the hold for the whole picture for 16 frames. A mover still on the keep list does the same. Per-texel walks of the lamp ring, the change list, and the mover spheres overflowed lavapipe's shader stack inside the hash wavelet, and bounce from a lamp reaches past that lamp, so the window is the picture. A direct sample is compared with the last marked value, per channel, so a ramp under one percent still marks and a dim channel cannot drop out. An unresolved miss is not stored (`lighting_pack_rgb9e5` of black is 0, and adding one used to look like a colour). A miss does not replace a colour already stored. A block that still has no colour stays on a short retry list, because the dirty list would otherwise stop visiting it. Until the first drift pass a changed field is walked through frame 8 and then every third frame. That phase leaves frames 9 and 10 on the stored bounce, which is the pair `screen_hall` scores; walking every frame moved that pair by 3.3 codes. A shadow texel is still under 16 sets while its field fills, so holding the first bounce stepped the median from 0.08 to 0.35 at frame 32. Every fourth frame a held texel that already has 16 sets, and whose field has split from its raw mean by the sparse ratio, steps a quarter of the way toward that mean. A full-trust read that is black is stored, so a sun band can skip it. Frame 32 applies the mean the hold skipped and stores a zero that never resolved. A cache clear zeros that store and composes the whole picture for three frames: the clear frame's walk is empty, and holding it leaves the previous picture on screen. A camera move does not take the hold.
+Role: DENOISE · Literature: SVGF re-filters every pixel every frame; this is the departure · More detail: [`lighting_cache.glsl`](../../crates/render/shaders/lighting_cache.glsl) `lighting_still_refresh`
 
 **Visibility / leak test**: stops light passing through thin walls. The neighbour read rejects a cell whose stored normal faces the other way and a cell more than half a cell off the query plane. A same-facing surface closer than half a cell is not rejected. Depth moments are not used.
 Role: VIS · Literature: GIBS depth moments + Chebyshev (§1.10); DDGI Chebyshev visibility · More detail: [GIBS.md §1.10](research/GIBS.md)
@@ -433,29 +436,56 @@ Role: SCHED · Literature: streaming hysteresis · More detail: [../systems/pbr-
 
 ### Tile fill
 
-**Tile fill**: choosing screen tiles and tracing paths into the surface cache from the pixels that need samples. Off unless `fill-ref --tile-fill on`. The live cache does not run it yet.
+**Tile fill**: the scheduler that spends `fill_budget` rays every world-cache round. About one need-weighted pick per screen tile, and the rest on a clipmap around the player. The world cache is the only store. Texels are its 12.5 cm detail.
 Role: SCHED · Literature: Lumen World Cache fill; SHaRC update pass · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
-**Pick**: one path from one pixel in a tile. The pixel is drawn by need, not uniformly.
+**Pick**: one ray from one world-cache entry, chosen by need, or one clipmap ray.
 Role: SAMPLE · Literature: ReSTIR candidate; Lumen's per-tile pixel · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
 
-**Fill budget**: the ray ceiling for a frame. It is a ceiling, not a target. The default in the checker is 1,000,000.
+**Fill budget**: `fill_budget`, the ray count one cache round traces. It is spent in full. High starts at 100,000. `0` traces no cache rays. `surface_cache.ray_budget` stays the ceiling for the other modes.
 Role: SCHED · Literature: Lumen's fixed update budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.1
+
+**Clipmap**: player-centred cells. 25 cm inside `fill_lod_near` (8 m), then double until `fill_cell_max` (4 m), then that size out to `fill_far`. Screen texels stay 12.5 cm.
+Role: STORE · Literature: clipmap LOD · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Fill leash**: a stored cell stays until the player is `fill_leash` times its create radius past it. New cells use the create radius, shifted ahead by `fill_look_ahead`. The two radii stop a boundary from creating and dropping the same cell.
+Role: SCHED · Literature: hysteresis band · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Off-screen floor**: `fill_offscreen_floor` (0.25) is the share of `fill_budget` the screen cannot take. That share ranks resident clipmap cells by closeness times remaining error. `fill_far_share` of the budget is reserved for cells at `fill_cell_max`. Rays the resident set does not take discover surfaces.
+Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
 Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
 
-**Shared sample**: a hit reconnected to a neighbour cell with the Jacobian weight. It never increments `own_count`.
+**Shared sample**: a hit reconnected to another cell in the same screen tile with the Jacobian weight, then stored with `lighting_sc_set_seed`. The colour is the clamped reconnection. The confidence is `fill_share_conf` times `max(0, 1 - own_count / fill_share_cap)`, so a cell that already has samples fades the prior instead of storing a darker one. It never increments the cell's own ray count. There is no `shared_count` field. `fill_share` 0 writes none. Ring sharing is not this sample. Its display weight is 0 once the cell's own rays reach `fill_share_handover`.
 Role: SAMPLE · Literature: ReSTIR GI reconnection shift (Ouyang et al., HPG 2021) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
+
+**Share handover**: own rays after which a fill seed's display weight is exactly 0. `fill_share_handover` defaults to `fill_warmup`. The 16-set handover stays for seeds this pass did not write. The ray cap is not this count.
+Role: TEMPORAL · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
 
 **Share gate**: a named reason a neighbour gets nothing: plane, normal, axis, near hit, own count, stamp, or the weight clamp.
 Role: VIS · Literature: ReSTIR spatial depth and normal test · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.2
 
-**Virtual tile**: an off-screen direction that stands in for a pixel so the same need applies behind the camera. The checker does not trace them; stage F3 does.
-Role: SCHED · Literature: the engine's scout rays · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.5
+**Virtual tile**: an off-screen direction. The clipmap holds the cell. Water-filling ranks it with the same priority as a screen cell.
+Role: SCHED · Literature: Lumen off-screen page update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.5
 
-**Need**: `prox * max(under, stale, disagree)`. It is how a pixel asks for picks.
+**Need**: closeness times (remaining error + `fill_change_weight` × the change lambda). Closeness is `1 / max(distance, fill_prox_min)`. Remaining error is the standard error over the mean, past `fill_error_target`. A cell with no rays has remaining error 1.
 Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Change lambda**: a cell's 0–1 measured change. One same-seed check ray writes it. A skipped frame multiplies it by `fill_lambda_decay`. It is not a lamp hint and it does not reset the cell.
+Role: TEMPORAL · Literature: A-SVGF eq. 6 (Schied, Peters and Dachsbacher, HPG 2018) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
+
+**Water-filling**: spending `fill_budget` from the highest priority bucket down. The fair pass gives a cell at most `fill_max_picks` (4). Leftover rays are the fill pour. The total does not pass the budget. A converged screen does not stop the round.
+Role: SCHED · Literature: Lumen tile budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.3
+
+**Cold-start rank**: while a cell's shown count is under 48, a lower shown count outranks a higher one, so one slot id cannot pin the tile. At 48 and after, the rank is the priority bucket from the stored variance. It is not a second budget. The rank reads the shown count.
+Role: SCHED · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Fill pour**: leftover `fill_budget` after the fair pass, added to the cells already chosen. A screen bucket takes up to 64 rays. An off-screen bucket takes up to 16 rays. A set is 64 rays, so the off-screen cap is not one set. A cell takes one grant that round: the on-screen pour or the off-screen grant, not both.
+Role: SCHED · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.3
+
+**Fill check rate**: `fill_check_rate`, one same-seed ray per this many cells. 9 is one ray in each 3×3 block. The seed does not include the frame.
+Role: SCHED · Literature: A-SVGF gradient check · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
 ### Historical (do not reuse)
 

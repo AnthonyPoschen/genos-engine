@@ -1551,6 +1551,13 @@ impl Tools {
                 "pixels",
                 num(f64::from(ctx.renderer.lighting_under_trusted_pixels())),
             )])),
+            "lighting_fill_compact_work" => {
+                let work = ctx.renderer.lighting_fill_compact_work();
+                reply(obj(vec![
+                    ("serial", num(f64::from(work[0]))),
+                    ("hist_groups", num(f64::from(work[1]))),
+                ]))
+            }
             "set_lighting_settings" => {
                 let scene = ctx.host.scene();
                 apply_lighting_update(&mut scene.lighting, args.0)?;
@@ -1934,10 +1941,9 @@ enum Step {
 }
 
 fn region_arg(args: &Args) -> Result<Region, String> {
-    Ok(args
-        .floats("region", 4)?
-        .map(|r| Region([r[0], r[1], r[2], r[3]]))
-        .unwrap_or_default())
+    Ok(args.floats("region", 4)?.map_or_else(Region::default, |r| {
+        Region([r[0], r[1], r[2], r[3]])
+    }))
 }
 
 fn yaw_pitch(d: Vec3) -> (f32, f32) {

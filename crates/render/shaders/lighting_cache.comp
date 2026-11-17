@@ -21,6 +21,12 @@ void lighting_tex_put(uint slot, vec4 v) {
     // size > 0.2), and a direct light that stays zero never marks the pixel.
     // Compose already recorded the blocks that read this slot. Mark those
     // when the packed irradiance the picture shows has changed.
+    // A held camera keeps the picture. A cell a change reaches still marks.
+    // The 32-frame pass is the drift under the dirty epsilon. The cell stores
+    // the new irradiance either way.
+    if (lighting_compose_world_held(slot)) {
+        return;
+    }
     if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
         && lighting_pack_rgb9e5(o.rgb) != lighting_pack_rgb9e5(v.rgb)) {
         lighting_compose_mark_slot(slot);
@@ -28,8 +34,23 @@ void lighting_tex_put(uint slot, vec4 v) {
 }
 void main() {
     uint gid = gl_GlobalInvocationID.x;
-    if (gid == 0u && lighting_world_mode() == 3u) {
-        lighting_fine_note_threshold();
+    if (lighting_ray_fill_on()) {
+        if (gid == 0u) {
+            gstats.live = ckeys.key[lighting_fill_header_at() + 7u];
+            lighting_wrc_note_lamps();
+            lighting_ls_note();
+        }
+        lighting_fill_resolve(gid);
+        return;
+    }
+    // World mode 3 has no second scheduler. Budget 0 traces nothing.
+    if (lighting_world_mode() == 3u) {
+        if (gid == 0u) {
+            gstats.live = lighting_live_count();
+            lighting_wrc_note_lamps();
+            lighting_ls_note();
+        }
+        return;
     }
     // The neighbour walk is the gather dispatch before compose, not this
     // relight. This pass does not touch the bin lists or the lattice table.
@@ -43,42 +64,6 @@ void main() {
     }
     if (gid == 0u) {
         gstats.live = lighting_live_count();
-        // Scheduler: the next round lists the buckets from the top down until
-        // they fill what the young leave of the batch; the histogram restarts.
-        if (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) {
-            lighting_wrc_note_lamps();
-            if (lighting_wrc_scout_due()) {
-                atomicAdd(gstats.scouts, LIGHTING_WRC_SCOUT_ENTRIES * LIGHTING_CACHE_RAYS);
-            }
-            lighting_ls_note();
-            uint room = lighting_sc_room() >> lighting_sc_budget_shift();
-            uint base = lighting_sc_base_room() >> lighting_sc_budget_shift();
-            uint reserve = lighting_fine_budget_entries();
-            uint total = 0u;
-            for (uint b = 0u; b < LIGHTING_SC_BUCKETS; b++) {
-                total += ckeys.key[LIGHTING_SC_HIST_AT + b];
-            }
-            // The boost still means more due than the base room. The fine
-            // reserve is not a backlog: it is already inside that room.
-            uint young = min(lighting_young_count(), base);
-            uint c = total > base - young ? min(ckeys.key[LIGHTING_SC_BOOST_AT] + 1u, 100000u) : 0u;
-            ckeys.key[LIGHTING_SC_BOOST_AT] = c;
-            bool boost = c > 0u && c <= LIGHTING_SC_BOOST_ROUNDS;
-            gstats.pad3 = boost ? 1u : 0u;
-            uint span = boost ? room : base;
-            uint budget = span > young + reserve ? span - young - reserve : 0u;
-            uint acc = 0u;
-            uint thr = 0u;
-            for (int b = int(LIGHTING_SC_BUCKETS) - 1; b >= 0; b--) {
-                acc += ckeys.key[LIGHTING_SC_HIST_AT + uint(b)];
-                ckeys.key[LIGHTING_SC_HIST_AT + uint(b)] = 0u;
-                if (acc >= budget && thr == 0u) {
-                    thr = uint(b);
-                }
-            }
-            ckeys.key[LIGHTING_SC_THR_AT] = thr;
-            gstats.sched_thr = thr;
-        }
     }
     if (j >= LIGHTING_CACHE_BATCH) {
         return;
