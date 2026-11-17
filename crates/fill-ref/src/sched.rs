@@ -378,6 +378,16 @@ pub fn cell_grant(already: u32, want: u32, max_picks: u32) -> u32 {
     want.min(cap.saturating_sub(already.min(cap)))
 }
 
+/// A cell that already took a grant this round takes nothing from the other emit.
+#[must_use]
+pub fn one_grant(already: u32, want: u32) -> u32 {
+    if already == 0 {
+        want
+    } else {
+        0
+    }
+}
+
 /// Due indices admitted this frame. The walk starts at `phase` in a table of
 /// `span` slots and wraps, taking at most `cap`. The device uses
 /// `lighting_round()` as the phase (`checks_from_phase`).
@@ -1029,6 +1039,13 @@ mod tests {
         }
         assert_eq!(total, max_picks);
         assert_eq!(cell_grant(max_picks, max_picks, max_picks), 0);
+    }
+
+    #[test]
+    fn a_cell_with_one_grant_does_not_take_the_other_emit() {
+        assert_eq!(one_grant(0, 16), 16);
+        assert_eq!(one_grant(4, 16), 0);
+        assert_eq!(one_grant(64, 16), 0);
     }
 
     #[test]

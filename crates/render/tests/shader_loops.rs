@@ -285,6 +285,27 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         "leftover on-screen rays pour onto the chosen cells"
     );
     assert!(
+        !fill.contains("lighting_fill_give"),
+        "the serial grant helper is gone; the lock is the grant"
+    );
+    assert!(
+        !fill.contains("lighting_fill_shown"),
+        "the unused shown-count helper is gone"
+    );
+    let emit_off = function_body(&fill, "void lighting_fill_emit_off(uint gid)");
+    assert!(
+        emit_off.contains("prior == 0u"),
+        "an off-screen emit takes nothing once the cell already has a grant"
+    );
+    assert!(
+        emit_off.contains("lighting_fill_holds_tile"),
+        "a tile winner does not take the off-screen grant"
+    );
+    assert!(
+        fill.contains("7 occupied-cell count"),
+        "header word 7 is the occupied-cell count"
+    );
+    assert!(
         fill.contains("Claiming the cell is the deposit"),
         "a camera primary claims the world cell and does not enter the mean as a hemisphere sample"
     );
