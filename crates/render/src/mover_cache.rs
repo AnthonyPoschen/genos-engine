@@ -403,7 +403,7 @@ impl MoverCache {
                 continue;
             }
             out.push(u32_from_usize(i));
-            if out.len() as u32 >= MOVER_PRESENCE_CAP {
+            if u32_from_usize(out.len()) >= MOVER_PRESENCE_CAP {
                 break;
             }
         }
@@ -798,7 +798,7 @@ impl MoverCache {
             self.dirty_table.push(0);
         }
         FillStats {
-            candidates: cands.len() as u32,
+            candidates: u32_from_usize(cands.len()),
             deposited,
             rays: self.fill_rays,
         }
