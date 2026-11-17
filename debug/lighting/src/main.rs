@@ -3238,8 +3238,8 @@ mod tests {
             .iter()
             .map(|choice| choice.name.as_str())
             .collect();
-        assert_eq!(lamp_names, ["off", "hits", "pixels", "both", "reuse"]);
-        assert_eq!(lamp.value, 4.0, "high uses the lamp reservoir (reuse)");
+        assert_eq!(lamp_names, ["off", "hits", "reuse"]);
+        assert_eq!(lamp.value, 2.0, "high uses the lamp reservoir (reuse)");
         let sliders: Vec<&str> = rows
             .iter()
             .filter(|row| row.slider.is_some())

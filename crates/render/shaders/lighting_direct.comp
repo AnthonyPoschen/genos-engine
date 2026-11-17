@@ -224,9 +224,13 @@ void main() {
     // Weighted point-lamp picking shares this loop's one trace. The sun stays
     // exact. A texel-direct check keeps the legacy estimator. Mode 0 leaves
     // `pick` as it was, so today's shade is unchanged.
+    // Reuse (4) is the only mode that writes a pixel reservoir or the
+    // visibility mean. pixels (2) and both (3) used to write that 24-byte
+    // record into the 64-byte stand-in. They parse as reuse. Hits (1) and
+    // reuse still shade bounce hits.
     uint lamp_mode = pc.lamp.x;
-    bool lamp_pix = idx < pixels && lamp_mode >= 2u && lamp_mode <= 4u;
-    bool lamp_hit = idx >= pixels && (lamp_mode == 1u || lamp_mode == 3u || lamp_mode == 4u);
+    bool lamp_pix = idx < pixels && lamp_mode == 4u;
+    bool lamp_hit = idx >= pixels && (lamp_mode == 1u || lamp_mode == 4u);
     bool lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
 #ifdef GENOS_RESTIR_DI
     // Product pixels only. The labelled exact sum, the random path, and the

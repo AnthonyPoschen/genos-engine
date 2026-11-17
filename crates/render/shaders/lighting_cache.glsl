@@ -50,7 +50,8 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint max_change;
     uint relit;
     uint live;
-    // Lookups that found neither their patch nor a free slot (the table is full).
+    // Claims whose 16-slot window had no free key. A full table shows up here.
+    // Eviction is a later change. Reads that do not claim are not counted.
     uint missed;
     // The same two for mature patches only: has the light itself stopped changing.
     uint mature_change;
@@ -1001,6 +1002,10 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             lighting_compose_cover(slot);
             return slot;
         }
+    }
+    // The window had no free key, or every free key was taken by another claim.
+    if (LIGHTING_SC_WRITES) {
+        atomicAdd(gstats.missed, 1u);
     }
     return ~0u;
 }
@@ -2992,9 +2997,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     float hsize = lighting_hit_size_n(pos, n);
     uint slot = lighting_cache_find_sized(pos, n, true, hsize, pos);
     if (slot == ~0u) {
-        if (LIGHTING_SC_WRITES) {
-            atomicAdd(gstats.missed, 1u);
-        }
+        // The claim already counted this miss.
         return vec3(0.0);
     }
     if (LIGHTING_SC_WRITES) {

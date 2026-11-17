@@ -215,7 +215,7 @@ Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete 
 **Lamp**: a point light. The sun is not a lamp.
 Role: LIGHTS
 
-**Lamp pick**: chooses a few lamps per shaded hit, weighted by their expected contribution. Modes: `off`, `hits` (`gi-1bounce`), `pixels`, `both`, `reuse`. Production screen pixels do not use this pick. They use ReSTIR DI. `reuse (experimental)` is a deprecated value and logs a warning.
+**Lamp pick**: chooses a few lamps per shaded hit, weighted by their expected contribution. Modes: `off`, `hits` (`gi-1bounce`), `reuse`. Production screen pixels do not use this pick. They use ReSTIR DI. `pixels`, `both`, `2`, and `3` parse as `reuse` and log a warning. `reuse (experimental)` is a deprecated value and logs a warning.
 Role: LIGHTS · Literature: RIS (Talbot 2005) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
 
 **Lamp reuse**: the hit picker and the noise-gate sample (`lamp_pick_reuse`). Production pixels are ReSTIR DI, not this merge. The menu switch is this key.
@@ -460,6 +460,8 @@ Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lig
 ### Historical (do not reuse)
 
 **residency_mb**: a fixed High cap of 256 MB, dropped by file order. The runtime budget is the VRAM budget. The key remains a deprecated alias.
+
+**Lamp pick pixels / both**: removed. They sampled screen pixels without allocating the visibility-mean window, and the shade wrote that 24-byte record into the 64-byte stand-in. `pixels`, `both`, `2`, and `3` parse as `reuse` and log a warning.
 
 **Screen probe**: removed. It was a point on the visible surface placed every probe tile, tracing rays for nearby pixels. Indirect light is the SH-L1 world cache. Texel detail is a one-way seed from those cells.
 Role: SAMPLE · Literature: Lumen screen probe (Wright et al., SIGGRAPH 2022). The departure is deletion of that gather.

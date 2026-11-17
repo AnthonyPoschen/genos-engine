@@ -162,7 +162,7 @@ pub(crate) fn restir_product_shade(restir_di: bool, direct_on: bool, gate: LampS
     restir_di && direct_on && gate == LampShadeGate::Product
 }
 
-/// `restir_di` off is the labelled exact sum for a pixel mode that used to sample.
+/// `restir_di` off is the labelled exact sum for reuse.
 ///
 /// Mode off already walks every lamp. Hits leave pixels on that walk.
 /// The noise gate's random, exact, and broken bits are not this switch.
@@ -170,10 +170,7 @@ pub(crate) fn restir_off_is_exact(restir_di: bool, mode: LampPickMode, gate: Lam
     if restir_di || gate != LampShadeGate::Product {
         return false;
     }
-    matches!(
-        mode,
-        LampPickMode::Reuse | LampPickMode::Pixels | LampPickMode::Both
-    )
+    matches!(mode, LampPickMode::Reuse)
 }
 
 /// Which shade the noise gate asks for. Production is [`Product`](Self::Product).
@@ -845,8 +842,6 @@ mod probe_still_tests {
         assert!(!restir_product_shade(true, true, LampShadeGate::Random));
         assert!(!restir_product_shade(true, true, LampShadeGate::Broken));
         assert!(restir_off_is_exact(false, LampPickMode::Reuse, LampShadeGate::Product));
-        assert!(restir_off_is_exact(false, LampPickMode::Pixels, LampShadeGate::Product));
-        assert!(restir_off_is_exact(false, LampPickMode::Both, LampShadeGate::Product));
         assert!(!restir_off_is_exact(false, LampPickMode::Off, LampShadeGate::Product));
         assert!(!restir_off_is_exact(false, LampPickMode::Hits, LampShadeGate::Product));
         assert!(!restir_off_is_exact(true, LampPickMode::Reuse, LampShadeGate::Product));

@@ -223,7 +223,8 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_VRAM_REPORT). restir_mean is inside restir
                             and is not in the total. --profile-passes prints
                             the same lines
-  --lamp-pick MODE          off, hits, pixels, both, or reuse
+  --lamp-pick MODE          off, hits, or reuse. pixels, both, 2, and 3 are
+                            reuse and log a warning
                             (GENOS_LIGHTING_LAMP_PICK; reuse is the same mode)
   --lamp-pick-samples N     shadow rays per shaded point, 1..4 (GENOS_LIGHTING_LAMP_PICK_SAMPLES)
   --lamp-pick-rays N        same knob as --lamp-pick-samples

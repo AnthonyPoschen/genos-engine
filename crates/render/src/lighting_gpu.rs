@@ -3841,6 +3841,9 @@ impl Gpu {
             buffer: *const BufInfo,
             texel: *const c_void,
         }
+        // Binding 15 is not in the lighting set. Writing it makes lavapipe drop
+        // binding 0, so the spatial merge sees a zero camera and rejects every
+        // neighbour. The pool still has a spare slot; this list is the layout.
         let bindings = [
             (0u32, scene.buffer),
             (5, dummy.buffer),
@@ -3853,7 +3856,6 @@ impl Gpu {
             (12, dummy.buffer),
             (13, dummy.buffer),
             (14, dummy.buffer),
-            (15, dummy.buffer),
             (16, dummy.buffer),
             (17, dummy.buffer),
             (18, dummy.buffer),
@@ -6922,6 +6924,15 @@ mod sh_knob_tests {
         let shade = include_str!("../shaders/lighting_cache.glsl");
         let helper = concat!("lighting_seed_", "scratch_at");
         assert!(!shade.contains(helper), "probe seed scratch helper is still in the shader");
+        let find = shade
+            .split("uint lighting_cache_find_sized")
+            .nth(1)
+            .expect("claim function");
+        let body = find.split("uint lighting_cache_find(").next().unwrap_or("");
+        assert!(
+            body.contains("atomicAdd(gstats.missed, 1u)"),
+            "a failed claim must count in gstats.missed"
+        );
     }
 
     #[test]

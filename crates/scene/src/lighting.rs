@@ -232,12 +232,9 @@ pub enum LampPickMode {
     /// Bounce hits, probe fills, and cache-ray hits. `gi-1bounce`. With
     /// `restir_di` on, screen pixels shade the reservoir, not the full sum.
     Hits = 1,
-    /// Primary pixels only. No previous frame. Diagnostic.
-    Pixels = 2,
-    /// Hits and pixels, no reservoir.
-    Both = 3,
     /// Hits, plus pixels with a temporal reservoir. Spatial only if the radius
-    /// is above 0. `low`, `medium`, and `high`.
+    /// is above 0. `low`, `medium`, and `high`. The visibility-mean window is
+    /// allocated only for this mode. `pixels` and `both` parse as this mode.
     Reuse = 4,
 }
 
@@ -246,8 +243,6 @@ impl LampPickMode {
         match self {
             Self::Off => "off",
             Self::Hits => "hits",
-            Self::Pixels => "pixels",
-            Self::Both => "both",
             Self::Reuse => "reuse",
         }
     }
@@ -256,9 +251,17 @@ impl LampPickMode {
         match text.trim().to_ascii_lowercase().as_str() {
             "off" | "0" => Some(Self::Off),
             "hits" | "1" => Some(Self::Hits),
-            "pixels" | "2" => Some(Self::Pixels),
-            "both" | "3" => Some(Self::Both),
             "reuse" | "4" | "reuse (experimental)" => Some(Self::Reuse),
+            // Wrote the visibility mean into the 64-byte stand-in. The window
+            // exists only for reuse, which is what every preset already sets.
+            "pixels" | "2" => {
+                warn_lamp_pick_retired("pixels");
+                Some(Self::Reuse)
+            }
+            "both" | "3" => {
+                warn_lamp_pick_retired("both");
+                Some(Self::Reuse)
+            }
             _ => None,
         }
     }
@@ -1665,7 +1668,7 @@ impl LightingSettings {
                     warn_lamp_pick_reuse_alias();
                 }
                 self.lamp_pick.mode = LampPickMode::parse(value).ok_or_else(|| {
-                    format!("lamp_pick is off, hits, pixels, both, or reuse, got {value}")
+                    format!("lamp_pick is off, hits, or reuse, got {value}")
                 })?;
             }
             "lamp_pick_candidates" => self.lamp_pick.candidates = num_u32(value)?,
@@ -1677,7 +1680,10 @@ impl LightingSettings {
                 if on(value)? {
                     self.lamp_pick.mode = LampPickMode::Reuse;
                 } else if self.lamp_pick.mode == LampPickMode::Reuse {
-                    self.lamp_pick.mode = LampPickMode::Both;
+                    // Off used to land on both, which wrote the mean into the
+                    // stand-in. Hits does not. Screen pixels stay on ReSTIR
+                    // or the labelled exact sum.
+                    self.lamp_pick.mode = LampPickMode::Hits;
                 }
             }
             "restir_di" => self.restir_di = on(value)?,
@@ -2398,6 +2404,21 @@ fn warn_screen_probe_retired(key: &'static str) {
     if guard.insert(key) {
         eprintln!(
             "warning: {key} is deprecated; screen-probe passes are removed and the world cache is the indirect light (alias kept for one release)"
+        );
+    }
+}
+
+fn warn_lamp_pick_retired(alias: &'static str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(alias) {
+        eprintln!(
+            "warning: lamp_pick value \"{alias}\" is deprecated; use \"reuse\" (alias kept for one release)"
         );
     }
 }

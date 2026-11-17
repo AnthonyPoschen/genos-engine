@@ -359,7 +359,7 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "lighting_lamp_pick",
             "Lamp pick",
             lamp_pick_index(lighting.lamp_pick.mode),
-            &["off", "hits", "pixels", "both", "reuse"],
+            &["off", "hits", "reuse"],
         ),
         Knob::number(
             "lighting_lamp_pick_samples",
@@ -607,9 +607,7 @@ fn lamp_pick_index(mode: LampPickMode) -> usize {
     match mode {
         LampPickMode::Off => 0,
         LampPickMode::Hits => 1,
-        LampPickMode::Pixels => 2,
-        LampPickMode::Both => 3,
-        LampPickMode::Reuse => 4,
+        LampPickMode::Reuse => 2,
     }
 }
 
@@ -673,7 +671,7 @@ pub fn apply_lighting_knob(
         "lighting_direct_specular" => ("direct_specular", on_off(v)),
         "lighting_lamp_pick" => (
             "lamp_pick",
-            ["off", "hits", "pixels", "both", "reuse"]
+            ["off", "hits", "reuse"]
                 .get(whole as usize)
                 .copied()
                 .unwrap_or("off")
