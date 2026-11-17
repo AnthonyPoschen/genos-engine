@@ -1049,7 +1049,7 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     for word in &grid.words {
         push_u32(&mut bytes, *word);
     }
-    while bytes.len() % 16 != 0 {
+    while !bytes.len().is_multiple_of(16) {
         push_u32(&mut bytes, 0);
     }
     debug_assert!(
