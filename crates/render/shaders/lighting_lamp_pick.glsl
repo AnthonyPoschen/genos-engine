@@ -350,10 +350,10 @@ float lamp_pick_u(uint idx, uint pixels, uint kept, bool fill_hit, bool reuse_pi
             uint checks = ckeys.key[lighting_fill_header_at() + 2u];
             uint on = ckeys.key[LIGHTING_ARGS_AT + 15u];
             if (r < checks) {
-                return lighting_fill_check_u(ckeys.key[LIGHTING_FILL_PICK_AT + r]);
+                return lighting_fill_check_u(ckeys.key[lighting_fill_pick_at() + r]);
             }
             if (r < checks + on) {
-                uint slot = ckeys.key[LIGHTING_FILL_PICK_AT + r];
+                uint slot = ckeys.key[lighting_fill_pick_at() + r];
                 uint key = slot < LIGHTING_CACHE_SLOTS ? ckeys.key[slot] : 0u;
                 return lighting_unit(key ^ (r * 0x85ebca6bu + 0x5bd1e995u));
             }

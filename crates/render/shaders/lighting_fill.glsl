@@ -693,6 +693,25 @@ float lighting_fill_shown(uint rays, uint slot) {
     return min(sets, lighting_sc_cap(slot));
 }
 
+// World cells skip the texel MSME fold. Priority still reads est.w, so a cell
+// with no stored variance has error 0 after its first ray and leaves the
+// histogram. This keeps a short variance on the cell until the mean settles.
+void lighting_fill_note_var(uint slot, vec3 e) {
+    const vec3 msmel = vec3(0.299, 0.587, 0.114);
+    vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+    float luma = max(dot(e, msmel), FILL_TINY);
+    if (!(a.w > FILL_VAR_EPS)) {
+        float seed = FILL_VAR_SEED * luma;
+        a = vec4(e, seed * seed + FILL_VAR_EPS);
+    } else {
+        vec3 sm = mix(a.rgb, e, FILL_SHORT);
+        float open_m = dot((e - a.rgb) * (e - sm), msmel);
+        float var = mix(a.w, max(open_m, 0.0), FILL_VAR_RATE);
+        a = vec4(sm, max(var, FILL_VAR_EPS));
+    }
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot] = a;
+}
+
 // `e` is the mean of this frame's n samples (each `lk * cos * TAU`). One writer
 // calls this, after every ray into the slot has been summed.
 void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, vec3 shy, vec3 shz, bool on_screen, float sun_luma) {
@@ -736,6 +755,9 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         b = vec4(vb, inc, k, b.w);
     } else {
         mean = old.w < FILL_HALF ? e : mix(old.rgb, e, clamp(k, 0.0, 1.0));
+        if (cell) {
+            lighting_fill_note_var(slot, e);
+        }
     }
     float cap = float(lighting_fill_u(13));
     float rays_after = min(rays0 + n, max(cap, float(warmup)));

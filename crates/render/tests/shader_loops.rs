@@ -124,6 +124,10 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         fill.contains("lighting_fill_real"),
         "an infinite check luma must not be stored or raise lambda"
     );
+    assert!(
+        fill.contains("lighting_fill_note_var(slot, e)"),
+        "a world cell must store short variance so error keeps scheduling rays"
+    );
     let pick = source("lighting_lamp_pick.glsl");
     assert!(
         pick.contains("lighting_fill_check_u"),
