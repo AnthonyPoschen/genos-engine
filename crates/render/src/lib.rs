@@ -92,9 +92,9 @@ pub use hdr_output::{
 pub use mesh::tone;
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
 pub use mover_cache::{
-    mover_pool_for_preset, MoverCache, MoverEntry, MoverTexel, MoverTier, MOVER_POOL_HIGH,
-    MOVER_POOL_LOW, MOVER_POOL_MEDIUM, MOVER_TEXEL_BYTES, MOVER_TIER_FAR, MOVER_TIER_MID,
-    MOVER_TIER_NEAR,
+    mover_pool_for_preset, MoverCache, MoverEntry, MoverGpuEntry, MoverOffer, MoverTexel, MoverTier,
+    MOVER_POOL_HIGH, MOVER_POOL_LOW, MOVER_POOL_MEDIUM, MOVER_TEXEL_BYTES, MOVER_TIER_FAR,
+    MOVER_TIER_MID, MOVER_TIER_NEAR,
 };
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};

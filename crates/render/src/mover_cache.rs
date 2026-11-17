@@ -523,6 +523,125 @@ pub fn mover_pool_for_preset(preset: genos_scene::LightingPreset) -> u32 {
     }
 }
 
+/// One live mover offered to [`MoverCache::sync_frame`].
+#[derive(Clone, Copy, Debug)]
+pub struct MoverOffer {
+    pub object_id: u32,
+    /// Screen-projected size (radius / distance).
+    pub screen: f32,
+    pub centre: [f32; 3],
+    pub radius: f32,
+}
+
+/// Packed GPU table entry (32 B). Matches the shader mover-table layout.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MoverGpuEntry {
+    pub object_id: u32,
+    pub tier: u32,
+    pub texel_base: u32,
+    pub texel_count: u32,
+    pub centre: [f32; 3],
+    pub radius: f32,
+}
+
+const _: () = assert!(std::mem::size_of::<MoverGpuEntry>() == 32);
+
+impl MoverGpuEntry {
+    pub const EMPTY: Self = Self {
+        object_id: 0,
+        tier: 2, // Far
+        texel_base: 0,
+        texel_count: 0,
+        centre: [0.0; 3],
+        radius: 0.0,
+    };
+
+    pub fn from_entry(e: &MoverEntry) -> Self {
+        Self {
+            object_id: e.object_id,
+            tier: match e.tier {
+                MoverTier::Near => 0,
+                MoverTier::Mid => 1,
+                MoverTier::Far => 2,
+            },
+            texel_base: e.texel_base,
+            texel_count: e.texel_count,
+            centre: e.centre,
+            radius: e.radius,
+        }
+    }
+}
+
+impl MoverCache {
+    /// Sync the table to this frame's movers. Dropped ids free their texels
+    /// immediately. Rebalances when the live set changes.
+    pub fn sync_frame(&mut self, offers: &[MoverOffer]) {
+        if self.capacity == 0 {
+            return;
+        }
+        let mut keep = std::collections::BTreeSet::new();
+        for o in offers {
+            if o.object_id == 0 {
+                continue;
+            }
+            keep.insert(o.object_id);
+            let _ = self.upsert(o.object_id, o.screen, o.centre, o.radius);
+        }
+        let drop: Vec<u32> = self
+            .table
+            .iter()
+            .filter(|e| e.is_live() && !keep.contains(&e.object_id))
+            .map(|e| e.object_id)
+            .collect();
+        for id in drop {
+            self.remove(id);
+        }
+        self.rebalance();
+    }
+
+    /// Dense GPU table upload (open-address slots, including empties).
+    pub fn pack_table(&self) -> Vec<MoverGpuEntry> {
+        self.table
+            .iter()
+            .map(|e| {
+                if e.is_live() {
+                    MoverGpuEntry::from_entry(e)
+                } else {
+                    MoverGpuEntry::EMPTY
+                }
+            })
+            .collect()
+    }
+
+    /// Bytes of the texel pool for GPU upload (little-endian, 64 B each).
+    pub fn pack_texels(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.texels.len() * MOVER_TEXEL_BYTES);
+        for t in &self.texels {
+            for c in &t.local_pos {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+            out.extend_from_slice(&t.object_id.to_le_bytes());
+            for lobe in &t.sh {
+                for c in lobe {
+                    out.extend_from_slice(&c.to_le_bytes());
+                }
+            }
+        }
+        out
+    }
+
+    /// World-cell priority boost centres: (centre, brick_metres) for each
+    /// mover that dirties the world.
+    pub fn world_boosts(&self) -> Vec<([f32; 3], f32)> {
+        self.table
+            .iter()
+            .filter(|e| Self::dirties_world(e))
+            .map(|e| (e.centre, Self::dirty_brick_metres(e)))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,5 +756,90 @@ mod tests {
             .expect("insert");
         assert_eq!(e.tier, MoverTier::Mid);
         assert_eq!(e.texel_count, MOVER_TIER_MID);
+    }
+
+    #[test]
+    fn sync_frame_frees_dropped_movers() {
+        let mut cache = MoverCache::new(1024);
+        cache.sync_frame(&[
+            MoverOffer {
+                object_id: 1,
+                screen: 0.2,
+                centre: [0.0; 3],
+                radius: 0.5,
+            },
+            MoverOffer {
+                object_id: 2,
+                screen: 0.2,
+                centre: [1.0, 0.0, 0.0],
+                radius: 0.5,
+            },
+        ]);
+        assert_eq!(cache.live_movers(), 2);
+        let live = cache.live_texels();
+        assert!(live > 0);
+        cache.sync_frame(&[MoverOffer {
+            object_id: 1,
+            screen: 0.2,
+            centre: [0.0; 3],
+            radius: 0.5,
+        }]);
+        assert!(cache.lookup(2).is_none());
+        assert_eq!(cache.live_movers(), 1);
+        assert!(cache.live_texels() < live);
+        assert_eq!(cache.free_texels() + cache.live_texels(), 1024);
+    }
+
+    #[test]
+    fn hysteresis_survives_upsert_band() {
+        let mut cache = MoverCache::new(512);
+        cache
+            .upsert(9, 0.2, [0.0; 3], 0.4)
+            .expect("near");
+        assert_eq!(cache.lookup(9).unwrap().tier, MoverTier::Near);
+        // Just under Near threshold: hysteresis keeps Near.
+        cache
+            .upsert(9, MOVER_NEAR_SCREEN - 0.01, [0.0; 3], 0.4)
+            .expect("hold");
+        assert_eq!(cache.lookup(9).unwrap().tier, MoverTier::Near);
+    }
+
+    #[test]
+    fn far_mover_does_not_dirty_world() {
+        let mut cache = MoverCache::new(256);
+        let e = cache
+            .upsert(4, 0.001, [0.0; 3], 0.4)
+            .expect("far");
+        assert!(!MoverCache::dirties_world(&e));
+        assert!(cache.world_boosts().is_empty());
+    }
+
+    #[test]
+    fn near_mover_dirties_one_metre_brick() {
+        let mut cache = MoverCache::new(256);
+        let e = cache
+            .upsert(5, 0.2, [2.0, 0.0, 0.0], 0.4)
+            .expect("near");
+        assert!(MoverCache::dirties_world(&e));
+        assert!((MoverCache::dirty_brick_metres(&e) - 1.4).abs() < 1e-5);
+        let boosts = cache.world_boosts();
+        assert_eq!(boosts.len(), 1);
+        assert_eq!(boosts[0].0, [2.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn gpu_packs_match_layout_sizes() {
+        let mut cache = MoverCache::new(64);
+        cache.sync_frame(&[MoverOffer {
+            object_id: 3,
+            screen: 0.2,
+            centre: [0.0; 3],
+            radius: 0.3,
+        }]);
+        let table = cache.pack_table();
+        assert_eq!(std::mem::size_of_val(table.as_slice()) % 32, 0);
+        assert!(table.iter().any(|e| e.object_id == 3 && e.texel_count > 0));
+        let bytes = cache.pack_texels();
+        assert_eq!(bytes.len(), 64 * MOVER_TEXEL_BYTES);
     }
 }
