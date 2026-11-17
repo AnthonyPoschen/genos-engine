@@ -21,7 +21,7 @@ fn the_fire_floor_reference() {
         )))
         .expect("shipped scene"),
     );
-    world.scene.lights.clear();
+    world.scene.clear_lights();
     let mut sim = genos_render::Simulation::from_scene(&world.scene);
     for _ in 0..genos_render::PROOF_STEPS {
         sim.advance(&mut world, genos_render::STEP_DT);
@@ -31,11 +31,11 @@ fn the_fire_floor_reference() {
     let eye = [camera.position.x, camera.position.y, camera.position.z];
     let (fire, _) = genos_render::medium(&world, eye);
     let mut scene = world.scene.clone();
-    scene.lights = vec![Light {
+    scene.set_lights(vec![Light {
         position: Vec3::new(fire.position[0], fire.position[1], fire.position[2]),
         color: fire.color.map(|c| c * fire.strength),
         direction: Vec3::ZERO,
-    }];
+    }]);
     let (width, height) = (320_u32, 180_u32);
     let setup = genos_debug::reference::RefSetup::from_camera(&scene, &camera, width, height, 256);
     let reference = genos_debug::reference::render(&setup);

@@ -75,7 +75,7 @@ fn orbit(center: Vec3, angle: f32) -> Camera {
 }
 
 fn place_lamp(world: &mut World, angle: f32) {
-    let Some(light) = world.scene.lights.first_mut() else {
+    let Some(light) = world.scene.light_at_mut(0) else {
         return;
     };
     light.position.x = 3.5 * angle.cos();
