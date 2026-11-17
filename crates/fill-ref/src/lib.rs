@@ -5,6 +5,9 @@
 //! reconnection weight. Stage F2 is [`sched`]: the always-on budget, the
 //! clipmap, and the single-ray fold the GPU scheduler mirrors. Stage F3 adds
 //! the check ray, the decaying lambda, and the water-fill of that budget.
+//! Stage F4a seeds the other cells of the same tile that pass the share gates.
+//! The seed is low confidence. It is not an own sample and it has no count
+//! field. Ring sharing is not in this crate's live path.
 //! Nothing here
 //! opens a window or a device. `--tile-fill` defaults off; that flag is the
 //! F1 checker, not the live F2 scheduler.
@@ -23,6 +26,8 @@
 //! - One path vertex. The design's longer paths are stage F5.
 //! - The reconnection weight is self-normalised. There is no pairwise MIS, no
 //!   visibility ray, and no reservoir. `t_min` is 2 m and the weight clamps at 2.
+//!   F4a stores that weight as one low-confidence seed. It does not keep a
+//!   `shared_count`, and one frame keeps the highest weight, then the lowest ray.
 //! - The origin estimator is the cache's cosine-weighted hemisphere sum
 //!   (`pi` times the mean of cosine-weighted samples).
 //!
@@ -43,8 +48,10 @@ pub use commit::{CommitRule, Shown, MEASURED_COMMIT};
 pub use deposit::{own_excludes_shared, Deposit, Faults};
 pub use pick::{far_is_fed, need, prox, under, PixelPick};
 pub use share::{
-    axis_id, near_hit_stays_home, pillar, plane_rel_error, share_weight, thin_wall,
-    unclamped_exceeds_cap, wall_base, Leak, Plane, Reject, ShareCell, ShareHit, T_MIN, W_CAP,
+    axis_id, near_hit_stays_home, pillar, plane_rel_error, share_claim, share_elect, share_in_tile,
+    share_weight, thin_wall, tile_share_holds, unclamped_exceeds_cap, wall_base, Leak, Plane,
+    Reject, ShareCell, ShareHit, ShareLimits, ShareSeed, T_MIN, TileNeighbour, TileSample, TileShare,
+    W_CAP,
 };
 pub use water::{assign, bucket, uniform_assign, TileNeed, BUCKETS};
 
@@ -140,6 +147,7 @@ fn faults_are_caught() -> bool {
         && share::unclamped_exceeds_cap()
         && share::constant_weight_plane_error() >= 0.01
         && share::firefly_bound_holds()
+        && share::tile_share_holds()
 }
 
 #[cfg(test)]

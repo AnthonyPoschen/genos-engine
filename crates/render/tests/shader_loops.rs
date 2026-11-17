@@ -1,3 +1,4 @@
+#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::single_element_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
@@ -37,6 +38,30 @@ const SHADERS: [&str; 24] = [
 
 /// Largest constant trip count a loop may have.
 const MAX_CONSTANT_TRIPS: u64 = 64;
+
+fn function_body<'a>(src: &'a str, signature: &str) -> &'a str {
+    let at = src
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing {signature}"));
+    let rest = &src[at + signature.len()..];
+    let open = rest
+        .find('{')
+        .unwrap_or_else(|| panic!("{signature} has no body"));
+    let mut depth = 0i32;
+    for (i, ch) in rest[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open + 1..open + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("{signature} body does not close")
+}
 
 fn source(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -115,19 +140,28 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
     );
     assert!(
         fill.contains("lighting_round() % tiles"),
-        "check rays must rotate through the screen, not rescan the same prefix"
+        "screen check rays must rotate with the round, not rescan the same prefix"
     );
     assert!(
-        fill.contains("lighting_round() & (guard - 1u)"),
-        "off-screen checks must rotate through the slot table"
+        fill.contains("lighting_hash(block ^ lighting_hash(lighting_round()))"),
+        "off-screen checks are one hash per block, not a scan of the slot table"
+    );
+    let plan = function_body(&fill, "void lighting_fill_dispatch()");
+    assert!(
+        !plan.contains("LIGHTING_CACHE_SLOTS"),
+        "the one scheduler thread must not walk the slot table"
+    );
+    assert!(
+        !plan.contains("LIGHTING_FILL_TILE_CAP"),
+        "the one scheduler thread must not walk the tile table"
+    );
+    assert!(
+        plan.contains("gstats.pad2"),
+        "the plan records how many serial iterations it ran"
     );
     assert!(
         fill.contains("lighting_fill_real"),
         "an infinite check luma must not be stored or raise lambda"
-    );
-    assert!(
-        fill.contains("lighting_fill_note_var(slot, e)"),
-        "a world cell must store short variance so error keeps scheduling rays"
     );
     let pick = source("lighting_lamp_pick.glsl");
     assert!(
@@ -147,6 +181,73 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
     assert!(
         !compact.contains("LIGHTING_WRC_SCOUT"),
         "the old refresh walk must not be listed"
+    );
+}
+
+/// The share pass writes a seed. These strings are the gates that a behavioural
+/// CPU test cannot see: the stamp source, the confidence scale, and the clamp.
+#[test]
+fn the_fill_share_writes_a_seed_under_the_five_gates() {
+    let fill = source("lighting_fill.glsl");
+    let commit = function_body(&fill, "void lighting_fill_commit(");
+    let cell_arm = commit
+        .find("} else if (cell)")
+        .expect("a world cell has its own deposit");
+    let after_cell = commit[cell_arm..].find("} else {").expect("the texel deposit follows");
+    assert!(
+        commit[cell_arm..cell_arm + after_cell].contains("lighting_fill_note_var(slot, e)"),
+        "a world cell must store short variance in its own deposit"
+    );
+    assert!(
+        !commit[cell_arm + after_cell..].contains("lighting_fill_note_var"),
+        "the variance note must not sit in the branch a world cell skips"
+    );
+    assert!(
+        fill.contains("lighting_fill_share("),
+        "an in-tile sample must reach the share pass"
+    );
+    let cache = source("lighting_cache.glsl");
+    assert!(
+        fill.contains("lighting_sc_set_fill_seed"),
+        "a shared sample must enter as a fill seed"
+    );
+    assert!(
+        cache.contains("lighting_sc_set_seed(slot, rgb, conf, sunfrac)"),
+        "the fill mark is written on the seed channel"
+    );
+    assert!(
+        !fill.contains("shared_count"),
+        "F4 must not add a shared_count field"
+    );
+    assert!(
+        fill.contains("lighting_fill_u(22)"),
+        "fill_share must be read"
+    );
+    assert!(
+        fill.contains("lighting_fill_f(23)"),
+        "a near hit must read fill_share_min_hit"
+    );
+    let accept = function_body(&fill, "float lighting_fill_share_accept");
+    assert!(
+        accept.contains("lighting_sc_updated(recv)"),
+        "the stamp reads the commit frame, not the visit word"
+    );
+    assert!(
+        !accept.contains("cache.v[3u * recv].w"),
+        "a bounce read updates the visit word and is not the mean"
+    );
+    let rgb = function_body(&fill, "vec3 lighting_fill_share_rgb");
+    assert!(
+        rgb.contains("b.x > 0.0"),
+        "a zeroed estimator is not a firefly bound"
+    );
+    assert!(
+        fill.contains("lighting_fill_f(29) * scale"),
+        "own-count expiry scales the seed confidence"
+    );
+    assert!(
+        fill.contains("lighting_fill_share_claim(found_w[s] * lighting_fill_share_scale(found[s]), r)"),
+        "a fresher cell's scale stays in the claim"
     );
     assert!(
         fill.contains("lighting_fill_tile_at"),
@@ -173,8 +274,46 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
     );
     let relight = source("lighting_cache.comp");
     assert!(
-        relight.contains("lighting_fill_header_at() + 3u"),
+        relight.contains("lighting_fill_header_at() + 7u"),
         "the fill reports occupied cells, not the empty due lists"
+    );
+    assert!(
+        fill.contains("FILL_OPEN_SETS"),
+        "young cells take turns until the variance bucket is the rank"
+    );
+    assert!(
+        fill.contains("lighting_fill_pour_row(hist, plan, 64u, left)"),
+        "leftover on-screen rays pour onto the chosen cells"
+    );
+    assert!(
+        !fill.contains("lighting_fill_give"),
+        "the serial grant helper is gone; the lock is the grant"
+    );
+    assert!(
+        !fill.contains("lighting_fill_shown"),
+        "the unused shown-count helper is gone"
+    );
+    let emit_on = function_body(&fill, "void lighting_fill_emit_on(uint gid)");
+    assert!(
+        emit_on.contains("Every tile winner writes a non-zero lock"),
+        "a zero-take tile winner still marks the lock the histogram counted"
+    );
+    let emit_off = function_body(&fill, "void lighting_fill_emit_off(uint gid)");
+    assert!(
+        emit_off.contains("prior == 0u"),
+        "an off-screen emit takes nothing once the cell already has a grant"
+    );
+    assert!(
+        emit_off.contains("lighting_fill_holds_tile"),
+        "a tile winner does not take the off-screen grant"
+    );
+    assert!(
+        fill.contains("7 occupied-cell count"),
+        "header word 7 is the occupied-cell count"
+    );
+    assert!(
+        fill.contains("Claiming the cell is the deposit"),
+        "a camera primary claims the world cell and does not enter the mean as a hemisphere sample"
     );
     assert!(
         !fill.contains("gstats.rays = budget"),
@@ -189,6 +328,18 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
     assert!(
         !cache_src.contains("uint lighting_settle_turns"),
         "the settle walk is gone; the fill visit replaced it"
+    );
+    assert!(
+        fill.contains("lighting_fill_seed_spent"),
+        "the fill seed's weight reaches 0"
+    );
+    assert!(
+        fill.contains("lighting_fill_u(31)"),
+        "fill_share_handover is the drop, and 0 uses the warmup count"
+    );
+    assert!(
+        cache.contains("const float LIGHTING_SC_HANDOVER = 16.0;"),
+        "the 16-set handover stays for seeds this pass did not write"
     );
 }
 
@@ -211,6 +362,47 @@ fn the_scene_ray_loops_are_kept_rolled() {
             "{name} includes scene_rays.glsl, which needs GL_EXT_control_flow_attributes"
         );
     }
+}
+
+/// The tile fill rays the world cell. A finer screen texel claims that cell
+/// and returns, so it cannot win the tile.
+#[test]
+fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
+    let fill = source("lighting_fill.glsl");
+    let visit = function_body(&fill, "void lighting_fill_visit(uint slot)");
+    let claim = visit.find("lighting_cache_find_sized(p, n, true, base, p)");
+    let tile = visit.find("lighting_fill_tile_at()");
+    match (claim, tile) {
+        (Some(claim_at), Some(tile_at)) => {
+            assert!(
+                claim_at < tile_at,
+                "the screen texel must return before the tile pick"
+            );
+            assert!(
+                visit[tile_at..].contains("lighting_fill_off_at()"),
+                "an on-screen cell also stays in its off-screen bin"
+            );
+        }
+        (None, _) => panic!("a screen texel must claim the world cell under it"),
+        (Some(_), None) => panic!("a world cell must still enter the tile"),
+    }
+    assert!(
+        visit.contains("if (size < base)"),
+        "only a slot finer than the base world cell skips the ray"
+    );
+    assert!(
+        visit.contains("lighting_fill_pack(slot, q)"),
+        "the tile rank is the priority bucket"
+    );
+    let pack = function_body(&fill, "uint lighting_fill_pack(uint slot, uint q)");
+    assert!(
+        pack.contains("open << 27u"),
+        "a cell under the open-set count outranks one that has them"
+    );
+    assert!(
+        pack.contains("(q & 63u)"),
+        "after the open count the stored-variance bucket is the rank"
+    );
 }
 
 /// The picture compose used to compile `scene_candidates_skip` (the occluder

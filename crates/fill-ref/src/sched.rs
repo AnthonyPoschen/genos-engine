@@ -84,6 +84,26 @@ pub struct Tunables {
     pub warmup_rays: u32,
     pub ray_cap: u32,
     pub frame_dt: f32,
+    /// 0 off, 1 in-tile. Ring is not a value this stage acts on.
+    pub share: u32,
+    /// First-hit distance below which a sample stays on its origin cell.
+    pub share_min_hit: f32,
+    /// Own paths after which a cell stops taking a shared seed.
+    pub share_cap: u32,
+    /// Relative depth of the same-surface plane test.
+    pub share_plane: f32,
+    /// Minimum normal dot of the same-surface test.
+    pub share_normal: f32,
+    /// Highest reconnection weight a neighbour may take.
+    pub share_w_cap: f32,
+    /// Cosine floor in the reconnection weight.
+    pub share_cos: f32,
+    /// Confidence of the shared seed. Below 1, so it is not an own sample.
+    pub share_conf: f32,
+    /// Distinct cells in the tile one sample may seed.
+    pub share_receivers: u32,
+    /// Own rays after which a fill seed's display weight is 0. High matches warmup.
+    pub share_handover: u32,
 }
 
 impl Tunables {
@@ -112,6 +132,16 @@ impl Tunables {
             warmup_rays: 16,
             ray_cap: 512,
             frame_dt: 1.0 / 60.0,
+            share: 0,
+            share_min_hit: 2.0,
+            share_cap: 32,
+            share_plane: 0.02,
+            share_normal: 0.99,
+            share_w_cap: 2.0,
+            share_cos: 0.05,
+            share_conf: 0.25,
+            share_receivers: 3,
+            share_handover: 16,
         }
     }
 
@@ -346,6 +376,16 @@ pub fn step_lambda(previous: f32, measured: Option<f32>, tun: &Tunables) -> f32 
 pub fn cell_grant(already: u32, want: u32, max_picks: u32) -> u32 {
     let cap = max_picks.max(1);
     want.min(cap.saturating_sub(already.min(cap)))
+}
+
+/// A cell that already took a grant this round takes nothing from the other emit.
+#[must_use]
+pub fn one_grant(already: u32, want: u32) -> u32 {
+    if already == 0 {
+        want
+    } else {
+        0
+    }
 }
 
 /// Due indices admitted this frame. The walk starts at `phase` in a table of
@@ -679,6 +719,21 @@ impl Estimator {
     }
 }
 
+/// Tile word above the slot id. While the shown count is under `open_sets`,
+/// a lower shown count outranks a higher one so one slot cannot pin the tile.
+/// At and past `open_sets` the rank is `bucket`, which is the stored-variance
+/// priority, not zero.
+#[must_use]
+pub fn open_rank(shown: u32, bucket: u32, open_sets: u32) -> u32 {
+    let bucket = bucket & 63;
+    if shown < open_sets {
+        let behind = (open_sets - shown).min(63);
+        (1 << 27) | (behind << 21)
+    } else {
+        bucket << 21
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,6 +748,24 @@ mod tests {
 
     fn high() -> Tunables {
         Tunables::high()
+    }
+
+    #[test]
+    fn the_share_knobs_match_the_high_limits() {
+        let tun = high();
+        let limits = crate::ShareLimits::high();
+        assert_eq!(tun.share, 0);
+        assert!((tun.share_min_hit - limits.t_min).abs() < 1.0e-6);
+        assert_eq!(tun.share_cap, limits.share_cap);
+        assert!((tun.share_plane - limits.plane).abs() < 1.0e-6);
+        assert!((tun.share_normal - limits.normal_min).abs() < 1.0e-6);
+        assert!((tun.share_w_cap - limits.w_cap).abs() < 1.0e-6);
+        assert!((tun.share_cos - limits.cos_floor).abs() < 1.0e-6);
+        assert!((tun.share_conf - limits.confidence).abs() < 1.0e-6);
+        assert_eq!(tun.share_receivers, limits.receivers);
+        assert_eq!(tun.share_handover, tun.warmup_rays);
+        assert_eq!(tun.share_handover, limits.handover);
+        assert!(limits.enabled);
     }
 
     #[test]
@@ -967,6 +1040,24 @@ mod tests {
         }
         assert_eq!(total, max_picks);
         assert_eq!(cell_grant(max_picks, max_picks, max_picks), 0);
+    }
+
+    #[test]
+    fn a_cell_with_one_grant_does_not_take_the_other_emit() {
+        assert_eq!(one_grant(0, 16), 16);
+        assert_eq!(one_grant(4, 16), 0);
+        assert_eq!(one_grant(64, 16), 0);
+    }
+
+    #[test]
+    fn a_young_cell_outranks_a_full_one_and_then_the_variance_bucket_does() {
+        let open = 48;
+        assert!(open_rank(0, 1, open) > open_rank(10, 63, open));
+        assert!(open_rank(10, 1, open) > open_rank(47, 63, open));
+        assert!(open_rank(47, 1, open) > open_rank(48, 63, open));
+        assert!(open_rank(48, 5, open) > open_rank(48, 4, open));
+        assert_eq!(open_rank(80, 0, open), 0);
+        assert!(open_rank(80, 3, open) > open_rank(80, 0, open));
     }
 
     #[test]

@@ -454,8 +454,11 @@ Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/l
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
 Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
 
-**Shared sample**: a hit reconnected to a neighbour cell with the Jacobian weight. It never increments `own_count`.
+**Shared sample**: a hit reconnected to another cell in the same screen tile with the Jacobian weight, then stored with `lighting_sc_set_seed`. The colour is the clamped reconnection. The confidence is `fill_share_conf` times `max(0, 1 - own_count / fill_share_cap)`, so a cell that already has samples fades the prior instead of storing a darker one. It never increments the cell's own ray count. There is no `shared_count` field. `fill_share` 0 writes none. Ring sharing is not this sample. Its display weight is 0 once the cell's own rays reach `fill_share_handover`.
 Role: SAMPLE · Literature: ReSTIR GI reconnection shift (Ouyang et al., HPG 2021) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
+
+**Share handover**: own rays after which a fill seed's display weight is exactly 0. `fill_share_handover` defaults to `fill_warmup`. The 16-set handover stays for seeds this pass did not write. The ray cap is not this count.
+Role: TEMPORAL · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.1
 
 **Share gate**: a named reason a neighbour gets nothing: plane, normal, axis, near hit, own count, stamp, or the weight clamp.
 Role: VIS · Literature: ReSTIR spatial depth and normal test · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §7.2
@@ -469,8 +472,14 @@ Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lig
 **Change lambda**: a cell's 0–1 measured change. One same-seed check ray writes it. A skipped frame multiplies it by `fill_lambda_decay`. It is not a lamp hint and it does not reset the cell.
 Role: TEMPORAL · Literature: A-SVGF eq. 6 (Schied, Peters and Dachsbacher, HPG 2018) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
-**Water-filling**: spending `fill_budget` from the highest priority bucket down. A hot cell can take several rays, up to `fill_max_picks`. The total does not pass the budget. A converged screen does not stop the round.
+**Water-filling**: spending `fill_budget` from the highest priority bucket down. The fair pass gives a cell at most `fill_max_picks` (4). Leftover rays are the fill pour. The total does not pass the budget. A converged screen does not stop the round.
 Role: SCHED · Literature: Lumen tile budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.3
+
+**Cold-start rank**: while a cell's shown count is under 48, a lower shown count outranks a higher one, so one slot id cannot pin the tile. At 48 and after, the rank is the priority bucket from the stored variance. It is not a second budget. The rank reads the shown count.
+Role: SCHED · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
+
+**Fill pour**: leftover `fill_budget` after the fair pass, added to the cells already chosen. A screen bucket takes up to 64 rays. An off-screen bucket takes up to 16 rays. A set is 64 rays, so the off-screen cap is not one set. A cell takes one grant that round: the on-screen pour or the off-screen grant, not both.
+Role: SCHED · Literature: — · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.3
 
 **Fill check rate**: `fill_check_rate`, one same-seed ray per this many cells. 9 is one ray in each 3×3 block. The seed does not include the frame.
 Role: SCHED · Literature: A-SVGF gradient check · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)

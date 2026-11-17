@@ -383,6 +383,40 @@ impl LightGroups {
     }
 }
 
+fn fill_parallel(settings: &LightingSettings) -> bool {
+    settings.world_mode() == 3 && settings.surface_cache.fill.budget > 0
+}
+
+fn fill_tiles(settings: &LightingSettings, w: u32, h: u32) -> u32 {
+    let tile = settings.surface_cache.fill.tile.max(1);
+    w.div_ceil(tile)
+        .saturating_mul(h.div_ceil(tile))
+        .min(u32::try_from(FILL_TILE_CAP).unwrap_or(u32::MAX))
+}
+
+/// Histogram before the one-thread plan. Emit after it. Neither covers the slot table.
+fn push_fill_hist(out: &mut LightGroups, settings: &LightingSettings, w: u32, h: u32) {
+    if !fill_parallel(settings) {
+        return;
+    }
+    let tiles = fill_tiles(settings, w, h);
+    let groups = tiles
+        .max(u32::try_from(FILL_OFF_CAP).unwrap_or(u32::MAX))
+        .div_ceil(64)
+        .max(1);
+    out.push(0, groups, LIGHTING_FILL_HIST, B_COMPACT);
+}
+
+fn push_fill_emit(out: &mut LightGroups, settings: &LightingSettings, w: u32, h: u32) {
+    if !fill_parallel(settings) {
+        return;
+    }
+    let tiles = fill_tiles(settings, w, h);
+    out.push(0, tiles.div_ceil(64).max(1), LIGHTING_FILL_EMIT_ON, B_COMPACT);
+    let off_groups = u32::try_from(FILL_OFF_CAP).unwrap_or(u32::MAX).div_ceil(64);
+    out.push(0, off_groups, LIGHTING_FILL_EMIT_OFF, B_COMPACT);
+}
+
 fn push_picture(out: &mut LightGroups, settings: &LightingSettings, gx: u32, gy: u32) {
     if settings.world_mode() == 3 {
         out.push(SH_PREP_PASS, gx, gy, B_CACHE);
@@ -453,7 +487,9 @@ pub(crate) fn light_groups(
         && settings.denoiser.iterations == 5
     {
         out.push(0, slots, 1, B_COMPACT);
+        push_fill_hist(&mut out, settings, w, h);
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
+        push_fill_emit(&mut out, settings, w, h);
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
         out.push(3, pixels.div_ceil(64), LIGHTING_MODE1, B_DIRECT);
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
@@ -552,9 +588,11 @@ fn gated(
     }
     if round && buckets.compact {
         out.push(0, slots, 1, B_COMPACT);
+        push_fill_hist(out, settings, w, h);
     }
     if round && (buckets.cache_rays || buckets.cache) {
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
+        push_fill_emit(out, settings, w, h);
     }
     if round && buckets.cache_rays {
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
@@ -714,6 +752,41 @@ mod probe_still_tests {
     }
 
     #[test]
+    fn a_moving_high_frame_histograms_bins_not_the_slot_table() {
+        let high = LightingSettings::preset(LightingPreset::High);
+        let moving = groups(&high, false, true);
+        let hist: Vec<_> = moving
+            .groups
+            .iter()
+            .copied()
+            .filter(|g| g.2 == LIGHTING_FILL_HIST)
+            .collect();
+        assert_eq!(hist.len(), 1, "one histogram dispatch");
+        let threads = hist[0].1.saturating_mul(64);
+        assert!(
+            threads >= 16_384,
+            "the histogram covers the off-screen bins ({threads})"
+        );
+        assert!(
+            u64::from(threads) < LIGHTING_CACHE_SLOTS,
+            "the histogram must not cover the slot table ({threads})"
+        );
+        assert_eq!(
+            moving.groups.iter().filter(|g| g.2 == LIGHTING_FILL_EMIT_ON).count(),
+            1
+        );
+        assert_eq!(
+            moving.groups.iter().filter(|g| g.2 == LIGHTING_FILL_EMIT_OFF).count(),
+            1
+        );
+        let visit = moving.groups.iter().position(|g| g.2 == 1 && g.0 == 0);
+        let plan = moving.groups.iter().position(|g| g.2 == LIGHTING_ARGS);
+        let hist_at = moving.groups.iter().position(|g| g.2 == LIGHTING_FILL_HIST);
+        let emit = moving.groups.iter().position(|g| g.2 == LIGHTING_FILL_EMIT_ON);
+        assert!(visit < hist_at && hist_at < plan && plan < emit);
+    }
+
+    #[test]
     fn a_settled_high_frame_stays_on_the_tuned_idle_list() {
         let high = LightingSettings::preset(LightingPreset::High);
         let busy = groups(&high, false, true);
@@ -727,6 +800,10 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_CACHE_RAYS as usize], 0);
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
         assert_eq!(quiet.groups.len(), 3);
+        assert!(
+            quiet.groups.iter().all(|g| g.2 != LIGHTING_FILL_HIST),
+            "a settled frame does not schedule fill"
+        );
         assert_eq!(quiet.groups[1].0, SH_PREP_PASS);
         assert_eq!(quiet.tags[1], B_CACHE);
         assert_eq!(quiet.groups[2].0, 7);

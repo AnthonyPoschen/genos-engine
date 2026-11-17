@@ -493,11 +493,12 @@ pub struct AmbientSettings {
     pub dusk_intensity: f32,
 }
 
-/// Always-on fill (stages F2 and F3). Every cache round spends `budget` rays.
+/// Always-on fill (stages F2, F3, and F4a). Every cache round spends `budget` rays.
 ///
 /// Keep [`FillSettings::high`] in step with `Tunables::high` in `genos-fill-ref`.
 /// F3 schedules one same-seed check ray per `check_rate` block and water-fills
-/// the rest of the budget by priority.
+/// the rest of the budget by priority. F4a seeds other cells in the same screen
+/// tile. The seed is low confidence. It does not add a ray.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FillSettings {
     /// Rays traced in one cache round. High starts at 100_000. `0` traces none.
@@ -542,6 +543,28 @@ pub struct FillSettings {
     pub ray_cap: u32,
     /// Seconds. The shader's look offset uses this when it has no frame delta.
     pub frame_dt: f32,
+    /// 0 off, 1 in-tile. A ring value is rejected: that spread is not this stage.
+    pub share: u32,
+    /// Metres. A nearer hit stays on the origin cell.
+    pub share_min_hit: f32,
+    /// Own paths after which a cell stops taking a shared seed.
+    pub share_cap: u32,
+    /// Relative depth of the same-surface plane test.
+    pub share_plane: f32,
+    /// Minimum normal dot of the same-surface test.
+    pub share_normal: f32,
+    /// Highest reconnection weight written into a neighbour seed.
+    pub share_w_cap: f32,
+    /// Cosine floor in the reconnection weight.
+    pub share_cos: f32,
+    /// Confidence of the shared seed. `lighting_sc_set_seed` clamps it to 0.05..1.
+    pub share_conf: f32,
+    /// Distinct cells in the tile one sample may seed.
+    pub share_receivers: u32,
+    /// Own rays after which a fill seed's display weight is 0. High's default
+    /// is `warmup_rays`. Other seeds keep the 16-set handover. The ray cap
+    /// does not move.
+    pub share_handover: u32,
 }
 
 impl FillSettings {
@@ -569,6 +592,16 @@ impl FillSettings {
             warmup_rays: 16,
             ray_cap: 512,
             frame_dt: 1.0 / 60.0,
+            share: 0,
+            share_min_hit: 2.0,
+            share_cap: 32,
+            share_plane: 0.02,
+            share_normal: 0.99,
+            share_w_cap: 2.0,
+            share_cos: 0.05,
+            share_conf: 0.25,
+            share_receivers: 3,
+            share_handover: 16,
         }
     }
 }
@@ -1101,6 +1134,28 @@ impl LightingSettings {
         fill.warmup_rays = fill.warmup_rays.max(1);
         fill.ray_cap = fill.ray_cap.max(fill.warmup_rays);
         fill.frame_dt = finite_pos(fill.frame_dt, 1.0 / 60.0);
+        fill.share = u32::from(fill.share == 1);
+        fill.share_min_hit = finite_pos(fill.share_min_hit, 2.0);
+        fill.share_cap = fill.share_cap.clamp(1, 4096);
+        fill.share_plane = finite_pos(fill.share_plane, 0.02);
+        fill.share_normal = if fill.share_normal.is_finite() {
+            fill.share_normal.clamp(0.0, 1.0)
+        } else {
+            0.99
+        };
+        fill.share_w_cap = finite_pos(fill.share_w_cap, 2.0);
+        fill.share_cos = if fill.share_cos.is_finite() {
+            fill.share_cos.clamp(1.0e-3, 1.0)
+        } else {
+            0.05
+        };
+        fill.share_conf = if fill.share_conf.is_finite() {
+            fill.share_conf.clamp(0.05, 1.0)
+        } else {
+            0.25
+        };
+        fill.share_receivers = fill.share_receivers.min(8);
+        fill.share_handover = fill.share_handover.max(1);
         if let Some(mode) = self.gi.world_mode {
             // Mode 2 pushed screen-probe irradiance into world patches.
             // That pass is removed, so the stored mode becomes the surface cache.
@@ -1456,6 +1511,16 @@ impl LightingSettings {
         let _ = writeln!(out, "surface_cache.fill_warmup={}", fill.warmup_rays);
         let _ = writeln!(out, "surface_cache.fill_ray_cap={}", fill.ray_cap);
         let _ = writeln!(out, "surface_cache.fill_frame_dt={}", num_text(fill.frame_dt));
+        let _ = writeln!(out, "surface_cache.fill_share={}", fill.share);
+        let _ = writeln!(out, "surface_cache.fill_share_min_hit={}", num_text(fill.share_min_hit));
+        let _ = writeln!(out, "surface_cache.fill_share_cap={}", fill.share_cap);
+        let _ = writeln!(out, "surface_cache.fill_share_plane={}", num_text(fill.share_plane));
+        let _ = writeln!(out, "surface_cache.fill_share_normal={}", num_text(fill.share_normal));
+        let _ = writeln!(out, "surface_cache.fill_share_w_cap={}", num_text(fill.share_w_cap));
+        let _ = writeln!(out, "surface_cache.fill_share_cos={}", num_text(fill.share_cos));
+        let _ = writeln!(out, "surface_cache.fill_share_conf={}", num_text(fill.share_conf));
+        let _ = writeln!(out, "surface_cache.fill_share_receivers={}", fill.share_receivers);
+        let _ = writeln!(out, "surface_cache.fill_share_handover={}", fill.share_handover);
         let _ = writeln!(
             out,
             "surface_cache.sh_cells={}",
@@ -1700,6 +1765,39 @@ impl LightingSettings {
             "surface_cache.fill_warmup" => self.surface_cache.fill.warmup_rays = num_u32(value)?,
             "surface_cache.fill_ray_cap" => self.surface_cache.fill.ray_cap = num_u32(value)?,
             "surface_cache.fill_frame_dt" => self.surface_cache.fill.frame_dt = num_f32(value)?,
+            "surface_cache.fill_share" => {
+                self.surface_cache.fill.share = match value {
+                    "0" | "off" => 0,
+                    "1" | "tile" => 1,
+                    "2" | "ring" => {
+                        return Err(
+                            "surface_cache.fill_share ring is not built; use off or tile".to_string(),
+                        );
+                    }
+                    _ => {
+                        return Err(format!(
+                            "surface_cache.fill_share is off or tile, got {value}"
+                        ));
+                    }
+                };
+            }
+            "surface_cache.fill_share_min_hit" => {
+                self.surface_cache.fill.share_min_hit = num_f32(value)?;
+            }
+            "surface_cache.fill_share_cap" => self.surface_cache.fill.share_cap = num_u32(value)?,
+            "surface_cache.fill_share_plane" => self.surface_cache.fill.share_plane = num_f32(value)?,
+            "surface_cache.fill_share_normal" => {
+                self.surface_cache.fill.share_normal = num_f32(value)?;
+            }
+            "surface_cache.fill_share_w_cap" => self.surface_cache.fill.share_w_cap = num_f32(value)?,
+            "surface_cache.fill_share_cos" => self.surface_cache.fill.share_cos = num_f32(value)?,
+            "surface_cache.fill_share_conf" => self.surface_cache.fill.share_conf = num_f32(value)?,
+            "surface_cache.fill_share_receivers" => {
+                self.surface_cache.fill.share_receivers = num_u32(value)?;
+            }
+            "surface_cache.fill_share_handover" => {
+                self.surface_cache.fill.share_handover = num_u32(value)?;
+            }
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
             "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
@@ -2008,6 +2106,22 @@ impl LightingSettings {
             ("GENOS_LIGHTING_FILL_WARMUP", "surface_cache.fill_warmup"),
             ("GENOS_LIGHTING_FILL_RAY_CAP", "surface_cache.fill_ray_cap"),
             ("GENOS_LIGHTING_FILL_FRAME_DT", "surface_cache.fill_frame_dt"),
+            ("GENOS_LIGHTING_FILL_SHARE", "surface_cache.fill_share"),
+            ("GENOS_LIGHTING_FILL_SHARE_MIN_HIT", "surface_cache.fill_share_min_hit"),
+            ("GENOS_LIGHTING_FILL_SHARE_CAP", "surface_cache.fill_share_cap"),
+            ("GENOS_LIGHTING_FILL_SHARE_PLANE", "surface_cache.fill_share_plane"),
+            ("GENOS_LIGHTING_FILL_SHARE_NORMAL", "surface_cache.fill_share_normal"),
+            ("GENOS_LIGHTING_FILL_SHARE_W_CAP", "surface_cache.fill_share_w_cap"),
+            ("GENOS_LIGHTING_FILL_SHARE_COS", "surface_cache.fill_share_cos"),
+            ("GENOS_LIGHTING_FILL_SHARE_CONF", "surface_cache.fill_share_conf"),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_RECEIVERS",
+                "surface_cache.fill_share_receivers",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_HANDOVER",
+                "surface_cache.fill_share_handover",
+            ),
         ];
         for (var, key) in keys {
             if key == "direct_specular" && launch.direct_specular.is_some() {
