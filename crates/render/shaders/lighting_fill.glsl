@@ -240,8 +240,8 @@ bool lighting_fill_pixel(vec3 p, out uint px, out uint py) {
     return true;
 }
 
-// While a cell has fewer than FILL_OPEN_SETS commits, fewer commits outrank
-// more, so one slot id cannot pin the tile. After that the rank is the
+// While a cell's shown count is under FILL_OPEN_SETS, a lower shown count
+// outranks a higher one, so one slot id cannot pin the tile. After that the rank is the
 // priority bucket. That bucket is the stored variance, so the cell does not
 // drop to bucket 0 when the countdown ends.
 const float FILL_OPEN_SETS = 48.0;
@@ -694,6 +694,16 @@ void lighting_fill_emit_on(uint gid) {
                     prior = got;
                 }
             }
+            // A zero take leaves the lock at 0. The off-screen emit then
+            // reads a tile word this pass already cleared, so holds_tile is
+            // false and that winner takes a grant the histogram did not
+            // count. Every tile winner writes a non-zero lock.
+            if (slot < LIGHTING_CACHE_SLOTS) {
+                uint held = atomicAdd(ckeys.key[lighting_fill_lock_at() + slot], 0u);
+                if (held == 0u) {
+                    atomicCompSwap(ckeys.key[lighting_fill_lock_at() + slot], 0u, 1u);
+                }
+            }
         }
     }
     uint place = lighting_fill_wg_place(m, lighting_fill_header_at());
@@ -718,8 +728,10 @@ void lighting_fill_emit_off(uint gid) {
         if (w != 0u) {
             uint q = lighting_fill_packed_q(w);
             slot = (w & 2097151u) - 1u;
-            // A tile winner's grant is the on-screen emit. The lock covers a
-            // cell that already took a grant and does not hold this tile.
+            // The on-screen emit clears the tile word before this dispatch,
+            // so holds_tile is false for a winner. The histogram skipped
+            // that winner while the word was still set. A non-zero lock is
+            // the grant it counted, including a zero-take winner.
             if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u
                 && !lighting_fill_holds_tile(slot)) {
                 // The on-screen emit already ran. A non-zero lock is that
@@ -816,7 +828,8 @@ void lighting_fill_dispatch() {
     uint used = check_n + on_take + far_take + near_take;
     uint left = used >= budget ? 0u : budget - used;
     // The fair pass stops at fill_max_picks. Rays still in the budget are more
-    // samples on those cells: one screen bucket up to 64, and one set off screen.
+    // samples on those cells: one screen bucket up to 64, and 16 rays off screen.
+    // A set is 64 rays, so the off-screen cap is not one set.
     lighting_fill_pour_row(hist, plan, 64u, left);
     lighting_fill_pour_row(hist_far, plan + 128u, LIGHTING_CACHE_RAYS, left);
     lighting_fill_pour_row(hist_near, plan + 256u, LIGHTING_CACHE_RAYS, left);

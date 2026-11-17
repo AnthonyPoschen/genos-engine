@@ -292,6 +292,11 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         !fill.contains("lighting_fill_shown"),
         "the unused shown-count helper is gone"
     );
+    let emit_on = function_body(&fill, "void lighting_fill_emit_on(uint gid)");
+    assert!(
+        emit_on.contains("Every tile winner writes a non-zero lock"),
+        "a zero-take tile winner still marks the lock the histogram counted"
+    );
     let emit_off = function_body(&fill, "void lighting_fill_emit_off(uint gid)");
     assert!(
         emit_off.contains("prior == 0u"),
