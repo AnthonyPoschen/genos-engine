@@ -19,16 +19,16 @@ void lighting_tex_put(uint slot, vec4 v) {
     cache.v[3u * slot + 2u] = v;
     // A 25 cm world cell never reaches the SVGF push (that push returns when
     // size > 0.2), and a direct light that stays zero never marks the pixel.
-    // Compose already recorded the blocks that read this slot. Mark those
-    // when the packed irradiance the picture shows has changed.
-    // A held camera keeps the picture. A cell a change reaches still marks.
-    // The 32-frame pass is the drift under the dirty epsilon. The cell stores
-    // the new irradiance either way.
+    // The reach note is the new sample against this mean, in the caller.
+    // Compose marks the recorded rect on that same band, not on an rgb9e5
+    // bucket. A held camera still skips the compose mark. The 32-frame pass
+    // is the drift under the dirty epsilon. The cell stores the new
+    // irradiance either way.
     if (lighting_compose_world_held(slot)) {
         return;
     }
     if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH
-        && lighting_pack_rgb9e5(o.rgb) != lighting_pack_rgb9e5(v.rgb)) {
+        && lighting_reach_radiance_hot(v.rgb, o.rgb, slot)) {
         lighting_compose_mark_slot(slot);
     }
 }
@@ -283,6 +283,7 @@ void main() {
             wa = 1.0;
         }
         vec3 mean = old.w < 0.5 ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
+        lighting_reach_note_cell(slot, old.rgb, e);
         lighting_tex_put(slot, vec4(mean, min(t + add, LIGHTING_WRC_CAP)));
         if (sh) {
             // Same weights as the mean (2 pi / rays a ray), same blend alpha.

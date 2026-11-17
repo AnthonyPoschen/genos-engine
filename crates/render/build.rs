@@ -126,6 +126,7 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
 struct DenoiseModules {
     screen: PathBuf,
     atrous_plain: PathBuf,
+    reach: PathBuf,
 }
 
 fn compile_denoise_modules(out: &std::path::Path) -> DenoiseModules {
@@ -148,9 +149,14 @@ fn compile_denoise_modules(out: &std::path::Path) -> DenoiseModules {
         &out.join("lighting_atrous_plain.comp.spv"),
         "LIGHTING_DENOISE_PLAIN",
     );
+    let reach = compile(
+        "shaders/lighting_reach.comp",
+        &out.join("lighting_reach.comp.spv"),
+    );
     DenoiseModules {
         screen,
         atrous_plain,
+        reach,
     }
 }
 
@@ -235,6 +241,10 @@ fn write_shader_glue(
     glue_text.push_str(&format!(
         "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
         denoise.screen.display()
+    ));
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_REACH_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        denoise.reach.display()
     ));
     for (name, path) in reflection_spv {
         glue_text.push_str(&format!(

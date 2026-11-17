@@ -137,6 +137,14 @@ pub(super) fn lighting_sh_keys_words() -> u64 {
     lattice + LATTICE_CAP * STRIDE + 2 * LIGHTING_CACHE_SLOTS
 }
 
+/// Words after the fill lists. Matches `lighting_reach.comp`:
+/// 2048 mask words (one bit per 32 px tile), 65536 change words, one bit per slot.
+fn lighting_reach_words() -> u64 {
+    const MASK: u64 = 2048;
+    const CHANGE: u64 = 65536;
+    MASK + CHANGE + LIGHTING_CACHE_SLOTS / 32
+}
+
 /// Fill param words sit after the per-pixel seed payload. One lock word per
 /// slot follows them (`lighting_fill.glsl`).
 const FILL_PARAM_WORDS: u64 = 32;
@@ -192,6 +200,10 @@ pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
     lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + end
 }
 
+fn lighting_keys_words(pixels: u64) -> u64 {
+    lighting_fill_keys_words(pixels) + lighting_reach_words()
+}
+
 fn lighting_compose_minx() -> u64 {
     lighting_compose_at() + 4 + 2 * LIGHTING_COMPOSE_CAP + LIGHTING_CACHE_SLOTS
 }
@@ -206,6 +218,8 @@ pub(crate) struct Lighting {
     /// High: full resolution, adaptive off. The adaptive branch is not in this SPIR-V.
     atrous_plain: Handle,
     screen_pipe: Handle,
+    /// Tile mask for a mover. A lamp does not use it.
+    reach_pipe: Handle,
     gbuffer_pipe: Handle,
     gbuf: Buffer,
     work: Buffer,
@@ -301,6 +315,26 @@ pub(crate) struct Lighting {
     /// Frame the host hash last changed. The hold reads it for LIGHTING_HOLD_CATCH
     /// frames (shader LIGHTING_LAMP_CATCH_AT). 0 until the first change.
     scene_catch: u32,
+    /// This frame's hash change is occluder motion with the camera, lamps, fog,
+    /// and meshes held. The drawn solid moves with that occluder. The
+    /// picture-wide mark stays off.
+    mover_local: bool,
+    /// Tiles still moving, from the previous stats readback (`diag[8]`).
+    reach_hot: u32,
+    /// Marked tiles from the previous stats readback. A mask that covers half
+    /// the picture is unproven, so the next frame unholds the picture.
+    reach_tiles: u32,
+    /// This frame's mover footprint could not be proved local, or the caller
+    /// asked for the picture-wide control. The scene mark is set.
+    reach_wide: bool,
+    /// Test probe. Forces the picture-wide unhold so a local run can be
+    /// compared with one that never held a tile.
+    picture_unhold: bool,
+    /// Frames to keep the lattice walk on after a local unhold. The readback
+    /// is a frame or two behind the mask.
+    reach_arm: u32,
+    kept_froxel: bool,
+    kept_mesh: u64,
     /// Hash of this frame's draw instances (poses, colours, emission).
     pub(crate) draw_key: u64,
     /// Frames in a row drawn from held light (settled): the picture no longer changes.
@@ -555,6 +589,16 @@ pub struct LightingAtrousStats {
     /// Pixels whose compose walked the world cache (`diag[0]`). A held frame
     /// reuses the stored bounce and this stays near zero.
     pub cache_walks: u32,
+    /// Screen tiles a mover reached this frame (`diag[8]`, low 16 bits).
+    pub reach_tiles: u32,
+    /// Tiles kept because the bounce still moved more than one percent.
+    pub reach_hot: u32,
+    /// Corner tiles of the picture. Bit 0 is the origin, then +x, +y, +x+y.
+    /// A set bit means that corner was unheld.
+    pub reach_corners: u32,
+    /// The host could not prove the mover's footprint, so this frame unheld
+    /// the picture. A full mask is that case: there is no outside to compare.
+    pub reach_wide: bool,
 }
 
 /// Shadow rays traced last frame, and how pixels shaded.
@@ -625,6 +669,11 @@ fn lighting_atrous_from(w: &[u32; LIGHTING_STATS_WORDS]) -> LightingAtrousStats 
         list_appended: w[65],
         // diag[0] is word 24.
         cache_walks: w[24],
+        // diag[8] is word 32. Low 16 tiles, next 12 hot, top 4 corners.
+        reach_tiles: w[32] & 0xffff,
+        reach_hot: (w[32] >> 16) & 0xfff,
+        reach_corners: w[32] >> 28,
+        reach_wide: false,
     }
 }
 
@@ -656,6 +705,7 @@ impl Default for Lighting {
             pipes: [std::ptr::null_mut(); 9],
             atrous_plain: std::ptr::null_mut(),
             screen_pipe: std::ptr::null_mut(),
+            reach_pipe: std::ptr::null_mut(),
             gbuffer_pipe: std::ptr::null_mut(),
             gbuf: Buffer::empty(),
             work: Buffer::empty(),
@@ -704,6 +754,14 @@ impl Default for Lighting {
             held: 0,
             still: 0,
             scene_catch: 0,
+            mover_local: false,
+            reach_hot: 0,
+            reach_tiles: 0,
+            reach_wide: false,
+            picture_unhold: false,
+            reach_arm: 0,
+            kept_froxel: false,
+            kept_mesh: 0,
             stats: [Buffer::empty(), Buffer::empty()],
             stats_dev: [Buffer::empty(), Buffer::empty()],
             quiet: 0,
@@ -1108,6 +1166,13 @@ impl Gpu {
         )?;
         self.note_pipeline_time("screen-denoise", start);
         let start = Instant::now();
+        self.lighting.reach_pipe = self.make_compute_pipe(
+            LIGHTING_REACH_SPV,
+            self.lighting.layout,
+            "reach",
+        )?;
+        self.note_pipeline_time("reach", start);
+        let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
         let made = self.make_pipeline(true, false, false);
@@ -1427,7 +1492,7 @@ impl Gpu {
                 // election (lighting_sh_keys_words). Eight words per pixel
                 // after that: the seed winner's payload, four corners.
                 self.lighting.cache_keys = self.make_buffer_queues(
-                    lighting_fill_keys_words(pixels) * 4,
+                    lighting_keys_words(pixels) * 4,
                     0x20 | 0x2 | 0x100 | 0x1,
                     Memory::Device,
                     &share,
@@ -1786,8 +1851,31 @@ impl Gpu {
     pub(crate) fn lighting_atrous_stats(&mut self) -> LightingAtrousStats {
         self.idle_device();
         let slot = self.lighting.last_slot;
-        self.read_stats16(self.lighting.stats[slot].memory)
-            .map_or_else(|_| LightingAtrousStats::default(), |w| lighting_atrous_from(&w))
+        let mut stats = self
+            .read_stats16(self.lighting.stats[slot].memory)
+            .map_or_else(|_| LightingAtrousStats::default(), |w| lighting_atrous_from(&w));
+        stats.reach_wide = self.lighting.reach_wide;
+        stats
+    }
+
+    /// Tile bits from the last frame. Word 0 covers tiles 0..31.
+    pub(crate) fn lighting_reach_mask(&mut self) -> Vec<u32> {
+        self.idle_device();
+        let [w, h, _, _] = self.lighting.dims;
+        if !self.lighting.ready || w == 0 || h == 0 {
+            return Vec::new();
+        }
+        let pixels = u64::from(w) * u64::from(h);
+        let at = lighting_fill_keys_words(pixels) * 4;
+        let bytes = 2048u64 * 4;
+        self.copy_device_range(self.lighting.cache_keys.buffer, at, bytes).map_or_else(
+            |_| Vec::new(),
+            |raw| {
+                raw.chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
+            },
+        )
     }
 
     /// Build the sun compose pipeline the first time a small step needs it.
@@ -2085,6 +2173,11 @@ impl Gpu {
                 if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
                     self.lighting.cache_rays = rays;
                 }
+                // diag[8], a frame or two behind the dispatch that wrote it.
+                if let Ok(reach) = self.read_stats_word(self.lighting.stats[slot].memory, 32) {
+                    self.lighting.reach_hot = (reach >> 16) & 0xfff;
+                    self.lighting.reach_tiles = reach & 0xffff;
+                }
             } else if !self.lighting.async_on {
                 // That slot did not dispatch a cache round. The stats buffer was
                 // cleared and never counted, so the probe is zero, not the
@@ -2362,7 +2455,9 @@ impl Gpu {
         // requests it again.
         let refresh = self.lighting.frame != 0
             && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
-        if self.lighting.still > 0 && !compose_full && !refresh {
+        // A mover's tiles need the lattice this frame. A held camera with
+        // nothing local still returns, which is the still-idle probe.
+        if self.lighting.still > 0 && !compose_full && !refresh && self.lighting.reach_arm == 0 {
             return;
         }
         self.lighting.maint_ran = true;
@@ -2578,24 +2673,40 @@ impl Gpu {
                 let fine = w[86];
                 let coarse = w[87];
                 let changed = w[85];
+                let heavy = w[84];
+                let walks = w[24];
+                let reach = w[32];
+                let tiles = reach & 0xffff;
+                let hot = (reach >> 16) & 0xfff;
+                let corners = reach >> 28;
                 eprintln!(
-                    "lightingdenoise {queue} frame {} pixels {fine} coarse {coarse} changed {changed} filtered {fine} mode screen ran 1",
+                    "lightingdenoise {queue} frame {} pixels {fine} coarse {coarse} changed {changed} filtered {fine} heavy {heavy} walks {walks} reach {tiles} hot {hot} corners {corners} mode screen ran 1",
                     self.lighting.frame
                 );
-                self.write_denoise_log(fine, coarse, changed);
+                self.write_denoise_log(fine, coarse, changed, heavy, walks, tiles, hot, corners);
             }
         }
     }
 
     /// `./genos-debug/denoise/` (or `<out>/denoise` when `--out` is set). Written
     /// only from the stats read the debug line already performed.
-    fn write_denoise_log(&self, fine: u32, coarse: u32, changed: u32) {
+    fn write_denoise_log(
+        &self,
+        fine: u32,
+        coarse: u32,
+        changed: u32,
+        heavy: u32,
+        walks: u32,
+        tiles: u32,
+        hot: u32,
+        corners: u32,
+    ) {
         let dir = std::path::Path::new(&self.debug_out).join("denoise");
         if std::fs::create_dir_all(&dir).is_err() {
             return;
         }
         let text = format!(
-            "frame {}\npixels {fine}\ncoarse {coarse}\nchanged {changed}\nfiltered {fine}\nmode screen\nran 1\n",
+            "frame {}\npixels {fine}\ncoarse {coarse}\nchanged {changed}\nfiltered {fine}\nheavy {heavy}\nwalks {walks}\nreach {tiles}\nhot {hot}\ncorners {corners}\nmode screen\nran 1\n",
             self.lighting.frame
         );
         let _ = std::fs::write(dir.join("latest.txt"), &text);
@@ -4257,11 +4368,43 @@ impl Gpu {
         // The shaders read this fraction as "the host hash changed". The
         // integer count is what lighting_near_change walks. A lamp does not
         // land in that list; the fraction is how the hold hears it this frame.
-        if self.lighting.still == 0 {
+        // Occluder motion with the camera and the lamps held is not that mark.
+        // The reach pass marks the tiles. A lamp stays picture-wide, this frame.
+        // The drawn instances move with the solid, so the draw key changes too.
+        // Fog and a traced mesh are not that solid: those stay picture-wide.
+        let mover_local = self.lighting.still == 0
+            && !self.lighting.kept_bytes.is_empty()
+            && scene_mover_only(&self.lighting.kept_bytes, &self.frame_bytes)
+            && self.froxel_wrote == self.lighting.kept_froxel
+            && self.mesh_field_key == self.lighting.kept_mesh;
+        self.lighting.mover_local = mover_local;
+        let [fw, fh, _, _] = self.lighting.dims;
+        let spheres = changes.as_deref().unwrap_or(&[]);
+        // Behind the camera, on it, entirely off-screen, or already half the
+        // tiles: not a local mask. The picture unholds.
+        let footprint = mover_local && reach_footprint_unproven(&self.frame_bytes, spheres, fw, fh);
+        let saturated = mover_local && reach_mask_saturated(self.lighting.reach_tiles, fw, fh);
+        // A change that is not occluder-only, or a dropped change list, is
+        // already the picture-wide path. The flag says so. The 16-frame catch
+        // (shader LIGHTING_HOLD_CATCH) keeps the flag on.
+        let picture = self.lighting.still == 0 && !mover_local;
+        let dropped = self.lighting.still == 0 && changes.is_none();
+        let catch_age = self.lighting.frame.saturating_sub(self.lighting.scene_catch);
+        let catching = self.lighting.scene_catch != 0 && catch_age <= 16;
+        let wide = self.lighting.picture_unhold || footprint || saturated || picture || dropped || catching;
+        self.lighting.reach_wide = wide;
+        if mover_local || self.lighting.reach_hot > 0 {
+            self.lighting.reach_arm = 4;
+        } else {
+            self.lighting.reach_arm = self.lighting.reach_arm.saturating_sub(1);
+        }
+        if self.lighting.still == 0 && (!mover_local || wide) {
             block[0] += LIGHTING_SCENE_CHANGED_MARK;
             // The first frames are the fill. Arming the catch there keeps the
             // wavelet off through the frames a still-hall gate scores.
-            if self.lighting.frame >= LIGHTING_STILL_REFRESH {
+            // The test probe marks this frame only. It does not arm the catch,
+            // so a stopped control holds the same way the local path does.
+            if self.lighting.frame >= LIGHTING_STILL_REFRESH && !self.lighting.picture_unhold {
                 self.lighting.scene_catch = self.lighting.frame;
             }
         }
@@ -4324,6 +4467,8 @@ impl Gpu {
         if !frozen {
             self.lighting.kept_key = key;
             self.lighting.kept_bytes.clone_from(&self.frame_bytes);
+            self.lighting.kept_froxel = self.froxel_wrote;
+            self.lighting.kept_mesh = self.mesh_field_key;
             self.lighting.probe_runs = self.lighting.probe_runs.wrapping_add(1);
         }
         let block_at = 16
@@ -4573,7 +4718,7 @@ impl Gpu {
             || opening
             || refresh
             || !self.lighting.compose_valid
-            || !(self.lighting.still > 0 || sun_amortise)
+            || (self.lighting.still == 0 && !sun_amortise && (!self.lighting.mover_local || self.lighting.reach_wide))
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
             || !self.lighting.settings.gi.enabled
@@ -4876,13 +5021,59 @@ impl Gpu {
             if let Some(pool) = stamps {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
+            // The reach pass runs after direct and the cache have written this
+            // frame's shade counts and cell notes, and before the wavelet or
+            // compose reads the mask. Dispatching it here would be a frame late.
             let mut filter_round = 0u32;
             let mut atrous_i = 0usize;
             let mut atrous_ran = false;
             let mut picked = false;
             // The push constants the next pass sees (the gather and filter rounds add bits).
             let mut cur_pc = pc;
+            let mut reach_marked = false;
             for (k, (pass, gx, gy)) in groups.iter().copied().enumerate() {
+                if !reach_marked && (pass == 7 || pass == 8 || pass == SH_PREP_PASS) {
+                    reach_marked = true;
+                    if self.lighting.cache_full && !self.lighting.reach_pipe.is_null() {
+                        (self.fns.cmd_push)(
+                            self.cmd,
+                            self.lighting.layout,
+                            0x20,
+                            0,
+                            LIGHTING_PC_BYTES,
+                            pc.as_ptr() as *const c_void,
+                        );
+                        (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.reach_pipe);
+                        (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+                        self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                    }
+                }
+                // The screen pass marks the same blocks afterwards and its
+                // exchange drops the field bit. Set it again from the mask
+                // once that pass has finished, before compose reads it.
+                if pass == 7 && self.lighting.cache_full && !self.lighting.reach_pipe.is_null() {
+                    let mut stamp_pc = pc;
+                    stamp_pc[2] = 0xffff_fffe;
+                    (self.fns.cmd_push)(
+                        self.cmd,
+                        self.lighting.layout,
+                        0x20,
+                        0,
+                        LIGHTING_PC_BYTES,
+                        stamp_pc.as_ptr() as *const c_void,
+                    );
+                    (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.reach_pipe);
+                    (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+                    self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                    (self.fns.cmd_push)(
+                        self.cmd,
+                        self.lighting.layout,
+                        0x20,
+                        0,
+                        LIGHTING_PC_BYTES,
+                        pc.as_ptr() as *const c_void,
+                    );
+                }
                 if pass == 4 {
                     // The gather's two rounds: the picks (bit 1), then the binning.
                     let mut round_pc = pc;
@@ -4899,6 +5090,26 @@ impl Gpu {
                     cur_pc = round_pc;
                 }
                 if pass == 8 {
+                    // The cache pass already read last frame's slot stamps.
+                    // Clear them before this frame's wavelet writes its own.
+                    if atrous_i == 0
+                        && self.lighting.cache_full
+                        && !self.lighting.reach_pipe.is_null()
+                    {
+                        let mut clear_pc = pc;
+                        clear_pc[2] = 0xffff_ffff;
+                        (self.fns.cmd_push)(
+                            self.cmd,
+                            self.lighting.layout,
+                            0x20,
+                            0,
+                            LIGHTING_PC_BYTES,
+                            clear_pc.as_ptr() as *const c_void,
+                        );
+                        (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.reach_pipe);
+                        (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+                        self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                    }
                     // S72V: the a-trous stage (lighting_atrous_stage, bits 1-3).
                     // S72V6: bits 1-3 cleared first; bit 3 is the gather's "changes
                     // this frame", so on frames with a change every stage read 4-7
@@ -5063,6 +5274,19 @@ impl Gpu {
                         (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, at);
                     }
                 }
+            }
+            if !reach_marked && self.lighting.cache_full && !self.lighting.reach_pipe.is_null() {
+                (self.fns.cmd_push)(
+                    self.cmd,
+                    self.lighting.layout,
+                    0x20,
+                    0,
+                    LIGHTING_PC_BYTES,
+                    pc.as_ptr() as *const c_void,
+                );
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.reach_pipe);
+                (self.fns.cmd_dispatch)(self.cmd, 1, 1, 1);
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
             }
             if agx_display {
                 let hdr_at = hdr_stamp_base(groups.len(), first);
@@ -5460,6 +5684,7 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.restir_spatial_wide))
                 .chain(std::iter::once(&mut self.lighting.restir_direct))
                 .chain(std::iter::once(&mut self.lighting.screen_pipe))
+                .chain(std::iter::once(&mut self.lighting.reach_pipe))
                 .chain(std::iter::once(&mut self.lighting.gbuffer_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_pipe))
                 .chain(std::iter::once(&mut self.lighting.agx_pipe))
@@ -5780,6 +6005,184 @@ pub(crate) fn lighting_mesh_movers(
 /// Frames an occluder stays a mover after it last moved (Lumen treats a mesh as
 /// dynamic while it moves; once it rests its surroundings are ordinary cache).
 const LIGHTING_MOVER_KEEP: u32 = 240;
+
+/// True when the two scene blocks differ only in occluder records and the
+/// occupancy grid those records rebuild. A lamp, the camera, or the sky is a
+/// picture-wide change and returns false. The grid header starts at byte 176
+/// (`occ_grid` in `scene_data.glsl`); the grid words follow the occluders.
+fn scene_mover_only(old: &[u8], new: &[u8]) -> bool {
+    const GRID_AT: usize = 176;
+    if old.len() < crate::pack::SCENE_TAIL || new.len() < crate::pack::SCENE_TAIL {
+        return false;
+    }
+    if old[..GRID_AT] != new[..GRID_AT] {
+        return false;
+    }
+    let word = |bytes: &[u8], at: usize| -> usize {
+        bytes
+            .get(at * 4..at * 4 + 4)
+            .map_or(0, |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])) as usize
+    };
+    let tail = crate::pack::SCENE_TAIL;
+    let lamps = word(old, 0);
+    let occs = word(old, 1);
+    if lamps != word(new, 0) || occs != word(new, 1) {
+        return false;
+    }
+    let lamp_end = tail + lamps * 32;
+    let occ_end = lamp_end + occs * 64;
+    if occ_end > old.len() || occ_end > new.len() {
+        return false;
+    }
+    if old[tail..lamp_end] != new[tail..lamp_end] {
+        return false;
+    }
+    old[lamp_end..occ_end] != new[lamp_end..occ_end]
+}
+
+const REACH_TAN_FLOOR: f32 = 1.0e-4;
+const REACH_NEAR_Z: f32 = 0.25;
+const REACH_NDC_Z: f32 = 0.05;
+
+fn f32_at(bytes: &[u8], at: usize) -> Option<f32> {
+    let b = bytes.get(at..at + 4)?;
+    Some(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+fn vec3_at(bytes: &[u8], at: usize) -> Option<[f32; 3]> {
+    Some([f32_at(bytes, at)?, f32_at(bytes, at + 4)?, f32_at(bytes, at + 8)?])
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// True when last frame's mask already covered half the picture. The next
+/// frame unholds rather than pretending the rest is untouched.
+fn reach_mask_saturated(tiles: u32, width: u32, height: u32) -> bool {
+    let total = width.div_ceil(32) * height.div_ceil(32);
+    total > 0 && tiles.saturating_mul(2) >= total
+}
+
+/// True when the change-list spheres are not a proved on-screen disc. The
+/// same projection as `reach_disc`: a sphere behind the camera, on the
+/// camera, or entirely off the picture, or whose union covers half the tiles.
+/// An empty list is unproved. #288's mover table is the same spheres.
+fn reach_footprint_unproven(frame: &[u8], spheres: &[[f32; 4]], width: u32, height: u32) -> bool {
+    if spheres.is_empty() || width == 0 || height == 0 {
+        return true;
+    }
+    let Some(eye) = vec3_at(frame, 16) else {
+        return true;
+    };
+    let Some(right) = vec3_at(frame, 96) else {
+        return true;
+    };
+    let Some(tan) = f32_at(frame, 108) else {
+        return true;
+    };
+    let Some(up) = vec3_at(frame, 112) else {
+        return true;
+    };
+    let Some(fwd) = vec3_at(frame, 128) else {
+        return true;
+    };
+    let Some(aspect) = f32_at(frame, 140) else {
+        return true;
+    };
+    let tw = width.div_ceil(32);
+    let th = height.div_ceil(32);
+    let total = tw * th;
+    if total == 0 || total > 65536 {
+        return true;
+    }
+    let mut bits = vec![0u64; usize::try_from(total).unwrap_or(0).div_ceil(64)];
+    let mut marked = 0u32;
+    let t = tan.max(REACH_TAN_FLOOR);
+    let aspect = aspect.max(REACH_TAN_FLOOR);
+    for s in spheres {
+        let rel = [s[0] - eye[0], s[1] - eye[1], s[2] - eye[2]];
+        let rad = s[3].max(0.0);
+        let z = dot3(rel, fwd);
+        if z < -rad || z <= REACH_NEAR_Z {
+            return true;
+        }
+        let zc = z.max(REACH_NEAR_Z);
+        let (ndc_x, ndc_y) = if z > REACH_NDC_Z {
+            (dot3(rel, right) / (z * t * aspect), dot3(rel, up) / (z * t))
+        } else {
+            (0.0, 0.0)
+        };
+        let width_px = u32_f32(width);
+        let height_px = u32_f32(height);
+        let px = (ndc_x + 1.0) * 0.5 * width_px;
+        let py = (1.0 - ndc_y) * 0.5 * height_px;
+        let pry = (rad / zc) / t * (0.5 * height_px);
+        let prx = (rad / zc) / (t * aspect) * (0.5 * width_px);
+        let pr = prx.max(pry);
+        let x0 = floor_i32((px - pr) / 32.0);
+        let y0 = floor_i32((py - pr) / 32.0);
+        let x1 = floor_i32((px + pr) / 32.0);
+        let y1 = floor_i32((py + pr) / 32.0);
+        let tw_i = i32::try_from(tw).unwrap_or(i32::MAX);
+        let th_i = i32::try_from(th).unwrap_or(i32::MAX);
+        // Entirely off the picture. A disc that only crosses the edge still
+        // has its on-screen tiles; measured notes cover the rest.
+        if x1 < 0 || y1 < 0 || x0 >= tw_i || y0 >= th_i {
+            return true;
+        }
+        let x0 = x0.max(0);
+        let y0 = y0.max(0);
+        let x1 = x1.min(tw_i - 1);
+        let y1 = y1.min(th_i - 1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let tile = u32::try_from(y).unwrap_or(0) * tw + u32::try_from(x).unwrap_or(0);
+                let i = tile as usize;
+                let word = i / 64;
+                let bit = 1u64 << (i % 64);
+                if bits.get(word).is_some_and(|w| w & bit == 0) {
+                    bits[word] |= bit;
+                    marked += 1;
+                }
+            }
+        }
+    }
+    marked.saturating_mul(2) >= total
+}
+
+/// `u32` to `f32` with no silent cast. Both halves fit the mantissa.
+fn u32_f32(v: u32) -> f32 {
+    let hi = u16::try_from(v >> 16).unwrap_or(0);
+    let lo = u16::try_from(v & 0xffff).unwrap_or(0);
+    f32::from(hi) * 65536.0 + f32::from(lo)
+}
+
+/// `floor` as an `i32`. A tile index past 65535 clamps. The reach mask
+/// stops at that many words.
+fn floor_i32(v: f32) -> i32 {
+    let n = v.floor();
+    if !n.is_finite() {
+        return 0;
+    }
+    let neg = n < 0.0;
+    let mag = if neg { -n } else { n };
+    if mag >= 65535.0 {
+        return if neg { -65535 } else { 65535 };
+    }
+    let mut lo = 0u16;
+    let mut hi = 65535u16;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if f32::from(mid) < mag {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    let mag_i = i32::from(lo);
+    if neg { -mag_i } else { mag_i }
+}
 
 /// Spheres (centre, radius) around every occluder that moved, came or went between
 /// two scene blocks (`pack::scene_bytes`): the bounds before and after, so a kept
@@ -6328,8 +6731,9 @@ mod sun_step {
     fn compose_spirv_stays_near_the_picture_pass() {
         // The missing-field read, the path debug view, the texels population
         // record, the shown-mean age tally, the bounce store rule, and the
-        // retry list sit in this pass. Compose is 245_364 bytes. 248_000
-        // still rejects a second occluder walk.
+        // retry list sit in this pass. A mover tile sets the field bit compose
+        // already tests. The tile bitset stays out of this shader. Compose is
+        // 247_092 bytes. 248_000 still rejects another walk in this pass.
         assert!(
             LIGHTING_COMPOSE_SPV.len() < 248_000,
             "compose SPIR-V is {} bytes",
@@ -6988,6 +7392,200 @@ mod sh_knob_tests {
             .expect("LIGHTING_CACHE_RAYS in lighting_cache_slots.glsl");
         assert!(rays.contains(&format!("= {LIGHTING_CACHE_RAYS}u;")), "{rays}");
         assert_eq!(u64::from(crate::cache_probe::SLOTS), LIGHTING_CACHE_SLOTS);
+    }
+}
+
+#[cfg(test)]
+mod reach_footprint_tests {
+    use super::{
+        dot3, f32_at, floor_i32, reach_footprint_unproven, reach_mask_saturated, u32_f32, vec3_at,
+        REACH_NDC_Z, REACH_NEAR_Z, REACH_TAN_FLOOR,
+    };
+
+    /// Half the diagonal of a unit square. A cell of edge `size` uses
+    /// `size * REACH_CELL_DIAG`, matching `REACH_CELL_DIAG` in the shader.
+    const REACH_CELL_DIAG: f32 = 0.70710677;
+
+    /// True when a sample a `step` away from a mean of `peak` joins a tile.
+    /// A step inside the quarter stays quiet. No residual yet stays quiet:
+    /// that sample is the seed. A running residual has to clear `noise_band`.
+    /// A cell the mover reaches joins in the shader without this test.
+    fn reach_sample_hot(step: f32, peak: f32, noise_known: bool, noise_band: f32) -> bool {
+        let bar = 0.25 * peak.max(0.25);
+        if step <= bar {
+            return false;
+        }
+        if !noise_known {
+            return false;
+        }
+        step > noise_band
+    }
+
+    /// Tiles a world cell's square covers. `radius` is the half-diagonal.
+    /// On or behind the camera covers nothing and is not wide. Half the
+    /// picture is wide and the tile list is empty. An entirely off-screen
+    /// cell covers nothing and is not wide. Same projection as
+    /// `lighting_reach_note_bounds`.
+    fn reach_cell_span(
+        frame: &[u8],
+        centre: [f32; 3],
+        radius: f32,
+        width: u32,
+        height: u32,
+    ) -> (bool, Vec<u32>) {
+        let Some(eye) = vec3_at(frame, 16) else {
+            return (true, Vec::new());
+        };
+        let Some(right) = vec3_at(frame, 96) else {
+            return (true, Vec::new());
+        };
+        let Some(tan) = f32_at(frame, 108) else {
+            return (true, Vec::new());
+        };
+        let Some(up) = vec3_at(frame, 112) else {
+            return (true, Vec::new());
+        };
+        let Some(fwd) = vec3_at(frame, 128) else {
+            return (true, Vec::new());
+        };
+        let Some(aspect) = f32_at(frame, 140) else {
+            return (true, Vec::new());
+        };
+        if width == 0 || height == 0 {
+            return (true, Vec::new());
+        }
+        let tw = width.div_ceil(32);
+        let th = height.div_ceil(32);
+        let total = tw * th;
+        if total == 0 {
+            return (true, Vec::new());
+        }
+        let rel = [centre[0] - eye[0], centre[1] - eye[1], centre[2] - eye[2]];
+        let rad = radius.max(0.0);
+        let z = dot3(rel, fwd);
+        if z < -rad || z <= REACH_NEAR_Z {
+            return (false, Vec::new());
+        }
+        let t = tan.max(REACH_TAN_FLOOR);
+        let aspect = aspect.max(REACH_TAN_FLOOR);
+        let zc = z.max(REACH_NEAR_Z);
+        let (ndc_x, ndc_y) = if z > REACH_NDC_Z {
+            (dot3(rel, right) / (z * t * aspect), dot3(rel, up) / (z * t))
+        } else {
+            (0.0, 0.0)
+        };
+        let width_px = u32_f32(width);
+        let height_px = u32_f32(height);
+        let px = (ndc_x + 1.0) * 0.5 * width_px;
+        let py = (1.0 - ndc_y) * 0.5 * height_px;
+        let pry = (rad / zc) / t * (0.5 * height_px);
+        let prx = (rad / zc) / (t * aspect) * (0.5 * width_px);
+        let pr = prx.max(pry);
+        let mut x0 = floor_i32((px - pr) / 32.0);
+        let mut y0 = floor_i32((py - pr) / 32.0);
+        let mut x1 = floor_i32((px + pr) / 32.0);
+        let mut y1 = floor_i32((py + pr) / 32.0);
+        let tw_i = i32::try_from(tw).unwrap_or(i32::MAX);
+        let th_i = i32::try_from(th).unwrap_or(i32::MAX);
+        if x1 < 0 || y1 < 0 || x0 >= tw_i || y0 >= th_i {
+            return (false, Vec::new());
+        }
+        x0 = x0.max(0);
+        y0 = y0.max(0);
+        x1 = x1.min(tw_i - 1);
+        y1 = y1.min(th_i - 1);
+        let span = u32::try_from(x1 - x0 + 1).unwrap_or(0) * u32::try_from(y1 - y0 + 1).unwrap_or(0);
+        if span.saturating_mul(2) >= total {
+            return (true, Vec::new());
+        }
+        let mut tiles = Vec::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                tiles.push(u32::try_from(y).unwrap_or(0) * tw + u32::try_from(x).unwrap_or(0));
+            }
+        }
+        (false, tiles)
+    }
+
+    fn put(buf: &mut [u8], at: usize, v: f32) {
+        buf[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// Camera at the origin, looking down -Z, 60° vertical, 320×180.
+    fn camera() -> Vec<u8> {
+        let mut buf = vec![0u8; 256];
+        put(&mut buf, 96, 1.0);
+        put(&mut buf, 108, 0.57735026);
+        put(&mut buf, 116, 1.0);
+        put(&mut buf, 136, -1.0);
+        put(&mut buf, 140, 320.0 / 180.0);
+        buf
+    }
+
+    #[test]
+    fn an_interior_disc_stays_local_and_an_unproved_one_does_not() {
+        let frame = camera();
+        let interior = [[0.0, 0.0, -8.0, 0.4]];
+        assert!(
+            !reach_footprint_unproven(&frame, &interior, 320, 180),
+            "a small disc in the middle of the picture was treated as unproved"
+        );
+        let behind = [[0.0, 0.0, 4.0, 0.4]];
+        assert!(reach_footprint_unproven(&frame, &behind, 320, 180));
+        let near = [[0.0, 0.0, -0.1, 0.4]];
+        assert!(reach_footprint_unproven(&frame, &near, 320, 180));
+        let off = [[40.0, 0.0, -8.0, 0.4]];
+        assert!(reach_footprint_unproven(&frame, &off, 320, 180));
+        assert!(reach_footprint_unproven(&frame, &[], 320, 180));
+        assert!(reach_mask_saturated(30, 320, 180));
+        assert!(!reach_mask_saturated(9, 320, 180));
+    }
+
+    #[test]
+    fn a_cell_footprint_covers_every_tile_it_spans() {
+        let frame = camera();
+        let (wide, one) = reach_cell_span(&frame, [0.8, 0.0, -8.0], 0.02, 320, 180);
+        assert!(!wide, "a small on-screen cell was treated as the picture");
+        assert_eq!(one.len(), 1, "a cell inside one tile covered {one:?}");
+        let (wide, many) = reach_cell_span(&frame, [0.0, 0.0, -8.0], 0.2, 320, 180);
+        assert!(!wide);
+        assert!(
+            many.len() >= 2,
+            "the centre tile was the whole footprint, got {many:?}"
+        );
+        let centre = reach_cell_span(&frame, [0.0, 0.0, -8.0], 0.0, 320, 180).1;
+        assert!(
+            centre.iter().all(|t| many.contains(t)),
+            "the footprint dropped the centre tile"
+        );
+        let (behind_wide, behind) = reach_cell_span(&frame, [0.0, 0.0, 4.0], 0.2, 320, 180);
+        assert!(!behind_wide, "a cell behind the camera unheld the picture");
+        assert!(behind.is_empty(), "a cell behind the camera covered a tile");
+        let (near_wide, near) = reach_cell_span(&frame, [0.0, 0.0, -0.1], 0.2, 320, 180);
+        assert!(!near_wide, "a cell on the camera unheld the picture");
+        assert!(near.is_empty(), "a cell on the camera covered a tile");
+        assert!(reach_cell_span(&frame, [0.0, 0.0, -8.0], 8.0, 320, 180).0);
+        let (wide, diag) =
+            reach_cell_span(&frame, [0.0, 0.0, -8.0], 0.25 * REACH_CELL_DIAG, 320, 180);
+        assert!(!wide);
+        assert!(diag.len() >= 2, "a cell-edge diagonal stayed on the centre tile");
+    }
+
+    #[test]
+    fn a_seed_sample_stays_quiet_and_a_step_outside_its_noise_joins() {
+        assert!(
+            !reach_sample_hot(0.4, 1.0, false, 0.0),
+            "a cell with no residual joined on its seed sample"
+        );
+        assert!(
+            !reach_sample_hot(0.1, 1.0, false, 0.0),
+            "a step inside the quarter joined"
+        );
+        assert!(
+            !reach_sample_hot(0.4, 1.0, true, 0.5),
+            "a step inside the cell's own noise joined"
+        );
+        assert!(reach_sample_hot(0.6, 1.0, true, 0.5));
     }
 }
 

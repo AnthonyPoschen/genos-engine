@@ -1512,6 +1512,18 @@ impl Renderer {
         self.gpu.lighting_atrous_stats()
     }
 
+    /// Force the picture-wide unhold. The local mask is the default. A test
+    /// turns this on for the whole-picture control and compares the pixels
+    /// whose tile bit stayed clear.
+    pub fn lighting_picture_unhold(&mut self, on: bool) {
+        self.gpu.lighting.picture_unhold = on;
+    }
+
+    /// Tile bits from the last frame. Word 0 covers tiles 0..31.
+    pub fn lighting_reach_mask(&mut self) -> Vec<u32> {
+        self.gpu.lighting_reach_mask()
+    }
+
     /// Shadow rays and spatial merges from the last frame. Waits for that frame.
     /// The counters are zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set.
     pub fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
