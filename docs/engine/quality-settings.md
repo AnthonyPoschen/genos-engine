@@ -14,7 +14,7 @@ A preset is a named table of knob values and nothing more. `LightingSettings::pr
 
 ## Tiers and hardware targets
 
-Master currently has these `LightingPreset` values: `Potato`, `DayCycle`, `Gi1Bounce`, `Low`, `Medium` and `High` (the default). `ReflectionPreset` has `Potato`, `Low`, `Medium` and `High`. Potato runs direct light, traced shadows and a flat ambient, with no GI buffers. It is the fallback, not a tuned player tier. `DayCycle` and `Gi1Bounce` are test steps between Potato and Low. Ultra is planned in ADR 0023 but not in code yet.
+Master currently has these `LightingPreset` values: `Fallback`, `DayCycle`, `Gi1Bounce`, `Low`, `Medium` and `High` (the default). `ReflectionPreset` has `Fallback`, `Low`, `Medium` and `High`. Fallback runs direct light, traced shadows and a flat ambient, with no GI buffers. It is the fallback, not a tuned player tier. `DayCycle` and `Gi1Bounce` are test steps between Fallback and Low. Ultra is planned in ADR 0023 but not in code yet.
 
 | Tier | Target hardware | Frame budget |
 |---|---|---|
@@ -27,7 +27,7 @@ Master currently has these `LightingPreset` values: `Potato`, `DayCycle`, `Gi1Bo
 - Low upscales with FSR, which is planned in ADR 0023 and not yet implemented.
 - A knob value that misses its tier's frame-time or VRAM gate moves down a tier.
 
-Pending: PR #135 (unmerged) renames `Potato` to `Fallback` (name `fallback`, with `potato` kept as a deprecated alias) in `LightingPreset`, `ReflectionPreset` and `PromotePreset`.
+Pending: PR #135 (unmerged) renames `Fallback` to `Fallback` (name `fallback`, with `potato` kept as a deprecated alias) in `LightingPreset`, `ReflectionPreset` and `PromotePreset`.
 
 ## Adding a setting
 

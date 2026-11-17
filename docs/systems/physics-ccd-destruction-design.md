@@ -52,7 +52,7 @@ The step has to grow a swept pair and a bond break without a second physics libr
 
 ```text
 MotionQuality   Discrete | Speculative | Swept
-speculative margin   default 0.25 m (Medium and High). Low uses 0.05 m. Potato does not read it.
+speculative margin   default 0.25 m (Medium and High). Low uses 0.05 m. Fallback does not read it.
 ToiEvent        pair, time (s), normal, point, advances, failed
 pair_slices     how many slices that pair took
 body_slices     how many slices that body took
@@ -118,7 +118,7 @@ One time-of-impact advance is budgeted at 3 µs (one closest-point query plus on
 
 | Preset | What the step may do | Pair cap | Advances per pair | Debris budget | Speculative margin | Ceiling |
 |---|---|---|---|---|---|---|
-| Potato | Discrete only. An intact breakable is one body. | 0 | 0 | 0 | unused | 0.2 ms |
+| Fallback | Discrete only. An intact breakable is one body. | 0 | 0 | 0 | unused | 0.2 ms |
 | Low | Speculative bullets. No time-of-impact loop. | 0 | 0 | 0 | 0.05 m | 0.5 ms |
 | Medium | Two swept pairs, one broken column. | 2 | 8 | 8 | 0.25 m | 1.5 ms |
 | High | `ship_impact` (four lanes) and `destruction_wall`. | 8 | 16 | 32 | 0.25 m | 3 ms |
@@ -156,7 +156,7 @@ Each metric has one threshold. The comparator is inclusive. A non-finite reading
 | `debris_alive` | `<=8` | `destruction_wall` |
 | `floor_penetration_m` | `<=0` | `destruction_wall` |
 | `toi_deferred` | `<=0` | `ship_impact` on High |
-| `step_ms_potato` | `<=0.2` | Potato workload |
+| `step_ms_fallback` | `<=0.2` | Fallback workload |
 | `step_ms_low` | `<=0.5` | Low workload |
 | `step_ms_medium` | `<=1.5` | Medium workload |
 | `step_ms_high` | `<=3` | High workload |

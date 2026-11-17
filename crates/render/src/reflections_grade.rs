@@ -87,7 +87,7 @@ pub fn grade_camera() -> Camera {
 }
 
 /// Deterministic grade scene. `preset` is the reflection budget. Lighting stays
-/// on Potato; the reflection passes read `ReflectionSettings`, not that preset.
+/// on Fallback; the reflection passes read `ReflectionSettings`, not that preset.
 #[must_use]
 pub fn grade_world(preset: ReflectionPreset) -> World {
     let mut world = World::from_scene(Scene {
@@ -102,7 +102,7 @@ pub fn grade_world(preset: ReflectionPreset) -> World {
         lights: Vec::new(),
         ceiling: None,
         sky: Some(Sky { color: SKY }),
-        lighting: LightingSettings::preset(LightingPreset::Potato),
+        lighting: LightingSettings::preset(LightingPreset::Fallback),
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),

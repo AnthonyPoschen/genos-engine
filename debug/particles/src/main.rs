@@ -311,7 +311,7 @@ fn proof_world(particles: &ParticleSettings) -> World {
         lights: Vec::new(),
         ceiling: None,
         sky: None,
-        lighting: LightingSettings::preset(LightingPreset::Potato),
+        lighting: LightingSettings::preset(LightingPreset::Fallback),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),

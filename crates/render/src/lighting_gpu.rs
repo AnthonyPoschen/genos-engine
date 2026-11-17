@@ -131,9 +131,9 @@ pub(crate) struct Lighting {
     meter_bins: u32,
     /// [`crate::hdr_output::post_signature`] of the buffers `make_lighting_targets` built.
     post_sig: u64,
-    /// `layout_post` is measuring the chain. Potato's GI size must not force SDR.
+    /// `layout_post` is measuring the chain. Fallback's GI size must not force SDR.
     budget_hdr: bool,
-    /// Preset the budget measurement classifies. High keeps a potato-shaped grade off Potato.
+    /// Preset the budget measurement classifies. High keeps a fallback-shaped grade off Fallback.
     budget_preset: genos_scene::LightingPreset,
     /// Panel the budget measurement classifies. Desktop is the 1440p gate.
     budget_panel: crate::hdr_output::DeckPanel,
@@ -1405,7 +1405,7 @@ impl Gpu {
         self.idle_device();
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
-            .map(|w| LampPickCounts {
+            .map_or_else(|_| LampPickCounts::default(), |w| LampPickCounts {
                 pixels: w[LAMP_PICK_DIAG_WORD],
                 kept: w[LAMP_PICK_DIAG_WORD + 1],
                 fills: w[LAMP_PICK_DIAG_WORD + 2],
@@ -1423,7 +1423,6 @@ impl Gpu {
                 px_lamps: w[LAMP_PICK_DIAG_WORD - 10],
                 hit_lamps: w[LAMP_PICK_DIAG_WORD - 9],
             })
-            .unwrap_or_default()
     }
 
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
@@ -1432,8 +1431,7 @@ impl Gpu {
         self.idle_device();
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
-            .map(|w| lighting_atrous_from(&w))
-            .unwrap_or_default()
+            .map_or_else(|_| LightingAtrousStats::default(), |w| lighting_atrous_from(&w))
     }
 
     /// Build the sun compose pipeline the first time a small step needs it.
@@ -2725,8 +2723,8 @@ impl Gpu {
         }
     }
 
-    /// Potato and Low stay on SDR. Low on a Deck OLED may take listed HDR10.
-    /// A higher preset with bloom off is not Potato: the encode grade uses that shape.
+    /// Fallback and Low stay on SDR. Low on a Deck OLED may take listed HDR10.
+    /// A higher preset with bloom off is not Fallback: the encode grade uses that shape.
     fn present_locks_sdr(&self, hdr10_listed: bool) -> bool {
         if self.lighting.hdr.legacy_bytes {
             return true;
@@ -2734,7 +2732,7 @@ impl Gpu {
         let preset = self.lighting.settings.preset;
         let named = matches!(
             preset,
-            genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
+            genos_scene::LightingPreset::Fallback | genos_scene::LightingPreset::Low
         );
         named
             && crate::hdr_output::post_locks_sdr(
@@ -2761,8 +2759,7 @@ impl Gpu {
             )
         } else {
             self.present_locks_sdr(self.hdr_output == crate::hdr_output::HdrSwapchain::Hdr10)
-        };
-        if force_sdr {
+        };        if force_sdr {
             return 0.0;
         }
         match self.hdr_output {
@@ -2801,7 +2798,7 @@ impl Gpu {
         };
         // Bloom intensity stays 0 until the pyramid has run. The display pass
         // reads the updated word. Compose therefore does not add a stale buffer.
-        // `w` is the encode: 0 SDR, 1 HDR10 PQ, 2 scRGB. Potato, Low, and
+        // `w` is the encode: 0 SDR, 1 HDR10 PQ, 2 scRGB. Fallback, Low, and
         // `legacy_bytes` stay 0. An unlisted mode still encodes into the side
         // buffer; the swapchain image stays the SDR pair.
         let output = self.hdr_output_word();

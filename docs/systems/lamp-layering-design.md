@@ -18,7 +18,7 @@ Anthony, 8 Oct 2026 (`docs/systems/lighting/history.md`): probes never throw a v
 - Baking direct light into the layer. Direct stays per pixel (ADR 0012, S75). The pixel shader multiplies the same weight. Shadows stay in the direct pass and the shadow cell cache.
 - A display ramp. S71E was reverted: smoothing the shown picture is lag. Fast-blend is the estimator's published mean, not a second fade.
 - Edit-time lightmaps, a CPU radiosity solve, Enlighten's UV atlas, DDGI probe volumes, and radiance cascades.
-- Potato GI. Potato stays direct plus flat ambient.
+- Fallback GI. Fallback stays direct plus flat ambient.
 - Switchable emissive as its own layer. Emissive stays on the live layer until a later design.
 - Any change to `lighting_schedule.rs` or the phase-3 branch.
 
@@ -33,7 +33,7 @@ Indirect light already lives in the surface light cache: hashed world-space entr
 | Coarse layer (L3–L4, fixed MB cap) | Unchanged. Lamp-layer samples stored on a coarse entry are charged to the lamp pool below, not to that cap. Evicting the entry drops the samples with it. |
 | Sun and sky share (E20) | Stays its own rescale. The sun is not a lamp and does not get a lamp layer. |
 | Screen probes | Read the published sum. Kept hits are not dropped on a lamp change (E02). |
-| Presets | Potato, Low, Medium, High, as in ADR 0013. No Ultra column. |
+| Presets | Fallback, Low, Medium, High, as in ADR 0013. No Ultra column. |
 
 A weight change is not a cache refresh. It does not enter the ray budget. A bake does.
 
@@ -94,7 +94,7 @@ Then
 k = max(k_listing, 1 - exp(-dt / τ))
 ```
 
-and the published value is `mix(long_mean, clamped_sample, k)`, as the listing already writes. τ is 50 ms on Medium and High, and 100 ms on Low. Potato does not run GI, so it has no τ.
+and the published value is `mix(long_mean, clamped_sample, k)`, as the listing already writes. τ is 50 ms on Medium and High, and 100 ms on Low. Fallback does not run GI, so it has no τ.
 
 At 60 fps and τ = 50 ms, `1 - exp(-dt / τ) ≈ 0.283`. The leftover share of an indirect step is `exp(-t / τ)`. It crosses 2% at `t = -τ ln(0.02) ≈ 196 ms`, which is 12 frames at 1/60 s. That 12-frame line is the indirect-lag budget (§10). It is a threshold, not the picture the grader wants, and it is not a claim that every scene has already been timed.
 
@@ -153,7 +153,7 @@ A flagged lamp that loses the flag, or that starts to move, takes the reverse tr
 
 Past the count cap, further flagged lamps are refused and stay on the live layer. Past a lamp's byte cap, that lamp is refused the same way. Refusal is a counter on the debug panel, not a silent quality pop: the lamp behaves as an ordinary live-layer lamp (fast-blend).
 
-| | Potato | Low | Medium | High |
+| | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | Flagged lamps that receive a layer | 0 | 4 | 8 | 16 |
 | Sample bytes, one lamp, ceiling | 0 | 256 KB | 512 KB | 1 MB |
@@ -212,7 +212,7 @@ Figures in this section are estimates from the budgets, not timings. The 4070 an
 
 **VRAM, layer pool at the ceiling, added to ADR 0013's totals.** ADR 0013 High is about 140 MB and Low about 75 MB, before this pool. Medium sits between those two; ADR 0013 does not publish a single Medium total.
 
-| | Potato | Low | Medium | High |
+| | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | Layer pool ceiling | 0 | 1.5 MB | 5 MB | 18 MB |
 | Lighting total if the pool is full | unchanged | ~77 MB | under 130 MB | ~158 MB |
@@ -221,9 +221,9 @@ Figures in this section are estimates from the budgets, not timings. The 4070 an
 
 The lighting budget stays ~200 MB with the pool at its ceiling. Typical scenes sit on the "one lamp ≈ 64 KB" side, not the ceiling.
 
-**Milliseconds.** These are ceilings inside the ADR 0013 lighting cap (Potato 1.5, Low 4, Medium 6, High 8 ms on a 4070 at 1080p; older GPUs keep the same cap and the controller shrinks the work). Combine is not added on top of that cap. A frame that spends the combine ceiling has that much less for other lighting work.
+**Milliseconds.** These are ceilings inside the ADR 0013 lighting cap (Fallback 1.5, Low 4, Medium 6, High 8 ms on a 4070 at 1080p; older GPUs keep the same cap and the controller shrinks the work). Combine is not added on top of that cap. A frame that spends the combine ceiling has that much less for other lighting work.
 
-| | Potato | Low | Medium | High |
+| | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | Fast-blend extra rays | 0 | 0 (uses the 64 k ray cap) | 0 (128 k) | 0 (256 k) |
 | Layer combine, whole pool, ceiling | 0 | 0.20 ms | 0.30 ms | 0.40 ms |
@@ -237,7 +237,7 @@ A still scene with published layers and no weight change spends 0 ms on combine.
 
 | Preset | τ | Time to 2% of a step | Gate at 60 fps |
 |---|---|---|---|
-| Potato | — | GI off | metric not applicable |
+| Fallback | — | GI off | metric not applicable |
 | Low | 100 ms | ~391 ms | ≤ 24 frames (400 ms) |
 | Medium | 50 ms | ~196 ms | ≤ 12 frames (200 ms) |
 | High | 50 ms | ~196 ms | ≤ 12 frames (200 ms) |
@@ -263,7 +263,7 @@ Settled means the blurred error stays ≤ 0.05 for 4 consecutive frames. The rep
 | `layer_bytes` | sample bytes charged to one lamp | ≤ 1,048,576 (the High per-lamp ceiling) | The lamp broke its cap. |
 | `finished_read` | count of probe or pixel reads whose value differs from the published sum by more than 0.001 | ≤ 0 | A reader saw a bake buffer or a raw set. |
 
-Potato: the GI picture metrics are not applicable (no GI). The grader does not invent Potato numbers.
+Fallback: the GI picture metrics are not applicable (no GI). The grader does not invent Fallback numbers.
 
 `pop_magnitude` stays the speck check. It is blind to a jump that every pixel shares. `fade_deviation` is the miss against the requested-weight image, in the same relative-luma units as its 0.05 threshold. Dividing by the capture's net change is not the score: a picture that overshoots makes that span smaller than the step and the ratio leaves the luma scale. The 50 ms blend is only the 12-frame budget on `toggle_settle_frames`. It is not the curve `fade_deviation` wants.
 

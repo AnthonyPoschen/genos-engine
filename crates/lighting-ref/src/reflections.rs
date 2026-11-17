@@ -109,7 +109,7 @@ pub struct Metric {
 pub struct Capture {
     pub gpu_ns: u64,
     pub vram_bytes: u64,
-    /// Potato, Low, Medium, High view draws.
+    /// Fallback, Low, Medium, High view draws.
     pub views: [u32; 4],
 }
 

@@ -125,7 +125,7 @@ G-buffer channels this design adds, beside the roughness and metallic ADR 0012 a
 
 **Hi-Z.** Min-depth pyramid at half resolution, R16. About 1.3 MB at 1080p and 2.5 MB at 1440p. Built only when the classify finds a glossy, mirror, portal, or water pixel.
 
-**Mirror target.** One colour image and one depth, reused for every extra view. Potato has none. Low is quarter resolution. Medium and High are half resolution. A recursive view samples the previous view when the cap still has a slot. Otherwise it samples the world cache.
+**Mirror target.** One colour image and one depth, reused for every extra view. Fallback has none. Low is quarter resolution. Medium and High are half resolution. A recursive view samples the previous view when the cap still has a slot. Otherwise it samples the world cache.
 
 **Portal record.** Two scene handles, two planes, the rigid map. Author-placed. The map is
 
@@ -135,9 +135,9 @@ p' = origin_b + basis_b * flip_z * basis_a⁻¹ * (p - origin_a)
 
 `flip_z` reverses the source forward axis so the view looks out of the destination. The harness grades a quarter-turn about Y into a quarter-turn about X, origin B at `(10, 0, 0)`, forward flipped. The expected points are baked by hand. A map that applies `from_basis` instead of its inverse misses them. Gate: `portal_point` ≤ `2/255`.
 
-**Water.** A mesh plus a uniform block of Gerstner components (direction, amplitude, wavelength, speed, steepness). The count is 0 / 4 / 6 / 8 for Potato / Low / Medium / High. Time is the scene clock. A frozen clock does not move the surface. The mesh writes the G-buffer (kind = water) and claims surface-cache texels the way any mesh does, so the room can pick up the water's colour. That replaces the extras-plan rule that water does not write the G-buffer, once this ADR is accepted.
+**Water.** A mesh plus a uniform block of Gerstner components (direction, amplitude, wavelength, speed, steepness). The count is 0 / 4 / 6 / 8 for Fallback / Low / Medium / High. Time is the scene clock. A frozen clock does not move the surface. The mesh writes the G-buffer (kind = water) and claims surface-cache texels the way any mesh does, so the room can pick up the water's colour. That replaces the extras-plan rule that water does not write the G-buffer, once this ADR is accepted.
 
-**Caustic cache.** A small world-space hash, sun only, same finished-value rule as the surface cache. Medium writes the image-space map into it (1 MB). High may spend reflection rays to confirm texels; those rays count against the reflection ray cap, not a second cap. Potato and Low leave it unallocated.
+**Caustic cache.** A small world-space hash, sun only, same finished-value rule as the surface cache. Medium writes the image-space map into it (1 MB). High may spend reflection rays to confirm texels; those rays count against the reflection ray cap, not a second cap. Fallback and Low leave it unallocated.
 
 ## Passes
 
@@ -148,7 +148,7 @@ Each pass is a compute or a raster with one trace site, the GI rule. A cheap che
 3. **Mirror and portal views.** Near the camera first, up to the view cap. Each view is a G-buffer and the existing lighting into the reused target. The oblique near plane rejects geometry behind the plane (`portal_leak` = 0). A requested view past the cap is not drawn.
 4. **Screen march.** One direction, half resolution, step cap 16 / 32 / 48 (Low / Medium / High). Thickness is one cache cell, 25 cm in world space, converted to view depth, so a hit behind a thin wall is rejected. McGuire and Mara (JCGT 2014) march until the ray leaves the frustum. We stop at the step cap and fall through to the cache.
 5. **Cache fallback.** A cone read of finished cache entries along the miss direction. No new ray. This is the Low fallback and the colour of a view the cap refused.
-6. **Reflection rays.** Medium up to 32 k, High up to 128 k, Potato and Low zero. Software SDF, or `VK_KHR_ray_query` when the device has it. The interface is the GI tracer. Misses stay on the cache value.
+6. **Reflection rays.** Medium up to 32 k, High up to 128 k, Fallback and Low zero. Software SDF, or `VK_KHR_ray_query` when the device has it. The interface is the GI tracer. Misses stay on the cache value.
 7. **Shade.** Read the cache at the hit. Metals tint by base colour. Dielectrics apply `F`.
 8. **Spatial filter.** One à-trous iteration on a budgeted list (4 k / 8 k / 16 k items). Variance already under the threshold skips the item.
 9. **Water.** Fresnel blend of the reflection and the refracted opaque colour, times `exp(-σ d)`. Foam coverage from the shoreline clamp and the Jacobian. Caustic add is a cache read.
@@ -162,7 +162,7 @@ A planar mirror reflects the camera through its plane and draws one view. A port
 
 | Preset | Extra views |
 |---|---|
-| Potato | 0 |
+| Fallback | 0 |
 | Low | 1 |
 | Medium | 2 |
 | High | 3 |
@@ -181,7 +181,7 @@ Caustics:
 
 | Mode | Presets | What it does |
 |---|---|---|
-| off | Potato, Low | no map, no rays |
+| off | Fallback, Low | no map, no rays |
 | image | Medium, High default | one sun, image-space map (Shah et al.), written into the caustic cache |
 | cache | High optional | reflection rays confirm cache texels, inside the ray cap |
 
@@ -191,7 +191,7 @@ Flat water under a vertical sun transmits `1 − F`. For IOR 1.333 that is 0.979
 
 Ceilings on the named GPU at the named resolution. The millisecond cap is what a later controller holds by cutting work units, the same rule as ADR 0013. These numbers are the gates. They are not a measurement of a 4070; phase 0 of the feature records the real times. The harness's good fixture feeds the estimates in the VRAM notes (under the cap). The bad fixture feeds a High frame at 2.5 ms and 80 MB.
 
-| | Potato | Low | Medium | High |
+| | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | GPU the cap is for | RTX 4070 | GTX 1060 6 GB, RX 580 | RTX 2060 class | RTX 4070 |
 | Resolution | 1440p | 1080p | 1080p | 1440p |
@@ -362,7 +362,7 @@ Each phase is one change. A phase that misses its gate is dropped: a five-line p
 
 P4 is where half-resolution tracing is confirmed or the near band moves to full resolution inside 32 MB. P9 does not add a ray cap of its own.
 
-The CPU picture landed the parts that do not need that lighting phase: planar mirrors and portals (P5, P6) with the Fresnel view cap, water shading and refraction (P7) on a flat plane, the shoreline clamp (P8; Jacobian foam still waits), and the Low ray count from P4. The frame runs those passes after lighting when the world lists a mirror, a portal, or water. Potato and Low store a ray count of 0 and do not march rays. Mirror and portal views are planar cameras with the oblique near clip, capped by `reflection_view_cap`. Water quads are the translucent pass and call `reflection_water_shade`. A scene with none of those surfaces skips the passes, so today's Lambert picture stays valid. `ReflectionSettings` is on the scene, the debug menu, and MCP. Classify counters and the idle-millisecond probe wait on `debug/reflections`.
+The CPU picture landed the parts that do not need that lighting phase: planar mirrors and portals (P5, P6) with the Fresnel view cap, water shading and refraction (P7) on a flat plane, the shoreline clamp (P8; Jacobian foam still waits), and the Low ray count from P4. The frame runs those passes after lighting when the world lists a mirror, a portal, or water. Fallback and Low store a ray count of 0 and do not march rays. Mirror and portal views are planar cameras with the oblique near clip, capped by `reflection_view_cap`. Water quads are the translucent pass and call `reflection_water_shade`. A scene with none of those surfaces skips the passes, so today's Lambert picture stays valid. `ReflectionSettings` is on the scene, the debug menu, and MCP. Classify counters and the idle-millisecond probe wait on `debug/reflections`.
 
 Next, after lighting phase 3: the screen march, the world-cache or `ray_query` fallback, and one spatial reflection filter. Those three stay out of `lighting_schedule.rs` and out of the GI passes. They turn `ssr_depth_rel` and `denoise_lag_frames` live under the same thresholds.
 

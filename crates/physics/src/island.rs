@@ -96,8 +96,7 @@ impl Islands {
                 }
             }
         }
-        for slot in 0..self.direct.len() {
-            let id = self.direct[slot];
+        for &id in &self.direct {
             let Some(body) = bodies.get_mut(index_of(id)) else {
                 continue;
             };

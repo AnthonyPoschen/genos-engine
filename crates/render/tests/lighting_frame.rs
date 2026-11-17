@@ -1941,7 +1941,7 @@ fn white_lamps(n: usize) -> World {
         lights,
         ceiling: None,
         sky: None,
-        lighting: LightingSettings::preset(LightingPreset::Potato),
+        lighting: LightingSettings::preset(LightingPreset::Fallback),
         debug: genos_scene::DebugSettings::default(),
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
@@ -1954,7 +1954,7 @@ fn white_lamps(n: usize) -> World {
 }
 
 fn direct_pick(mode: LampPickMode, rays: u32) -> LightingSettings {
-    let mut settings = LightingSettings::preset(LightingPreset::Potato);
+    let mut settings = LightingSettings::preset(LightingPreset::Fallback);
     settings.direct.max_lights = 0;
     settings.sky = false;
     settings.ambient.mode = AmbientMode::Off;
@@ -2351,7 +2351,7 @@ fn preset_direct_scales_with_samples_not_lamps() {
         settings.sky = false;
         settings.ambient.mode = AmbientMode::Off;
         settings.direct.max_lights = 0;
-        if preset != LightingPreset::Potato {
+        if preset != LightingPreset::Fallback {
             settings.world_cache.enabled = true;
             settings.gi.enabled = true;
         }
@@ -2367,13 +2367,13 @@ fn preset_direct_scales_with_samples_not_lamps() {
         let _ = draw(window, renderer, &world, camera);
         traced_rays(renderer.lighting_lamp_pick_counts())
     };
-    let off3 = count_of(renderer, window, 3, LightingPreset::Potato, &camera);
-    let off12 = count_of(renderer, window, 12, LightingPreset::Potato, &camera);
-    eprintln!("preset potato rays 3={off3} 12={off12}");
-    assert!(off3 > 0, "potato traced nothing");
+    let off3 = count_of(renderer, window, 3, LightingPreset::Fallback, &camera);
+    let off12 = count_of(renderer, window, 12, LightingPreset::Fallback, &camera);
+    eprintln!("preset fallback rays 3={off3} 12={off12}");
+    assert!(off3 > 0, "fallback traced nothing");
     assert!(
         off12 > off3.saturating_mul(2),
-        "potato did not grow with the lamps ({off3} -> {off12})"
+        "fallback did not grow with the lamps ({off3} -> {off12})"
     );
     let high3 = count_of(renderer, window, 3, LightingPreset::High, &camera);
     // A yaw keeps this frame off the quiet held path, which would shade every lamp once.

@@ -28,7 +28,7 @@ The realtime volume is a froxel grid. Height fog, local fog volumes, and shadowe
 
 | Piece | What it does today | What this design does with it |
 |---|---|---|
-| `fog_along`, `height_fog_along`, `compose_fog` (`crates/render/src/particles.rs`) | Puff optical depth through at most eight spheres. Transmittance and the homogeneous in-scatter integral call `genos_math` (`crates/math/src/media.rs`). `height_fog_along` calls the slanted height-fog optical depth. `media.glsl` is the GLSL mirror. Lamps use `1 / (1 + dist² * 0.08)`. No shadows. | The composite equation stays. When the froxel is on, puff density is injected as local spheres and the puff composite is skipped, so a puff is not counted twice. Potato keeps `fog_along`. |
+| `fog_along`, `height_fog_along`, `compose_fog` (`crates/render/src/particles.rs`) | Puff optical depth through at most eight spheres. Transmittance and the homogeneous in-scatter integral call `genos_math` (`crates/math/src/media.rs`). `height_fog_along` calls the slanted height-fog optical depth. `media.glsl` is the GLSL mirror. Lamps use `1 / (1 + dist² * 0.08)`. No shadows. | The composite equation stays. When the froxel is on, puff density is injected as local spheres and the puff composite is skipped, so a puff is not counted twice. Fallback keeps `fog_along`. |
 | Premultiplied fog blend (`crates/render/src/gpu.rs`) | `rgb = in-scattering`, `alpha = 1 - transmittance`, source factor one, destination `one_minus_src_alpha`. Result is `in-scattering + destination * transmittance`. | The upsample writes that target. The blend stays. |
 | World cache and world radiance cache | Camera-independent surface light. Budgeted refresh ([ADR 0013](../adr/0013-lighting-invalidation-is-local.md)). | A refreshed froxel reads them for indirect incident light. No write. |
 | Shadow cell cache, tracer | 12.5 cm shadow reuse. Software SDF or `VK_KHR_ray_query`. macOS is the software tracer ([ADR 0012](../adr/0012-gi.md)). | Shaft shadows use that tracer. Low and Medium may reuse the shadow cell. |
@@ -38,7 +38,7 @@ The realtime volume is a froxel grid. Height fog, local fog volumes, and shadowe
 
 GI v2's non-goal line stands: the GI passes do not grow a volume. This design is the reader those passes left room for.
 
-Presets are Potato, Low, Medium, and High, the same four as lighting. Potato is direct light and flat ambient. Its fog is off. Day-cycle and gi-1bounce do not gain a volume in this design.
+Presets are Fallback, Low, Medium, and High, the same four as lighting. Fallback is direct light and flat ambient. Its fog is off. Day-cycle and gi-1bounce do not gain a volume in this design.
 
 ### Fit to the frame
 
@@ -101,7 +101,7 @@ The structure we follow is Hillaire 2015: extinction and scattering in a frustum
 
 Departures from Hillaire 2015, by name:
 
-1. **History stays off.** Hillaire blends a reprojected scattering sample every frame. [ADR 0012](../adr/0012-gi.md) stores no radiance history, so Potato, Low, Medium, and High leave fog history off. Enabling it is an open decision for Anthony. The evidence is `froxel_temporal_smear_px` and `fog_yaw_pop_rel`. This design does not choose that outcome and does not adopt a reject rule.
+1. **History stays off.** Hillaire blends a reprojected scattering sample every frame. [ADR 0012](../adr/0012-gi.md) stores no radiance history, so Fallback, Low, Medium, and High leave fog history off. Enabling it is an open decision for Anthony. The evidence is `froxel_temporal_smear_px` and `fog_yaw_pop_rel`. This design does not choose that outcome and does not adopt a reject rule.
 2. **No full-grid light refresh.** Extinction is filled every enabled frame. In-scatter samples stop at the cap. Hillaire updates every cell's lighting every frame. There is no full-volume fallback.
 3. **Unshadowed closed form on an unsampled cell.** Hillaire would keep a reprojected sample. There is no history to keep. The stand-in is the analytic unshadowed integral of the height fog, plus local extinction with no lamp. It is finished, it is not black, and it is biased bright inside a shaft until a sample arrives. Near slices are first in the cap, so that bias is not the near-camera error.
 4. **Column integral and a depth-aware upsample,** not a per-pixel march through the 3D texture. A march at 1440p does not fit the ceiling.
@@ -132,7 +132,7 @@ Stored per cell, 16 bytes:
 | 8 | RGBA16F: in-scattering rgb, extinction in a |
 | 8 | RGBA16F history: previous in-scattering rgb, accept weight in a |
 
-The column target is RGBA16F, 8 bytes per column: integrated in-scattering rgb and transmittance in a. Potato allocates neither.
+The column target is RGBA16F, 8 bytes per column: integrated in-scattering rgb and transmittance in a. Fallback allocates neither.
 
 ### Extinction inject (every enabled frame)
 
@@ -168,7 +168,7 @@ p_hg(g, μ) = (1 - g²) / (4π (1 + g² - 2 g μ) ^ 1.5)
 
 The sun takes the first sample on every refreshed cell. Point lamps take what the cap has left, strongest first, using the lamp-pick weights. The sun is not lamp-picked. Low refreshes the sun only. Medium refreshes up to four point lamps. High refreshes up to eight.
 
-Sample caps per frame: Potato 0, Low 4 000, Medium 12 000, High 32 000. Ten percent of each cap is the starvation slice, oldest cells first, matching [ADR 0013](../adr/0013-lighting-invalidation-is-local.md). The rest is priority: change-record magnitude, near-camera slice (the nearest quarter of the slices), age, then a newly visible column. A histogram of 64 bins picks the threshold. No sort.
+Sample caps per frame: Fallback 0, Low 4 000, Medium 12 000, High 32 000. Ten percent of each cap is the starvation slice, oldest cells first, matching [ADR 0013](../adr/0013-lighting-invalidation-is-local.md). The rest is priority: change-record magnitude, near-camera slice (the nearest quarter of the slices), age, then a newly visible column. A histogram of 64 bins picks the threshold. No sort.
 
 Low and Medium may take `V` from the shadow cell cache. High traces a fresh ray for a near-slice cell and may reuse the cache farther out. The ray goes through the software tracer or through `VK_KHR_ray_query` when that extension is present. macOS uses the software tracer. A slower GPU keeps the same millisecond ceiling: the controller lowers the sample cap, sun last. Nothing requires a minimum ray count.
 
@@ -197,7 +197,7 @@ The column target is 160×90 on High, not 2560×1440. The composite samples it w
 
 ## 7. Fog history
 
-Fog history is off on Potato, Low, Medium, and High. [ADR 0012](../adr/0012-gi.md) stores no radiance history. The grid layout reserves a history slot so a later decision can turn the setting on without a second allocation. While the setting is off the pass does not read that slot and does not blend a previous frame. An unsampled cell uses the unshadowed closed form (departure 3).
+Fog history is off on Fallback, Low, Medium, and High. [ADR 0012](../adr/0012-gi.md) stores no radiance history. The grid layout reserves a history slot so a later decision can turn the setting on without a second allocation. While the setting is off the pass does not read that slot and does not blend a previous frame. An unsampled cell uses the unshadowed closed form (departure 3).
 
 Enabling fog history is an open decision for Anthony. This document does not choose it. The evidence is `froxel_temporal_smear_px` (centroid lag of a static shaft during a 90° yaw, threshold 0.50 px at 1440p, the worse of stride 1 and stride 16) and `fog_yaw_pop_rel` (frame-to-frame relative luminance of the fog term on that yaw, threshold 0.05).
 
@@ -209,7 +209,7 @@ A light shaft is the picture of `V` changing across cells that share a lamp. It 
 
 Point lamps are the same, with the hull clipped to the lamp's reach. A lamp that moves, switches, or dims is a change record for surface light. Fog history is off, so that edit does not blend a previous fog sample.
 
-The world-cache term is indirect incident light at `p`. The cache stays camera-independent. The froxel is view-dependent and is not a cache of surface light. Medium reads the coarse world level. High reads the level the surface point would use. Potato and Low do not read it (`fog.gi` off). A cache miss contributes zero indirect light, not a second ambient. The direct sun term still stands.
+The world-cache term is indirect incident light at `p`. The cache stays camera-independent. The froxel is view-dependent and is not a cache of surface light. Medium reads the coarse world level. High reads the level the surface point would use. Fallback and Low do not read it (`fog.gi` off). A cache miss contributes zero indirect light, not a second ambient. The direct sun term still stands.
 
 Fog does not darken the cache. A surface under a thick fog is still lit as GI lights it, and the volume then composites in front. That is a departure from full transport and it is a non-goal of v1, stated here so the grade does not treat it as a bug. The path tracer's surface vertices also ignore the medium until a later decision says otherwise. Phase 7's reference matches v1: the medium is on the camera ray only.
 
@@ -229,7 +229,7 @@ The grade reuses `blur_relative` (`genos-lighting-ref`): `|Yc - Yr| / max(Yr, 0.
 
 VRAM is the grid plus the column target. 16 bytes per froxel, 8 bytes per column. Figures are decimal MB (1e6 bytes). Milliseconds are ceilings at 1440p on an RTX 4070, to calibrate in the first implementing phase, not measurements. A pass that measures over its ceiling loses samples first, then far slices. Near slices stay.
 
-| | Potato | Low | Medium | High |
+| | Fallback | Low | Medium | High |
 |---|---|---|---|---|
 | Grid | none | 64×36×24 | 96×54×32 | 160×90×48 |
 | Froxels | 0 | 55 296 | 165 888 | 691 200 |
@@ -277,11 +277,11 @@ A missing feature prints `-` for the value and `NOT-IMPLEMENTED`. It does not pr
 | `fog_still_flicker` | 0.02 | Mean frame-to-frame relative luminance of the fog term, camera still | Graded from two lavapipe frames. History is off. Scaling the second frame by 1.4 fails. |
 | `frame_column_abs` | 1e-3 | Peak abs error of the frame's own column buffer against the CPU shadowed integral of that frame | Graded from the Low frame after the depth prepass. The frame traces the resident scene, so the reference does too. An empty buffer fails. A separate `run_fog` dispatch is not this row. |
 | `frame_picture_unchanged` | 0 | 0 when fog changes the composed picture, 1 when the fog-on and fog-off pictures match | Graded from two Low frames. The compose header is written on the device only inside the frame dispatch, so a missing dispatch and a compose that ignores fog both score 1. |
-| `froxel_vram_potato_mb` | 0.05 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. Potato is 0. Doubling the High grid fails 12 MB. |
+| `froxel_vram_fallback_mb` | 0.05 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. Fallback is 0. Doubling the High grid fails 12 MB. |
 | `froxel_vram_low_mb` | 1.5 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
 | `froxel_vram_medium_mb` | 4 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
 | `froxel_vram_high_mb` | 12 | Allocated fog VRAM | Graded. Lavapipe allocation, decimal MB. |
-| `froxel_ms_potato` | 0.05 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. Potato does not dispatch, so the lavapipe value is 0. The 4070 ceiling is not graded. |
+| `froxel_ms_fallback` | 0.05 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. Fallback does not dispatch, so the lavapipe value is 0. The 4070 ceiling is not graded. |
 | `froxel_ms_low` | 0.40 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. The value is the lavapipe timestamp of the dispatched Low grid, 64×36×24 unless settings override it. |
 | `froxel_ms_medium` | 0.80 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. Lavapipe timestamp of the dispatched Medium grid, 96×54×32 unless settings override it. |
 | `froxel_ms_high` | 1.20 | Fog pass time, 4070, 1440p | `NOT-IMPLEMENTED`. Lavapipe timestamp of the dispatched High grid, 160×90×48 unless settings override it. |

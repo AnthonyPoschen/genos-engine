@@ -31,7 +31,7 @@ pub const Z_NEAR: f32 = 0.10;
 /// Far slice edge, metres. The tail past this is closed-form height fog.
 pub const Z_FAR: f32 = 64.0;
 
-/// Preset grid. Potato, day-cycle, and gi-1bounce allocate nothing.
+/// Preset grid. Fallback, day-cycle, and gi-1bounce allocate nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridSize {
     /// Columns.
@@ -157,7 +157,7 @@ pub fn default_frame_sun() -> DirectSun {
     }
 }
 
-/// Grid for a lighting preset. Potato, day-cycle, and one-bounce GI allocate none.
+/// Grid for a lighting preset. Fallback, day-cycle, and one-bounce GI allocate none.
 #[must_use]
 pub fn grid_size(preset: LightingPreset) -> GridSize {
     match preset {
@@ -176,7 +176,7 @@ pub fn grid_size(preset: LightingPreset) -> GridSize {
             height: 90,
             slices: 48,
         },
-        LightingPreset::Potato | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => GridSize {
+        LightingPreset::Fallback | LightingPreset::DayCycle | LightingPreset::Gi1Bounce => GridSize {
             width: 0,
             height: 0,
             slices: 0,
@@ -1362,8 +1362,8 @@ mod tests {
     }
 
     #[test]
-    fn potato_allocates_no_cells() {
-        assert_eq!(grid_size(LightingPreset::Potato).cells(), 0);
+    fn fallback_allocates_no_cells() {
+        assert_eq!(grid_size(LightingPreset::Fallback).cells(), 0);
         assert_eq!(grid_size(LightingPreset::DayCycle).cells(), 0);
         assert_eq!(grid_size(LightingPreset::Gi1Bounce).cells(), 0);
         assert_eq!(grid_size(LightingPreset::Low).cells(), 64 * 36 * 24);
@@ -1462,7 +1462,7 @@ mod tests {
         assert!(limited.cells() <= 10);
         assert!(limited.cells() >= 1);
         assert_eq!(limited.width, 8);
-        let potato = dispatched_grid(&FogSettings::default(), LightingPreset::Potato);
-        assert_eq!(potato.cells(), 0);
+        let fallback = dispatched_grid(&FogSettings::default(), LightingPreset::Fallback);
+        assert_eq!(fallback.cells(), 0);
     }
 }

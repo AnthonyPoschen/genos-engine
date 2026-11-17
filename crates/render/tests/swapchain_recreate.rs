@@ -22,7 +22,7 @@ fn a_resize_replaces_the_swapchain_and_keeps_presenting() {
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
-    let world = grade_world(ReflectionPreset::Potato);
+    let world = grade_world(ReflectionPreset::Fallback);
     let camera = grade_camera();
     for (width, height) in [(320, 180), (256, 144), (320, 180)] {
         renderer.resize(width, height).expect("resize recreates the swapchain");

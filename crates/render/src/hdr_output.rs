@@ -1055,7 +1055,7 @@ pub fn surface_choice(
     (sdr_format, COLOR_SPACE_SRGB, HdrSwapchain::Sdr)
 }
 
-/// Host preference, then the output mode. `force_sdr` is Potato, Low, and `legacy_bytes`.
+/// Host preference, then the output mode. `force_sdr` is Fallback, Low, and `legacy_bytes`.
 /// `Auto` calls [`pick_hdr_output`].
 #[must_use]
 pub fn resolve_swapchain(
@@ -1416,9 +1416,9 @@ pub fn mib_cents(mib: f64) -> f64 {
     (mib * 100.0).round()
 }
 
-/// Potato and Low stay on SDR. The Deck OLED Low chain may take HDR10 when that pair is listed.
+/// Fallback and Low stay on SDR. The Deck OLED Low chain may take HDR10 when that pair is listed.
 ///
-/// Potato is checked first, so an edited Potato stays locked even when its bloom fields look like Low.
+/// Fallback is checked first, so an edited Fallback stays locked even when its bloom fields look like Low.
 /// A chain with four levels and at most 64 bins locks the same way. scRGB stays locked.
 #[must_use]
 pub fn post_locks_sdr(
@@ -1430,9 +1430,9 @@ pub fn post_locks_sdr(
     if hdr.legacy_bytes {
         return true;
     }
-    let potato = preset == genos_scene::LightingPreset::Potato
+    let fallback = preset == genos_scene::LightingPreset::Fallback
         || (hdr.bloom_levels == 0 && matches!(hdr.exposure_mode, genos_scene::ExposureMode::Fixed));
-    if potato {
+    if fallback {
         return true;
     }
     let low = preset == genos_scene::LightingPreset::Low
@@ -1458,7 +1458,7 @@ pub fn deck_oled_hdr10(
         )
 }
 
-/// HDR10 or scRGB keeps an encode image. Potato, Low, legacy, Auto, and SDR do not.
+/// HDR10 or scRGB keeps an encode image. Fallback, Low, legacy, Auto, and SDR do not.
 ///
 /// This is the desktop rule. A Deck OLED Low HDR10 chain is decided by [`post_locks_sdr`].
 #[must_use]
@@ -2122,13 +2122,13 @@ mod tests {
     fn post_chain_at_1440p_is_under_the_exact_byte_ceilings() {
         let width = 2560u32;
         let height = 1440u32;
-        let potato = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Potato);
+        let fallback = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Fallback);
         let low = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Low);
         let medium = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Medium);
         let high = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::High);
         let ultra = genos_scene::HdrSettings::ultra();
         let cases = [
-            (&potato, 28.13, 29_491_232_u64, 0, 0, 0),
+            (&fallback, 28.13, 29_491_232_u64, 0, 0, 0),
             (&low, 37.46, 31_788_832, 7, 640, 80),
             (&medium, 37.49, 38_701_600, 9, 1280, 80),
             (&high, 37.50, 38_708_416, 11, 1280, 40),
@@ -2146,9 +2146,9 @@ mod tests {
             assert_eq!(chain.base_w, base);
             assert_eq!(chain.coarse_w, coarse);
         }
-        assert_eq!(post_chain(width, height, &potato, false).encode_bytes, 0);
-        assert_eq!(post_chain(width, height, &potato, false).bloom_bytes, 0);
-        assert_eq!(post_chain(width, height, &potato, false).meter_bytes, 0);
+        assert_eq!(post_chain(width, height, &fallback, false).encode_bytes, 0);
+        assert_eq!(post_chain(width, height, &fallback, false).bloom_bytes, 0);
+        assert_eq!(post_chain(width, height, &fallback, false).meter_bytes, 0);
         assert_eq!(post_chain(width, height, &high, false).lut_bytes, 0);
         let pixels = u64::from(width) * u64::from(height);
         let mut high_hdr = high.clone();
@@ -2303,13 +2303,13 @@ mod tests {
         assert_eq!(deck_panel_from_product("Galileo"), DeckPanel::Oled);
         assert_eq!(deck_panel_from_product("Jupiter"), DeckPanel::Lcd);
         assert_eq!(deck_panel_from_product("  "), DeckPanel::Desktop);
-        let mut edited = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Potato);
+        let mut edited = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::Fallback);
         edited.bloom_levels = 4;
         edited.histogram_bins = 64;
         edited.output = genos_scene::OutputMode::Hdr10;
         assert!(post_locks_sdr(
             &edited,
-            genos_scene::LightingPreset::Potato,
+            genos_scene::LightingPreset::Fallback,
             DeckPanel::Oled,
             true,
         ));

@@ -392,10 +392,10 @@ impl Renderer {
         (self.gpu.extent_w, self.gpu.extent_h)
     }
 
-    /// Rebuild the post chain for `hdr`. GI targets follow Potato so the check does not also build the High cache.
+    /// Rebuild the post chain for `hdr`. GI targets follow Fallback so the check does not also build the High cache.
     ///
-    /// Potato's lighting preset does not force SDR for this call. Encode follows `hdr.output`,
-    /// except Potato and Low settings, which stay SDR.
+    /// Fallback's lighting preset does not force SDR for this call. Encode follows `hdr.output`,
+    /// except Fallback and Low settings, which stay SDR.
     pub fn layout_post(&mut self, hdr: genos_scene::HdrSettings) -> Result<(), String> {
         self.layout_post_for(
             hdr,
@@ -407,7 +407,7 @@ impl Renderer {
 
     /// Rebuild the post chain the way `post_locks_sdr` classifies `preset` on `panel`.
     ///
-    /// GI targets still follow Potato. `hdr10_listed` is the Deck OLED exception.
+    /// GI targets still follow Fallback. `hdr10_listed` is the Deck OLED exception.
     pub fn layout_post_for(
         &mut self,
         hdr: genos_scene::HdrSettings,
@@ -416,7 +416,7 @@ impl Renderer {
         hdr10_listed: bool,
     ) -> Result<(), String> {
         self.gpu.lighting.settings =
-            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato);
+            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Fallback);
         self.gpu.lighting.hdr = hdr;
         self.gpu.lighting.budget_hdr = true;
         self.gpu.lighting.budget_preset = preset;
@@ -611,7 +611,7 @@ impl Renderer {
         self.gpu.lighting.work_clear = true;
     }
 
-    /// Replace the override with a named preset (`potato`, `low`, `medium`, `high`).
+    /// Replace the override with a named preset (`fallback`, `low`, `medium`, `high`).
     pub fn apply_lighting_preset(&mut self, name: &str) -> Result<(), String> {
         let preset = genos_scene::LightingPreset::parse(name)
             .ok_or_else(|| format!("unknown lighting preset {name}"))?;
@@ -3058,8 +3058,7 @@ impl Gpu {
             let preset = self.lighting.settings.preset;
             let named = matches!(
                 preset,
-                genos_scene::LightingPreset::Potato | genos_scene::LightingPreset::Low
-            );
+                genos_scene::LightingPreset::Fallback | genos_scene::LightingPreset::Low            );
             named
                 && crate::hdr_output::post_locks_sdr(
                     &self.lighting.hdr,
@@ -4266,8 +4265,7 @@ impl Gpu {
                 times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
                 self.last_unfilled
-                    .map(|stats| format!(" | {}", stats.line()))
-                    .unwrap_or_default(),
+                    .map_or_else(String::new, |stats| format!(" | {}", stats.line())),
                 lamp_pick_line
             );
         }

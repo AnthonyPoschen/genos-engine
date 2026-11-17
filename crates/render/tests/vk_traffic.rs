@@ -18,7 +18,7 @@ fn steady_frames_allocate_no_vulkan_objects() {
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
-    let world = grade_world(ReflectionPreset::Potato);
+    let world = grade_world(ReflectionPreset::Fallback);
     let camera = grade_camera();
     for _ in 0..3 {
         let _ = window.pump();

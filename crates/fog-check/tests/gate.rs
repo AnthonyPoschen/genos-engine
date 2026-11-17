@@ -38,7 +38,7 @@ fn analytic_broken_fails_each_metric() {
 }
 
 const MS_ROWS: &[&str] = &[
-    "froxel_ms_potato",
+    "froxel_ms_fallback",
     "froxel_ms_low",
     "froxel_ms_medium",
     "froxel_ms_high",
@@ -87,7 +87,7 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
         "fog_still_flicker",
         "frame_column_abs",
         "frame_picture_unchanged",
-        "froxel_vram_potato_mb",
+        "froxel_vram_fallback_mb",
         "froxel_vram_low_mb",
         "froxel_vram_medium_mb",
         "froxel_vram_high_mb",
@@ -101,8 +101,8 @@ fn feature_metrics_keep_absent_rows_and_grade_the_live_ones() {
     let gi = metric(&report, "gi_inscatter_blur_rel");
     assert_eq!(gi.value, None);
     assert_eq!(gi.status, Status::NotImplemented);
-    let potato = metric(&report, "froxel_ms_potato");
-    assert_eq!(potato.value, Some(0.0));
+    let fallback = metric(&report, "froxel_ms_fallback");
+    assert_eq!(fallback.value, Some(0.0));
     for name in ["froxel_ms_low", "froxel_ms_medium", "froxel_ms_high"] {
         let row = metric(&report, name);
         assert!(row.value.unwrap() > 0.0, "{row:?}");

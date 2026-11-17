@@ -117,7 +117,7 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          Keeps the checkpoint aim unless --look is set
   --look X,Y,Z           world point to aim at. --look=X,Y,Z is the same flag.
                          Yaw 0 looks down -Z
-  --preset NAME          potato, low, medium, or high. Sets GENOS_LIGHTING_PRESET
+  --preset NAME          fallback (alias: potato), low, medium, or high. Sets GENOS_LIGHTING_PRESET
   --exposure-mode auto|camera|fixed
                          meter, physical camera, or a fixed EV100.
                          GENOS_HDR_EXPOSURE_MODE applies only when this is omitted
@@ -347,8 +347,6 @@ const DROP_KNOBS: &[&str] = &[
 const VIEWS: [&str; 8] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
 ];
-const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
-
 struct Options {
     scene: String,
     checkpoint: Option<String>,
@@ -1257,7 +1255,7 @@ fn loading_world() -> World {
         sky: Some(Sky {
             color: [0.02, 0.02, 0.025],
         }),
-        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato),
+        lighting: genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Fallback),
         debug: DebugSettings::default(),
         fps_counter: FpsCounterSettings::default(),
         event_loop: EventLoopSettings::default(),
@@ -2690,10 +2688,10 @@ fn note_gi(app: &mut App, renderer: &mut Renderer) {
 
 fn apply_intent(opts: &Options) -> Result<(), String> {
     if let Some(preset) = &opts.preset {
-        if !PRESETS.contains(&preset.as_str()) {
-            return Err(format!("unknown preset {preset}"));
-        }
-        std::env::set_var("GENOS_LIGHTING_PRESET", preset);
+        let parsed = genos_scene::LightingPreset::parse(preset)
+            .ok_or_else(|| format!("unknown preset {preset}"))?;
+        // Canonical name so deprecated aliases (potato) still set a live value.
+        std::env::set_var("GENOS_LIGHTING_PRESET", parsed.name());
     } else if opts.full_effort {
         std::env::set_var("GENOS_LIGHTING_PRESET", "high");
     }
@@ -3291,7 +3289,7 @@ mod tests {
             .as_ref()
             .unwrap();
         let names: Vec<&str> = preset.steps.iter().map(|step| step.name.as_str()).collect();
-        assert!(names.contains(&"potato"));
+        assert!(names.contains(&"fallback"));
         assert!(names.contains(&"day-cycle"));
         assert!(names.contains(&"gi-1bounce"));
         assert!(names.contains(&"high"));

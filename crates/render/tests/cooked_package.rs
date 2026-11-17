@@ -319,7 +319,7 @@ fn proof_world(lit: bool) -> World {
         ceiling: None,
         sky: None,
         lighting: if lit {
-            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Potato)
+            genos_scene::LightingSettings::preset(genos_scene::LightingPreset::Fallback)
         } else {
             genos_scene::LightingSettings::default()
         },

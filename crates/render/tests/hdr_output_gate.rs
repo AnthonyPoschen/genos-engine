@@ -73,7 +73,7 @@ const GPU_TAU: f64 = 0.001;
 const GPU_BLOOM_K: f64 = 1.0;
 const GPU_BLOOM_LEVELS: u32 = 3;
 const GPU_FRAMES: u32 = 2;
-/// Plain compose of the shipped hall, Potato, ambient 8, `legacy_bytes`, 160×90.
+/// Plain compose of the shipped hall, Fallback, ambient 8, `legacy_bytes`, 160×90.
 const LEGACY_SHOULDER: &[u8] = include_bytes!("data/legacy_shoulder_160x90.bgra");
 
 /// Scene-linear Rec.709, then the `AgX_LUT_Gen` sRGB power-2.4 code.
@@ -290,7 +290,7 @@ fn live_metrics() -> Vec<Metric> {
         equal("scrgb_code", scrgb_code(203.0), SCRGB_WHITE),
         collected_ms("post_ms_device", gpu_grab().post_ms, DEVICE_MS_MAX),
         at_most("post_vram_device", gpu_post_vram(), PICTURE_VRAM_MAX),
-        equal("passes_fallback", chain_passes(LightingPreset::Potato), 0.0),
+        equal("passes_fallback", chain_passes(LightingPreset::Fallback), 0.0),
         equal("passes_low", chain_passes(LightingPreset::Low), 7.0),
         equal("passes_medium", chain_passes(LightingPreset::Medium), 9.0),
         equal("passes_high", chain_passes(LightingPreset::High), 11.0),
@@ -868,7 +868,7 @@ fn force_sdr_misses(
     wrong
 }
 
-/// Mutation: Potato and Low keep the host HDR pair.
+/// Mutation: Fallback and Low keep the host HDR pair.
 fn pick_ignores_force(
     host: PresentHost,
     list: &[ListedFormat],
@@ -1242,7 +1242,7 @@ fn capture_levels(
     with_hot: bool,
 ) -> Result<Grab, String> {
     let mut world = World::from_scene(scene.clone());
-    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
     world.scene.hdr = gpu_settings(levels);
     draw_once(window, renderer, &world, camera)?;
     if let Some(light) = world.scene.lights.first_mut() {
@@ -1422,7 +1422,7 @@ fn measure_budget_device() -> Result<Budget, String> {
         return Err(format!("swapchain is {width}x{height}, wanted 2560x1440"));
     }
     let presets = [
-        (HdrSettings::for_preset(LightingPreset::Potato), "fallback"),
+        (HdrSettings::for_preset(LightingPreset::Fallback), "fallback"),
         (HdrSettings::for_preset(LightingPreset::Low), "low"),
         (HdrSettings::for_preset(LightingPreset::Medium), "medium"),
         (HdrSettings::for_preset(LightingPreset::High), "high"),
@@ -1665,8 +1665,8 @@ fn capture_legacy() -> LegacyGrab {
         }
     };
     let mut world = World::from_scene(scene);
-    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
-    // Potato's ambient sits under 0.64, so the shoulder never runs. Raised
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
+    // Fallback's ambient sits under 0.64, so the shoulder never runs. Raised
     // ambient puts the plain compose onto the curve this row grades.
     world.scene.lighting.ambient.intensity = 8.0;
     world.scene.hdr = HdrSettings::legacy_bytes();
@@ -1793,9 +1793,9 @@ fn capture_legacy_mode() -> LegacyModeGrab {
         }
     };
     let mut world = World::from_scene(scene);
-    world.scene.lighting = LightingSettings::preset(LightingPreset::Potato);
+    world.scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
     world.scene.lighting.ambient.intensity = 8.0;
-    let mut hdr = HdrSettings::for_preset(LightingPreset::Potato);
+    let mut hdr = HdrSettings::for_preset(LightingPreset::Fallback);
     hdr.display = genos_scene::DisplayTransform::Legacy;
     hdr.exposure_mode = genos_scene::ExposureMode::Fixed;
     hdr.ev100 = 0.0;
