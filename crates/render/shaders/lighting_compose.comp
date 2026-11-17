@@ -173,7 +173,7 @@ void main() {
         // The linear-bounce slice holds the last full walk. A held frame
         // reuses it. The fill (the frames before the first 32-frame pass),
         // that pass, a camera move, and a pixel a lamp or a mover reaches
-        // walk again. Direct still updates. The walk is four cache finds per
+        // walk again. A mover walks the tiles the reach pass marked. Direct still updates. The walk is four cache finds per
         // pixel; it was the steady compose. A cache clear zeros the slice
         // for the next three frames (BOUNCE_FILL_FRAMES): the clear frame's
         // walk is empty, and a held frame would keep that empty store, which

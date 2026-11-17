@@ -61,6 +61,11 @@ the trace pauses time, so it adds no settling.
 * `ref_err_near`: the near-camera-weighted error against the reference,
   `sum(w |live - ref|) / sum(w ref)` in linear luminance, with
   `w = 1 / max(distance, 0.5 m)` from the depth view. Mean and worst frame.
+  Luma undoes the legacy shoulder. A channel at or above the asymptote is
+  held at the last code of `dither.glsl`'s noise (under one code, so code
+  198 and above) before that inverse. A pixel leaves the sum only when both
+  pictures are in that band. `over_ceiling_frac` is the share of live pixels
+  in the band.
 * `ref_err`: the same without the weight.
 * `grid_worst`, `grid_longest_run`: the PR #94 checkerboard metric
   (`scripts/lighting/grid_metric.py`, copied unchanged).
@@ -107,7 +112,7 @@ number is unchanged and `grid_worst` stays reported.
   pass when the noise is already at or under 0.02.
 * `slant*` only: `slant_mid_err_mean`, `slant_mid_err_worst`. For each traced
   frame, crop the middle half, average 2×2 blocks, and take
-  `sum(|live - ref|) / (sum(ref) + 1e-6)` on sRGB-decoded Rec.709 luma of
+  `sum(|live - ref|) / (sum(ref) + 1e-6)` on that same shoulder luma of
   `f*-live.png` and `f*-reference.png`. The mean of those frames, rounded to
   4 decimals, is the gate. `proxy_abs_mean` in
   `scripts/lighting/slant_mid_split.py` is the mean absolute luma.

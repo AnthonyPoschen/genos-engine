@@ -992,6 +992,10 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         return;
     }
     vec4 old = cache.v[3u * slot + 2u];
+    // World mode 3 returns from the cache pass before its own note, on both
+    // settings of the fill budget. This commit is the writer that stored the
+    // sample. The raw sample against the stored mean, not the blended mean.
+    lighting_reach_note_cell(slot, old.rgb, e);
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     float rays0 = max(b.w, 0.0);
     uint warmup = max(lighting_fill_u(12), 1u);
