@@ -278,6 +278,11 @@ kind = "test"
 detail = "harness only"
 
 [[var]]
+name = "GENOS_BUFFER_POISON"
+kind = "test"
+detail = "harness only: fill new host-visible GPU buffers with 0xFF/NaN"
+
+[[var]]
 name = "OCC_DUMP"
 kind = "test"
 detail = "harness only"
