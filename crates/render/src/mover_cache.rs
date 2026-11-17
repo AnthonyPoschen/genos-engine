@@ -240,10 +240,21 @@ pub fn mover_gpu_pool_offset() -> u64 {
         + u64::from(MOVER_TABLE_SLOTS) * u64::try_from(MOVER_GPU_RECORD_BYTES).unwrap_or(0)
 }
 
-/// Total mover SSBO bytes for a pool of `pool_cap` texels.
+/// Max mover-fill texel indices packed after the pool (shared scheduler list).
+pub const MOVER_FILL_LIST_CAP: u32 = 512;
+
+/// Byte offset of the fill-index list inside the mover SSBO.
+#[must_use]
+pub fn mover_gpu_fill_offset(pool_cap: u32) -> u64 {
+    mover_gpu_pool_offset()
+        + u64::from(pool_cap.max(1)) * u64::try_from(MOVER_TEXEL_BYTES).unwrap_or(0)
+}
+
+/// Total mover SSBO bytes for a pool of `pool_cap` texels (includes fill list).
 #[must_use]
 pub fn mover_gpu_bytes(pool_cap: u32) -> u64 {
-    mover_gpu_pool_offset() + u64::from(pool_cap.max(1)) * u64::try_from(MOVER_TEXEL_BYTES).unwrap_or(0)
+    mover_gpu_fill_offset(pool_cap)
+        + u64::from(MOVER_FILL_LIST_CAP) * 4
 }
 
 /// One dirty byte range for a partial SSBO upload.
@@ -269,6 +280,10 @@ pub struct MoverCache {
     dirty_table: Vec<u32>,
     /// Dirty texel indices.
     dirty_texels: Vec<u32>,
+    /// Ranked fill-candidate texel indices for the GPU pass (≤ [`MOVER_FILL_LIST_CAP`]).
+    fill_list: Vec<u32>,
+    /// Equivalent rays claimed by the last [`Self::prepare_fill`] (`len × 16`).
+    fill_rays: u32,
 }
 
 impl MoverCache {
@@ -292,6 +307,8 @@ impl MoverCache {
             dirty_full: true,
             dirty_table: Vec::new(),
             dirty_texels: Vec::new(),
+            fill_list: Vec::new(),
+            fill_rays: 0,
         }
     }
 
@@ -357,6 +374,10 @@ impl MoverCache {
                 &pack_texel(tex),
             );
         }
+        let fill_off = mover_gpu_fill_offset(self.pool_cap);
+        for (i, idx) in self.fill_list.iter().enumerate() {
+            write_bytes(&mut out, fill_off + u64_from_usize(i) * 4, idx);
+        }
         out
     }
 
@@ -408,6 +429,16 @@ impl MoverCache {
             });
             i += 1;
         }
+        // Fill list rides with the header whenever the scheduler ranked candidates.
+        if !self.fill_list.is_empty()
+            && (!self.dirty_table.is_empty() || !self.dirty_texels.is_empty())
+        {
+            let n = u32_from_usize(self.fill_list.len()).max(1);
+            ranges.push(DirtyRange {
+                offset: mover_gpu_fill_offset(self.pool_cap),
+                size: u64::from(n) * 4,
+            });
+        }
         ranges
     }
 
@@ -440,6 +471,7 @@ impl MoverCache {
     }
 
     fn write_header(&self, out: &mut [u8]) {
+        let fill_off = u32::try_from(mover_gpu_fill_offset(self.pool_cap)).unwrap_or(0);
         let words = [
             self.pool_cap,
             MOVER_TABLE_SLOTS,
@@ -449,6 +481,15 @@ impl MoverCache {
             u32::try_from(mover_gpu_table_offset()).unwrap_or(0),
             u32::try_from(mover_gpu_pool_offset()).unwrap_or(0),
             self.free_top,
+            // Stage H fill list: count, byte offset, capacity, reserved.
+            u32_from_usize(self.fill_list.len()),
+            fill_off,
+            MOVER_FILL_LIST_CAP,
+            self.fill_rays,
+            0,
+            0,
+            0,
+            0,
         ];
         for (i, w) in words.iter().enumerate() {
             let at = i * 4;
@@ -620,6 +661,7 @@ impl MoverCache {
                     let dst = &mut self.table[usize_from_u32(slot)];
                     dst.texel_count = u32_from_usize(owned.len());
                     dst.texel_base = owned.first().copied().unwrap_or(u32::MAX);
+                    self.layout_local_positions(slot);
                     return Err(e);
                 }
             }
@@ -629,7 +671,141 @@ impl MoverCache {
         dst.texel_count = want;
         dst.texel_base = owned.first().copied().unwrap_or(u32::MAX);
         self.mark_table_dirty(slot);
+        self.layout_local_positions(slot);
         Ok(())
+    }
+
+    /// Spreads owned texels across the mover's local AABB (deterministic grid).
+    fn layout_local_positions(&mut self, slot: u32) {
+        let rec = self.table[usize_from_u32(slot)];
+        if rec.texel_count == 0 || rec.texel_base == u32::MAX {
+            return;
+        }
+        let n = rec.texel_count;
+        let hx = rec.half_extents[0].abs().max(0.05);
+        let hy = rec.half_extents[1].abs().max(0.05);
+        let hz = rec.half_extents[2].abs().max(0.05);
+        for i in 0..n {
+            let u = (i as f32 + 0.5) / n as f32;
+            let local = [
+                (u * 2.0 - 1.0) * hx,
+                ((i * 5) % 7) as f32 / 6.0 * 2.0 * hy - hy,
+                ((i * 3) % 5) as f32 / 4.0 * 2.0 * hz - hz,
+            ];
+            let idx = rec.texel_base.saturating_add(i);
+            if let Some(t) = self.texels.get_mut(usize_from_u32(idx)) {
+                if t.object_id == rec.object_id {
+                    t.local_pos = local;
+                    t.local_n = [0.0, 1.0, 0.0];
+                    self.mark_texel_dirty(idx);
+                }
+            }
+        }
+    }
+
+    /// Deposits one world-direction irradiance sample into a texel (CPU fill).
+    pub fn deposit(&mut self, texel_index: u32, irradiance: [f32; 3], weight: f32) -> bool {
+        let Some(t) = self.texels.get_mut(usize_from_u32(texel_index)) else {
+            return false;
+        };
+        if t.object_id == MOVER_ID_NONE || weight <= 0.0 {
+            return false;
+        }
+        let w = weight.max(0.0);
+        let prev = t.samples.max(0.0);
+        let next = prev + w;
+        let a = w / next;
+        t.mean = [
+            t.mean[0] + (irradiance[0] - t.mean[0]) * a,
+            t.mean[1] + (irradiance[1] - t.mean[1]) * a,
+            t.mean[2] + (irradiance[2] - t.mean[2]) * a,
+        ];
+        t.samples = next;
+        self.mark_texel_dirty(texel_index);
+        true
+    }
+
+    /// Ranks fill candidates and packs the GPU fill list under `ray_budget`
+    /// (16 rays per texel). Does not write means on the host — the cache pass
+    /// deposits world-direction lighting from the lattice.
+    pub fn prepare_fill(
+        &mut self,
+        ray_budget: u32,
+        measured_change: f32,
+        distance_moved_m: f32,
+        lamp_change_near: bool,
+        distance_m: f32,
+    ) -> FillStats {
+        let cands = self.fill_candidates(
+            measured_change,
+            distance_moved_m,
+            lamp_change_near,
+            distance_m,
+        );
+        let per = 16u32; // matches LIGHTING_CACHE_RAYS
+        let max_deposits = if ray_budget == 0 {
+            MOVER_FILL_LIST_CAP
+        } else {
+            (ray_budget / per).min(MOVER_FILL_LIST_CAP)
+        };
+        self.fill_list.clear();
+        for c in cands.iter().take(max_deposits as usize) {
+            self.fill_list.push(c.texel_index);
+        }
+        let deposited = u32_from_usize(self.fill_list.len());
+        self.fill_rays = deposited.saturating_mul(per);
+        // Header + fill list must reach the GPU even when no texel layout changed.
+        self.dirty_full = false;
+        if !self.dirty_table.contains(&0) {
+            // Force header into the next pack_dirty (header is always first range).
+            self.dirty_table.push(0);
+        }
+        FillStats {
+            candidates: cands.len() as u32,
+            deposited,
+            rays: self.fill_rays,
+        }
+    }
+
+    /// Runs one CPU fill round: deposits into the highest-priority candidates
+    /// under `ray_budget` (counted as 16 rays per deposit for reporting).
+    pub fn fill_round(
+        &mut self,
+        ray_budget: u32,
+        measured_change: f32,
+        distance_moved_m: f32,
+        lamp_change_near: bool,
+        distance_m: f32,
+        irradiance: [f32; 3],
+    ) -> FillStats {
+        let stats = self.prepare_fill(
+            ray_budget,
+            measured_change,
+            distance_moved_m,
+            lamp_change_near,
+            distance_m,
+        );
+        let mut deposited = 0u32;
+        for &idx in &self.fill_list.clone() {
+            if self.deposit(idx, irradiance, 1.0) {
+                deposited = deposited.saturating_add(1);
+            }
+        }
+        FillStats {
+            candidates: stats.candidates,
+            deposited,
+            rays: deposited.saturating_mul(16),
+        }
+    }
+
+    #[must_use]
+    pub fn fill_rays(&self) -> u32 {
+        self.fill_rays
+    }
+
+    #[must_use]
+    pub fn fill_list(&self) -> &[u32] {
+        &self.fill_list
     }
 
     fn count_texels_for(&self, object_id: u32) -> u32 {
@@ -784,6 +960,15 @@ pub enum MoverCacheError {
     TableFull,
     PoolFull,
     MissingMover,
+}
+
+/// One fill-round report (Stage H / scaling).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FillStats {
+    pub candidates: u32,
+    pub deposited: u32,
+    /// Equivalent rays (`deposited × 16`).
+    pub rays: u32,
 }
 
 fn table_hash(object_id: u32) -> u32 {
@@ -1286,7 +1471,41 @@ mod tests {
         assert!(hot > cold);
     }
 
-    /// Stage E scaling report: 10 / 100 / 1000 Near movers on a High pool.
+    #[test]
+    fn prepare_fill_ranks_under_budget_and_skips_far() {
+        let mut cache = MoverCache::new(256);
+        cache.upsert(record(1)).expect("near");
+        cache
+            .update_tier_and_alloc(1, 2.0, 80.0)
+            .expect("alloc");
+        let mut far = record(2);
+        far.tier = MoverTier::Far;
+        cache.upsert(far).expect("far");
+        let stats = cache.prepare_fill(64, 0.5, 0.1, false, 2.0);
+        assert_eq!(stats.deposited, 4); // 64 / 16
+        assert_eq!(stats.rays, 64);
+        assert_eq!(cache.fill_list().len(), 4);
+        assert!(cache.fill_list().iter().all(|&t| {
+            cache.texel(t).is_some_and(|x| x.object_id == 1)
+        }));
+    }
+
+    #[test]
+    fn deposit_blends_world_direction_mean() {
+        let mut cache = MoverCache::new(16);
+        cache.upsert(record(1)).expect("ins");
+        let i = cache
+            .claim_texel(1, [0.0; 3], [0.0, 1.0, 0.0])
+            .expect("claim");
+        assert!(cache.deposit(i, [1.0, 0.0, 0.0], 1.0));
+        assert!(cache.deposit(i, [0.0, 1.0, 0.0], 1.0));
+        let t = cache.texel(i).expect("live");
+        assert!((t.mean[0] - 0.5).abs() < 1.0e-5);
+        assert!((t.mean[1] - 0.5).abs() < 1.0e-5);
+        assert!((t.samples - 2.0).abs() < 1.0e-5);
+    }
+
+    /// Stage E/H scaling report: 10 / 100 / 1000 Near movers on a High pool.
     #[test]
     fn gpu_pack_is_header_plus_table_plus_pool() {
         let cache = MoverCache::new(32);
@@ -1294,7 +1513,7 @@ mod tests {
         assert_eq!(u64_from_usize(bytes.len()), mover_gpu_bytes(32));
         assert_eq!(std::mem::size_of::<GpuMoverTexel>(), MOVER_TEXEL_BYTES);
         assert_eq!(std::mem::size_of::<GpuMoverRecord>(), MOVER_GPU_RECORD_BYTES);
-        // High pool stays near the 2 MiB texel budget (+ table/header).
+        // High pool stays near the 2 MiB texel budget (+ table/header/fill list).
         let high = mover_gpu_bytes(MOVER_TEXELS_HIGH);
         assert!(high > 2 * 1024 * 1024);
         assert!(high < 3 * 1024 * 1024);
@@ -1319,8 +1538,8 @@ mod tests {
     }
 
     #[test]
-    fn scaling_10_100_1000_reports_pool_use_and_boost() {
-        fn run(n: u32) -> (u32, u32, usize, usize) {
+    fn scaling_10_100_1000_reports_pool_use_boost_and_rays() {
+        fn run(n: u32) -> (u32, u32, usize, usize, u32) {
             let mut cache = MoverCache::high();
             for id in 1..=n {
                 let mut r = record(id);
@@ -1338,25 +1557,30 @@ mod tests {
                 3.0,
                 80.0,
             );
+            let stats = cache.prepare_fill(4096, 0.2, 0.05, false, 3.0);
             eprintln!(
-                "movers={n} share={share} used_texels={used} fill_candidates={} dirtied_bricks={}",
+                "movers={n} share={share} used_texels={used} fill_candidates={} dirtied_bricks={} rays_per_frame={}",
                 cands.len(),
-                bricks.len()
+                bricks.len(),
+                stats.rays
             );
-            (share, used, cands.len(), bricks.len())
+            (share, used, cands.len(), bricks.len(), stats.rays)
         }
-        let (s10, u10, c10, b10) = run(10);
+        let (s10, u10, c10, b10, r10) = run(10);
         assert_eq!(s10, MOVER_TIER_NEAR_TEXELS);
         assert_eq!(u10, 10 * MOVER_TIER_NEAR_TEXELS);
         assert_eq!(c10, usize_from_u32(10 * MOVER_TIER_NEAR_TEXELS));
         assert!(b10 > 0);
-        let (s100, u100, c100, _) = run(100);
+        assert_eq!(r10, 4096); // ray_budget / 16 deposits, ×16
+        let (s100, u100, c100, _, r100) = run(100);
         assert_eq!(s100, MOVER_TEXELS_HIGH / 100);
         assert_eq!(u100, 100 * (MOVER_TEXELS_HIGH / 100));
         assert_eq!(c100, usize_from_u32(u100));
-        let (s1000, u1000, c1000, _) = run(1000);
+        assert_eq!(r100, 4096);
+        let (s1000, u1000, c1000, _, r1000) = run(1000);
         assert_eq!(s1000, 32);
         assert_eq!(u1000, 32_000);
         assert_eq!(c1000, 32_000);
+        assert_eq!(r1000, 4096);
     }
 }

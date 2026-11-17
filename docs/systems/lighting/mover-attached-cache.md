@@ -1,6 +1,6 @@
 # Object-attached mover lighting cache
 
-Status: **in progress** (Stages A–D landed; GPU table/pool SSBO compose read and fill still open).
+Status: **in progress** (Stages A–G landed; H fill deposits + I compose polish + J lavapipe gates in flight).
 
 ## Intent
 
@@ -37,10 +37,11 @@ Moving objects must carry their own lighting records so a spin or slide does not
 | B | Tiers, hysteresis, pressure share, free-on-drop; `surface_cache.mover_texels` |
 | C | Fill candidates + swept 1 m brick boost |
 | D | Delete object-local shared-hash salt; stop change-block hitch pack; host sync into `MoverCache`; unhold count kept in head.w |
+| F | GPU SSBO (binding 15): header + table + texel pool; dirty-range upload |
+| G | G-buffer object id; compose O(1) table + hashed span read |
+| H | Shared fill list; cache pass deposits world-direction lighting from the lattice |
 
 ## Still open
 
-- GPU SSBO for mover table + texel pool; compose O(1) read by object id / local cell.
-- G-buffer object / bone id for hitch without a dense scan.
-- Fill pass writing mover texels from the shared ray budget.
-- Spin gate at 0.027 once pool compose is live.
+- Stage I compose polish (Far never writes world cells — already gated; verify gates).
+- Stage J lavapipe: spin 0.027, knockout ≤ 0.213, ReSTIR REF_ERR 0.05, moving-boxes vs #282, rays/frame 10/100/1000.

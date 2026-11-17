@@ -308,6 +308,8 @@ pub(crate) struct Lighting {
     mover_cache: crate::mover_cache::MoverCache,
     /// GPU SSBO: header + table + texel pool (binding 15). Host-visible upload.
     mover_buf: Buffer,
+    /// Equivalent mover-fill rays deposited last sync (16 × deposits).
+    mover_fill_rays: u32,
     /// Traced mesh instances (mesh_field order): last poses, the ones that moved in
     /// the last LIGHTING_MOVER_KEEP frames, and every instance's bounding sphere now.
     mesh_poses: Vec<[f32; 16]>,
@@ -675,6 +677,7 @@ impl Default for Lighting {
             movers: std::collections::BTreeMap::new(),
             mover_cache: crate::mover_cache::MoverCache::high(),
             mover_buf: Buffer::empty(),
+            mover_fill_rays: 0,
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
@@ -5607,6 +5610,12 @@ impl Gpu {
             let _ = self.lighting.mover_cache.upsert(rec);
         }
         self.lighting.mover_cache.rebalance_all();
+        // Stage H: rank mover texels into the shared fill list. The cache pass
+        // deposits world-direction lighting from the lattice (Far never listed).
+        let budget = self.lighting.settings.surface_cache.ray_budget;
+        let budget = if budget == 0 { 4096 } else { budget };
+        let stats = self.lighting.mover_cache.prepare_fill(budget, 0.25, 0.05, false, 3.0);
+        self.lighting.mover_fill_rays = stats.rays;
         self.upload_mover_cache();
     }
 

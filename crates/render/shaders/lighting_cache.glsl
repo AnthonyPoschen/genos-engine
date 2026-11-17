@@ -1366,6 +1366,65 @@ vec4 lighting_mover_texel_mean(uint tex) {
         uintBitsToFloat(movers_gpu.header[at + 7u])); // samples in w
 }
 
+// Stage H fill list (header words 8..10; indices after the pool).
+uint lighting_mover_fill_count() { return movers_gpu.header[8]; }
+uint lighting_mover_fill_off() { return movers_gpu.header[9] / 4u; }
+uint lighting_mover_fill_texel(uint i) {
+    return movers_gpu.header[lighting_mover_fill_off() + i];
+}
+
+// World position of a mover texel (local → yaw about Y → centre).
+vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
+    uint at = lighting_mover_pool_off() + tex * 16u;
+    vec3 local = vec3(
+        uintBitsToFloat(movers_gpu.header[at + 0u]),
+        uintBitsToFloat(movers_gpu.header[at + 1u]),
+        uintBitsToFloat(movers_gpu.header[at + 2u]));
+    vec3 ln = vec3(
+        uintBitsToFloat(movers_gpu.header[at + 8u]),
+        uintBitsToFloat(movers_gpu.header[at + 9u]),
+        uintBitsToFloat(movers_gpu.header[at + 10u]));
+    uint oid = movers_gpu.header[at + 3u];
+    uint slot = lighting_mover_find_slot(oid);
+    if (slot == ~0u) {
+        world_n = vec3(0.0, 1.0, 0.0);
+        return local;
+    }
+    uint rt = lighting_mover_table_off() + slot * 16u;
+    vec3 centre = vec3(
+        uintBitsToFloat(movers_gpu.header[rt + 8u]),
+        uintBitsToFloat(movers_gpu.header[rt + 9u]),
+        uintBitsToFloat(movers_gpu.header[rt + 10u]));
+    float yc = uintBitsToFloat(movers_gpu.header[rt + 11u]);
+    float ys = uintBitsToFloat(movers_gpu.header[rt + 15u]);
+    vec3 w = vec3(yc * local.x + ys * local.z, local.y, -ys * local.x + yc * local.z) + centre;
+    world_n = normalize(vec3(yc * ln.x + ys * ln.z, ln.y, -ys * ln.x + yc * ln.z) + vec3(1.0e-6));
+    return w;
+}
+
+// Blend one world-direction irradiance sample into a mover texel (Far never listed).
+void lighting_mover_deposit(uint tex, vec3 rgb, float w) {
+    if (w <= 0.0 || tex == ~0u) {
+        return;
+    }
+    uint at = lighting_mover_pool_off() + tex * 16u;
+    if (movers_gpu.header[at + 3u] == 0u) {
+        return;
+    }
+    float prev = uintBitsToFloat(movers_gpu.header[at + 7u]);
+    float next = prev + w;
+    float a = w / max(next, 1.0e-6);
+    vec3 mean = vec3(
+        uintBitsToFloat(movers_gpu.header[at + 4u]),
+        uintBitsToFloat(movers_gpu.header[at + 5u]),
+        uintBitsToFloat(movers_gpu.header[at + 6u]));
+    mean += (rgb - mean) * a;
+    movers_gpu.header[at + 4u] = floatBitsToUint(mean.x);
+    movers_gpu.header[at + 5u] = floatBitsToUint(mean.y);
+    movers_gpu.header[at + 6u] = floatBitsToUint(mean.z);
+    movers_gpu.header[at + 7u] = floatBitsToUint(next);
+}
+
 // Packed hitch records: retired. Kept as zeros so call sites compile.
 uint lighting_movers_hitch() { return 0u; }
 vec4 lighting_mover(uint m, uint k) { return vec4(0.0); }
