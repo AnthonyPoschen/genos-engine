@@ -185,7 +185,15 @@ void main() {
         } else {
             bounce = indirect(p, pos, n);
             if (mode == 0u) {
-                outc.px[at] = lighting_pack_rgb9e5(max(bounce, vec3(0.0))) + 1u;
+                // An empty walk is not a colour to hold. Storing packed black
+                // (plus one, so the slot looked full) froze the first miss for
+                // 32 frames: the shadow field filled and the pixel stayed black.
+                // A later walk still replaces a stored bounce, including with
+                // black when a lamp has left.
+                uint packed = lighting_pack_rgb9e5(max(bounce, vec3(0.0)));
+                if (packed != 0u || stored != 0u) {
+                    outc.px[at] = packed + 1u;
+                }
             }
         }
 #endif
