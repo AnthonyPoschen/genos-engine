@@ -6,9 +6,13 @@
 //! open-address mover table maps object id to a record in O(1). Compose reads
 //! these texels for mover pixels; world cells cover everything else.
 //!
-//! Stage A ships the pool, the table, and lookup. Allocation tiers, the
-//! scheduler, and compose wiring land in later stages.
+//! Stages A–C: pool, table, lookup, tiers, and the fill/boost scheduler
+//! helpers. Compose wiring lands in Stage D.
 
+#![expect(
+    clippy::as_conversions,
+    reason = "brick indices and pool lengths use small integer casts"
+)]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 
 /// Bytes per mover texel on the GPU path (fp16 SH + packed normal).
@@ -563,6 +567,164 @@ fn table_hash(object_id: u32) -> u32 {
     object_id.wrapping_mul(2654435761) & (MOVER_TABLE_SLOTS - 1)
 }
 
+/// World-cell brick size for the mover dirty boost (1 m, DDGI-style +1 cell).
+pub const MOVER_DIRTY_BRICK_M: f32 = 1.0;
+
+/// Minimum angular size (radius / distance) before a mover dirties world cells.
+pub const MOVER_MATTER_ANGULAR: f32 = 0.01;
+
+/// One mover texel waiting in the shared fill budget.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MoverFillCandidate {
+    pub object_id: u32,
+    pub texel_index: u32,
+    /// Higher runs sooner. Combines measured change, distance moved, lamp
+    /// proximity, and camera closeness (`1 / max(d, 0.5)`).
+    pub priority: f32,
+}
+
+/// Priority for a mover texel in the single screen-tile / F-stack budget.
+#[must_use]
+pub fn fill_priority(
+    measured_change: f32,
+    distance_moved_m: f32,
+    lamp_change_near: bool,
+    distance_m: f32,
+) -> f32 {
+    let closeness = 1.0 / distance_m.max(0.5);
+    let move_w = distance_moved_m.max(0.0);
+    let lamp_w = if lamp_change_near { 4.0 } else { 0.0 };
+    measured_change.max(0.0) * 2.0 + move_w * 1.5 + lamp_w + closeness
+}
+
+/// Whether a mover is large enough on screen / in angle to dirty world cells.
+/// Far-tiny movers read world cells and write nothing back into them.
+#[must_use]
+pub fn mover_matters(radius_m: f32, distance_m: f32, screen_radius_px: f32) -> bool {
+    if screen_radius_px >= MOVER_MID_LEAVE_PX {
+        return true;
+    }
+    let angular = radius_m.max(0.0) / distance_m.max(0.5);
+    angular >= MOVER_MATTER_ANGULAR
+}
+
+/// 1 m brick indices that cover the swept bounds of a mover, expanded by one
+/// brick on every side (DDGI wake box + 1 cell).
+#[must_use]
+pub fn swept_boost_bricks(prev_sphere: [f32; 4], curr_sphere: [f32; 4]) -> Vec<[i32; 3]> {
+    let (lo, hi) = swept_aabb(prev_sphere, curr_sphere);
+    bricks_covering(lo, hi, MOVER_DIRTY_BRICK_M)
+}
+
+fn swept_aabb(prev: [f32; 4], curr: [f32; 4]) -> ([f32; 3], [f32; 3]) {
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for sphere in [prev, curr] {
+        let r = sphere[3].abs();
+        for a in 0..3 {
+            lo[a] = lo[a].min(sphere[a] - r);
+            hi[a] = hi[a].max(sphere[a] + r);
+        }
+    }
+    // Expand by one brick.
+    for a in 0..3 {
+        lo[a] -= MOVER_DIRTY_BRICK_M;
+        hi[a] += MOVER_DIRTY_BRICK_M;
+    }
+    (lo, hi)
+}
+
+fn bricks_covering(lo: [f32; 3], hi: [f32; 3], brick: f32) -> Vec<[i32; 3]> {
+    let brick = brick.max(1.0e-3);
+    let min_i = [
+        floor_brick(lo[0], brick),
+        floor_brick(lo[1], brick),
+        floor_brick(lo[2], brick),
+    ];
+    let max_i = [
+        floor_brick(hi[0], brick),
+        floor_brick(hi[1], brick),
+        floor_brick(hi[2], brick),
+    ];
+    let mut out = Vec::new();
+    let mut x = min_i[0];
+    while x <= max_i[0] {
+        let mut y = min_i[1];
+        while y <= max_i[1] {
+            let mut z = min_i[2];
+            while z <= max_i[2] {
+                out.push([x, y, z]);
+                z = z.saturating_add(1);
+            }
+            y = y.saturating_add(1);
+        }
+        x = x.saturating_add(1);
+    }
+    out
+}
+
+/// Floor of `v / brick` as `i32`, toward −∞.
+fn floor_brick(v: f32, brick: f32) -> i32 {
+    (v / brick).floor() as i32
+}
+
+impl MoverCache {
+    /// Builds fill candidates for every live mover texel. Far movers contribute
+    /// nothing. Priority comes from [`fill_priority`].
+    #[must_use]
+    pub fn fill_candidates(
+        &self,
+        measured_change: f32,
+        distance_moved_m: f32,
+        lamp_change_near: bool,
+        distance_m: f32,
+    ) -> Vec<MoverFillCandidate> {
+        let p = fill_priority(measured_change, distance_moved_m, lamp_change_near, distance_m);
+        let mut out = Vec::new();
+        for rec in &self.table {
+            if !rec.is_live() || rec.tier == MoverTier::Far || rec.texel_count == 0 {
+                continue;
+            }
+            for (i, t) in self.texels.iter().enumerate() {
+                if t.object_id != rec.object_id {
+                    continue;
+                }
+                out.push(MoverFillCandidate {
+                    object_id: rec.object_id,
+                    texel_index: u32_from_usize(i),
+                    priority: p,
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out
+    }
+
+    /// World-cell bricks to boost for one mover's swept motion. Empty when the
+    /// mover is too small to matter at its distance.
+    #[must_use]
+    pub fn world_boost_bricks(
+        &self,
+        object_id: u32,
+        prev_sphere: [f32; 4],
+        distance_m: f32,
+        screen_radius_px: f32,
+    ) -> Vec<[i32; 3]> {
+        let Some(rec) = self.get(object_id) else {
+            return Vec::new();
+        };
+        let radius = rec.sphere[3].abs();
+        if !mover_matters(radius, distance_m, screen_radius_px) {
+            return Vec::new();
+        }
+        swept_boost_bricks(prev_sphere, rec.sphere)
+    }
+}
+
 fn dist2(a: [f32; 3], b: [f32; 3]) -> f32 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
@@ -792,5 +954,48 @@ mod tests {
             .expect("mid");
         assert_eq!(n, MOVER_TIER_MID_TEXELS);
         assert_eq!(cache.get(5).map(|r| r.tier), Some(MoverTier::Mid));
+    }
+
+    #[test]
+    fn tiny_far_mover_dirties_no_world_cells() {
+        assert!(!mover_matters(0.05, 50.0, 1.0));
+        let mut cache = MoverCache::new(64);
+        let mut r = record(9);
+        r.sphere = [0.0, 1.0, 0.0, 0.05];
+        cache.upsert(r).expect("insert");
+        let bricks = cache.world_boost_bricks(9, [0.0, 1.0, 0.0, 0.05], 50.0, 1.0);
+        assert!(bricks.is_empty());
+    }
+
+    #[test]
+    fn swept_boost_covers_box_plus_one_metre_brick() {
+        // Stationary 0.5 m radius at origin → AABB [-0.5,0.5], expand ±1 →
+        // bricks from floor(-1.5)=-2 through floor(1.5)=1 on each axis.
+        let bricks = swept_boost_bricks([0.0, 0.0, 0.0, 0.5], [0.0, 0.0, 0.0, 0.5]);
+        assert!(bricks.contains(&[-2, -2, -2]));
+        assert!(bricks.contains(&[1, 1, 1]));
+        assert!(!bricks.contains(&[-3, 0, 0]));
+        // Moving along +X extends the sweep.
+        let moved = swept_boost_bricks([0.0, 0.0, 0.0, 0.5], [3.0, 0.0, 0.0, 0.5]);
+        assert!(moved.len() > bricks.len());
+        assert!(moved.contains(&[4, 0, 0])); // 3+0.5+1 = 4.5 → floor 4
+    }
+
+    #[test]
+    fn fill_candidates_skip_far_and_rank_by_priority() {
+        let mut cache = MoverCache::new(128);
+        cache.upsert(record(1)).expect("near");
+        cache
+            .update_tier_and_alloc(1, 2.0, 80.0)
+            .expect("alloc near");
+        let mut far = record(2);
+        far.tier = MoverTier::Far;
+        cache.upsert(far).expect("far");
+        let cands = cache.fill_candidates(0.5, 0.1, false, 2.0);
+        assert!(!cands.is_empty());
+        assert!(cands.iter().all(|c| c.object_id == 1));
+        let hot = fill_priority(1.0, 2.0, true, 1.0);
+        let cold = fill_priority(0.0, 0.0, false, 20.0);
+        assert!(hot > cold);
     }
 }
