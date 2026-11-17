@@ -13,6 +13,7 @@ mod hdr_output;
 mod lamp_pick;
 pub mod lighting_sh;
 mod material_stream;
+pub mod mover_cache;
 mod mesh;
 mod mesh_field;
 mod occ_grid;
@@ -66,6 +67,11 @@ pub use gpu::{
     LightingChangeHead, LightingSunStats, MaterialStats, Renderer, ScreenLine, ScreenRect,
     SettleStats, TexelDetailPlant, UnfilledControl, UnfilledStats, ViewMode, VkTraffic,
     release_software_compiler_heap,
+};
+pub use mover_cache::{
+    MoverCache, MoverCacheError, MoverRecord, MoverTexel, MoverTier, MOVER_TABLE_SLOTS,
+    MOVER_TEXELS_HIGH, MOVER_TEXELS_LOW, MOVER_TEXELS_MEDIUM, MOVER_TEXEL_BYTES,
+    MOVER_TIER_MID_TEXELS, MOVER_TIER_NEAR_TEXELS,
 };
 pub use hdr_output::{
     aces2_rec709, agx_display_linear, agx_rec709, bloom_commute_error, bloom_downsample,
