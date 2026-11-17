@@ -1519,22 +1519,49 @@ void lighting_fill_resolve(uint gid) {
     lighting_fill_share(gid);
 }
 
-// One wavelet stage a frame, the same stage for every off-screen band child
-// that already has LIGHTING_FINE_READY_SETS samples. Neighbours' levels are
-// last frame's writes. Below that count the stage does not run, and compose
-// shows the raw mean when the child becomes visible. A child the frustum can
-// see is the screen launch's, so this does not run a second filter on it.
-void lighting_fine_world_filter(uint slot) {
-    if (slot >= LIGHTING_CACHE_SLOTS) {
+// The birth frame often runs before the parent cell has a sample. Until the
+// child has its own sets, replace the stored prior when the parent has more
+// samples than the one already kept. A child the frustum can see is left as
+// it was: the screen push publishes that snapshot, and it does not track the
+// parent after it becomes visible.
+#ifndef GENOS_COMPOSE_NO_WALK
+void lighting_fine_adopt(uint slot) {
+    if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
         return;
     }
     if (!(cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID)) {
         return;
     }
-    if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
+    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_FINE_READY_SETS) {
         return;
     }
-    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_FINE_READY_SETS) {
+    vec3 p;
+    vec3 n;
+    if (!lighting_sc_texel_world(slot, p, n)) {
+        return;
+    }
+    vec3 pr;
+    float pn;
+    float pv;
+    float ps;
+    lighting_fine_prior(p, n, pr, pn, pv, ps);
+    float have = cache.v[LIGHTING_SC_SHOWN_AT + slot].z;
+    if (!(pn > have + LIGHTING_SC_SET_HALF)) {
+        return;
+    }
+    lighting_sc_set_seed(slot, pr, 1.0, ps);
+    vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + slot];
+    mark.y = 1.0;
+    mark.z = pn;
+    mark.w = pv;
+    cache.v[LIGHTING_SC_SHOWN_AT + slot] = mark;
+    lighting_fine_publish(slot);
+}
+#endif
+// Off-screen band children keep the parent-prior blend in the filtered field.
+// A child the frustum can see is published by the screen push.
+void lighting_fine_world_filter(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS || cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
         return;
     }
     uint px;
@@ -1542,12 +1569,10 @@ void lighting_fine_world_filter(uint slot) {
     if (lighting_fill_pixel(lighting_sc_texel_pos(slot), px, py)) {
         return;
     }
-    uint stage = lighting_frame() % 7u;
-    if (stage == 0u) {
-        lighting_svgf_variance(slot);
-    } else if (stage <= 5u) {
-        lighting_svgf_iter(slot, stage - 1u);
-    } else {
-        lighting_svgf_push(slot);
+#ifndef GENOS_COMPOSE_NO_WALK
+    lighting_fine_adopt(slot);
+#endif
+    if (lighting_fine_has_prior(slot)) {
+        lighting_fine_publish(slot);
     }
 }
