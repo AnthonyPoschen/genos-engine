@@ -6201,6 +6201,10 @@ pub struct CacheRound {
     pub waiting: u32,
     /// Scout rays scheduled this round. Zero when the scout was not due.
     pub scouts: u32,
+    /// Lookups that found neither their entry nor a free slot.
+    pub missed: u32,
+    /// Entries freed this round (distance drop, expiry, or a full-table eviction).
+    pub freed: u32,
 }
 
 impl CacheRound {
@@ -6213,6 +6217,8 @@ impl CacheRound {
             due: words[17],
             waiting: words[18],
             scouts: words[19],
+            missed: words[3],
+            freed: words[10],
         }
     }
 }

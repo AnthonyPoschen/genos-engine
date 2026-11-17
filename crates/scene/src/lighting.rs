@@ -590,11 +590,12 @@ pub struct SurfaceCacheSettings {
     /// same edge. `0` does not drop by distance. Key `surface_cache.fine_lod_drop`.
     pub fine_lod_drop: f32,
     /// Metres the create and drop distances stretch ahead of the player's
-    /// motion and turn. `0` keeps the band centred on the player.
-    /// Key `surface_cache.fine_lod_lookahead`.
+    /// motion and turn. A still view does not stretch the band. `0` keeps
+    /// the band centred on the player. Key `surface_cache.fine_lod_lookahead`.
     pub fine_lod_lookahead: f32,
-    /// Share of the fixed texel ray room reserved for off-screen fine texels
-    /// inside the drop distance. `0` reserves none. Clamped to `0.5`.
+    /// Share of the fixed texel ray room reserved for fine texels inside the
+    /// drop distance that are not yet settled. The share is taken out of that
+    /// room. `0` reserves none. Clamped to `0.5`.
     /// Key `surface_cache.fine_budget_share`.
     pub fine_budget_share: f32,
     /// Priority multiplier for a fine texel a pixel is showing. `1` is no boost.

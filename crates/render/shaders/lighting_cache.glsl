@@ -507,6 +507,9 @@ const uint LIGHTING_FINE_AHEAD_AT = LIGHTING_SC_HIST_AT + 92u;
 const uint LIGHTING_FINE_SHARE_AT = LIGHTING_SC_HIST_AT + 93u;
 const uint LIGHTING_FINE_BOOST_AT = LIGHTING_SC_HIST_AT + 94u;
 const uint LIGHTING_FINE_CLOSE_AT = LIGHTING_SC_HIST_AT + 95u;
+// Ranked seats for the fine band. One word per bucket, cleared when the
+// threshold is chosen. Stops before the lamp snapshot at +160.
+const uint LIGHTING_FINE_HIST_AT = LIGHTING_SC_HIST_AT + 96u;
 // WRC refresh (S61B, Anthony: a hard, fixed budget): at most LIGHTING_WRC_REFRESH
 // batch entries a round (~6 % of 65536) go to WRC cells outside the reveal
 // burst, from two lists: change-driven first (a mover nearby, or a lamp that
@@ -3390,11 +3393,16 @@ void lighting_write_args() {
         ckeys.key[LIGHTING_DRAIN_CELLS_AT] = 0u;
         ckeys.key[LIGHTING_DRAIN_SQ_AT] = 0u;
         gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
-        uint base = lighting_fine_budget_entries();
-        uint fine = min(ckeys.key[LIGHTING_FINE_COUNT_AT], base);
-        uint young_budget = young_room > base ? young_room - base : 0u;
+        // The fine share is a slice of the ceiling the histogram used, not
+        // extra entries above it. A quiet frame stays at the base room.
+        uint reserve = lighting_fine_budget_entries();
+        uint fine = min(ckeys.key[LIGHTING_FINE_COUNT_AT], reserve);
+        uint boost_n = ckeys.key[LIGHTING_SC_BOOST_AT];
+        bool fine_boost = boost_n > 0u && boost_n <= LIGHTING_SC_BOOST_ROUNDS;
+        uint ceiling = fine_boost ? room : young_room;
+        uint young_budget = ceiling > reserve ? ceiling - reserve : 0u;
         uint first = fine + min(lighting_young_count(), young_budget);
-        a = min(room, first + lighting_mature_count());
+        a = min(ceiling, first + lighting_mature_count());
         b = min(ckeys.key[LIGHTING_SC_TRICKLE_COUNT_AT], LIGHTING_SC_TRICKLE >> sh);
         // S77A: change-list cells are checks, one 16-ray entry each; the
         // background list (and escalated cells) take whole sets.
@@ -3621,27 +3629,25 @@ const float LIGHTING_FINE_SCORE_NEAR = 0.25;
 const float LIGHTING_FINE_CHG_CAP = 4.0;
 const float LIGHTING_FINE_PLANE_EPS = 1.0e-3;
 const float LIGHTING_FINE_HALF = 0.5;
-const float LIGHTING_FINE_THR_START = 1.0e-3;
-const float LIGHTING_FINE_THR_UP = 1.5;
-const float LIGHTING_FINE_THR_HI = 1.0e5;
-const float LIGHTING_FINE_THR_DOWN = 0.8;
-const float LIGHTING_FINE_THR_LO = 1.0e-4;
 float lighting_fine_word(uint at) {
     return uintBitsToFloat(ckeys.key[at]);
 }
+// Motion and a turn only. A still camera leaves the band centred: the view
+// raises priority, it does not change who is inside the distance.
 vec3 lighting_fine_ahead() {
-    vec3 fwd = normalize(scene.view_forward.xyz + vec3(0.0, LIGHTING_FINE_AHEAD_EPS, 0.0));
     vec4 last_eye = work.v[lighting_change_at() + 1u];
     vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
     if (!(last_eye.w > LIGHTING_FINE_VALID) || !(dot(last_fwd, last_fwd) > LIGHTING_FINE_VALID)) {
-        return fwd;
+        return vec3(0.0);
     }
+    vec3 fwd = normalize(scene.view_forward.xyz + vec3(0.0, LIGHTING_FINE_AHEAD_EPS, 0.0));
     vec3 step = scene.eye.xyz - last_eye.xyz;
     vec3 turn = fwd - normalize(last_fwd);
-    if (!(dot(step, step) > LIGHTING_FINE_AHEAD_EPS) && !(dot(turn, turn) > LIGHTING_FINE_AHEAD_EPS)) {
-        return fwd;
+    vec3 motion = LIGHTING_FINE_AHEAD_STEP * step + LIGHTING_FINE_AHEAD_TURN * turn;
+    if (!(dot(motion, motion) > LIGHTING_FINE_AHEAD_EPS)) {
+        return vec3(0.0);
     }
-    return normalize(fwd + LIGHTING_FINE_AHEAD_STEP * step + LIGHTING_FINE_AHEAD_TURN * turn);
+    return normalize(motion);
 }
 float lighting_fine_reach(vec3 p) {
     vec3 from = p - scene.eye.xyz;
@@ -3666,16 +3672,28 @@ bool lighting_fine_past_drop(vec3 p) {
     float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
     return drop > 0.0 && lighting_fine_reach(p) > drop;
 }
-float lighting_fine_score(uint slot, vec3 p, float t) {
+// Closeness falls off as 1/reach when fine_close_boost is above 0. Zero leaves
+// the rank to remaining error, measured change, and the on-screen boost.
+float lighting_fine_score(uint slot, vec3 p, float t, bool on_screen) {
     float reach = max(lighting_fine_reach(p), LIGHTING_FINE_SCORE_NEAR);
     float close = max(lighting_fine_word(LIGHTING_FINE_CLOSE_AT), 0.0);
+    float dist = close > 0.0 ? (1.0 + close) / reach : 1.0;
     vec2 nz = lighting_sc_noise(slot);
     float err = nz.x >= 0.0 ? nz.x : 1.0;
     float cap = max(lighting_sc_cap(slot), 1.0);
     err = max(err, clamp((cap - t) / cap, 0.0, 1.0));
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     float chg = est.x > 0.0 ? max(est.y, 0.0) : 1.0;
-    return (1.0 / reach) * (1.0 + close) * (1.0 + err) * (1.0 + min(chg, LIGHTING_FINE_CHG_CAP));
+    float boost = lighting_fine_word(LIGHTING_FINE_BOOST_AT);
+    float screen = (on_screen && boost > 1.0) ? boost : 1.0;
+    // Under four sets the texel stays in the rank, nearer first. At four it
+    // yields, so the next shell is reached instead of one texel taking the lane.
+    float fresh = floor(max(t, 0.0)) < 4.0 ? 1.0 : 0.0;
+    return screen * dist * (1.0 + err) * (1.0 + min(chg, LIGHTING_FINE_CHG_CAP)) * (1.0 + 8.0 * fresh);
+}
+uint lighting_fine_bucket(float score) {
+    float l = log2(max(score, 1.0e-4));
+    return uint(clamp(l * 8.0 + 32.0, 0.0, float(LIGHTING_SC_BUCKETS - 1u)));
 }
 bool lighting_fine_keep_visiting(uint slot) {
     if (lighting_fine_budget_entries() == 0u) {
@@ -3694,7 +3712,65 @@ bool lighting_fine_keep_visiting(uint slot) {
     }
     return !lighting_sc_settled(slot, cache.v[3u * slot + 2u].w);
 }
+// A full probe chain: free the farthest texel past the drop distance, or else
+// the farthest settled texel, and count the miss either way.
+bool lighting_fine_evict(vec3 pos, vec3 n) {
+    uint key = lighting_cache_key_sized(pos, n, LIGHTING_SC_TEXEL);
+    uint start = lighting_hash(key ^ 0x9e3779b9u);
+    uint best = ~0u;
+    uint best_key = 0u;
+    float best_reach = -1.0;
+    bool best_far = false;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
+        uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
+        uint k = ckeys.key[slot];
+        if (k == 0u || k == key) {
+            continue;
+        }
+        if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
+            continue;
+        }
+        vec3 p = lighting_sc_texel_pos(slot);
+        float reach = lighting_fine_reach(p);
+        bool far = lighting_fine_past_drop(p);
+        bool settled = lighting_sc_settled(slot, cache.v[3u * slot + 2u].w);
+        if (!far && !settled) {
+            continue;
+        }
+        bool better = best == ~0u || (far && !best_far) || (far == best_far && reach > best_reach);
+        if (better) {
+            best = slot;
+            best_key = k;
+            best_reach = reach;
+            best_far = far;
+        }
+    }
+    if (best == ~0u) {
+        return false;
+    }
+    if (atomicCompSwap(ckeys.key[best], best_key, 0u) != best_key) {
+        return false;
+    }
+    atomicAdd(gstats.freed, 1u);
+    lighting_sc_forget(best);
+    cache.v[3u * best + 1u] = vec4(0.0);
+    cache.v[3u * best + 2u] = vec4(0.0);
+    return true;
+}
+uint lighting_fine_claim(vec3 q, vec3 n) {
+    uint s = lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+    if (s != ~0u) {
+        return s;
+    }
+    atomicAdd(gstats.missed, 1u);
+    if (!lighting_fine_evict(q, n)) {
+        return ~0u;
+    }
+    return lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+}
 // Four 12.5 cm texels cover one 25 cm world cell. The stored hit is the surface.
+// The estimator age word marks a cell whose children were already claimed, so
+// later compacts do not probe them again. Leaving the drop distance clears it.
 void lighting_fine_spawn(uint slot) {
     float create = lighting_fine_word(LIGHTING_FINE_CREATE_AT);
     if (!(create > 0.0) || lighting_world_mode() != 3u) {
@@ -3705,7 +3781,13 @@ void lighting_fine_spawn(uint slot) {
     }
     vec3 n = cache.v[3u * slot + 1u].xyz;
     vec3 p = lighting_sc_texel_pos(slot);
-    if (lighting_fine_reach(p) > create) {
+    float reach = lighting_fine_reach(p);
+    float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
+    if (drop > 0.0 && reach > drop) {
+        cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w = 0.0;
+        return;
+    }
+    if (reach > create || cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w > 0.5) {
         return;
     }
     uint ax = lighting_axis(n) >> 1u;
@@ -3723,10 +3805,13 @@ void lighting_fine_spawn(uint slot) {
         if (abs(nd) > LIGHTING_FINE_PLANE_EPS) {
             q[ax] += dot(p - q, n) / nd;
         }
-        lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+        lighting_fine_claim(q, n);
     }
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w = 1.0;
 }
-// True when this texel was freed or placed on the reserved ray list.
+// True when this texel was freed, seated, or rejected. A loser does not fall
+// through onto the main list. On-screen unsettled texels compete here too;
+// the screen boost is part of the rank.
 bool lighting_fine_schedule(uint slot, float t, bool on_screen) {
     if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
         return false;
@@ -3741,22 +3826,26 @@ bool lighting_fine_schedule(uint slot, float t, bool on_screen) {
         return true;
     }
     uint cap = lighting_fine_budget_entries();
-    if (on_screen || cap == 0u || lighting_sc_settled(slot, t)) {
+    if (cap == 0u || lighting_sc_settled(slot, t)) {
         return false;
     }
     float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
     if (!(drop > 0.0) || lighting_fine_reach(p) >= drop) {
         return false;
     }
-    float score = lighting_fine_score(slot, p, t);
-    float thr = lighting_fine_word(LIGHTING_FINE_THR_AT);
-    if (thr > 0.0 && score < thr) {
-        return false;
-    }
+    float score = lighting_fine_score(slot, p, t, on_screen);
+    uint bucket = lighting_fine_bucket(score);
     uint m = lighting_sc_entries(slot, true);
+    atomicAdd(ckeys.key[LIGHTING_FINE_HIST_AT + bucket], m);
+    // 0 means the rank is not chosen yet: keep the nearer half of the buckets.
+    uint raw = ckeys.key[LIGHTING_FINE_THR_AT];
+    uint thr = raw == 0u ? 32u : raw - 1u;
+    if (bucket < thr) {
+        return true;
+    }
     uint at = atomicAdd(ckeys.key[LIGHTING_FINE_COUNT_AT], m);
     if (at >= cap) {
-        return false;
+        return true;
     }
     uint n = min(m, cap - at);
     for (uint i = 0u; i < n; i++) {
@@ -3764,27 +3853,40 @@ bool lighting_fine_schedule(uint slot, float t, bool on_screen) {
     }
     return true;
 }
-uint lighting_young_at(uint n) {
-    uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], n);
-    return at + lighting_fine_budget_entries();
-}
-void lighting_fine_note_threshold() {
-    uint got = ckeys.key[LIGHTING_FINE_COUNT_AT];
-    uint cap = lighting_fine_budget_entries();
-    float thr = lighting_fine_word(LIGHTING_FINE_THR_AT);
-    if (!(thr > 0.0)) {
-        thr = LIGHTING_FINE_THR_START;
-    }
-    if (cap == 0u) {
-        ckeys.key[LIGHTING_FINE_THR_AT] = floatBitsToUint(LIGHTING_FINE_THR_START);
+// Young and fine lists share the top of the key stack. Writes stop at the
+// hash keys. n that does not fit is dropped, not wrapped.
+void lighting_young_write(uint slot, uint n) {
+    uint reserve = lighting_fine_budget_entries();
+    uint room = LIGHTING_CACHE_SLOTS > reserve + 1u ? LIGHTING_CACHE_SLOTS - reserve - 1u : 0u;
+    if (n == 0u || room == 0u) {
         return;
     }
-    if (got >= cap) {
-        thr = min(thr * LIGHTING_FINE_THR_UP, LIGHTING_FINE_THR_HI);
-    } else {
-        thr = max(thr * LIGHTING_FINE_THR_DOWN, LIGHTING_FINE_THR_LO);
+    n = min(n, room);
+    uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], n);
+    if (at >= room) {
+        return;
     }
-    ckeys.key[LIGHTING_FINE_THR_AT] = floatBitsToUint(thr);
+    uint fit = min(n, room - at);
+    uint start = at + reserve;
+    for (uint i = 0u; i < fit; i++) {
+        ckeys.key[2u * LIGHTING_CACHE_SLOTS - start - i] = slot;
+    }
+}
+void lighting_fine_note_threshold() {
+    uint cap = lighting_fine_budget_entries();
+    uint acc = 0u;
+    uint thr = 0u;
+    bool cut = false;
+    for (int b = int(LIGHTING_SC_BUCKETS) - 1; b >= 0; b--) {
+        acc += ckeys.key[LIGHTING_FINE_HIST_AT + uint(b)];
+        ckeys.key[LIGHTING_FINE_HIST_AT + uint(b)] = 0u;
+        if (!cut && cap > 0u && acc >= cap) {
+            thr = uint(b);
+            cut = true;
+        }
+    }
+    // Stored as bucket + 1. 1 admits every bucket (the rank fitted).
+    ckeys.key[LIGHTING_FINE_THR_AT] = cut ? thr + 1u : 1u;
 }
 // WRC scout ray s of this round (entries past the batch's texels): from the eye
 // (a quarter from up to 2 m beside it), half over the sphere and half within
@@ -5654,6 +5756,20 @@ void lighting_svgf_push(uint slot) {
             } else {
                 float lam = clamp(lighting_sc_lambda(slot), 0.0, 1.0);
                 catch_up = (1.0 - lam) * catch_up + lam;
+                // A young fine texel keeps its parent seed in the picture and
+                // lets its own sets take over by count, so a handful of sets
+                // cannot walk the surface once it is on screen.
+                if (lighting_fine_budget_entries() > 0u
+                    && sets < LIGHTING_SC_FULL_SETS
+                    && cache.v[3u * slot + 1u].w <= LIGHTING_HIT_PATCH
+                    && !lighting_fine_past_drop(lighting_sc_texel_pos(slot))) {
+                    vec4 sd = lighting_sc_seed(slot);
+                    float held = sets / LIGHTING_SC_FULL_SETS;
+                    if (sd.w > 0.0) {
+                        outc = mix(sd.rgb, outc, held);
+                    }
+                    catch_up = min(catch_up, mix(LIGHTING_FIELD_CATCH * 0.25, catch_up, held));
+                }
             }
             outc = mix(prev, outc, catch_up);
         }

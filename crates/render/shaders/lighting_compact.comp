@@ -355,10 +355,7 @@ void main() {
                     cache.v[LIGHTING_SC_GRAD_AT + slot].x = -lam;
                     lighting_sc_check_soon(slot);
                     lighting_dg(2u, 1u); lighting_dg(3u, mm);
-                    uint at = lighting_young_at(mm);
-                    for (uint i = 0u; i < mm; i++) {
-                        ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
-                    }
+                    lighting_young_write(slot, mm);
                     return;
                 }
             }
@@ -522,10 +519,7 @@ void main() {
         uint m = (settling && wrc) ? 1u : lighting_sc_entries(slot, true);
         lighting_dg(burst ? 1u : (near ? 0u : 34u), m); lighting_dg(35u, 1u);
         if (young) {
-            uint at = lighting_young_at(m);
-            for (uint i = 0u; i < m; i++) {
-                ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
-            }
+            lighting_young_write(slot, m);
         } else {
             uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
             for (uint i = 0u; i < m; i++) {
@@ -536,10 +530,7 @@ void main() {
     }
     uint m = lighting_sc_entries(slot, true);
     if (near || t < LIGHTING_CACHE_MATURE - 0.5) {
-        uint at = lighting_young_at(m);
-        for (uint i = 0u; i < m; i++) {
-            ckeys.key[2u * LIGHTING_CACHE_SLOTS - at - i] = slot;
-        }
+        lighting_young_write(slot, m);
     } else {
         uint at = atomicAdd(ckeys.key[LIGHTING_CACHE_SLOTS], m);
         for (uint i = 0u; i < m; i++) {

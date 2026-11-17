@@ -1,4 +1,7 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Per-frame cache trace of a full-shadow pixel and a penumbra pixel, and the
 //! seed a turn writes into a fine texel that did not exist yet.
@@ -11,8 +14,8 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 
 use genos_render::{
-    linear_from_display, luminance, radiance, sees, solid_contains, trace_ray, CacheQuery, Renderer,
-    StoredCell,
+    linear_from_display, luminance, radiance, sees, solid_contains, trace_ray, CacheQuery,
+    Renderer, StoredCell,
 };
 use genos_scene::{look_direction, viewport_uv, Camera, LightingPreset, LightingSettings, Vec3};
 use genos_stress::building::{Layout, LightMix};
@@ -29,12 +32,18 @@ const RAY_LIFT: f32 = 0.02;
 
 fn open() -> (MutexGuard, genos_window::Lifecycle<Renderer>) {
     static GPU: Mutex<()> = Mutex::new(());
-    let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = GPU
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let frame = window.pump();
     let (renderer, permit) =
-        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 type MutexGuard = std::sync::MutexGuard<'static, ()>;
@@ -209,11 +218,7 @@ fn surface_at(scene: &genos_scene::Scene, camera: &Camera, pixel: u32) -> Option
     })
 }
 
-fn find_surface(
-    scene: &genos_scene::Scene,
-    camera: &Camera,
-    want_shadow: bool,
-) -> Option<Surface> {
+fn find_surface(scene: &genos_scene::Scene, camera: &Camera, want_shadow: bool) -> Option<Surface> {
     let mut y = 8u32;
     while y + 8 < HEIGHT {
         let mut x = 8u32;
@@ -263,8 +268,12 @@ fn query(point: [f32; 3], normal: [f32; 3], size: f32) -> CacheQuery {
 fn display_luma(pixels: &[u8], pixel: u32) -> f64 {
     let at = usize::try_from(pixel).unwrap_or(0).saturating_mul(4);
     let b = f32_u32(u32::from(pixels.get(at).copied().unwrap_or(0))) / 255.0;
-    let g = f32_u32(u32::from(pixels.get(at.saturating_add(1)).copied().unwrap_or(0))) / 255.0;
-    let r = f32_u32(u32::from(pixels.get(at.saturating_add(2)).copied().unwrap_or(0))) / 255.0;
+    let g = f32_u32(u32::from(
+        pixels.get(at.saturating_add(1)).copied().unwrap_or(0),
+    )) / 255.0;
+    let r = f32_u32(u32::from(
+        pixels.get(at.saturating_add(2)).copied().unwrap_or(0),
+    )) / 255.0;
     f64_f32(luminance([
         linear_from_display(r),
         linear_from_display(g),
@@ -290,7 +299,9 @@ fn note_frame(
     series: &mut Series,
 ) {
     series.pixel_y.push(scene_luma(picture, surface.pixel));
-    series.display_y.push(display_luma(displayed, surface.pixel));
+    series
+        .display_y
+        .push(display_luma(displayed, surface.pixel));
     series.weight.push(f64_f32(fine.weight));
     series.support.push(f64_f32(fine.field_support));
     if fine.hit.slot.is_none() {
@@ -606,7 +617,11 @@ fn nearby_spots(scene: &genos_scene::Scene, camera: &Camera) -> Vec<Spot> {
         }
         x += 1;
     }
-    spots.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+    spots.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     spots.truncate(32);
     spots
 }
@@ -619,7 +634,10 @@ fn push_spot(spots: &mut Vec<Spot>, camera: &Camera, point: [f32; 3], normal: [f
     if !(0.05..=NEAR).contains(&distance) {
         return;
     }
-    if spots.iter().any(|spot| length(sub(spot.position, point)) < 0.2) {
+    if spots
+        .iter()
+        .any(|spot| length(sub(spot.position, point)) < 0.2)
+    {
         return;
     }
     spots.push(Spot {
@@ -674,7 +692,10 @@ fn a_turn_seeds_fine_texels_from_the_world_cell() {
         .map(|spot| !off_screen(&camera, spot.position))
         .collect();
     let shown = on_screen.iter().filter(|on| **on).count();
-    eprintln!("turn yaw {yaw:.3} pitch {pitch:.3} on_screen {shown} of {}", spots.len());
+    eprintln!(
+        "turn yaw {yaw:.3} pitch {pitch:.3} on_screen {shown} of {}",
+        spots.len()
+    );
     for _ in 0..4 {
         let _ = window.pump();
         renderer
@@ -726,7 +747,10 @@ fn a_turn_seeds_fine_texels_from_the_world_cell() {
         );
     }
     eprintln!("compared {compared} max_seed_rel {seed_gap:.3} max_parent_rel {coarse_gap:.3}");
-    assert!(compared >= 4, "the turn did not bring nearby surfaces on screen");
+    assert!(
+        compared >= 4,
+        "the turn did not bring nearby surfaces on screen"
+    );
 }
 
 fn trunc_u32(v: f32) -> u32 {
@@ -782,6 +806,9 @@ struct YawTurn {
     filled: u32,
     mean_weight: f64,
     pixel_delta: f64,
+    rays: u32,
+    missed: u32,
+    freed: u32,
 }
 
 fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: bool) -> YawTurn {
@@ -802,11 +829,14 @@ fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: b
     for _ in 0..24 {
         let _ = draw_presented(window, renderer, stage, &camera);
     }
+    let round = renderer.read_cache_round().expect("cache round");
     let fine_q: Vec<CacheQuery> = spots
         .iter()
         .map(|spot| query(spot.position, spot.normal, TEXEL))
         .collect();
-    let before = renderer.read_cache_cells(&fine_q).expect("fine before the turn");
+    let before = renderer
+        .read_cache_cells(&fine_q)
+        .expect("fine before the turn");
     let mut acc = [0.0f32; 3];
     for spot in &spots {
         acc = add(acc, spot.position);
@@ -869,13 +899,17 @@ fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: b
         weight_sum / f64::from(filled)
     };
     eprintln!(
-        "fill {fill} shown {shown} filled {filled} mean_weight {mean_weight:.2} pixel_delta {pixel_delta:.4} counted {counted}"
+        "fill {fill} shown {shown} filled {filled} mean_weight {mean_weight:.2} pixel_delta {pixel_delta:.4} counted {counted} rays {} missed {} freed {}",
+        round.rays, round.missed, round.freed
     );
     YawTurn {
         shown,
         filled,
         mean_weight,
         pixel_delta,
+        rays: round.rays,
+        missed: round.missed,
+        freed: round.freed,
     }
 }
 
@@ -889,8 +923,16 @@ fn a_yaw_turn_finds_nearby_surfaces_already_filled() {
     let (stage, _) = hall();
     let off = yaw_once(window, renderer, &stage, false);
     let on = yaw_once(window, renderer, &stage, true);
-    assert!(off.shown >= 4, "the turn brought {} surfaces on screen", off.shown);
-    assert!(on.shown >= 4, "the turn brought {} surfaces on screen", on.shown);
+    assert!(
+        off.shown >= 4,
+        "the turn brought {} surfaces on screen",
+        off.shown
+    );
+    assert!(
+        on.shown >= 4,
+        "the turn brought {} surfaces on screen",
+        on.shown
+    );
     assert!(
         on.filled * 2 >= on.shown,
         "fine texels before the turn: {} of {} (mean weight {:.2})",
@@ -909,4 +951,119 @@ fn a_yaw_turn_finds_nearby_surfaces_already_filled() {
         on.pixel_delta,
         off.pixel_delta
     );
+    assert!(off.rays > 0, "the unfilled hall traced no cache rays");
+    assert!(
+        on.rays <= off.rays + off.rays / 20,
+        "fine band rays {} against the still ceiling {} (freed {}, missed {})",
+        on.rays,
+        off.rays,
+        on.freed,
+        on.missed
+    );
+    assert_eq!(
+        on.missed, 0,
+        "claims missed a free slot {} times (freed {})",
+        on.missed, on.freed
+    );
+}
+
+fn horiz(yaw: f32) -> [f32; 3] {
+    let dir = look_direction(yaw, 0.0);
+    [dir.x, dir.y, dir.z]
+}
+
+fn cell_at(renderer: &mut Renderer, point: [f32; 3], size: f32) -> bool {
+    let cell = renderer
+        .read_cache_cells(&[query(point, [0.0, 1.0, 0.0], size)])
+        .expect("floor lookup")
+        .into_iter()
+        .next()
+        .expect("one cell");
+    cell.hit.slot.is_some()
+}
+
+fn floor_point(eye: [f32; 3], dir: [f32; 3], dist: f32) -> [f32; 3] {
+    [eye[0] + dir[0] * dist, 0.05, eye[2] + dir[2] * dist]
+}
+
+/// A still camera does not claim past the create distance. Moving claims
+/// farther ahead of the motion and does not claim the same distance behind.
+#[test]
+fn a_move_stretches_the_fine_band_and_a_still_view_does_not() {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let (stage, _) = hall();
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    settings.sanitize();
+    renderer.set_lighting_settings(settings);
+    renderer.reset_lighting_cache();
+    let mut camera = Camera::opening();
+    camera.set_pose(Vec3::new(14.5, 1.7, 23.5), -0.3554, 0.08);
+    for _ in 0..16 {
+        let _ = draw_presented(window, renderer, &stage, &camera);
+    }
+    let eye = eye_of(&camera);
+    let fwd = horiz(camera.yaw);
+    let side = [-fwd[2], 0.0, fwd[0]];
+    let mut still_near = 0u32;
+    let mut still_far = 0u32;
+    for (name, dir, dist) in [
+        ("ahead", fwd, 4.0),
+        ("behind", scale(fwd, -1.0), 4.0),
+        ("left", side, 4.0),
+        ("right", scale(side, -1.0), 4.0),
+        ("ahead", fwd, 7.2),
+        ("behind", scale(fwd, -1.0), 7.2),
+    ] {
+        let point = floor_point(eye, dir, dist);
+        let world = cell_at(renderer, point, WORLD);
+        let fine = cell_at(renderer, point, TEXEL);
+        eprintln!("still {name} {dist:.1} world {world} fine {fine}");
+        if dist < 6.0 && fine {
+            still_near += 1;
+        }
+        if dist > 6.3 {
+            still_far += u32::from(fine);
+        }
+    }
+    assert!(
+        still_near >= 2,
+        "a still band filled {still_near} of the 4 m floor, in more than the view direction"
+    );
+    assert_eq!(
+        still_far, 0,
+        "a still camera filled {still_far} floor texels past the create distance"
+    );
+    let behind_start = floor_point(eye, scale(fwd, -1.0), 7.2);
+    renderer.reset_lighting_cache();
+    for _ in 0..10 {
+        let dir = horiz(camera.yaw);
+        let p = camera.position;
+        camera.set_pose(
+            Vec3::new(p.x + dir[0] * 0.4, p.y, p.z + dir[2] * 0.4),
+            camera.yaw,
+            camera.pitch,
+        );
+        let _ = draw_presented(window, renderer, &stage, &camera);
+    }
+    let eye = eye_of(&camera);
+    let fwd = horiz(camera.yaw);
+    let ahead = floor_point(eye, fwd, 7.2);
+    // The start point stays past the create distance for the whole walk.
+    // A point 7.2 m behind the final eye was inside the band at the start.
+    let behind = behind_start;
+    let ahead_world = cell_at(renderer, ahead, WORLD);
+    let ahead_fine = cell_at(renderer, ahead, TEXEL);
+    let behind_world = cell_at(renderer, behind, WORLD);
+    let behind_fine = cell_at(renderer, behind, TEXEL);
+    eprintln!(
+        "move ahead world {ahead_world} fine {ahead_fine}; behind world {behind_world} fine {behind_fine}"
+    );
+    assert!(
+        ahead_world,
+        "the floor 7.2 m ahead of the move has no world cell to spawn from"
+    );
+    assert!(ahead_fine, "motion did not claim the floor 7.2 m ahead");
+    assert!(!behind_fine, "motion claimed the floor 7.2 m behind");
 }
