@@ -4877,6 +4877,8 @@ const vec3 LIGHTING_SVGF_LW = vec3(0.2126, 0.7152, 0.0722);
 // are held until they add up past it (bounded 1 % lag).
 const bool LIGHTING_DIRTY_ATROUS = true;
 const float LIGHTING_DIRTY_EPS = 0.01;
+// Floor for the direct-sample scale, so a black sample is not a zero denominator.
+const float LIGHTING_DIRTY_FLOOR = 1.0e-4;
 // A still camera's direct sample flickers inside one percent. Marking the
 // block on that flicker redrew the picture. A larger step, a signature
 // change, and a moving camera still mark. The 32-frame backstop marks too.
@@ -4890,7 +4892,7 @@ bool lighting_compose_direct_moved(uint packed, uint prev) {
     vec3 a = max(lighting_unpack_rgb9e5(packed), vec3(0.0));
     vec3 b = max(lighting_unpack_rgb9e5(prev), vec3(0.0));
     float scale = max(max(max(a.r, a.g), a.b), max(max(b.r, b.g), b.b));
-    return any(greaterThan(abs(a - b), vec3(LIGHTING_DIRTY_EPS * max(scale, 1.0e-4))));
+    return any(greaterThan(abs(a - b), vec3(LIGHTING_DIRTY_EPS * max(scale, LIGHTING_DIRTY_FLOOR))));
 }
 const bool LIGHTING_DIRTY_NOISE = false; // S78X: off (lum a 0.348 -> 0.345, a lag toward darker)
 const float LIGHTING_DIRTY_SE = 2.0;
