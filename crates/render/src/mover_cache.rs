@@ -1008,4 +1008,47 @@ mod tests {
         let cold = fill_priority(0.0, 0.0, false, 20.0);
         assert!(hot > cold);
     }
+
+    /// Stage E scaling report: 10 / 100 / 1000 Near movers on a High pool.
+    #[test]
+    fn scaling_10_100_1000_reports_pool_use_and_boost() {
+        fn run(n: u32) -> (u32, u32, usize, usize) {
+            let mut cache = MoverCache::high();
+            for id in 1..=n {
+                let mut r = record(id);
+                r.tier = MoverTier::Near;
+                r.sphere = [id as f32, 1.0, 0.0, 0.5];
+                cache.upsert(r).expect("insert");
+            }
+            cache.rebalance_all();
+            let share = cache.share_for(MoverTier::Near);
+            let used = cache.used_texels();
+            let cands = cache.fill_candidates(0.2, 0.05, false, 3.0);
+            let bricks = cache.world_boost_bricks(
+                1,
+                [0.0, 1.0, 0.0, 0.5],
+                3.0,
+                80.0,
+            );
+            eprintln!(
+                "movers={n} share={share} used_texels={used} fill_candidates={} dirtied_bricks={}",
+                cands.len(),
+                bricks.len()
+            );
+            (share, used, cands.len(), bricks.len())
+        }
+        let (s10, u10, c10, b10) = run(10);
+        assert_eq!(s10, MOVER_TIER_NEAR_TEXELS);
+        assert_eq!(u10, 10 * MOVER_TIER_NEAR_TEXELS);
+        assert_eq!(c10, usize_from_u32(10 * MOVER_TIER_NEAR_TEXELS));
+        assert!(b10 > 0);
+        let (s100, u100, c100, _) = run(100);
+        assert_eq!(s100, MOVER_TEXELS_HIGH / 100);
+        assert_eq!(u100, 100 * (MOVER_TEXELS_HIGH / 100));
+        assert_eq!(c100, usize_from_u32(u100));
+        let (s1000, u1000, c1000, _) = run(1000);
+        assert_eq!(s1000, 32);
+        assert_eq!(u1000, 32_000);
+        assert_eq!(c1000, 32_000);
+    }
 }
