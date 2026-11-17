@@ -6505,8 +6505,9 @@ mod sun_step {
     fn compose_spirv_stays_near_the_picture_pass() {
         // The missing-field read, the path debug view, the texels population
         // record, the shown-mean age tally, the bounce store rule, and the
-        // retry list sit in this pass. Compose is 245_364 bytes. 248_000
-        // still rejects a second occluder walk.
+        // retry list sit in this pass. Compose is 230_120 bytes after the
+        // hitch mesh/on bodies stay out of GENOS_COMPOSE_NO_WALK (pool path
+        // + lattice warm-up only). 248_000 still rejects a second occluder walk.
         assert!(
             LIGHTING_COMPOSE_SPV.len() < 248_000,
             "compose SPIR-V is {} bytes",

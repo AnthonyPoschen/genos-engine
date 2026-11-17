@@ -1378,7 +1378,7 @@ vec4 lighting_mover_texel_mean(uint tex) {
 const float LIGHTING_MOVER_EPS = 1.0e-6;
 
 // Object-local → world (yaw about Y). Inverse is lighting_mover_world_to_local.
-// Compose needs these under GENOS_COMPOSE_NO_WALK; fill uses them too.
+// Compose needs the inverse under GENOS_COMPOSE_NO_WALK; fill uses both.
 vec3 lighting_mover_yaw_local(vec3 local, float yc, float ys) {
     return vec3(yc * local.x + ys * local.z, local.y, -ys * local.x + yc * local.z);
 }
@@ -1387,6 +1387,9 @@ vec3 lighting_mover_world_to_local(vec3 world_off, float yc, float ys) {
     return vec3(yc * world_off.x - ys * world_off.z, world_off.y, ys * world_off.x + yc * world_off.z);
 }
 
+// Stage H fill/deposit stays out of compose (GENOS_COMPOSE_NO_WALK) to keep
+// lighting_compose.comp under the 248k SPIR-V ceiling.
+#ifndef GENOS_COMPOSE_NO_WALK
 // Scale-aware outward fill bias: fraction of max(texel size, min half-extent).
 // For a 0.5 m half-extent box this is 0.02 m (same as the old fixed bias);
 // smaller movers shrink with their extent, larger ones stay at least one texel.
@@ -1397,9 +1400,6 @@ float lighting_mover_ray_bias(float min_half_extent) {
         * LIGHTING_MOVER_RAY_BIAS_FRAC;
 }
 
-// Stage H fill/deposit stays out of compose (GENOS_COMPOSE_NO_WALK) to keep
-// lighting_compose.comp under the 248k SPIR-V ceiling.
-#ifndef GENOS_COMPOSE_NO_WALK
 uint lighting_mover_fill_count() { return movers_gpu.header[8]; }
 uint lighting_mover_fill_off() { return movers_gpu.header[9] / 4u; }
 uint lighting_mover_fill_texel(uint i) {
@@ -1524,6 +1524,12 @@ vec4 lighting_mover(uint m, uint k) { return vec4(0.0); }
 bool lighting_in_change(vec3 p) { return false; }
 #endif
 
+// Hitch-list mover frame / on-surface test. Compose uses the G-buffer object
+// id pool path only (GENOS_COMPOSE_NO_WALK); keeping mf_sample + mat3 inverse
+// out of lighting_compose.comp is what keeps the 248k SPIR-V ceiling.
+#ifdef GENOS_COMPOSE_NO_WALK
+uint lighting_mover_on(vec3 pos, vec3 n) { return ~0u; }
+#else
 // Mover m's frame: world point to local and back. An occluder turns about +Y
 // (scene_rays.glsl occ_local and occ_world); a traced mesh instance (id + 1 past
 // 10000) uses its mesh field rows (world to object) and their inverse.
@@ -1610,6 +1616,7 @@ uint lighting_mover_by_id(float idp) {
     }
     return ~0u;
 }
+#endif
 // Texel slot's surface point and normal in the world. Object-local shared-hash
 // slots are gone; stored positions are always world.
 bool lighting_sc_texel_world(uint slot, out vec3 p, out vec3 n) {
@@ -4547,15 +4554,19 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
                     if (mean.w >= LIGHTING_MOVER_FULL_SETS) {
                         return vec4(mean.rgb, 1.0);
                     }
+                    // Warm-up prior: SH lattice just outside the surface. Do not
+                    // call lighting_world_irradiance_in here — that inlines the
+                    // mode-3 body into compose and blows the 248k SPIR-V ceiling.
                     vec3 nn = normalize(n + vec3(LIGHTING_MOVER_EPS));
                     vec3 outside = pos + nn * LIGHTING_SC_TEXEL;
                     uint saved_oid = lighting_px_object_id;
                     lighting_px_object_id = 0u;
-                    vec4 prior = lighting_world_irradiance_in(outside, n, outside, false);
+                    vec4 prior = lighting_sh_compose_lattice(outside, n, false);
                     lighting_px_object_id = saved_oid;
                     float w = mean.w / LIGHTING_MOVER_FULL_SETS;
-                    if (mean.w > 0.0 || prior.w > 0.0) {
-                        return vec4(mix(prior.rgb, mean.rgb, w), mix(prior.w, 1.0, w));
+                    if (mean.w > 0.0 || prior.w > LIGHTING_CACHE_HAS_W) {
+                        float tw = prior.w > LIGHTING_CACHE_HAS_W ? prior.w : 0.0;
+                        return vec4(mix(prior.rgb, mean.rgb, w), mix(tw, 1.0, w));
                     }
                 }
             }
