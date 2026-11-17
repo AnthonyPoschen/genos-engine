@@ -129,7 +129,7 @@ Role: SCHED · Literature: — (GIBS shows holes and fills them by spawning; Lum
 **Unfilled**: a pixel or entry with no light value yet. These are logged to `./genos-debug/unfilled/`.
 Role: TOOL · Literature: —
 
-**Object-local entry**: an entry stored in a moving object's local space, so its light moves with the object.
+**Object-local entry**: historical. Mover lighting now uses the object-attached texel pool (`surface_cache.mover_pool`); object-local keys in the shared world hash are deleted. See [mover-attach-cache.md](../systems/lighting/mover-attach-cache.md).
 Role: STORE · Literature: GIBS transform/bone-attached surfel (§1.5); Lumen moving cards · More detail: `GENOS_LIGHTING_SC_LOCAL`; branch gibs-mover-attach-msme
 
 **World radiance cache (WRC)**: a coarse world-space cache of incoming light, used for far rays and as a fallback.

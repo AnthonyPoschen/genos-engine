@@ -842,4 +842,47 @@ mod tests {
         let bytes = cache.pack_texels();
         assert_eq!(bytes.len(), 64 * MOVER_TEXEL_BYTES);
     }
+
+    /// Stage E scaling report: 10 / 100 / 1000 Near movers on a High pool.
+    #[test]
+    fn scaling_ten_hundred_thousand_movers() {
+        let mut report = String::new();
+        for &n in &[10u32, 100, 1000] {
+            let mut cache = MoverCache::new(MOVER_POOL_HIGH);
+            let offers: Vec<MoverOffer> = (1..=n)
+                .map(|id| MoverOffer {
+                    object_id: id,
+                    screen: 0.2,
+                    centre: [id as f32 * 0.5, 0.0, 0.0],
+                    radius: 0.4,
+                })
+                .collect();
+            cache.sync_frame(&offers);
+            let boosts = cache.world_boosts();
+            let share = cache.lookup(1).map(|e| e.texel_count).unwrap_or(0);
+            let line = format!(
+                "movers={n} live={} texels={} free={} share={} dirtied_cells≈{} pool={}",
+                cache.live_movers(),
+                cache.live_texels(),
+                cache.free_texels(),
+                share,
+                boosts.len(),
+                cache.capacity()
+            );
+            report.push_str(&line);
+            report.push('\n');
+            assert_eq!(cache.live_movers(), n);
+            assert_eq!(boosts.len() as u32, n);
+            // Fair share shrinks under crowd; 1000 → 32 on High.
+            if n == 1000 {
+                assert!(share <= 32, "1000-mover share was {share}");
+                assert_eq!(share, 32);
+            }
+            if n == 10 {
+                assert_eq!(share, MOVER_TIER_NEAR);
+            }
+        }
+        // Visible in `--nocapture` CI / agent logs.
+        eprintln!("mover-pool scaling\n{report}");
+    }
 }

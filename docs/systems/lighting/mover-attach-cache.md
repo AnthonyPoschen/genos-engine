@@ -1,6 +1,7 @@
 # Object-attached mover lighting cache
 
-**Status:** in progress (stages A–E on `cursor/mover-attach-cache-ccf2`)  
+**Status:** stages A–E landed on `cursor/mover-attach-cache-ccf2` (GPU texel fill
+and G-buffer object-id compose read still open; see Left undone).  
 **Paper:** GIBS (Halén & Hayward, SIGGRAPH 2021) §1.5 transform/bone attachment  
 **Supersedes:** object-local keys in the shared world hash table behind
 `surface_cache.attach_movers`, and the 16-mover list packed into the 64-vec4
@@ -61,3 +62,28 @@ stays on the other agent’s PR. This path must not edit those sites.
 - Prediction / rollback: n/a.
 - Determinism: same inputs → same pool layout given a fixed insert order.
 - Headless server: pool may be zero; no GPU upload.
+
+## Scaling (CPU pool, High 32768 texels)
+
+From `mover_cache::tests::scaling_ten_hundred_thousand_movers`:
+
+| Movers | Live texels | Share / mover | World boosts |
+|---:|---:|---:|---:|
+| 10 | 3840 | 384 (Near cap) | 10 |
+| 100 | 32700 | 327 | 100 |
+| 1000 | 32000 | 32 | 1000 |
+
+Rays/frame and GPU dirtied-cell counts need the owner-PC gate script
+`debug/lighting/scripts/gates/mover-pool-scale.rhai` and `gi-check` spin
+(limit 0.027).
+
+## Left undone
+
+1. **Mover-texel SH fill** in the cache pass (scheduler candidates that write
+   the 64 B pool). Compose still shows movers via the world-cell detail read.
+2. **G-buffer object / transform id** so compose can O(1)-lookup mover texels
+   per pixel (GIBS §1.5). Table lookup by id is ready on the CPU side.
+3. **GPU upload** of `pack_table` / `pack_texels` into a shader-visible buffer
+   (binding or work-buffer region).
+4. Owner-PC: spin grade ≤ 0.027; knockout late ≤ 0.213; ReSTIR `REF_ERR` 0.05
+   unchanged by this change.
