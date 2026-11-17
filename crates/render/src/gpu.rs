@@ -1333,6 +1333,16 @@ impl Renderer {
         self.gpu.texel_detail_prod()
     }
 
+    /// Like [`Self::texel_detail_prod`], with the mover-pool slide measurement on
+    /// (`lamp.w = 1`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_slide(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_slide()
+    }
+
     /// Writing specialization with `lamp.x = 1`. The returned bytes are the
     /// planted cache and key table. Drop this renderer before compiling the
     /// reader: lavapipe keeps the compiler heap until the device is gone.

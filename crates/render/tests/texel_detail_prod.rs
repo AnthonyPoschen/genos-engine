@@ -23,6 +23,7 @@ const STRIDE: usize = 17;
 const ROWS: usize = 37;
 const TRAILER: usize = 40;
 const PARITY: usize = 32;
+const SLIDE: usize = 107;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -81,7 +82,7 @@ fn motion_slant() -> [f32; 3] {
 }
 
 fn words_len() -> usize {
-    8 + ROWS * STRIDE + TRAILER + PARITY
+    8 + ROWS * STRIDE + TRAILER + PARITY + SLIDE
 }
 
 #[expect(
@@ -94,6 +95,10 @@ fn words_len() -> usize {
 )]
 fn head_float_bits(word: u32) -> u32 {
     (word as f32).to_bits()
+}
+
+fn rec709(c: [f32; 3]) -> f32 {
+    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
 }
 
 fn near(got: [f32; 3], want: [f32; 3]) -> bool {
@@ -155,6 +160,140 @@ fn readonly_fixture_head_matches_the_folded_shader_constant() {
     assert_eq!((head.head_hi >> 12) & 31, 0, "no isolate toggles");
     assert_ne!(head.head_hi & DETAIL_BIT, 0, "detail on");
     assert_eq!(sc_flags, 14_395_658);
+}
+
+#[test]
+fn a_mover_slides_without_stepping_on_world_cells() {
+    // 1 mm steps across 75 cm. The before samples are the salt-0 world gather,
+    // which is the picture a detail-on mover showed: one lone corner stays
+    // full until it leaves the window, then the colour pops by the cell gap.
+    // The after samples are the mover-pool read. It stays on the object's
+    // colour. A mover hit must not claim a world cell. A world cell on the
+    // mover drops now; one inside the change volume drops after two unread
+    // frames and a fresh floor cell stays.
+    let mut owner = open().expect("lavapipe device");
+    let renderer = &mut *owner.device;
+    assert_eq!(renderer.gpu_kind(), GpuKind::Software);
+    let words = renderer
+        .texel_detail_prod_slide()
+        .expect("production compose slide");
+    assert_eq!(words.len(), words_len());
+    let slide = slide_block(&words);
+    let fine = [7.0, 3.0, 1.0];
+    let red = [8.0, 0.0, 0.0];
+    let gap = rec709(red);
+    eprintln!(
+        "slide before max {before_step} at {before_mm} mm, after max {after_step} at {after_mm} mm, gap {gap}",
+        before_step = slide.before_step,
+        before_mm = slide.before_mm,
+        after_step = slide.after_step,
+        after_mm = slide.after_mm,
+    );
+    for i in 0..16 {
+        eprintln!(
+            "slide {cm} cm before {before:?} after {after:?}",
+            cm = i * 5,
+            before = slide.before[i],
+            after = slide.after[i],
+        );
+    }
+    assert!(
+        slide.before_step > 0.5 * gap,
+        "the world-cell read did not pop; max step {} at {} mm, the cell gap is {gap}",
+        slide.before_step,
+        slide.before_mm
+    );
+    assert!(
+        slide.after_step < 0.05 * gap,
+        "object-local GI stepped {} at {} mm; the cell gap is {gap}",
+        slide.after_step,
+        slide.after_mm
+    );
+    for (i, rgb) in slide.after.iter().enumerate() {
+        assert!(
+            near(*rgb, fine),
+            "sample {i} showed {rgb:?}, wanted the object colour {fine:?}"
+        );
+        assert!(!near(*rgb, red), "sample {i} bled the stale world red");
+        assert!(
+            !near(*rgb, [0.0, 0.0, 7.0]),
+            "sample {i} bled the world blue"
+        );
+    }
+    assert!(
+        slide.world_hit.abs() <= ABS,
+        "a mover hit wrote a world cell"
+    );
+    assert!(
+        (slide.object_hit - 1.0).abs() <= ABS,
+        "a mover hit did not leave an object entry"
+    );
+    assert!(
+        slide.object_salt > 0.5,
+        "object entry salt {}",
+        slide.object_salt
+    );
+    assert!(slide.bleed.abs() <= ABS, "a world colour appeared on the box");
+    assert!(
+        (slide.drop_on - 1.0).abs() <= ABS,
+        "a world cell on the mover was kept"
+    );
+    assert!(
+        (slide.drop_stale - 1.0).abs() <= ABS,
+        "an unread world cell in the change volume was kept"
+    );
+    assert!(
+        (slide.drop_kept - 1.0).abs() <= ABS,
+        "a fresh floor cell in the change volume was dropped"
+    );
+}
+
+struct Slide {
+    after: [[f32; 3]; 16],
+    after_step: f32,
+    after_mm: f32,
+    before: [[f32; 3]; 16],
+    before_step: f32,
+    before_mm: f32,
+    world_hit: f32,
+    object_hit: f32,
+    object_salt: f32,
+    bleed: f32,
+    drop_on: f32,
+    drop_stale: f32,
+    drop_kept: f32,
+}
+
+fn slide_block(words: &[f32]) -> Slide {
+    let at = 8 + ROWS * STRIDE + TRAILER + PARITY;
+    let w = &words[at..at + SLIDE];
+    let mut after = [[0.0; 3]; 16];
+    let mut before = [[0.0; 3]; 16];
+    for i in 0..16 {
+        after[i] = [w[i * 3], w[i * 3 + 1], w[i * 3 + 2]];
+    }
+    let after_step = w[48];
+    let after_mm = w[49];
+    for i in 0..16 {
+        let b = 50 + i * 3;
+        before[i] = [w[b], w[b + 1], w[b + 2]];
+    }
+    let tail = 50 + 48;
+    Slide {
+        after,
+        after_step,
+        after_mm,
+        before,
+        before_step: w[tail],
+        before_mm: w[tail + 1],
+        world_hit: w[tail + 2],
+        object_hit: w[tail + 3],
+        object_salt: w[tail + 4],
+        bleed: w[tail + 5],
+        drop_on: w[tail + 6],
+        drop_stale: w[tail + 7],
+        drop_kept: w[tail + 8],
+    }
 }
 
 #[test]
