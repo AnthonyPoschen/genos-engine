@@ -1393,7 +1393,8 @@ impl Gpu {
             // One word: the dirty-compose list length, copied after the passes.
             self.lighting.compose_host = self.make_buffer(256, 0x2, Memory::Readback)?;
         }
-        self.lighting.gbuf = self.make_buffer(16 + pixels * 20, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        // GBUF_STRIDE = 6 uints/pixel (object id in word 5).
+        self.lighting.gbuf = self.make_buffer(16 + pixels * 24, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4.max(1) * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
         // Picture, emitted light, and (when direct refresh is slower than every

@@ -1089,6 +1089,8 @@ impl Renderer {
                         continue;
                     };
                     let instance = instances.len() as u32;
+                    // Object id matches the mover table (1-based instance index).
+                    let object_id = instance;
                     instances.push(InstanceRec {
                         model: *model,
                         // w: emitted light as shared-exponent bits (0: none) for the
@@ -1102,6 +1104,7 @@ impl Renderer {
                         atlas: *color_rect,
                         normal_atlas: *normal_rect,
                         extra: [*cutoff, *roughness, *metallic, f32::from_bits(*material_flags)],
+                        ids: [object_id, 0, 0, 0],
                     });
                     draws.push(DrawSpan {
                         shapes: true,
@@ -1670,6 +1673,9 @@ struct InstanceRec {
     normal_atlas: [f32; 4],
     /// x is the alpha cutoff. 0 does not discard.
     extra: [f32; 4],
+    /// x = object / transform id for the mover cache (0 = none).
+    /// y = top-weight bone id for skinned meshes (0 = use object id).
+    ids: [u32; 4],
 }
 
 fn identity_instance() -> InstanceRec {
@@ -1680,6 +1686,7 @@ fn identity_instance() -> InstanceRec {
         atlas: [0.0; 4],
         normal_atlas: [0.0; 4],
         extra: [0.0; 4],
+        ids: [0; 4],
     }
 }
 
@@ -3678,7 +3685,8 @@ impl Gpu {
     }
 
     fn write_instances(&mut self, items: &[InstanceRec]) -> Result<(), String> {
-        let mut bytes = Vec::with_capacity(items.len() * 128);
+        // mat4 + 4×vec4 + uvec4 ids = 144 bytes per instance.
+        let mut bytes = Vec::with_capacity(items.len() * 144);
         for item in items {
             for value in item
                 .model
@@ -3689,6 +3697,9 @@ impl Gpu {
                 .chain(item.extra)
             {
                 bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+            for id in item.ids {
+                bytes.extend_from_slice(&id.to_ne_bytes());
             }
         }
         // GI holds its light while nothing it sees changes (lighting_gpu.rs).

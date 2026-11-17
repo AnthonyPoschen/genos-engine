@@ -1269,11 +1269,10 @@ vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
 // How far around a change a patch is relit first (lighting_compact.comp), metres.
 const float LIGHTING_NEAR_CHANGE = 1.0;
 
-// Movers: presence/count lives in head w (/ 200000) for unhold. The old
-// 16×4-vec4 hitch list in the change block is gone; the host MoverCache /
-// mover table owns records. Hitch helpers below return empty so compose does
-// not walk stale change-block words. attach_movers bit stays at / 100000.
+// Movers: presence/count lives in head w (/ 200000) for unhold. Records live
+// in movers_gpu (binding 15). attach_movers bit stays at / 100000.
 const uint LIGHTING_MOVER_VEC4 = 4u;
+const uint LIGHTING_MOVER_TABLE_SLOTS = 4096u;
 uint lighting_movers_first() {
     vec4 head = work.v[lighting_change_at()];
     return head.y > 0.5 ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
@@ -1281,19 +1280,95 @@ uint lighting_movers_first() {
 uint lighting_movers_count() {
     return uint(work.v[lighting_change_at()].w) / 200000u;
 }
-// Packed hitch records in the change block: always none after the mover-table cutover.
-uint lighting_movers_hitch() {
-    return 0u;
-}
-vec4 lighting_mover(uint m, uint k) {
-    // Change-block mover payload deleted; return zero until the table SSBO binds.
-    return vec4(0.0);
-}
 // Object-attached mover pool (GIBS 2021 §1.5). Static geometry stays
 // world-lattice (ADR 0012). The bit is surface_cache.attach_movers, head w / 100000.
 bool lighting_sc_local_on() {
     return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
 }
+
+// Header words in movers_gpu (mover_cache.rs pack).
+uint lighting_mover_pool_cap() { return movers_gpu.header[0]; }
+uint lighting_mover_table_off() { return movers_gpu.header[5] / 4u; }
+uint lighting_mover_pool_off() { return movers_gpu.header[6] / 4u; }
+
+uint lighting_mover_table_hash(uint object_id) {
+    return (object_id * 2654435761u) & (LIGHTING_MOVER_TABLE_SLOTS - 1u);
+}
+
+// O(1) open-address lookup. Returns table slot or ~0.
+uint lighting_mover_find_slot(uint object_id) {
+    if (object_id == 0u || !lighting_sc_local_on()) {
+        return ~0u;
+    }
+    uint start = lighting_mover_table_hash(object_id);
+    uint base = lighting_mover_table_off();
+    for (uint step = 0u; step < 16u; step++) {
+        uint slot = (start + step) & (LIGHTING_MOVER_TABLE_SLOTS - 1u);
+        uint at = base + slot * 16u; // 64 B = 16 uints
+        uint id = movers_gpu.header[at];
+        if (id == object_id) {
+            return slot;
+        }
+        if (id == 0u) {
+            return ~0u;
+        }
+    }
+    return ~0u;
+}
+
+// Tier (0 Near, 1 Mid, 2 Far) for a table slot.
+uint lighting_mover_tier(uint slot) {
+    uint at = lighting_mover_table_off() + slot * 16u;
+    return movers_gpu.header[at + 1u];
+}
+
+uint lighting_mover_texel_base(uint slot) {
+    uint at = lighting_mover_table_off() + slot * 16u;
+    return movers_gpu.header[at + 2u];
+}
+
+uint lighting_mover_texel_count(uint slot) {
+    uint at = lighting_mover_table_off() + slot * 16u;
+    return movers_gpu.header[at + 3u];
+}
+
+// O(1) texel index for object_id at local_pos: hash the local cell into the span.
+uint lighting_mover_texel_lookup(uint object_id, vec3 local_pos) {
+    uint slot = lighting_mover_find_slot(object_id);
+    if (slot == ~0u) {
+        return ~0u;
+    }
+    if (lighting_mover_tier(slot) >= 2u) {
+        return ~0u; // Far: read world cells only
+    }
+    uint base = lighting_mover_texel_base(slot);
+    uint count = lighting_mover_texel_count(slot);
+    if (count == 0u || base == ~0u) {
+        return ~0u;
+    }
+    ivec3 cell = ivec3(floor(local_pos / LIGHTING_SC_TEXEL));
+    uint h = hash_cell3(cell, object_id);
+    uint tex = base + (h % count);
+    uint pool = lighting_mover_pool_off();
+    uint at = pool + tex * 16u;
+    if (movers_gpu.header[at + 3u] != object_id) {
+        return ~0u;
+    }
+    return tex;
+}
+
+vec4 lighting_mover_texel_mean(uint tex) {
+    uint at = lighting_mover_pool_off() + tex * 16u;
+    return vec4(
+        uintBitsToFloat(movers_gpu.header[at + 4u]),
+        uintBitsToFloat(movers_gpu.header[at + 5u]),
+        uintBitsToFloat(movers_gpu.header[at + 6u]),
+        uintBitsToFloat(movers_gpu.header[at + 7u])); // samples in w
+}
+
+// Packed hitch records: retired. Kept as zeros so call sites compile.
+uint lighting_movers_hitch() { return 0u; }
+vec4 lighting_mover(uint m, uint k) { return vec4(0.0); }
 
 // A point inside the bounds of a hitch-listed mover. Hitch list is empty after
 // the mover-table cutover; world-cell boost uses the host swept-brick path.
@@ -4370,16 +4445,37 @@ uint lighting_px_classify_shown(uint slot) {
     }
     return 8u;
 }
+// Optional object id from the G-buffer (0 = none). Set by compose before read.
+uint lighting_px_object_id = 0u;
+
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_unfilled = false;
     lighting_px_shade = 8u;
     lighting_px_parent = 0u;
     uint mode = lighting_world_mode();
-    // Object-local shared-hash path deleted. Mover pixels read world cells
-    // (and later the mover texel pool). Hitch is empty until the table SSBO
-    // binds, so om stays ~0 and the world lattice path runs.
-    uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
     lighting_obj_salt = 0.0;
+    // Mover texel pool via G-buffer object id (O(1) table + hashed span).
+    if (mode == 3u && lighting_px_object_id != 0u && lighting_sc_local_on()) {
+        uint slot = lighting_mover_find_slot(lighting_px_object_id);
+        if (slot != ~0u && lighting_mover_tier(slot) < 2u) {
+            // Object-local position: subtract sphere centre (rigid yaw ignored for lookup key).
+            uint at = lighting_mover_table_off() + slot * 16u;
+            vec3 centre = vec3(
+                uintBitsToFloat(movers_gpu.header[at + 8u]),
+                uintBitsToFloat(movers_gpu.header[at + 9u]),
+                uintBitsToFloat(movers_gpu.header[at + 10u]));
+            vec3 local_pos = pos - centre;
+            uint tex = lighting_mover_texel_lookup(lighting_px_object_id, local_pos);
+            if (tex != ~0u) {
+                vec4 mean = lighting_mover_texel_mean(tex);
+                if (mean.w > 0.5) {
+                    return vec4(mean.rgb, 1.0);
+                }
+            }
+            // Empty Near/Mid pool: fall through to world cells (never write them from Far).
+        }
+    }
+    uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
     if (om != ~0u && lighting_sh_texel_detail_on()) {
         vec4 sh = lighting_sh_compose_lattice(pos, n, false);
         if ((lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
@@ -4387,7 +4483,6 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
         }
         return sh;
     }
-    // Flag 4194304 (surface cache): a pixel on a hitch-listed mover takes probes.
     if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }

@@ -19,6 +19,7 @@ layout(location = 8) flat out float v_cutoff;
 layout(location = 9) flat out float v_rough;
 layout(location = 10) flat out float v_metal;
 layout(location = 11) flat out uint v_mat;
+layout(location = 12) flat out uint v_object_id;
 invariant gl_Position;
 layout(push_constant) uniform Push {
     mat4 view_proj;
@@ -29,6 +30,8 @@ struct Instance {
     vec4 atlas;
     vec4 normal_atlas;
     vec4 extra;
+    // x = object id, y = top-weight bone id (0 → use object id).
+    uvec4 ids;
 };
 layout(std430, set = 0, binding = 3) readonly buffer Instances {
     Instance items[];
@@ -58,4 +61,7 @@ void main() {
     v_rough = rough;
     v_metal = item.extra.z;
     v_mat = floatBitsToUint(item.extra.w);
+    // GIBS §1.5: skinned meshes attach to the top-weight bone id.
+    uint oid = item.ids.x != 0u ? item.ids.x : (gl_InstanceIndex + 1u);
+    v_object_id = item.ids.y != 0u ? item.ids.y : oid;
 }
