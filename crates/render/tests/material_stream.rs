@@ -98,8 +98,9 @@ fn scene() -> Scene {
         __scene.fog = genos_scene::FogSettings::default();
         __scene.reflections = genos_scene::ReflectionSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    }
+        }
 }
 
 fn checker_atlas() -> MaterialAtlas {

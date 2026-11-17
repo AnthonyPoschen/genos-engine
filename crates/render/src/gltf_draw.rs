@@ -805,8 +805,9 @@ mod tests {
             __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
             __scene.fog = genos_scene::FogSettings::default();
             __scene.menu = genos_scene::MenuSettings::default();
+            __scene.particles = genos_scene::ParticleSettings::default();
             __scene
-        });
+            });
         let before = world.objects.len();
         let mut place = identity_pose();
         place[13] = 1.0; // lift 1 m
@@ -906,8 +907,9 @@ mod tests {
             __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
             __scene.fog = genos_scene::FogSettings::default();
             __scene.menu = genos_scene::MenuSettings::default();
+            __scene.particles = genos_scene::ParticleSettings::default();
             __scene
-        })
+            })
     }
 
     fn textured_quad(metallic: f32, alpha_mode: genos_load::AlphaMode) -> genos_load::GltfScene {

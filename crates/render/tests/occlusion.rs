@@ -258,8 +258,9 @@ fn a_lamp_sealed_in_walls_under_a_roof_lights_nothing_outside() {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    };
+        };
     let mut camera = Camera::new(0.4, -4.5, std::f32::consts::PI);
     camera.pitch = 0.1;
     check(
@@ -299,8 +300,9 @@ fn a_lamp_above_the_roof_lights_nothing_under_it() {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    };
+        };
     let mut camera = Camera::new(0.0, -3.0, std::f32::consts::PI);
     camera.pitch = 0.05;
     check(
@@ -332,8 +334,9 @@ fn a_lamp_inside_a_box_lights_nothing_outside() {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    };
+        };
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);
     camera.pitch = -0.2;
     check(
@@ -365,8 +368,9 @@ fn a_lamp_inside_a_cylinder_lights_nothing_outside_even_over_its_cap() {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    };
+        };
     let mut camera = Camera::new(-0.5, -4.0, 2.7);
     camera.pitch = 0.0;
     check(
@@ -411,8 +415,9 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    };
+        };
     let mut world = World::from_scene(scene);
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);
     camera.pitch = -0.15;

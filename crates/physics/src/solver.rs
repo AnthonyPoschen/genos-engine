@@ -269,8 +269,8 @@ fn solve_velocity(bodies: &mut [Body], manifold: &mut Manifold) {
     }
     solve_normal_block(a, b, normal, &mut manifold.points[..count]);
     manifold.twist = solve_twist(a, b, normal, &manifold.points[..count], manifold.twist);
-    for index in 0..count {
-        friction_at_point(a, b, t1, t2, &mut manifold.points[index]);
+    for point in &mut manifold.points[..count] {
+        friction_at_point(a, b, t1, t2, point);
     }
 }
 
@@ -435,7 +435,9 @@ fn normal_coupling(
     let other_a = other_arm_a.cross(normal);
     let lever_b = arm_b.cross(normal);
     let other_b = other_arm_b.cross(normal);
-    inv_mass(a) + inv_mass(b) + lever_a.dot(inv_inertia(a, other_a))
+    inv_mass(a)
+        + inv_mass(b)
+        + lever_a.dot(inv_inertia(a, other_a))
         + lever_b.dot(inv_inertia(b, other_b))
 }
 
@@ -587,8 +589,7 @@ fn friction_delta(
     let friction = a.friction.max(b.friction).max(0.0);
     let limit = (friction * point.normal_impulse).max(0.0);
     let mut impulse = Vec3::ZERO;
-    for slot in 0..2 {
-        let axis = if slot == 0 { t1 } else { t2 };
+    for (slot, axis) in [t1, t2].into_iter().enumerate() {
         let rel = point_velocity(a, ra) - point_velocity(b, rb);
         let vt = rel.dot(axis);
         let kt = mass_along(a, b, ra, rb, axis);
@@ -639,6 +640,10 @@ fn inv_mass(body: &Body) -> f32 {
     } else {
         body.inverse_mass
     }
+}
+
+pub(crate) fn world_inverse_inertia(body: &Body, vector: Vec3) -> Vec3 {
+    inv_inertia(body, vector)
 }
 
 fn inv_inertia(body: &Body, vector: Vec3) -> Vec3 {

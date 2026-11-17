@@ -5,7 +5,8 @@
 
 use genos_math::{height_optical_depth_f32, phase_hg_f32};
 use genos_scene::{
-    Camera, Floor, FogSettings, FogShape, FogVolume, LightingPreset, LightingSettings, Scene, Vec3,
+    Camera, Floor, FogSettings, FogShape, FogVolume, LightingPreset, LightingSettings,
+    ParticleSettings, Scene, Vec3,
     Wall,
 };
 
@@ -476,8 +477,9 @@ fn shaft_scene() -> (
         __scene.fog = FogSettings::default();
         __scene.reflections = genos_scene::ReflectionSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = ParticleSettings::default();
         __scene
-    };
+        };
     (settings, view, size, sun, lamp, scene)
 }
 
@@ -504,8 +506,9 @@ fn empty_scene() -> Scene {
         __scene.fog = FogSettings::default();
         __scene.reflections = genos_scene::ReflectionSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = ParticleSettings::default();
         __scene
-    }
+        }
 }
 
 /// Shadowed column integral. Sun and lamp visibility use `trace::sees`.
@@ -954,8 +957,9 @@ pub fn composed_frame_scene(enabled: bool) -> Scene {
         };
         __scene.reflections = genos_scene::ReflectionSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    }
+        }
 }
 
 /// Eye for [`composed_frame_scene`]. Yaw 0 looks along -Z, across the floor.

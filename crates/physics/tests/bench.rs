@@ -91,4 +91,61 @@ fn timed_math_and_physics_batch_does_not_allocate() {
         direction.x + matrix.cols[0] + world.bodies[0].position.y
     );
     assert_eq!(allocs, 0, "timed math and physics allocated {allocs} times");
+
+    // The allocation counter is process-global, so the vehicle steps stay in this test.
+    let mut aircraft = genos_physics::aero_trim_world();
+    step(&mut aircraft, 1.0 / 60.0);
+    let before_aircraft = ALLOCS.load(Ordering::Relaxed);
+    step(&mut aircraft, 1.0 / 60.0);
+    let aircraft_allocs = ALLOCS.load(Ordering::Relaxed) - before_aircraft;
+    println!("aircraft_allocs={aircraft_allocs}");
+    assert_eq!(
+        aircraft_allocs, 0,
+        "trimmed aircraft step allocated {aircraft_allocs} times"
+    );
+
+    let mut sleeper = genos_physics::aero_trim_world();
+    sleeper.bodies[0].sleeping = true;
+    sleeper.bodies[0].velocity = Vec3::ZERO;
+    step(&mut sleeper, 1.0 / 60.0);
+    let before_wake = ALLOCS.load(Ordering::Relaxed);
+    step(&mut sleeper, 1.0 / 60.0);
+    let wake_allocs = ALLOCS.load(Ordering::Relaxed) - before_wake;
+    println!("aircraft_wake_allocs={wake_allocs}");
+    assert!(
+        !sleeper.bodies[0].sleeping,
+        "the allocation sleeper stayed asleep"
+    );
+    assert_eq!(
+        wake_allocs, 0,
+        "aircraft wake step allocated {wake_allocs} times"
+    );
+
+    let mut landing = genos_physics::gear_plane_world();
+    step(&mut landing, 1.0 / 60.0);
+    let before_landing = ALLOCS.load(Ordering::Relaxed);
+    step(&mut landing, 1.0 / 60.0);
+    let landing_allocs = ALLOCS.load(Ordering::Relaxed) - before_landing;
+    println!("landing_allocs={landing_allocs}");
+    assert_eq!(
+        landing_allocs, 0,
+        "gear and wing step allocated {landing_allocs} times"
+    );
+
+    let mut thruster = genos_physics::thruster_world();
+    let mut ground = genos_physics::chassis_rest_world(10.0);
+    step(&mut thruster, 1.0 / 60.0);
+    step(&mut ground, 1.0 / 60.0);
+    let before_vehicle = ALLOCS.load(Ordering::Relaxed);
+    step(&mut thruster, 1.0 / 60.0);
+    step(&mut ground, 1.0 / 60.0);
+    let vehicle_allocs = ALLOCS.load(Ordering::Relaxed) - before_vehicle;
+    println!("vehicle_allocs={vehicle_allocs}");
+    assert_eq!(
+        vehicle_allocs, 0,
+        "vehicle step allocated {vehicle_allocs} times"
+    );
+    let velocity = thruster.bodies[0].velocity;
+    assert!(velocity.x.is_finite() && velocity.y.is_finite() && velocity.z.is_finite());
+    assert_eq!(ground.step_stats.wheel_rays, 4);
 }

@@ -19,7 +19,7 @@ use genos_ecs::{SceneHandle, World};
 use crate::types::{Floor, Light, Scene, Solid, Wall};
 use crate::{
     DebugSettings, EventLoopSettings, FogSettings, FpsCounterSettings, HdrSettings,
-    LightingSettings, MenuSettings, ReflectionSettings,
+    LightingSettings, MenuSettings, ParticleSettings, ReflectionSettings,
 };
 
 impl Scene {
@@ -49,6 +49,7 @@ impl Scene {
             reflections: ReflectionSettings::default(),
             hdr: HdrSettings::default(),
             fog: FogSettings::default(),
+            particles: ParticleSettings::default(),
         }
     }
 
@@ -83,6 +84,7 @@ impl Scene {
         scene.reflections = self.reflections;
         scene.hdr.clone_from(&self.hdr);
         scene.fog.clone_from(&self.fog);
+        scene.particles.clone_from(&self.particles);
         scene
     }
 

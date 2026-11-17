@@ -65,8 +65,9 @@ fn room() -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    })
+        })
 }
 
 fn call(name: &str, args: Value) -> Value {

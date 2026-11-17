@@ -5,7 +5,7 @@
 
 use std::ffi::c_void;
 
-use genos_scene::{Camera, FogSettings, FogShape, LightingPreset, Scene};
+use genos_scene::{Camera, FogSettings, FogShape, LightingPreset, ParticleSettings, Scene};
 
 use super::{check, read_f32s, tick_delta, Buffer, Gpu, Handle, Image, Memory};
 use crate::fog::{
@@ -82,11 +82,14 @@ impl Gpu {
     }
 
     /// Columns the last frame dispatch wrote. Empty when that frame did not dispatch.
+    ///
+    /// The wait is the fence bound to this flight, and only when that slot has a
+    /// submit in flight. A reset fence from an out-of-date acquire is not waited.
     pub(super) fn read_frame_columns(&mut self) -> Result<Vec<FogColumn>, String> {
         if !self.froxel_wrote {
             return Ok(Vec::new());
         }
-        self.wait_fence(self.fence, "frame columns")?;
+        self.wait_live_fence(self.fence, "frame columns")?;
         let Some(job) = self.froxel_frame.as_ref() else {
             return Ok(Vec::new());
         };
@@ -1057,6 +1060,7 @@ impl Gpu {
                 buffer: targets.scene.buffer,
                 memory: targets.scene.memory,
                 size: targets.scene.size,
+                align: targets.scene.align,
             }
         };
         self.write_buffer(&scene, bytes)
@@ -1595,8 +1599,9 @@ fn empty_scene() -> Scene {
         __scene.fog = FogSettings::default();
         __scene.reflections = genos_scene::ReflectionSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = ParticleSettings::default();
         __scene
-    }
+        }
 }
 
 fn columns_from(floats: &[f32]) -> Vec<FogColumn> {

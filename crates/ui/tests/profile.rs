@@ -671,8 +671,9 @@ fn the_graph_paint_is_a_different_color_from_its_background() {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    });
+        });
     let camera = Camera::opening();
     let mut spiked = calm();
     spiked[0] = Duration::from_millis(25);

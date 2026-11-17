@@ -65,6 +65,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
@@ -75,6 +76,7 @@ const SHOW_PARTICLES: bool = false;
 use genos_scene::{
     load_path, update, Actions, Camera, Codimation, DebugSettings, Easing, EventLoopSettings,
     Floor, FogSettings, FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings,
+    ParticleSettings,
     ReflectionSettings, Scene, Sky, Vec3,
 };
 use genos_ui::{
@@ -89,6 +91,24 @@ const BOX_LEG_SECONDS: f32 = 8.0;
 const FIRST_FRAME_SECONDS: f32 = 1.0 / 60.0;
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
+
+/// Wait until `duration` has passed. A condvar timeout is the wait, matching
+/// `wait_unpumped` in the renderer. A park can return at once if the token is set.
+fn wait_deadline(duration: Duration) {
+    if duration.is_zero() {
+        return;
+    }
+    let deadline = Instant::now() + duration;
+    let pair = (Mutex::new(()), Condvar::new());
+    while Instant::now() < deadline {
+        let guard = match pair.0.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let _ = pair.1.wait_timeout(guard, remaining);
+    }
+}
 
 /// Elapsed seconds since `previous`. The first frame uses [`FIRST_FRAME_SECONDS`].
 fn frame_seconds(previous: Option<Instant>, now: Instant) -> f32 {
@@ -174,6 +194,8 @@ fn red_box_path() -> Option<Codimation> {
 }
 
 fn main() {
+    // Quit drops the lifecycle before `_exit`. Skip the lavapipe teardown wait.
+    genos_window::release_driver_on_process_exit();
     let code = match run() {
         Ok(code) => code,
         Err(err) => {
@@ -198,6 +220,7 @@ fn run() -> Result<i32, String> {
     let mut time_of_day = None;
     let mut block_ms = None;
     let mut close_early = false;
+    let mut full_destroy = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -331,6 +354,7 @@ fn run() -> Result<i32, String> {
                 )?);
             }
             "--lifecycle-close-early" => close_early = true,
+            "--lifecycle-full-destroy" => full_destroy = true,
             other if genos_window::block_ms_needs_value(other) == Some(false) => {
                 block_ms = Some(genos_window::parse_block_ms(other, None)?);
             }
@@ -340,6 +364,11 @@ fn run() -> Result<i32, String> {
 
     let block_ms = genos_window::block_ms_mirror(block_ms);
     let close_early = genos_window::close_early_mirror(close_early);
+    // The validation gate passes this so vkDestroyDevice and vkDestroyInstance
+    // still run and object-leak reports fire. The quit-gap run omits it.
+    if genos_window::full_destroy_mirror(full_destroy) {
+        genos_window::request_full_driver_destroy();
+    }
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
     let mut window = if proof {
         Window::open_proof(size.0, size.1)?
@@ -471,6 +500,12 @@ fn run() -> Result<i32, String> {
         if frame.closing {
             break;
         }
+        if frame.minimized {
+            // The window pump returns at once when the queue is empty. The same
+            // condvar deadline as `wait_unpumped` keeps the frame from spinning.
+            wait_deadline(Duration::from_millis(16));
+            continue;
+        }
         if extent_changed(size.0, size.1, frame.width, frame.height) || frame.resized {
             renderer.resize(frame.width, frame.height)?;
             size = (renderer.width(), renderer.height());
@@ -480,9 +515,7 @@ fn run() -> Result<i32, String> {
         let input_at = Instant::now();
         let gated = focus.gate(&frame);
         input.begin_frame();
-        input.apply_evdev_keys(&gated.keys_down);
-        input.set_mouse_button(InputCode::mouse_left, gated.mouse_left);
-        input.add_mouse_delta(gated.mouse_dx, gated.mouse_dy);
+        window.write_devices(&mut input, &gated);
         input.poll_gamepads();
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
@@ -702,6 +735,7 @@ fn run() -> Result<i32, String> {
             // The panel and the live graph are not the scene: a bench draws without them.
             overlay.clear();
         }
+        renderer.set_particle_dt(if paused { 0.0 } else { dt });
         let draw_at = Instant::now();
         let (pixels, timing) = if detailed {
             let (pixels, timing) =
@@ -887,8 +921,9 @@ fn loading_world() -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = FogSettings::default();
         __scene.menu = MenuSettings::default();
+        __scene.particles = ParticleSettings::default();
         __scene
-    })
+        })
 }
 
 /// Decode the scene on a worker while the mapped window keeps pumping.
@@ -909,7 +944,9 @@ fn load_scene_pumped(
         if frame.closing {
             return Err("window closed during load".into());
         }
-        let _ = renderer.draw(&load_world, &camera, false);
+        if !frame.minimized {
+            let _ = renderer.draw(&load_world, &camera, false);
+        }
         match take_scene_load(&mut job)? {
             LoadPace::Ready => {
                 meter.mark();

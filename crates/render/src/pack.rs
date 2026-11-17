@@ -1989,8 +1989,9 @@ mod tests {
             __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
             __scene.fog = genos_scene::FogSettings::default();
             __scene.menu = genos_scene::MenuSettings::default();
+            __scene.particles = genos_scene::ParticleSettings::default();
             __scene
-        };
+            };
         let world = World::from_scene(scene);
         let camera = Camera::opening();
         let view = view_proj(&camera, 16.0 / 9.0);

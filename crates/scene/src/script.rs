@@ -34,6 +34,7 @@ use genos_math::Vec3;
 use crate::debug_settings::DebugSettings;
 use crate::event_loop::EventLoopSettings;
 use crate::fog::FogSettings;
+use crate::particles::ParticleSettings;
 use crate::fps_counter::FpsCounterSettings;
 use crate::hdr::HdrSettings;
 use crate::lighting::LightingSettings;
@@ -427,8 +428,9 @@ pub fn load_str(source: &str) -> Result<Scene, String> {
         __scene.reflections = built.reflections;
         __scene.hdr = built.hdr.clone();
         __scene.fog = built.fog.clone();
+        __scene.particles = built.particles.clone();
         __scene
-    })
+        })
 }
 
 fn num(value: &Dynamic) -> f32 {
@@ -456,4 +458,5 @@ struct Builder {
     reflections: ReflectionSettings,
     hdr: HdrSettings,
     fog: FogSettings,
+    particles: ParticleSettings,
 }

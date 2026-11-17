@@ -29,8 +29,10 @@ members = [
     "examples/stress",
     "debug/scene-lib",
     "debug/lighting",
+    "debug/particles",
     "debug/physics",
     "debug/ecs",
+    "debug/input",
     "debug/jobs",
 ]
 

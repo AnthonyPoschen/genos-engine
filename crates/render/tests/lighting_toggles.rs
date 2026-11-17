@@ -143,8 +143,9 @@ fn room(settings: LightingSettings) -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    })
+        })
 }
 
 fn index(name: &str) -> usize {
@@ -560,8 +561,9 @@ fn interior(settings: LightingSettings) -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    })
+        })
 }
 
 struct Look {
@@ -873,8 +875,9 @@ fn shadow_corner(settings: LightingSettings) -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    })
+        })
 }
 
 /// Still probe-only must not cost more than the surface cache. Settle is 32

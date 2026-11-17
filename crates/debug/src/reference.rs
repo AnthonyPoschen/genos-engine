@@ -1187,8 +1187,9 @@ mod tests {
             __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
             __scene.fog = genos_scene::FogSettings::default();
             __scene.menu = genos_scene::MenuSettings::default();
+            __scene.particles = genos_scene::ParticleSettings::default();
             __scene
-        }
+            }
     }
 
     /// A shut white 6 x 3 x 6 m room around the origin with one lamp.
@@ -1224,8 +1225,9 @@ mod tests {
             __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
             __scene.fog = genos_scene::FogSettings::default();
             __scene.menu = genos_scene::MenuSettings::default();
+            __scene.particles = genos_scene::ParticleSettings::default();
             __scene
-        }
+            }
     }
 
     fn hit_at(scene: &Scene, point: [f32; 3], normal: [f32; 3]) -> TraceHit {

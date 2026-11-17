@@ -332,8 +332,9 @@ fn proof_world(lit: bool) -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    });
+        });
     for object in &mut world.objects {
         if let genos_render::DrawKind::Fixed(genos_render::FixedPart::Floor) = object.kind {
             object.hidden = true;

@@ -1,0 +1,20 @@
+[package]
+name = "genos-input-debug"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "genos-input"
+path = "src/main.rs"
+
+[dependencies]
+genos-input = { path = "../../crates/input" }
+genos-mcp = { path = "../../crates/mcp" }
+genos-scene = { path = "../../crates/scene" }

@@ -596,8 +596,9 @@ fn overlap_world(n: u32) -> World {
         __scene.reflections = genos_scene::ReflectionSettings::default();
         __scene.hdr = HdrSettings::legacy_bytes();
         __scene.fog = FogSettings::default();
+        __scene.particles = ParticleSettings::default();
         __scene
-    };
+        };
     World::from_scene(scene)
 }
 

@@ -13,6 +13,7 @@ mod hdr;
 mod lighting;
 mod menu;
 mod objects;
+mod particles;
 mod reflections;
 mod scene_store;
 mod script;
@@ -20,8 +21,8 @@ mod settings;
 mod types;
 
 pub use camera::{
-    look_direction, transform_point, update, view_proj, viewport_uv, Actions, Camera, CAMERA_FAR,
-    CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
+    listener_state, look_direction, transform_point, update, view_proj, viewport_uv, Actions,
+    Camera, CAMERA_FAR, CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
 };
 pub use codimation::{Codimation, Easing};
 pub use debug_settings::DebugSettings;
@@ -50,6 +51,11 @@ pub use lighting::{
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
 pub use objects::{move_placed, publish, Published};
+pub use particles::{
+    apply_particle_arg, particle_flag_needs_value, ParticleCli, ParticleEnv, ParticleLight,
+    ParticlePreset, ParticleSettings, DEFAULT_SEED, HIGH_MAX_PARTICLES, LOW_MAX_PARTICLES,
+    MAX_PARTICLE_SLOTS, MEDIUM_MAX_PARTICLES, SPAWN_COUNT,
+};
 pub use reflections::{
     check_reflection_arg, reflection_flag_needs_value, Caustics, ReflectionCli, ReflectionEnv,
     ReflectionSettings, ReflectionTracer,

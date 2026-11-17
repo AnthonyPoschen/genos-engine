@@ -30,6 +30,7 @@ use genos_mcp::json::{self, Value};
 use genos_render::{Renderer, World};
 use genos_scene::{
     Camera, EngineSettings, EventLoopSettings, Floor, FogSettings, FpsCounterSettings, Light,
+    ParticleSettings,
     MenuSettings, ReflectionSettings, Scene, Vec3,
 };
 use genos_window::Window;
@@ -71,8 +72,9 @@ fn room() -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = FogSettings::default();
         __scene.menu = MenuSettings::default();
+        __scene.particles = ParticleSettings::default();
         __scene
-    })
+        })
 }
 
 fn call(name: &str, args: Value) -> Value {

@@ -103,8 +103,9 @@ fn silhouette_world() -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    });
+        });
     world.objects.push(Object {
         hidden: false,
         affects_light: false,

@@ -112,8 +112,9 @@ pub fn grade_world(preset: ReflectionPreset) -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    });
+        });
     world.reflection_swatch = true;
     world.reflection_sky = SKY;
     world.reflectors = grade_reflectors();

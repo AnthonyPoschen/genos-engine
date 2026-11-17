@@ -1,0 +1,17 @@
+#version 450
+// Read-only on the shared word. Syncval reports a missing barrier against
+// this recording's fill, not the other flight's write. It suppresses
+// write-after-write, so the witness has to be a read.
+layout(local_size_x = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Touch {
+    uint value;
+} touch;
+
+layout(std430, set = 0, binding = 1) buffer Sink {
+    uint value;
+} sink;
+
+void main() {
+    sink.value = touch.value;
+}

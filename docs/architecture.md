@@ -12,9 +12,9 @@ The first proof uses the window, the input, Vulkan, Rhai, and the lighting pass.
 
 The first program is `examples/camera`. The execution goal is [MVP scene](goals/mvp-scene.md). See [ADR 0010](adr/0010-first-proof-is-the-lit-scripted-scene.md).
 
-Linux on Wayland is the first machine for this proof. Windows and macOS run the same scene when those machines are available. The X11 window waits until an X11 session is a target.
+Linux on Wayland is the first machine for this proof. Windows opens a Win32 window (`crates/window/src/win32_shim.c`) and reads XInput. macOS opens a Cocoa window (`crates/window/src/cocoa_shim.m`) and reads GameController. The X11 window waits until an X11 session is a target.
 
-On Wayland, the camera moves only while the window has keyboard focus. On X11, Windows, and macOS, the keyboard poll is global. That split already exists in `input-zig`.
+On Wayland, Win32, and Cocoa, the camera moves only while the window has keyboard focus. Those windows clear their keys when focus leaves. X11 is not in this tree yet. `input-zig` polls that keyboard globally.
 
 ## Frame
 
@@ -60,7 +60,7 @@ crates/audio-check/ package genos-audio-check
 examples/camera/    package genos-camera
 ```
 
-`genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device.
+`genos-audio` mixes loaded PCM and submits that stereo buffer to the operating system. Direct-path transmission is one compute pass in `genos-render`. The camera scene does not open a sound device. The plan keeps that mix as the only DSP and keeps each device output as a write of the finished buffer ([ADR 0041](adr/0041-one-audio-mix-device-outputs-only.md), [audio design](systems/audio-design.md)).
 
 `genos-debug` runs the debug commands, scripts, captures and the path-traced ground truth over the MCP command queue. Each engine system adds a binary under `debug/<system>/` on that scaffolding, with scenes in `debug/scenes/`. `genos-scene-lib` parses those scene files and does not link the renderer. `genos-lighting` is the lighting debug binary: it builds the scenes and writes screenshots, dumps, and logs under `./genos-debug/`. See [Debugging](systems/debugging.md).
 

@@ -92,8 +92,9 @@ fn equal_elapsed_time_matches_across_frame_schedules() {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    };
+        };
     let mouse = Actions {
         capture_click: true,
         mouse_dx: 40.0,

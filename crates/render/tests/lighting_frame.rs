@@ -255,8 +255,9 @@ fn lighting_draws_emitted_light_and_bounces_it() {
             __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
             __scene.fog = genos_scene::FogSettings::default();
             __scene.menu = genos_scene::MenuSettings::default();
+            __scene.particles = genos_scene::ParticleSettings::default();
             __scene
-        });
+            });
         let mut lit = gltf.clone();
         for m in &mut lit.materials {
             m.emissive = [glow; 3];
@@ -1335,8 +1336,9 @@ fn shadow_floor_world() -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    });
+        });
     // Beside the scored patch, low, so a few cells see it and the rest do not.
     // A few centimetres off the floor, just beside the scored patch, so the
     // nearest 12.5 cm cells see it and the cells one step away do not.
@@ -1574,8 +1576,9 @@ fn banner_world(lamp_x: f32, lamp_z: f32) -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    });
+        });
     world
         .add_gltf_traced(&banner, &genos_render::identity_pose(), &settings)
         .expect("banner mesh");
@@ -1963,8 +1966,9 @@ fn sponza_curtain_scores(screen: bool) -> (f64, f64) {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    });
+        });
     world
         .add_gltf_traced(&scene, &genos_render::identity_pose(), &settings_bake)
         .expect("sponza mesh");
@@ -2032,8 +2036,9 @@ fn white_lamps(n: usize) -> World {
         __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
         __scene.fog = genos_scene::FogSettings::default();
         __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = genos_scene::ParticleSettings::default();
         __scene
-    })
+        })
 }
 
 fn direct_pick(mode: LampPickMode, rays: u32) -> LightingSettings {
