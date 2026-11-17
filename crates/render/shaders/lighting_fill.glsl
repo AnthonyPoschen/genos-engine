@@ -357,15 +357,18 @@ void lighting_fill_visit(uint slot) {
     // The world cell is the store for a screen texel. A 12.5 cm screen texel
     // outranks its parent while it is young, so the parent stays empty and
     // compose shows a direct-only mean. Claim the parent; its own visit
-    // schedules the rays. A band child (SHOWN.y set at spawn) is a candidate
-    // in this same histogram, under the same ceiling. It does not get a
-    // second list.
-    if (size >= base) {
+    // schedules the rays. An off-screen band child is a candidate in this
+    // same histogram. A child the frustum can see is not: it would take the
+    // parent's rays and the presented frame would stop filling.
+    uint seen_x;
+    uint seen_y;
+    bool seen = lighting_fill_pixel(p, seen_x, seen_y);
+    if (size >= base && !seen) {
         lighting_fine_spawn(slot);
     }
     if (size < base) {
         lighting_cache_find_sized(p, n, true, base, p);
-        if (!(cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID)) {
+        if (!(cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID) || seen) {
             return;
         }
     }
@@ -384,6 +387,15 @@ void lighting_fill_visit(uint slot) {
         uint cap = lighting_fill_off_cap();
         uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
         uint packed = lighting_fill_pack(slot, q);
+        // A band child does not take the cold-start rank, and it only
+        // contends for one bin in eight. An empty child in every bin
+        // outranks the cells the presented frame is still filling.
+        if (size < base) {
+            if ((bin & 7u) != 0u) {
+                return;
+            }
+            packed = ((q & 63u) << 21u) | (slot + 1u);
+        }
         atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
         uint rate = max(lighting_fill_u(16), 1u);
         uint block = slot / rate;
@@ -1505,4 +1517,37 @@ void lighting_fill_resolve(uint gid) {
     memoryBarrierBuffer();
     barrier();
     lighting_fill_share(gid);
+}
+
+// One wavelet stage a frame, the same stage for every off-screen band child
+// that already has LIGHTING_FINE_READY_SETS samples. Neighbours' levels are
+// last frame's writes. Below that count the stage does not run, and compose
+// shows the raw mean when the child becomes visible. A child the frustum can
+// see is the screen launch's, so this does not run a second filter on it.
+void lighting_fine_world_filter(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    if (!(cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID)) {
+        return;
+    }
+    if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
+        return;
+    }
+    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_FINE_READY_SETS) {
+        return;
+    }
+    uint px;
+    uint py;
+    if (lighting_fill_pixel(lighting_sc_texel_pos(slot), px, py)) {
+        return;
+    }
+    uint stage = lighting_frame() % 7u;
+    if (stage == 0u) {
+        lighting_svgf_variance(slot);
+    } else if (stage <= 5u) {
+        lighting_svgf_iter(slot, stage - 1u);
+    } else {
+        lighting_svgf_push(slot);
+    }
 }

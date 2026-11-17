@@ -5042,7 +5042,10 @@ vec4 lighting_svgf_in(uint s, out float var) {
     float t = floor(max(own.w, 0.0));
     var = -1.0;
     bool wrc = cache.v[3u * s + 1u].w > 0.2;
-    if (t < 0.5 || !lighting_svgf_active(s)) {
+    // A band child can feed the world-space filter without joining the screen
+    // list. The screen list still requires lighting_svgf_active.
+    bool band = cache.v[LIGHTING_SC_SHOWN_AT + s].y > LIGHTING_FINE_VALID;
+    if (t < 0.5 || (!lighting_svgf_active(s) && !band)) {
         return vec4(0.0);
     }
     // S72V7: each texel's light is carried to now (its sun/sky gain, as the
