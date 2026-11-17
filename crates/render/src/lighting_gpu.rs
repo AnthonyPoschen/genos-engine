@@ -7407,24 +7407,25 @@ mod reach_footprint_tests {
     const REACH_CELL_DIAG: f32 = 0.70710677;
 
     /// True when a sample a `step` away from a mean of `peak` joins a tile.
-    /// A step inside the quarter stays quiet. Unknown noise does not: a young
-    /// cell with no estimator is hot once the quarter is cleared. A running
-    /// estimator also has to clear `noise_band`.
+    /// A step inside the quarter stays quiet. No residual yet stays quiet:
+    /// that sample is the seed. A running residual has to clear `noise_band`.
+    /// A cell the mover reaches joins in the shader without this test.
     fn reach_sample_hot(step: f32, peak: f32, noise_known: bool, noise_band: f32) -> bool {
         let bar = 0.25 * peak.max(0.25);
         if step <= bar {
             return false;
         }
         if !noise_known {
-            return true;
+            return false;
         }
         step > noise_band
     }
 
     /// Tiles a world cell's square covers. `radius` is the half-diagonal.
-    /// Behind the camera, on it, or half the picture is wide and the tile list
-    /// is empty. An entirely off-screen cell covers nothing and is not wide.
-    /// Same projection as `lighting_reach_note_bounds`.
+    /// On or behind the camera covers nothing and is not wide. Half the
+    /// picture is wide and the tile list is empty. An entirely off-screen
+    /// cell covers nothing and is not wide. Same projection as
+    /// `lighting_reach_note_bounds`.
     fn reach_cell_span(
         frame: &[u8],
         centre: [f32; 3],
@@ -7463,7 +7464,7 @@ mod reach_footprint_tests {
         let rad = radius.max(0.0);
         let z = dot3(rel, fwd);
         if z < -rad || z <= REACH_NEAR_Z {
-            return (true, Vec::new());
+            return (false, Vec::new());
         }
         let t = tan.max(REACH_TAN_FLOOR);
         let aspect = aspect.max(REACH_TAN_FLOOR);
@@ -7557,7 +7558,12 @@ mod reach_footprint_tests {
             centre.iter().all(|t| many.contains(t)),
             "the footprint dropped the centre tile"
         );
-        assert!(reach_cell_span(&frame, [0.0, 0.0, 4.0], 0.2, 320, 180).0);
+        let (behind_wide, behind) = reach_cell_span(&frame, [0.0, 0.0, 4.0], 0.2, 320, 180);
+        assert!(!behind_wide, "a cell behind the camera unheld the picture");
+        assert!(behind.is_empty(), "a cell behind the camera covered a tile");
+        let (near_wide, near) = reach_cell_span(&frame, [0.0, 0.0, -0.1], 0.2, 320, 180);
+        assert!(!near_wide, "a cell on the camera unheld the picture");
+        assert!(near.is_empty(), "a cell on the camera covered a tile");
         assert!(reach_cell_span(&frame, [0.0, 0.0, -8.0], 8.0, 320, 180).0);
         let (wide, diag) =
             reach_cell_span(&frame, [0.0, 0.0, -8.0], 0.25 * REACH_CELL_DIAG, 320, 180);
@@ -7566,10 +7572,10 @@ mod reach_footprint_tests {
     }
 
     #[test]
-    fn an_unknown_noise_sample_joins_and_a_quiet_one_does_not() {
+    fn a_seed_sample_stays_quiet_and_a_step_outside_its_noise_joins() {
         assert!(
-            reach_sample_hot(0.4, 1.0, false, 0.0),
-            "a young cell with no estimator stayed quiet"
+            !reach_sample_hot(0.4, 1.0, false, 0.0),
+            "a cell with no residual joined on its seed sample"
         );
         assert!(
             !reach_sample_hot(0.1, 1.0, false, 0.0),

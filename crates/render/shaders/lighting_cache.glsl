@@ -5287,6 +5287,15 @@ const float REACH_SHADOW = 0.25;
 // One cell, or this many direct-shade pixels, is a tile. A single relit
 // pixel is not: the one-percent hold fires in almost every tile.
 const uint REACH_DIRECT_PIXELS = 128u;
+// How fast a fill cell's residual variance follows the raw sample. A hot
+// sample does not teach the band, so a step stays outside it. Quiet samples
+// pull the band in. The multi-scale estimator does not use this word.
+const float REACH_RESID_RATE = 0.08;
+// The raw fill sample is a heavy-tailed residual against the stored mean.
+// Two standard errors, the texel rule, marks thousands of settled cells and
+// the picture unholds. Thirty-two standard errors is the tail that is not
+// that noise. A multi-scale estimate still uses LIGHTING_DIRTY_SE.
+const float REACH_RESID_SE = 32.0;
 // One projection. No change-list walk: that overflowed lavapipe's stack.
 bool lighting_reach_project(vec3 world, out uvec2 px) {
     px = uvec2(0u);
@@ -5337,13 +5346,55 @@ void lighting_reach_count_px(uvec2 p) {
     }
     atomicAdd(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + ty * tw + tx], 1u);
 }
+// lighting_sc_noise is unknown when the multi-scale flag is off. A fill cell
+// keeps the squared luminance residual of the raw sample against the stored
+// mean in the estimator's z. That is the band. The short variance is the
+// residual against a mean that chases the sample, so it calls a settled
+// sample hot. No residual yet is a seed, not a reach.
+vec2 lighting_reach_noise(uint slot) {
+    vec2 nz = lighting_sc_noise(slot);
+    if (nz.x >= 0.0) {
+        return nz;
+    }
+    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+    if (b.x > 0.0 || !(b.w > REACH_HALF) || !(b.z > 0.0)) {
+        return nz;
+    }
+    float lum = dot(max(cache.v[3u * slot + 2u].rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+    if (!(lum > 0.0)) {
+        return nz;
+    }
+    float sd = sqrt(b.z);
+    return vec2(sd / lum, sd);
+}
+// The squared step of the raw sample against the stored mean. The first
+// sample is at least a quarter of the mean, so a quiet seed does not freeze
+// the band shut. Later samples pull it toward the residual the fill
+// actually writes. A hot sample is in that residual: leaving it out ratchets
+// the band down to the quiet core and keeps the tail hot forever.
+void lighting_reach_note_resid(uint slot, vec3 taken, vec3 mean) {
+    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+    if (b.x > 0.0) {
+        return;
+    }
+    float dl = abs(dot(max(taken, vec3(0.0)) - max(mean, vec3(0.0)), LIGHTING_SVGF_LW));
+    float resid = dl * dl;
+    if (!(b.z > 0.0)) {
+        float lum = dot(max(mean, vec3(0.0)), LIGHTING_SVGF_LW);
+        b.z = max(resid, REACH_SHADOW * REACH_SHADOW * lum * lum);
+    } else {
+        b.z = mix(b.z, resid, REACH_RESID_RATE);
+    }
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = b;
+}
 // The new sample against the stored mean. Unpacked luminance, not an rgb9e5
 // pack: one bucket does not keep a settled cell hot, and a pack that matches
 // while the sample is still outside the band does not clear it. The sample
 // has to clear REACH_SHADOW, the same quarter as a direct shade step. A
-// running estimator also has to clear the cell's own noise. No estimator
-// (a young cell) is hot: unknown noise is not a reason to stay quiet. The
-// tile drops on the next reach pass once the sample is inside that band.
+// running estimator, including a fill cell's stored deviation, also has to
+// clear the cell's own noise. A fill cell with no residual yet stays quiet:
+// that sample is the seed. The tile drops on the next reach pass once the
+// sample is inside the band. A cell the mover reaches joins without this test.
 bool lighting_reach_radiance_hot(vec3 taken, vec3 mean, uint slot) {
     float ys = dot(max(taken, vec3(0.0)), LIGHTING_SVGF_LW);
     float ym = dot(max(mean, vec3(0.0)), LIGHTING_SVGF_LW);
@@ -5353,28 +5404,37 @@ bool lighting_reach_radiance_hot(vec3 taken, vec3 mean, uint slot) {
         return false;
     }
     vec2 nz = lighting_sc_noise(slot);
+    float se = LIGHTING_DIRTY_SE;
     if (!(nz.x >= 0.0)) {
-        return true;
+        nz = lighting_reach_noise(slot);
+        se = REACH_RESID_SE;
     }
-    return dl > LIGHTING_DIRTY_SE * nz.y * lighting_sc_sun_gain(slot);
+    // No residual yet. This sample is the seed, not a departure from a
+    // band. Marking it joins every newly filled cell while a mover is
+    // listed, and one of those cells sits on the camera.
+    if (!(nz.x >= 0.0)) {
+        return false;
+    }
+    return dl > se * nz.y * lighting_sc_sun_gain(slot);
 }
-// The last change word is not a tile. A hot cell whose bounds are behind the
-// camera, on it, or half the picture sets it. The reach pass turns that into
-// the scene mark. `reach_cell_span` is the same test.
+// The last change word is not a tile. A hot cell whose square covers half
+// the picture sets it. A cell on or behind the camera has no footprint and
+// does not. `reach_cell_span` is the same test.
 void lighting_reach_wide_note() {
     atomicMax(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + LIGHTING_REACH_CHANGE_WORDS - 1u], 1u);
 }
 // Tiles the cell's square covers. The centre alone misses the rest of the
-// cell. Behind the camera, on it, or a rect of half the picture is not a
-// local mask: the reach pass unholds the picture.
+// cell. A cell on or behind the camera covers nothing. A rect of half the
+// picture is not a local mask: the reach pass unholds the picture.
 void lighting_reach_raise_px(uvec2 px);
 void lighting_reach_note_bounds(vec3 centre, float rad) {
     vec3 rel = centre - scene.eye.xyz;
     float z = dot(rel, scene.view_forward.xyz);
+    // On or behind the camera there is no screen footprint. A fill outlier
+    // there used to set the picture unhold, and one such cell a frame
+    // dropped the hold everywhere. A rect that covers half the picture
+    // still does: that cell is in front and its square is not local.
     if (z < -rad || z <= REACH_NEAR_Z) {
-        if (lighting_reach_noting()) {
-            lighting_reach_wide_note();
-        }
         return;
     }
     float t = max(scene.view_right.w, REACH_TAN_FLOOR);
@@ -5450,8 +5510,9 @@ void lighting_reach_raise_px(uvec2 px) {
 // not the centre: a centre tile misses the rest of the footprint. While a
 // mover is listed those tiles join even outside the mover disc. A tile
 // already marked stays while the sample is still outside the band, including
-// the frames after the mover stops, and drops once it is not. Bounds behind
-// the camera, on it, or half the picture unhold the picture.
+// the frames after the mover stops, and drops once it is not. A cell the
+// mover reaches joins while that mover is listed. A cell on or behind the
+// camera covers nothing. Half the picture unholds the picture.
 void lighting_reach_note_cell(uint slot, vec3 mean, vec3 taken) {
     if (slot >= LIGHTING_CACHE_SLOTS) {
         return;
@@ -5460,7 +5521,21 @@ void lighting_reach_note_cell(uint slot, vec3 mean, vec3 taken) {
     if (!(size > LIGHTING_HIT_PATCH)) {
         return;
     }
-    if (!lighting_reach_radiance_hot(taken, mean, slot)) {
+    // No stored mean yet. The first sample is the mean, not a departure
+    // from one. A cell behind the camera would otherwise unhold the picture.
+    if (!(cache.v[3u * slot + 2u].w > REACH_HALF)) {
+        return;
+    }
+    bool hot = lighting_reach_radiance_hot(taken, mean, slot);
+    lighting_reach_note_resid(slot, taken, mean);
+    // The residual tail is a few cells and it is not the mover: fill noise
+    // hides a far box's bounce. A cell the mover actually reaches joins on
+    // that fact. The quarter-and-residual test is what joins a cell outside
+    // that disc.
+    if (!hot && lighting_reach_noting() && lighting_near_change(cache.v[3u * slot].xyz)) {
+        hot = true;
+    }
+    if (!hot) {
         return;
     }
     lighting_reach_note_bounds(cache.v[3u * slot].xyz, size * REACH_CELL_DIAG);
