@@ -15,11 +15,28 @@ Moving objects must carry their own lighting records so a spin or slide does not
 5. **World boost.** Cells in 1 m bricks around the mover's swept bounds get a fill priority boost; movers too small at their distance dirty nothing.
 6. **One scheduler.** Mover texels are ordinary fill candidates (change, distance moved, lamp proximity, closeness). Compose reads mover texels for mover pixels and world cells elsewhere.
 
+## Scope this stage (yaw-only, boxes-first)
+
+This stage is **yaw-only** and **boxes-first**. That is intentional and safe for the live analytic box occluders; it is not full rotation and not mesh-surface sampling.
+
+| What | Today | Safe? |
+|---|---|---|
+| **Yaw** (heading about Y) | Host stores `yaw_cos` / `yaw_sin`. Compose converts world→local with the inverse yaw before the hash lookup. Fill transforms local→world with the same yaw. | Yes — matches box occ yaw. |
+| **Pitch / roll / tumble** | Not stored. No pitch/roll in the mover record or in `lighting_mover_world_to_local`. A tumbling box keeps the last yaw frame only. | Safe for current analytic boxes (yaw-only motion). Wrong for a pitched or rolling mover until full-rotation lands. |
+| **AABB-surface texels** | Host layout places texels on the six faces of the local AABB with outward normals, hashed into compose buckets. | Correct for boxes. Spheres float off the true shell (AABB shrink-wrap). |
+| **Mesh movers** | Hitch packs centre from world bounds and **identity yaw**. `half_extents` is left zero → layout clamps each axis to `LIGHTING_SC_TEXEL` (a 25 cm cube). No mesh-surface samples. | Safe (does not crash or smear world cells); lighting quality on mesh movers is a coarse stand-in until mesh-surface texels land. |
+
+### Named follow-ups
+
+1. **Full rotation** — store a full orientation (or pitch/roll with yaw); world↔local uses that frame for lookup and fill. Required before pitched / tumbling movers are trusted.
+2. **Mesh-surface texels** — spawn and look up on the mesh (or SDF) surface with real half-extents / bone frame, not the 25 cm AABB stand-in.
+
 ## Departures from GIBS
 
 - Movers only (not all geometry).
 - World-direction lighting in the texel (GIBS keeps local frames for position; incoming light is what changes).
 - Discrete Near/Mid/Far tiers instead of continuous screen-relative radius.
+- This stage is yaw-only AABB boxes; GIBS attaches surfels on arbitrary oriented surfaces.
 
 ## Networking (rubric)
 
@@ -59,7 +76,7 @@ Moving objects must carry their own lighting records so a spin or slide does not
 
 3. **Red-box dark bands (mover faces):** Compose returned `w = 1` whenever mover texel `samples > 0.5`, so underfilled pool texels painted full-trust dark patches. Trust now requires ≥ 8 sample sets before full-trust; below that, blend with a world prior just outside the surface along the normal (on-mover world cells are dropped, so hollow fallthrough stayed dark).
 
-4. **Persistent blocky dark faces (orbit/spin @ 4070):** Root causes were (a) compose looked up `pos - centre` without inverse yaw, so rotating faces keyed the wrong hash buckets; (b) host layout was a volume grid with every normal = `+Y`, so side-face fill origins sat inside the mesh and self-shadowed; (c) fill ray origins had no outward bias. Fix: object-local lookup via inverse yaw, AABB-surface layout with outward normals hashed into compose buckets, and `LIGHTING_MOVER_RAY_BIAS` along the world normal.
+4. **Persistent blocky dark faces (orbit/spin @ 4070):** Root causes were (a) compose looked up `pos - centre` without inverse yaw, so rotating faces keyed the wrong hash buckets; (b) host layout was a volume grid with every normal = `+Y`, so side-face fill origins sat inside the mesh and self-shadowed; (c) fill ray origins had no outward bias. Fix: object-local lookup via inverse yaw, AABB-surface layout with outward normals hashed into compose buckets, and a **scale-aware** fill bias (`LIGHTING_MOVER_RAY_BIAS_FRAC` × max(`LIGHTING_SC_TEXEL`, min half-extent)) along the world normal.
 
 ## Review follow-ups (#288)
 

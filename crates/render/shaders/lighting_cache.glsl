@@ -1387,8 +1387,15 @@ vec3 lighting_mover_world_to_local(vec3 world_off, float yc, float ys) {
     return vec3(yc * world_off.x - ys * world_off.z, world_off.y, ys * world_off.x + yc * world_off.z);
 }
 
-// Push fill origins just outside the surface so lattice reads are not self-shadowed.
-const float LIGHTING_MOVER_RAY_BIAS = 0.02;
+// Scale-aware outward fill bias: fraction of max(texel size, min half-extent).
+// For a 0.5 m half-extent box this is 0.02 m (same as the old fixed bias);
+// smaller movers shrink with their extent, larger ones stay at least one texel.
+const float LIGHTING_MOVER_RAY_BIAS_FRAC = 0.04;
+
+float lighting_mover_ray_bias(float min_half_extent) {
+    return max(LIGHTING_SC_TEXEL, max(min_half_extent, LIGHTING_MOVER_EPS))
+        * LIGHTING_MOVER_RAY_BIAS_FRAC;
+}
 
 // Stage H fill/deposit stays out of compose (GENOS_COMPOSE_NO_WALK) to keep
 // lighting_compose.comp under the 248k SPIR-V ceiling.
@@ -1413,7 +1420,8 @@ vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
     uint slot = lighting_mover_find_slot(oid);
     if (slot == ~0u) {
         world_n = normalize(ln + vec3(LIGHTING_MOVER_EPS));
-        return local + world_n * LIGHTING_MOVER_RAY_BIAS;
+        float extent = max(max(abs(local.x), abs(local.y)), abs(local.z));
+        return local + world_n * lighting_mover_ray_bias(extent);
     }
     uint rt = lighting_mover_table_off() + slot * 16u;
     vec3 centre = vec3(
@@ -1422,9 +1430,14 @@ vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
         uintBitsToFloat(movers_gpu.header[rt + 10u]));
     float yc = uintBitsToFloat(movers_gpu.header[rt + 11u]);
     float ys = uintBitsToFloat(movers_gpu.header[rt + 15u]);
+    vec3 he = vec3(
+        uintBitsToFloat(movers_gpu.header[rt + 12u]),
+        uintBitsToFloat(movers_gpu.header[rt + 13u]),
+        uintBitsToFloat(movers_gpu.header[rt + 14u]));
+    float min_he = min(min(abs(he.x), abs(he.y)), abs(he.z));
     vec3 w = lighting_mover_yaw_local(local, yc, ys) + centre;
     world_n = normalize(lighting_mover_yaw_local(ln, yc, ys) + vec3(LIGHTING_MOVER_EPS));
-    return w + world_n * LIGHTING_MOVER_RAY_BIAS;
+    return w + world_n * lighting_mover_ray_bias(min_he);
 }
 
 void lighting_mover_deposit(uint tex, vec3 rgb, float w) {
