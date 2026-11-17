@@ -493,6 +493,73 @@ pub struct AmbientSettings {
     pub dusk_intensity: f32,
 }
 
+/// Always-on fill (stage F2). Every cache round spends `budget` rays.
+///
+/// Keep [`FillSettings::high`] in step with `Tunables::high` in `genos-fill-ref`.
+/// `check_rate` is named and unused until F3 schedules check rays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FillSettings {
+    /// Rays traced in one cache round. High starts at 100_000. `0` traces none.
+    pub budget: u32,
+    /// Screen tile, in pixels. One pick per tile that has a surface.
+    pub tile: u32,
+    /// Metres. Level 0 is this size out to `lod_near`. The world cell is the source.
+    pub lod_near: f32,
+    /// Coarsest cell. Doubling stops here and that size runs out to `far`.
+    pub cell_max: f32,
+    /// Drop radius is this times the create radius. Greater than 1 holds the boundary.
+    pub leash_scale: f32,
+    /// Seconds of player velocity the create centre leads the player by.
+    pub look_ahead: f32,
+    /// Clipmap extent, metres. Cells past this are dropped.
+    pub far: f32,
+    /// Share of `budget` reserved as the far bin of the off-screen rays.
+    pub far_share: f32,
+    /// Share of `budget` the screen cannot take. The rest of the round is off-screen too.
+    pub offscreen_floor: f32,
+    /// A cell is sufficient when its standard error over the mean is below this.
+    pub error_target: f32,
+    /// Metres. Closeness is `1 / max(distance, prox_min)`.
+    pub prox_min: f32,
+    /// Weight of the measured-change term. The term is 0 until F3.
+    pub change_weight: f32,
+    /// Texels per check ray. F2 does not trace them.
+    pub check_rate: u32,
+    /// Rays of plain mean before the MSME catch-up.
+    pub warmup_rays: u32,
+    /// Averaging window, in rays.
+    pub ray_cap: u32,
+    /// Seconds. The shader's look offset uses this when it has no frame delta.
+    pub frame_dt: f32,
+}
+
+impl FillSettings {
+    #[must_use]
+    pub fn high() -> Self {
+        Self {
+            budget: 100_000,
+            tile: 8,
+            lod_near: 8.0,
+            cell_max: 4.0,
+            leash_scale: 1.5,
+            look_ahead: 0.5,
+            far: 200.0,
+            far_share: 0.05,
+            offscreen_floor: 0.25,
+            error_target: 0.03,
+            prox_min: 0.5,
+            change_weight: 1.0,
+            check_rate: 9,
+            warmup_rays: 16,
+            ray_cap: 512,
+            frame_dt: 1.0 / 60.0,
+        }
+    }
+}
+
+/// Work-buffer ray slots (`LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS`).
+const FILL_BUDGET_MAX: u32 = 1_572_864;
+
 /// Knobs of the surface light cache. The world cache is this same cache.
 ///
 /// A cache entry is one hashed surface patch. `slot` is only its storage index.
@@ -515,7 +582,8 @@ pub struct SurfaceCacheSettings {
     /// update. `0` leaves that `0.1` floor and still clamps. The hold path
     /// does not read this.
     pub firefly_sigma: f32,
-    /// Cap on rays dispatched in one cache round. `0` keeps the existing lists.
+    /// Cap on rays dispatched in one cache round for modes other than the world
+    /// cache. `0` keeps those lists. World mode 3 spends `fill.budget` instead.
     pub ray_budget: u32,
     /// Fresh rays per frame for a dormant cache entry, a whole number from 0 to 16.
     /// `0` keeps one sweep in eight. `1` through `16` trace one new 16-ray entry
@@ -581,6 +649,8 @@ pub struct SurfaceCacheSettings {
     /// errors of the round's own per-cell differences. `0` drops that test (the
     /// 1 % gap alone, as before).
     pub drain_sigma: f32,
+    /// Stage F2 scheduler. World mode 3 spends `fill.budget` every cache round.
+    pub fill: FillSettings,
 }
 
 /// Surface cache switches the renderer uses when nothing sets `sc_flags`
@@ -832,6 +902,8 @@ impl LightingSettings {
                 s.ambient.mode = AmbientMode::Day;
                 s.ambient.intensity = 0.35;
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
+                s.surface_cache.fill.budget = 25_000;
+                s.surface_cache.fill.tile = 32;
             }
             LightingPreset::Medium => {
                 // High's directional product stays on: SH cells, texel detail,
@@ -848,6 +920,8 @@ impl LightingSettings {
                     LAMP_PICK_CANDIDATES_MEDIUM,
                     LAMP_PICK_SPATIAL_RADIUS,
                 );
+                s.surface_cache.fill.budget = 50_000;
+                s.surface_cache.fill.tile = 16;
             }
         }
         s.sanitize();
@@ -887,6 +961,7 @@ impl LightingSettings {
                 sh_texel_ray_cut: true,
                 sh_probe_retire: true,
                 drain_sigma: 4.0,
+                fill: FillSettings::high(),
             },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
@@ -964,6 +1039,31 @@ impl LightingSettings {
         } else {
             4.0
         };
+        let fill = &mut self.surface_cache.fill;
+        fill.budget = fill.budget.min(FILL_BUDGET_MAX);
+        fill.tile = fill.tile.clamp(1, 64);
+        fill.lod_near = finite_pos(fill.lod_near, 8.0);
+        fill.cell_max = finite_pos(fill.cell_max, 4.0).max(0.25);
+        fill.leash_scale = finite_pos(fill.leash_scale, 1.5).max(1.0);
+        fill.look_ahead = if fill.look_ahead.is_finite() {
+            fill.look_ahead.max(0.0)
+        } else {
+            0.5
+        };
+        fill.far = finite_pos(fill.far, 200.0);
+        fill.far_share = finite_unit(fill.far_share, 0.05);
+        fill.offscreen_floor = finite_unit(fill.offscreen_floor, 0.25);
+        fill.error_target = finite_pos(fill.error_target, 0.03);
+        fill.prox_min = finite_pos(fill.prox_min, 0.5);
+        fill.change_weight = if fill.change_weight.is_finite() {
+            fill.change_weight.max(0.0)
+        } else {
+            1.0
+        };
+        fill.check_rate = fill.check_rate.max(1);
+        fill.warmup_rays = fill.warmup_rays.max(1);
+        fill.ray_cap = fill.ray_cap.max(fill.warmup_rays);
+        fill.frame_dt = finite_pos(fill.frame_dt, 1.0 / 60.0);
         if let Some(mode) = self.gi.world_mode {
             // Mode 2 pushed screen-probe irradiance into world patches.
             // That pass is removed, so the stored mode becomes the surface cache.
@@ -1297,6 +1397,23 @@ impl LightingSettings {
             "surface_cache.dormant_rays={}",
             self.surface_cache.dormant_rays
         );
+        let fill = &self.surface_cache.fill;
+        let _ = writeln!(out, "surface_cache.fill_budget={}", fill.budget);
+        let _ = writeln!(out, "surface_cache.fill_tile={}", fill.tile);
+        let _ = writeln!(out, "surface_cache.fill_lod_near={}", num_text(fill.lod_near));
+        let _ = writeln!(out, "surface_cache.fill_cell_max={}", num_text(fill.cell_max));
+        let _ = writeln!(out, "surface_cache.fill_leash={}", num_text(fill.leash_scale));
+        let _ = writeln!(out, "surface_cache.fill_look_ahead={}", num_text(fill.look_ahead));
+        let _ = writeln!(out, "surface_cache.fill_far={}", num_text(fill.far));
+        let _ = writeln!(out, "surface_cache.fill_far_share={}", num_text(fill.far_share));
+        let _ = writeln!(out, "surface_cache.fill_offscreen_floor={}", num_text(fill.offscreen_floor));
+        let _ = writeln!(out, "surface_cache.fill_error_target={}", num_text(fill.error_target));
+        let _ = writeln!(out, "surface_cache.fill_prox_min={}", num_text(fill.prox_min));
+        let _ = writeln!(out, "surface_cache.fill_change_weight={}", num_text(fill.change_weight));
+        let _ = writeln!(out, "surface_cache.fill_check_rate={}", fill.check_rate);
+        let _ = writeln!(out, "surface_cache.fill_warmup={}", fill.warmup_rays);
+        let _ = writeln!(out, "surface_cache.fill_ray_cap={}", fill.ray_cap);
+        let _ = writeln!(out, "surface_cache.fill_frame_dt={}", num_text(fill.frame_dt));
         let _ = writeln!(
             out,
             "surface_cache.sh_cells={}",
@@ -1520,6 +1637,22 @@ impl LightingSettings {
                 self.surface_cache.firefly_sigma = sigma;
             }
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
+            "surface_cache.fill_budget" => self.surface_cache.fill.budget = num_u32(value)?,
+            "surface_cache.fill_tile" => self.surface_cache.fill.tile = num_u32(value)?,
+            "surface_cache.fill_lod_near" => self.surface_cache.fill.lod_near = num_f32(value)?,
+            "surface_cache.fill_cell_max" => self.surface_cache.fill.cell_max = num_f32(value)?,
+            "surface_cache.fill_leash" => self.surface_cache.fill.leash_scale = num_f32(value)?,
+            "surface_cache.fill_look_ahead" => self.surface_cache.fill.look_ahead = num_f32(value)?,
+            "surface_cache.fill_far" => self.surface_cache.fill.far = num_f32(value)?,
+            "surface_cache.fill_far_share" => self.surface_cache.fill.far_share = num_f32(value)?,
+            "surface_cache.fill_offscreen_floor" => self.surface_cache.fill.offscreen_floor = num_f32(value)?,
+            "surface_cache.fill_error_target" => self.surface_cache.fill.error_target = num_f32(value)?,
+            "surface_cache.fill_prox_min" => self.surface_cache.fill.prox_min = num_f32(value)?,
+            "surface_cache.fill_change_weight" => self.surface_cache.fill.change_weight = num_f32(value)?,
+            "surface_cache.fill_check_rate" => self.surface_cache.fill.check_rate = num_u32(value)?,
+            "surface_cache.fill_warmup" => self.surface_cache.fill.warmup_rays = num_u32(value)?,
+            "surface_cache.fill_ray_cap" => self.surface_cache.fill.ray_cap = num_u32(value)?,
+            "surface_cache.fill_frame_dt" => self.surface_cache.fill.frame_dt = num_f32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
             "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
@@ -1807,6 +1940,22 @@ impl LightingSettings {
                 "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE",
                 "surface_cache.sh_probe_retire",
             ),
+            ("GENOS_LIGHTING_FILL_BUDGET", "surface_cache.fill_budget"),
+            ("GENOS_LIGHTING_FILL_TILE", "surface_cache.fill_tile"),
+            ("GENOS_LIGHTING_FILL_LOD_NEAR", "surface_cache.fill_lod_near"),
+            ("GENOS_LIGHTING_FILL_CELL_MAX", "surface_cache.fill_cell_max"),
+            ("GENOS_LIGHTING_FILL_LEASH", "surface_cache.fill_leash"),
+            ("GENOS_LIGHTING_FILL_LOOK_AHEAD", "surface_cache.fill_look_ahead"),
+            ("GENOS_LIGHTING_FILL_FAR", "surface_cache.fill_far"),
+            ("GENOS_LIGHTING_FILL_FAR_SHARE", "surface_cache.fill_far_share"),
+            ("GENOS_LIGHTING_FILL_OFFSCREEN_FLOOR", "surface_cache.fill_offscreen_floor"),
+            ("GENOS_LIGHTING_FILL_ERROR_TARGET", "surface_cache.fill_error_target"),
+            ("GENOS_LIGHTING_FILL_PROX_MIN", "surface_cache.fill_prox_min"),
+            ("GENOS_LIGHTING_FILL_CHANGE_WEIGHT", "surface_cache.fill_change_weight"),
+            ("GENOS_LIGHTING_FILL_CHECK_RATE", "surface_cache.fill_check_rate"),
+            ("GENOS_LIGHTING_FILL_WARMUP", "surface_cache.fill_warmup"),
+            ("GENOS_LIGHTING_FILL_RAY_CAP", "surface_cache.fill_ray_cap"),
+            ("GENOS_LIGHTING_FILL_FRAME_DT", "surface_cache.fill_frame_dt"),
         ];
         for (var, key) in keys {
             if key == "direct_specular" && launch.direct_specular.is_some() {
@@ -2445,6 +2594,22 @@ fn parse_firefly_sigma(value: &str) -> Result<f32, String> {
         Ok(sigma)
     } else {
         Err(format!("expected a non-negative number, got {value}"))
+    }
+}
+
+fn finite_pos(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
+fn finite_unit(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        fallback
     }
 }
 

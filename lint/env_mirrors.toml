@@ -453,6 +453,86 @@ kind = "mirror"
 detail = "--lighting-fill (stress), LightingSettings key; MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_FILL_BUDGET"
+kind = "mirror"
+detail = "surface_cache.fill_budget (stress knob lighting_fill_budget); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CELL_MAX"
+kind = "mirror"
+detail = "surface_cache.fill_cell_max (stress knob lighting_fill_cell_max); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CHANGE_WEIGHT"
+kind = "mirror"
+detail = "surface_cache.fill_change_weight (stress knob lighting_fill_change_weight); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CHECK_RATE"
+kind = "mirror"
+detail = "surface_cache.fill_check_rate (stress knob lighting_fill_check_rate); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_ERROR_TARGET"
+kind = "mirror"
+detail = "surface_cache.fill_error_target (stress knob lighting_fill_error_target); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_FAR"
+kind = "mirror"
+detail = "surface_cache.fill_far (stress knob lighting_fill_far); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_FAR_SHARE"
+kind = "mirror"
+detail = "surface_cache.fill_far_share (stress knob lighting_fill_far_share); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_FRAME_DT"
+kind = "mirror"
+detail = "surface_cache.fill_frame_dt (stress knob lighting_fill_frame_dt); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_LEASH"
+kind = "mirror"
+detail = "surface_cache.fill_leash (stress knob lighting_fill_leash); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_LOD_NEAR"
+kind = "mirror"
+detail = "surface_cache.fill_lod_near (stress knob lighting_fill_lod_near); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_LOOK_AHEAD"
+kind = "mirror"
+detail = "surface_cache.fill_look_ahead (stress knob lighting_fill_look_ahead); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_OFFSCREEN_FLOOR"
+kind = "mirror"
+detail = "surface_cache.fill_offscreen_floor (stress knob lighting_fill_offscreen_floor); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_PROX_MIN"
+kind = "mirror"
+detail = "surface_cache.fill_prox_min (stress knob lighting_fill_prox_min); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_RAY_CAP"
+kind = "mirror"
+detail = "surface_cache.fill_ray_cap (stress knob lighting_fill_ray_cap); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_TILE"
+kind = "mirror"
+detail = "surface_cache.fill_tile (stress knob lighting_fill_tile); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_WARMUP"
+kind = "mirror"
+detail = "surface_cache.fill_warmup (stress knob lighting_fill_warmup); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_GI"
 kind = "todo"
 detail = "no CLI argument yet"

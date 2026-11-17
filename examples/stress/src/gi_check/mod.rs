@@ -683,8 +683,7 @@ fn view_rows(rows: &mut Vec<Row>, run: &str, dir: &Path, refs: &Path) -> Result<
             .iter()
             .filter(|s| f(s).is_finite())
             .max_by(|a, b| f(a).total_cmp(&f(b)))
-            .map(|s| format!("worst {} {:.4}", s.view, f(s)))
-            .unwrap_or_default()
+            .map_or_default(|s| format!("worst {} {:.4}", s.view, f(s)))
     };
     let worst_image = |f: &dyn Fn(&ViewScore) -> f64| {
         let view = scores

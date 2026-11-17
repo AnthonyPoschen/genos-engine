@@ -1,9 +1,11 @@
-//! CPU reference for screen-tile fill (stage F1).
+//! CPU reference for screen-tile fill.
 //!
-//! The estimators are the design in `docs/systems/lighting/screen-tile-fill-design.md`:
-//! need-weighted picks, water-filling, a fixed-point deposit, one writer at
-//! resolve, and the reconnection weight with its gates. Nothing here opens a
-//! window or a device. The live cache is unchanged. `--tile-fill` defaults off.
+//! Stage F1 estimators live in the other modules: need-weighted picks,
+//! water-filling, a fixed-point deposit, one writer at resolve, and the
+//! reconnection weight. Stage F2 is [`sched`]: the always-on budget, the
+//! clipmap, and the single-ray fold the GPU scheduler mirrors. Nothing here
+//! opens a window or a device. `--tile-fill` defaults off; that flag is the
+//! F1 checker, not the live F2 scheduler.
 //!
 //! The resolve rule is the one the age-of-shown-mean runs measured
 //! (`MEASURED_COMMIT`). On the axis-aligned red-box texels, 1M commits are
@@ -31,6 +33,7 @@
 mod commit;
 mod deposit;
 mod pick;
+pub mod sched;
 mod share;
 mod water;
 
