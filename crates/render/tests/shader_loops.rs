@@ -1,6 +1,7 @@
 #![cfg_attr(test, expect(clippy::panic, reason = "a test aborts when a fixture fails"))]
 #![cfg_attr(test, expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 #![cfg_attr(test, expect(clippy::single_element_loop, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
+#![cfg_attr(test, expect(clippy::too_many_lines, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
 
 //! The ray and shadow helpers are inlined at every call site. A loop with a large
 //! constant bound in them invites the driver to unroll it into each copy: a DDA bounded
@@ -100,6 +101,44 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         "a second ray into a slot must be summed, not dropped"
     );
     assert!(fill.contains("lighting_ray_fill_on"), "fill must be wired");
+    assert!(
+        fill.contains("cache.v[LIGHTING_SC_GRAD_AT + slot] = vec4(0.0)"),
+        "freeing a slot must drop the previous occupant's check state"
+    );
+    assert!(
+        fill.contains("lighting_fill_seed"),
+        "a reused slot must not keep a seed from another key"
+    );
+    assert!(
+        fill.contains("prior >= max_picks"),
+        "fill_max_picks is per cell, including a cell that wins several tiles"
+    );
+    assert!(
+        fill.contains("lighting_round() % tiles"),
+        "check rays must rotate through the screen, not rescan the same prefix"
+    );
+    assert!(
+        fill.contains("lighting_round() & (guard - 1u)"),
+        "off-screen checks must rotate through the slot table"
+    );
+    assert!(
+        fill.contains("lighting_fill_real"),
+        "an infinite check luma must not be stored or raise lambda"
+    );
+    assert!(
+        fill.contains("lighting_fill_note_var(slot, e)"),
+        "a world cell must store short variance so error keeps scheduling rays"
+    );
+    let pick = source("lighting_lamp_pick.glsl");
+    assert!(
+        pick.contains("lighting_fill_check_u"),
+        "a check ray's lamp pick must use the stored seed"
+    );
+    let direct = source("lighting_direct.comp");
+    assert!(
+        direct.contains("lighting_fill_check_u"),
+        "a texel-direct check must not mix the frame into a fill check ray"
+    );
     let compact = source("lighting_compact.comp");
     assert!(
         compact.contains("lighting_fill_visit"),
