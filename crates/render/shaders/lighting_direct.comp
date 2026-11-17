@@ -224,9 +224,13 @@ void main() {
     // Weighted point-lamp picking shares this loop's one trace. The sun stays
     // exact. A texel-direct check keeps the legacy estimator. Mode 0 leaves
     // `pick` as it was, so today's shade is unchanged.
+    // Reuse (4) is the only mode that writes a pixel reservoir or the
+    // visibility mean. pixels (2) and both (3) used to write that 24-byte
+    // record into the 64-byte stand-in. They parse as reuse. Hits (1) and
+    // reuse still shade bounce hits.
     uint lamp_mode = pc.lamp.x;
-    bool lamp_pix = idx < pixels && lamp_mode >= 2u && lamp_mode <= 4u;
-    bool lamp_hit = idx >= pixels && (lamp_mode == 1u || lamp_mode == 3u || lamp_mode == 4u);
+    bool lamp_pix = idx < pixels && lamp_mode == 4u;
+    bool lamp_hit = idx >= pixels && (lamp_mode == 1u || lamp_mode == 4u);
     bool lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
 #ifdef GENOS_RESTIR_DI
     // Product pixels only. The labelled exact sum, the random path, and the
@@ -746,8 +750,8 @@ void main() {
     }
 #ifdef GENOS_RESTIR_DI
     // Cumulative mean of the unbiased reservoir sample, visibility included.
-    // The three floats are the slot this shade already wrote. No second
-    // buffer. The shadow ray above re-traces the stored sample when the
+    // R, G, and blue are full floats in the slot this shade already wrote.
+    // No second buffer. The shadow ray above re-traces the stored sample when the
     // reservoir kept that lamp. A different lamp traces the stored one once.
     // History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9), one pixel, and
     // drops when the reservoir resets (word 15), any lamp changed (word 39),
@@ -885,7 +889,7 @@ void main() {
                 LampReservoir prev_res = lamp_res_load(hist_px, lamp_res_slot_prev());
                 // The hold-off path stores the mean length in the low 24 bits.
                 // The high 8 bits only count to 255, which froze a short mean.
-                // Hold-off stores the mean as three floats, not rgb9e5.
+                // Hold-off stores R, G, and blue as full floats, not rgb9e5.
                 prev_count = lamp_res_samples(prev_res);
                 if (prev_count > 0u) {
                     prev = vec3(prev_res.w_sum, prev_res.target, uintBitsToFloat(hg.w));

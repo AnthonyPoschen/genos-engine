@@ -250,7 +250,11 @@ fn lamp_pick_round_trips_and_rejects_a_bad_mode() {
     settings.set_key("lamp_pick_reuse", "on").unwrap();
     assert_eq!(settings.lamp_pick.mode, LampPickMode::Reuse);
     settings.set_key("lamp_pick_reuse", "off").unwrap();
-    assert_eq!(settings.lamp_pick.mode, LampPickMode::Both);
+    assert_eq!(settings.lamp_pick.mode, LampPickMode::Hits);
+    settings.set_key("lamp_pick", "pixels").unwrap();
+    assert_eq!(settings.lamp_pick.mode, LampPickMode::Reuse);
+    settings.set_key("lamp_pick", "both").unwrap();
+    assert_eq!(settings.lamp_pick.mode, LampPickMode::Reuse);
     assert_eq!(settings.lamp_pick.rays, 2);
     settings
         .set_key("lamp_pick", "reuse (experimental)")

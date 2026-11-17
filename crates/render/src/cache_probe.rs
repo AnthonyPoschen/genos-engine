@@ -4,8 +4,9 @@
 //! `lighting_cache_find_sized` in `lighting_cache.glsl`. The slot count matches
 //! `LIGHTING_CACHE_SLOTS` in `lighting_cache_slots.glsl`.
 
-/// Slots in the surface-cache hash. `lighting_cache_slots.glsl`.
-pub const SLOTS: u32 = 1_048_576;
+/// Default slots in the surface-cache hash. `lighting_cache_slots.glsl`.
+/// A live table may be smaller; pass that count to [`probe_slot`].
+pub const SLOTS: u32 = 262_144;
 /// Probe steps before a lookup gives up. `LIGHTING_CACHE_SEARCH`.
 pub const SEARCH: u32 = 16;
 
@@ -87,22 +88,25 @@ pub fn cache_key(position: [f32; 3], normal: [f32; 3], size: f32) -> u32 {
     h.max(1)
 }
 
-/// Slot `step` of the probe window for `key`.
+/// Slot `step` of the probe window for `key` in a table of `slots` entries.
+/// `slots` is a power of two.
 #[must_use]
-pub fn probe_slot(key: u32, step: u32) -> u32 {
+pub fn probe_slot(key: u32, step: u32, slots: u32) -> u32 {
+    let slots = if slots == 0 { SLOTS } else { slots };
     let start = lighting_hash(key ^ 0x9e37_79b9);
-    start.wrapping_add(step) & (SLOTS - 1)
+    let mask = slots.saturating_sub(1);
+    start.wrapping_add(step) & mask
 }
 
 /// Walk the same 16 slots the shader walks.
 #[must_use]
-pub fn classify_window(keys: &[u32], key: u32) -> CacheHit {
+pub fn classify_window(keys: &[u32], key: u32, slots: u32) -> CacheHit {
     let mut slot = None;
     let mut copies = 0u32;
     let mut live = 0u32;
     let mut foreign = 0u32;
     for step in 0..SEARCH {
-        let at = probe_slot(key, step);
+        let at = probe_slot(key, step, slots);
         let Some(stored) = keys.get(usize_from_u32(at)).copied() else {
             continue;
         };

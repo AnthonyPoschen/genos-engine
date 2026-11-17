@@ -359,7 +359,7 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "lighting_lamp_pick",
             "Lamp pick",
             lamp_pick_index(lighting.lamp_pick.mode),
-            &["off", "hits", "pixels", "both", "reuse"],
+            &["off", "hits", "reuse"],
         ),
         Knob::number(
             "lighting_lamp_pick_samples",
@@ -513,6 +513,14 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "",
         ),
         Knob::number(
+            "lighting_surface_cache_slots",
+            "Cache slots",
+            lighting.surface_cache.slots as f64,
+            (0.0, 1_048_576.0),
+            4096.0,
+            "",
+        ),
+        Knob::number(
             "lighting_surface_cache_dormant_rays",
             "Dormant rays",
             lighting.surface_cache.dormant_rays as f64,
@@ -599,9 +607,7 @@ fn lamp_pick_index(mode: LampPickMode) -> usize {
     match mode {
         LampPickMode::Off => 0,
         LampPickMode::Hits => 1,
-        LampPickMode::Pixels => 2,
-        LampPickMode::Both => 3,
-        LampPickMode::Reuse => 4,
+        LampPickMode::Reuse => 2,
     }
 }
 
@@ -665,7 +671,7 @@ pub fn apply_lighting_knob(
         "lighting_direct_specular" => ("direct_specular", on_off(v)),
         "lighting_lamp_pick" => (
             "lamp_pick",
-            ["off", "hits", "pixels", "both", "reuse"]
+            ["off", "hits", "reuse"]
                 .get(whole as usize)
                 .copied()
                 .unwrap_or("off")
@@ -706,6 +712,7 @@ pub fn apply_lighting_knob(
         ),
         "lighting_surface_cache_firefly_sigma" => ("surface_cache.firefly_sigma", format!("{v}")),
         "lighting_surface_cache_ray_budget" => ("surface_cache.ray_budget", whole.to_string()),
+        "lighting_surface_cache_slots" => ("surface_cache.slots", whole.to_string()),
         "lighting_surface_cache_dormant_rays" => ("surface_cache.dormant_rays", whole.to_string()),
         "lighting_world_cache" => ("world_cache", on_off(v)),
         "lighting_world_stale" => ("world_stale", whole.max(1).to_string()),
@@ -975,6 +982,7 @@ mod tests {
         "lighting_surface_cache_blend",
         "lighting_surface_cache_firefly_sigma",
         "lighting_surface_cache_ray_budget",
+        "lighting_surface_cache_slots",
         "lighting_surface_cache_dormant_rays",
         "lighting_world_cache",
         "lighting_world_stale",

@@ -559,6 +559,12 @@ impl Renderer {
     }
 
     /// Bytes of the post buffers: scene image, host copy, bloom, encode, params, meter.
+    /// Per-buffer lighting allocation. One `name bytes` line, then `total`.
+    /// `restir_mean` is a region of `restir` and is not in the total.
+    pub fn lighting_vram_report(&self) -> String {
+        self.gpu.lighting_vram_report()
+    }
+
     pub fn hdr_vram_bytes(&self) -> f64 {
         let lighting = &self.gpu.lighting;
         let bytes = lighting

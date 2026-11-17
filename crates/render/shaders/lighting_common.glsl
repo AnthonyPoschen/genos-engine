@@ -72,7 +72,7 @@ layout(push_constant) uniform Push {
     // and the light cache round (bits 12-31, lighting_round), w: frame
     uvec4 params;
     // Lamp picking. Zero keeps today's shade loop (lighting_direct.comp).
-    // x: mode (0 off, 1 hits, 2 pixels, 3 both, 4 reuse)
+    // x: mode (0 off, 1 hits, 4 reuse). 2 and 3 parse as reuse on the host.
     // y: candidates in bits 0-7, shadow rays in bits 8-15, unbiased in bit 16,
     //    shadow-ray counters in bit 17
     // z: spatial radius in pixels (0 skips the neighbour merge)

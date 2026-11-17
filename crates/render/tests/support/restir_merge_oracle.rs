@@ -9,6 +9,8 @@ use genos_render::Renderer;
 
 const EMPTY: u32 = u32::MAX;
 const GRID: u32 = 8;
+/// Packed history words. Lamp and M share word 0. Header word 19 is this stride.
+const HIST_STRIDE: usize = 4;
 const CANDIDATES: u32 = 4;
 const VIEW_Z: f32 = 3.0;
 const LIFT: f32 = 0.02;
@@ -263,10 +265,12 @@ struct Sample {
 }
 
 fn load_sample(words: &[u32], at: usize) -> Sample {
-    let lamp = words.get(at).copied().unwrap_or(EMPTY);
+    let packed = words.get(at).copied().unwrap_or(0);
+    let lamp16 = packed & 0xffff;
+    let lamp = if lamp16 == 0xffff { EMPTY } else { lamp16 };
+    let m = packed >> 16;
     let w = f32::from_bits(words.get(at + 1).copied().unwrap_or(0));
-    let m = words.get(at + 2).copied().unwrap_or(0);
-    let target = f32::from_bits(words.get(at + 3).copied().unwrap_or(0));
+    let target = f32::from_bits(words.get(at + 2).copied().unwrap_or(0));
     if m == 0 || lamp == EMPTY || target <= 0.0 || w <= 0.0 {
         Sample {
             lamp: EMPTY,
@@ -398,8 +402,8 @@ fn build(header_neighbors: u32) -> Built {
     let pixels = usize::try_from(GRID * GRID).unwrap_or(0);
     let lamp_base = 64usize;
     let hist0 = lamp_base + world.lamps.len() * 8;
-    let hist1 = hist0 + pixels * 6;
-    let scratch = hist1 + pixels * 6;
+    let hist1 = hist0 + pixels * HIST_STRIDE;
+    let scratch = hist1 + pixels * HIST_STRIDE;
     let total = scratch + pixels * 4;
     let mut restir = vec![0u32; total];
     restir[0] = u32::try_from(world.lamps.len()).unwrap_or(0);
@@ -413,7 +417,7 @@ fn build(header_neighbors: u32) -> Built {
     restir[16] = 3;
     restir[17] = 0xC5A1_7E11;
     restir[18] = 0x0051_5EED;
-    restir[19] = 6;
+    restir[19] = u32::try_from(HIST_STRIDE).unwrap_or(0);
     restir[46] = 1;
     restir[48] = GRID;
     restir[49] = GRID;
@@ -440,19 +444,23 @@ fn build(header_neighbors: u32) -> Built {
         }
     }
     for pixel in 0..pixels {
-        let at = hist1 + pixel * 6;
+        let at = hist1 + pixel * HIST_STRIDE;
         let sample = planted(u32::try_from(pixel).unwrap_or(0));
+        let empty = sample.m == 0 || sample.lamp == EMPTY || sample.target <= 0.0 || sample.w <= 0.0;
+        let packed = if empty {
+            0xffff
+        } else {
+            (sample.lamp & 0xffff) | (sample.m << 16)
+        };
         if let Some(slot) = restir.get_mut(at) {
-            *slot = sample.lamp;
+            *slot = packed;
         }
-        put_f(&mut restir, at + 1, sample.w);
-        if let Some(slot) = restir.get_mut(at + 2) {
-            *slot = sample.m;
-        }
-        put_f(&mut restir, at + 3, sample.target);
-        put_f(&mut restir, at + 4, VIEW_Z);
-        if let Some(slot) = restir.get_mut(at + 5) {
-            *slot = world.normal_bits;
+        put_f(&mut restir, at + 1, if empty { 0.0 } else { sample.w });
+        put_f(&mut restir, at + 2, if empty { 0.0 } else { sample.target });
+        // fp16 view depth. The neighbour test rejects only when the gap is
+        // both over 2% and over 5 cm. 3.0 is exact in fp16.
+        if let Some(slot) = restir.get_mut(at + 3) {
+            *slot = genos_render::lighting_sh::pack_half_2x16(VIEW_Z, 0.0);
         }
     }
     let mut scene = vec![0u32; 64];
@@ -501,7 +509,7 @@ fn reference(built: &Built, header: u32, merge: bool) -> Vec<Sample> {
     let mut out = Vec::with_capacity(pixels);
     for pixel in 0..pixels {
         let px = u32::try_from(pixel).unwrap_or(0);
-        let loaded = load_sample(&built.restir, built.hist + pixel * 6);
+        let loaded = load_sample(&built.restir, built.hist + pixel * HIST_STRIDE);
         if !merge {
             out.push(loaded);
             continue;
@@ -513,7 +521,7 @@ fn reference(built: &Built, header: u32, merge: bool) -> Vec<Sample> {
         for source in picked {
             let sample = load_sample(
                 &built.restir,
-                built.hist + usize::try_from(source).unwrap_or(0) * 6,
+                built.hist + usize::try_from(source).unwrap_or(0) * HIST_STRIDE,
             );
             slots.push(canon(&built.world, px, source, &sample));
         }

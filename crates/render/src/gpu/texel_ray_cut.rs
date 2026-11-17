@@ -9,7 +9,7 @@ use std::ffi::c_void;
 
 use super::{check, read_f32s, Buffer, Gpu, Handle, Memory};
 
-const SLOTS: u64 = 1_048_576;
+const SLOTS: u64 = 262_144;
 const CACHE_BYTES: u64 = SLOTS * 392;
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
 const OUT_FLOATS: usize = 8 + 22 * 8;

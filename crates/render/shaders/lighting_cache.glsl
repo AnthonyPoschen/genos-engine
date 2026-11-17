@@ -50,7 +50,8 @@ layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint max_change;
     uint relit;
     uint live;
-    // Lookups that found neither their patch nor a free slot (the table is full).
+    // Claims whose 16-slot window had no free key. A full table shows up here.
+    // Eviction is a later change. Reads that do not claim are not counted.
     uint missed;
     // The same two for mature patches only: has the light itself stopped changing.
     uint mature_change;
@@ -1012,6 +1013,10 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             lighting_compose_cover(slot);
             return slot;
         }
+    }
+    // The window had no free key, or every free key was taken by another claim.
+    if (LIGHTING_SC_WRITES) {
+        atomicAdd(gstats.missed, 1u);
     }
     return ~0u;
 }
@@ -3018,9 +3023,7 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     float hsize = lighting_hit_size_n(pos, n);
     uint slot = lighting_cache_find_sized(pos, n, true, hsize, pos);
     if (slot == ~0u) {
-        if (LIGHTING_SC_WRITES) {
-            atomicAdd(gstats.missed, 1u);
-        }
+        // The claim already counted this miss.
         return vec3(0.0);
     }
     if (LIGHTING_SC_WRITES) {
@@ -4952,8 +4955,11 @@ const uint LIGHTING_SC_OFFER_AT = LIGHTING_SH_LATTICE_AT + LIGHTING_SH_LATTICE_C
 // the lowest pixel id, then the lowest corner.
 const uint LIGHTING_SC_SEED_AT = LIGHTING_SC_OFFER_AT + LIGHTING_CACHE_SLOTS;
 // Eight uints per pixel after the election: four corners, each rgb9e5 then
-// weight and sun fraction. Only that pixel writes its corners. Compact reads
-// the winning corner.
+// a 16-bit weight and a 16-bit sun fraction. Only that pixel writes its
+// corners. Compact is a later dispatch and reads the winning corner, so the
+// payload has to stay until then. A store into the slot from the winning
+// pixel races a beaten pixel's store. Recomputing the seed there is a later
+// cache, not the value this frame published.
 const uint LIGHTING_SC_SEED_PAY_AT = LIGHTING_SC_SEED_AT + LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_ATROUS_PREV_AT = LIGHTING_ATROUS_PPM_AT + 1u;
 const uint LIGHTING_ATROUS_BIN_AT = LIGHTING_ATROUS_PREV_AT + 1u;
@@ -6030,12 +6036,6 @@ uint lighting_gdirty_at() {
 uint lighting_graw_at(uint probe, uint k) {
     return lighting_gdirty_at() + 2u * lighting_probes() + probe * lighting_rays() + k;
 }
-// Two vec4 per pixel, after the held-probe gather: corner rgb9e5, then corner meta.
-// Only the pixel that owns a corner writes it.
-uint lighting_seed_scratch_at() {
-    return lighting_gdirty_at() + 2u * lighting_probes() + lighting_probes() * lighting_rays();
-}
-
 // Tangent offsets are 10 bits on the cell (about 0.12 mm at 12.5 cm). Distance
 // is the next 10 bits, stored plus one so a real offer is never the unset 0.
 const float LIGHTING_SC_OFFER_SPAN = 1023.0;

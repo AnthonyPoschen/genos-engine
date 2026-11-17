@@ -14,8 +14,17 @@ use crate::pack::GpuLamp;
 /// Header words. The live shader reads these indices.
 pub const HEADER_WORDS: usize = 64;
 pub const LAMP_STRIDE: usize = 8;
-/// Reservoir words per history slot (lamp, weight, M, target, depth, normal).
-pub const HIST_STRIDE: u32 = 6;
+/// History words per pixel. Lamp and M share a word (16 bits each; the empty
+/// lamp is `0xffff`, expanded to the 32-bit sentinel on load). The stored M
+/// cap is at most 32 candidates times 20, so it fits. Weight and target stay
+/// f32: the estimator is `w_sum / (M * target)`. The fourth word is fp16 view
+/// depth and an snorm8 octahedral normal. Scratch is [`SCRATCH_STRIDE`]
+/// unpacked words and is not this stride.
+pub const HIST_STRIDE: u32 = 4;
+/// Unpacked scratch words (lamp, weight, M, target). The shade reads these.
+pub const SCRATCH_STRIDE: u32 = 4;
+const _: () = assert!(32u32 * (M_CAP / CANDIDATES) <= 0xffff);
+const _: () = assert!(genos_scene::MAX_LAMPS < 0xffff);
 pub const CANDIDATES: u32 = 4;
 pub const PROPOSAL_TREE: u32 = 2;
 /// Product spatial taps. The scene setting is the source; this is the prefix default.
@@ -206,7 +215,7 @@ fn same_lamp(a: &GpuLamp, b: &GpuLamp) -> bool {
 /// in the upload; the cap keeps a lamp-list change from moving them.
 #[must_use]
 pub fn buffer_bytes(pixels: u64) -> u64 {
-    let reservoirs = pixels.saturating_mul(u64::from(HIST_STRIDE) * 2 + 4) * 4;
+    let reservoirs = pixels.saturating_mul(u64::from(HIST_STRIDE) * 2 + u64::from(SCRATCH_STRIDE)) * 4;
     PREFIX_CAP_WORDS
         .saturating_mul(4)
         .saturating_add(reservoirs)
@@ -325,7 +334,7 @@ pub fn prefix(
     let hist_words = pixels.saturating_mul(u64::from(HIST_STRIDE));
     let hist1 = hist0.saturating_add(hist_words);
     let scratch = hist1.saturating_add(hist_words);
-    let total = scratch.saturating_add(pixels.saturating_mul(4));
+    let total = scratch.saturating_add(pixels.saturating_mul(u64::from(SCRATCH_STRIDE)));
     let hist0_u = u32::try_from(hist0).ok()?;
     let hist1_u = u32::try_from(hist1).ok()?;
     let scratch_u = u32::try_from(scratch).ok()?;
@@ -476,6 +485,17 @@ mod tests {
         assert!(at(&packed.words, 2) >= 1, "a lamp is a leaf");
         assert!(packed.total_words > u64::try_from(packed.words.len()).unwrap_or(0));
         assert_eq!(at(&packed.words, 12), super::M_CAP, "history M cap");
+        assert_eq!(at(&packed.words, 19), super::HIST_STRIDE, "history stride");
+        let hist0 = u64::from(at(&packed.words, 4));
+        let hist1 = u64::from(at(&packed.words, 5));
+        let scratch = u64::from(at(&packed.words, 6));
+        let cells = 32u64 * 16;
+        assert_eq!(hist1 - hist0, cells * u64::from(super::HIST_STRIDE));
+        assert_eq!(scratch - hist1, cells * u64::from(super::HIST_STRIDE));
+        assert_eq!(
+            packed.total_words - scratch,
+            cells * u64::from(super::SCRATCH_STRIDE)
+        );
         assert_eq!(at(&packed.words, 13), super::SPATIAL_NEIGHBORS);
         assert_eq!(at(&packed.words, 14), super::SPATIAL_RADIUS);
         assert_eq!(at(&packed.words, 46), super::RESOLUTION_SCALE);

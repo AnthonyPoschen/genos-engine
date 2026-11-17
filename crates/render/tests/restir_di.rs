@@ -245,6 +245,7 @@ fn assert_gate(
     );
     let (live, _) = settle(window, renderer, world, camera, direct_neighbors(true, neighbors), WARMUP, GATE_AVG);
     let gate_err = ref_err_near(&live, &brute, &distance);
+    eprintln!("restir gate ref_err_near {gate_err:.4} ceiling {REF_ERR} neighbours {neighbors}");
     assert!(
         gate_err <= REF_ERR,
         "gate ref_err_near {gate_err:.4} above {REF_ERR}"
@@ -272,6 +273,7 @@ fn assert_shadow(window: &mut Window, renderer: &mut Renderer, world: &World, ca
     let (shadow_brute, shadow_distance) = settle(window, renderer, world, camera, direct_settings(false), 2, 1);
     let (shadow_live, _) = settle(window, renderer, world, camera, direct_settings(true), WARMUP, SHADOW_AVG);
     let shadow_err = ref_err_near(&shadow_live, &shadow_brute, &shadow_distance);
+    eprintln!("restir shadow ref_err_near {shadow_err:.4} ceiling {REF_ERR}");
     assert!(
         shadow_err <= REF_ERR,
         "shadow ref_err_near {shadow_err:.4} above {REF_ERR}"
