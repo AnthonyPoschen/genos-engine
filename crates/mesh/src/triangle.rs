@@ -11,10 +11,6 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 #![expect(
-    clippy::needless_range_loop,
-    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-)]
-#![expect(
     clippy::return_self_not_must_use,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
