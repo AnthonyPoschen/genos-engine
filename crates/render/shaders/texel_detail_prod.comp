@@ -6,7 +6,7 @@
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 1) in;
 #include "lighting_common.glsl"
-#ifndef PROD_SLIDE_ONLY
+#if !defined(PROD_SLIDE_ONLY) && !defined(PROD_COMPOSE_LATTICE)
 #include "lighting_screen_probe.glsl"
 #endif
 
@@ -260,7 +260,7 @@ const uint PROD_MOVER_POOL_BYTES = 262208u;
 const uint PROD_MOVER_FILL_BYTES = 264256u;
 const uint PROD_MOVER_PRES_BYTES = 266304u;
 
-#if !defined(PROD_READONLY) && !defined(PROD_SLIDE_ONLY)
+#if !defined(PROD_READONLY) && !defined(PROD_SLIDE_ONLY) && !defined(PROD_COMPOSE_LATTICE)
 void prod_lamp_dark(uint cell);
 
 void prod_prepare(uint id, out vec3 pos, out vec3 n, out vec3 q, out uint cell, out uint extra) {
@@ -505,7 +505,9 @@ void prod_mover_write_record(vec3 centre, vec2 yaw) {
     movers_gpu.header[at + 14u] = floatBitsToUint(1.0);
     movers_gpu.header[at + 15u] = floatBitsToUint(yaw.y);
     movers_gpu.header[12] = 1u;
-    movers_gpu.header[lighting_mover_presence_off()] = slot;
+    // Presence list is out of compose (GENOS_COMPOSE_NO_WALK). The fixture
+    // packs the same byte offset prod_mover_gpu_ensure wrote into header[13].
+    movers_gpu.header[PROD_MOVER_PRES_BYTES / 4u] = slot;
 }
 
 void prod_mover_place(vec3 centre, vec2 yaw) {
@@ -526,7 +528,7 @@ void prod_mover(vec3 pos) {
     prod_mover_place(pos - vec3(0.0, 1.0, 0.0), vec2(1.0, 0.0));
 }
 
-#if !defined(PROD_READONLY) && !defined(PROD_SLIDE_ONLY)
+#if !defined(PROD_READONLY) && !defined(PROD_SLIDE_ONLY) && !defined(PROD_COMPOSE_LATTICE)
 void prod_lamp_dark(uint cell) {
     if (cell == ~0u) {
         return;
@@ -563,9 +565,11 @@ void prod_trailer(uint i, float v) {
 }
 #endif
 
-#ifdef PROD_SLIDE_ONLY
+#if defined(PROD_SLIDE_ONLY) || defined(PROD_COMPOSE_LATTICE)
 // One millimetre, 75 cm, three world cells. Before = salt-0 world gather.
 // After = mover pool read (object id 1). Sixteen samples are every 5 cm.
+// PROD_COMPOSE_LATTICE reuses the box / warm-up geometry for the compose
+// stored-id load (GENOS_COMPOSE_NO_WALK).
 const vec3 PROD_SLIDE_ORIGIN = vec3(5000.125, 0.0, 5000.125);
 const uint PROD_SLIDE_SAMPLES = 16u;
 const float PROD_LUMA_R = 0.2126;
@@ -578,6 +582,9 @@ const float PROD_SLIDE_FAR = 100.125;
 const float PROD_SLIDE_MM = 0.001;
 const float PROD_SLIDE_EPS = 0.05;
 const float PROD_SLIDE_HAS_W = 0.5;
+#endif
+
+#ifdef PROD_SLIDE_ONLY
 
 float prod_luma(vec3 c) {
     return dot(max(c, vec3(0.0)), vec3(PROD_LUMA_R, PROD_LUMA_G, PROD_LUMA_B));
@@ -717,11 +724,25 @@ void prod_slide_note(uint rel, vec3 shown) {
         lighting_px_object_id = 0u;
         float static_pool =
             distance(far_irr.rgb, PROD_MOVER_FINE) < PROD_SLIDE_EPS ? 1.0 : 0.0;
-        // Warm-up probe: samples = 2 (< 8) + blue prior just outside along +Y.
-        // Expect mix(blue, fine, 2/8) through lighting_world_irradiance — not
-        // the old samples=1 / mean.w>0.5 full-trust bypass, and not dark.
+        // Warm-up probe (live gather lock): samples = 2 (< 8) + blue SH-lattice
+        // prior just outside along +Y. This module does not define
+        // GENOS_COMPOSE_NO_WALK, so lighting_sh_compose_lattice is
+        // lighting_sh_read (live 8-corner gather), not lighting_compose.comp's
+        // stored-id load. PROD_COMPOSE_LATTICE locks that compose path.
+        //
+        // Clear the on-surface RED before planting blue. Plane distance from
+        // `outside` to the surface cell is exactly LIGHTING_CELL_HALF *
+        // LIGHTING_SH_CELL (0.125); reject is `>`, so a planted surface cell
+        // would still blend. Expect mix(blue, fine, 2/8) — not the old
+        // samples=1 / mean.w>0.5 full-trust bypass, and not dark.
         float warm_ok = 0.0;
         {
+            if (on_slot != ~0u) {
+                ckeys.key[on_slot] = 0u;
+                lighting_sc_forget(on_slot);
+                cache.v[3u * on_slot + 1u] = vec4(0.0);
+                cache.v[3u * on_slot + 2u] = vec4(0.0);
+            }
             uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0));
             if (tex != ~0u) {
                 uint pat = lighting_mover_pool_off() + tex * 16u;
@@ -842,7 +863,82 @@ void prod_slide_run() {
 }
 #endif // PROD_SLIDE_ONLY
 
-#if !defined(PROD_READONLY) && !defined(PROD_SLIDE_ONLY)
+#ifdef PROD_COMPOSE_LATTICE
+// Compose-only warm-up prior: GENOS_COMPOSE_NO_WALK makes
+// lighting_sh_compose_lattice load stored corner ids (lighting_compose.comp),
+// not the live gather. Plant a lattice record with the blue outside cell in
+// every corner, clear any on-surface red, then shade through
+// lighting_world_irradiance the same way production compose does.
+void prod_compose_lattice_plant(uint blue, vec3 outside, vec3 n) {
+    uint ax;
+    uint sgn;
+    vec3 g0;
+    vec3 an;
+    vec3 inset;
+    lighting_sh_lattice_axes(outside, n, ax, sgn, g0, an, inset);
+    uint key = lighting_sh_lattice_key(ax, sgn, g0);
+    uint home = key & (LIGHTING_SH_LATTICE_CAP - 1u);
+    uint word = LIGHTING_SH_LATTICE_AT + home * LIGHTING_SH_LATTICE_STRIDE;
+    uint pack = ax | (sgn << 2u);
+    ckeys.key[word] = key;
+    ckeys.key[word + 1u] = pack;
+    ckeys.key[word + 2u] = floatBitsToUint(g0.x);
+    ckeys.key[word + 3u] = floatBitsToUint(g0.y);
+    ckeys.key[word + 4u] = floatBitsToUint(g0.z);
+    ckeys.key[word + 5u] = lighting_frame();
+    [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        ckeys.key[word + 6u + k] = blue;
+    }
+}
+
+void prod_compose_lattice_run() {
+    prod_head(0u);
+    gstats.ctrl_bits = PROD_DENOISE;
+    gstats.ctrl_bounce = 0u;
+    vec3 n = PROD_UP;
+    vec3 box = vec3(PROD_SLIDE_BOX, 1.0, PROD_SLIDE_BOX);
+    vec3 warm_pos = box + vec3(0.0, 1.0, 0.0);
+    vec3 outside = warm_pos + n * LIGHTING_SC_TEXEL;
+    // No on-surface red: plane distance would be exactly the reject boundary.
+    uint blue = lighting_cache_find_sized(outside, n, true, LIGHTING_SH_CELL, outside);
+    if (blue != ~0u) {
+        cache.v[3u * blue].w = uintBitsToFloat(lighting_frame());
+        cache.v[3u * blue + 1u] = vec4(n, LIGHTING_SH_CELL);
+        cache.v[3u * blue + 2u] = vec4(PROD_BLUE, LIGHTING_SC_FULL_SETS);
+        cache.v[LIGHTING_SC_OBJ_AT + blue] = vec4(0.0);
+        prod_compose_lattice_plant(blue, outside, n);
+    }
+    prod_mover_place(box, vec2(1.0, 0.0));
+    float lattice_ok = 0.0;
+    float warm_ok = 0.0;
+    if (blue != ~0u) {
+        vec4 prior = lighting_sh_compose_lattice(outside, n, false);
+        if (distance(prior.rgb, PROD_BLUE) < PROD_SLIDE_EPS && prior.w > LIGHTING_CACHE_HAS_W) {
+            lattice_ok = 1.0;
+        }
+        uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0));
+        if (tex != ~0u) {
+            uint pat = lighting_mover_pool_off() + tex * 16u;
+            movers_gpu.header[pat + 7u] = floatBitsToUint(PROD_MOVER_WARM_SETS);
+            gbuf.words[5] = PROD_MOVER_OID;
+            lighting_px_object_id = PROD_MOVER_OID;
+            vec4 warm = lighting_world_irradiance(warm_pos, n);
+            lighting_px_object_id = 0u;
+            vec3 expect =
+                mix(PROD_BLUE, PROD_MOVER_FINE, PROD_MOVER_WARM_SETS / PROD_MOVER_FULL_SETS);
+            if (distance(warm.rgb, expect) < PROD_SLIDE_EPS && warm.w > 0.0
+                && distance(warm.rgb, PROD_MOVER_FINE) > PROD_SLIDE_EPS) {
+                warm_ok = 1.0;
+            }
+        }
+    }
+    // out[8]=lattice load ok, out[9]=warm-up through compose lattice prior.
+    prod_f(8u, lattice_ok);
+    prod_f(9u, warm_ok);
+}
+#endif // PROD_COMPOSE_LATTICE
+
+#if !defined(PROD_READONLY) && !defined(PROD_SLIDE_ONLY) && !defined(PROD_COMPOSE_LATTICE)
 void prod_motion() {
     prod_head(0u);
     gstats.ctrl_bits = PROD_DENOISE;
@@ -1001,9 +1097,9 @@ void prod_motion() {
     prod_f(at + 16u, decoy_same);
 }
 
-#endif // !PROD_READONLY && !PROD_SLIDE_ONLY (prod_motion)
+#endif // !PROD_READONLY && !PROD_SLIDE_ONLY && !PROD_COMPOSE_LATTICE (prod_motion)
 
-#ifndef PROD_SLIDE_ONLY
+#if !defined(PROD_SLIDE_ONLY) && !defined(PROD_COMPOSE_LATTICE)
 void prod_read_row(uint id, vec3 pos, vec3 n, vec3 q, uint cell) {
     vec4 mean_before = cell == ~0u ? vec4(0.0) : cache.v[3u * cell + 2u];
     uint stamp_before = cell == ~0u ? 0u : floatBitsToUint(cache.v[3u * cell].w);
@@ -1380,9 +1476,24 @@ void prod_plant_local_corners(float samples) {
     lighting_obj_salt = 0.0;
 }
 
-#endif // !PROD_SLIDE_ONLY (fixture helpers)
+#endif // !PROD_SLIDE_ONLY && !PROD_COMPOSE_LATTICE (fixture helpers)
 
-#ifdef PROD_SLIDE_ONLY
+#ifdef PROD_COMPOSE_LATTICE
+void main() {
+    gstats.ctrl_bits = PROD_DENOISE;
+    gstats.chg[31] = 1u;
+    prod_head(0u);
+    prod_u(0u, lighting_sc_flags());
+    prod_u(1u, uint(work.v[lighting_change_at() + 3u].w));
+    prod_u(2u, 0u);
+    prod_u(3u, 0u);
+    prod_u(4u, 0u);
+    prod_u(5u, lighting_world_mode());
+    prod_u(6u, ckeys.key[7u]);
+    prod_u(7u, ckeys.key[PROD_HEAD_WORDS + 7u]);
+    prod_compose_lattice_run();
+}
+#elif defined(PROD_SLIDE_ONLY)
 void main() {
     gstats.ctrl_bits = PROD_DENOISE;
     gstats.chg[31] = 1u;

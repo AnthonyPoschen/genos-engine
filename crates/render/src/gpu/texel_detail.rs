@@ -140,6 +140,31 @@ impl Gpu {
         Ok(out)
     }
 
+    /// `PROD_COMPOSE_LATTICE` + `GENOS_COMPOSE_NO_WALK`: stored-id lattice load
+    /// as `lighting_compose.comp` runs it. Slide `warm_ok` is the live gather.
+    pub(super) fn texel_detail_prod_compose_lattice(&mut self) -> Result<Vec<f32>, String> {
+        release_compiler_heap();
+        if self.texel_detail.is_some() {
+            self.destroy_texel_detail();
+        }
+        self.texel_detail = Some(
+            self.create_texel_detail_pipe(super::TEXEL_DETAIL_PROD_COMPOSE_LATTICE_SPV)?,
+        );
+        self.zero_texel_buffers()?;
+        let keys = self
+            .texel_detail
+            .as_ref()
+            .ok_or("texel detail production check is not created")?
+            .keys
+            .memory;
+        self.write_texel_detail_heads(keys)?;
+        self.submit_texel(false, 0, 0, 0, 0)?;
+        let out = self.read_texel_out()?;
+        self.destroy_texel_detail();
+        release_compiler_heap();
+        Ok(out)
+    }
+
     /// Writing specialization, `lamp.x = 1`. Copies the cache and the key table
     /// and destroys the pipeline. The caller drops the device before compiling
     /// the reader.

@@ -168,10 +168,11 @@ fn a_mover_slides_without_stepping_on_world_cells() {
     // which is the picture a detail-on mover showed: one lone corner stays
     // full until it leaves the window, then the colour pops by the cell gap.
     // The after samples go through lighting_world_irradiance (≥8 sets). A
-    // trailer probe exercises warm-up (samples=2 + outside prior). A mover
-    // hit must not claim a world cell. A world cell on the mover drops now;
-    // one inside the change volume drops after two unread frames and a fresh
-    // floor cell stays.
+    // trailer probe exercises warm-up (samples=2 + outside prior) on the live
+    // gather (`warm_ok`); compose's stored-id load is
+    // `compose_lattice_warm_up_prior_loads_stored_ids`. A mover hit must not
+    // claim a world cell. A world cell on the mover drops now; one inside the
+    // change volume drops after two unread frames and a fresh floor cell stays.
     let mut owner = open().expect("lavapipe device");
     let renderer = &mut *owner.device;
     assert_eq!(renderer.gpu_kind(), GpuKind::Software);
@@ -254,8 +255,32 @@ fn a_mover_slides_without_stepping_on_world_cells() {
     );
     assert!(
         (slide.warm_up - 1.0).abs() <= ABS,
-        "warm-up blend through lighting_world_irradiance failed ({})",
+        "warm-up live-gather blend through lighting_world_irradiance failed ({})",
         slide.warm_up
+    );
+}
+
+#[test]
+fn compose_lattice_warm_up_prior_loads_stored_ids() {
+    // GENOS_COMPOSE_NO_WALK: lighting_sh_compose_lattice loads stored corner
+    // ids (lighting_compose.comp), not the live gather. Slide warm_ok locks
+    // the gather only.
+    let mut owner = open().expect("lavapipe device");
+    let renderer = &mut *owner.device;
+    assert_eq!(renderer.gpu_kind(), GpuKind::Software);
+    let words = renderer
+        .texel_detail_prod_compose_lattice()
+        .expect("compose lattice warm-up");
+    assert!(words.len() >= 10, "compose lattice out short ({})", words.len());
+    let lattice_ok = words[8];
+    let warm_ok = words[9];
+    assert!(
+        (lattice_ok - 1.0).abs() <= ABS,
+        "compose stored-id lattice load failed ({lattice_ok})"
+    );
+    assert!(
+        (warm_ok - 1.0).abs() <= ABS,
+        "warm-up through compose lattice prior failed ({warm_ok})"
     );
 }
 
@@ -275,7 +300,8 @@ struct Slide {
     drop_kept: f32,
     /// 1 when a far static sample with a colliding oid returned the pool colour.
     static_pool: f32,
-    /// 1 when samples=2 + outside prior blends through `lighting_world_irradiance`.
+    /// 1 when samples=2 + outside prior blends through `lighting_world_irradiance`
+    /// on the live gather (this module does not define `GENOS_COMPOSE_NO_WALK`).
     warm_up: f32,
 }
 

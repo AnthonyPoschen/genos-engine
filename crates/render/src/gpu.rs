@@ -1348,6 +1348,16 @@ impl Renderer {
         self.gpu.texel_detail_prod_slide()
     }
 
+    /// Compose stored-id lattice load (`GENOS_COMPOSE_NO_WALK`) for the mover
+    /// warm-up prior. Slide `warm_ok` locks the live gather only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_compose_lattice(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_compose_lattice()
+    }
+
     /// Writing specialization with `lamp.x = 1`. The returned bytes are the
     /// planted cache and key table. Drop this renderer before compiling the
     /// reader: lavapipe keeps the compiler heap until the device is gone.
