@@ -255,7 +255,7 @@ fn first_paths() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scale",
                 "small",
                 "--no-panel",
@@ -273,7 +273,7 @@ fn first_paths() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scale",
                 "small",
             ],
@@ -291,7 +291,7 @@ fn first_paths() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scene",
                 "stress",
             ],
@@ -308,7 +308,7 @@ fn first_paths() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scene",
                 "stress",
             ],
@@ -324,7 +324,7 @@ fn later_paths() -> Vec<Spec> {
             "lighting_check",
             "genos-lighting",
             18771,
-            &["--check", "--size", "320x180", "--preset", "potato"],
+            &["--check", "--size", "320x180", "--preset", "fallback"],
             None,
             &[0, 1],
         ),
@@ -362,7 +362,7 @@ fn later_paths() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scene",
                 "stress",
             ],
@@ -400,7 +400,7 @@ fn early_closes() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scale",
                 "small",
                 "--no-panel",
@@ -420,7 +420,7 @@ fn early_closes() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scene",
                 "stress",
                 "--lifecycle-close-early",
@@ -452,7 +452,7 @@ fn plants() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scale",
                 "small",
                 "--no-panel",
@@ -471,7 +471,7 @@ fn plants() -> Vec<Spec> {
                 "--size",
                 "320x180",
                 "--preset",
-                "potato",
+                "fallback",
                 "--scene",
                 "stress",
             ],
@@ -634,17 +634,17 @@ fn launch(seat: &Seat, spec: &Spec, block_ms: Option<&str>) -> Result<Finished, 
         .env("VK_ICD_FILENAMES", ICD)
         .env("VK_DRIVER_FILES", ICD)
         .env("GENOS_MCP_PORT", spec.port.to_string())
-        // Every binary quits at the Potato preset. genos-camera and
+        // Every binary quits at the Fallback preset. genos-camera and
         // `genos-stress lighting-ref` have no `--preset` argument, so the
-        // mirror sets it for them; the others pass `--preset potato`, which
+        // mirror sets it for them; the others pass `--preset fallback`, which
         // wins over this. Without it camera and lighting-ref run High, whose
         // GI allocates and clears the compiled 1,048,576-slot world cache
         // (~368 MiB). lavapipe keeps those pages until vkDestroyInstance,
         // so their quit measured ~85 ms of driver memory release, not
         // teardown. This gate measures teardown. The real fix is the lighting
         // VRAM item in the roadmap (per-preset world-cache slot counts),
-        // which stays on the lighting side. Rename to `fallback` with #135.
-        .env("GENOS_LIGHTING_PRESET", "potato")
+        // which stays on the lighting side.
+        .env("GENOS_LIGHTING_PRESET", "fallback")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
