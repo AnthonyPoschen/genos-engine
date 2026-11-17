@@ -2,9 +2,11 @@
 """Score a still-hall fill curve and a lamp-3 move against the path reference.
 
 Near-weighted relative luminance, the same blocks and weight as
-oracle_metrics.py: sum(w |live - ref|) / sum(w ref) on 2x2 means, linear
-Rec.709 luma, w = 1 / max(distance, 0.5 m). Sky pixels (reference sRGB within
-2 codes of (28, 36, 48), or a depth at the 50 m far plane) are left out.
+oracle_metrics.py: sum(w |live - ref|) / sum(w ref) on 2x2 means,
+w = 1 / max(distance, 0.5 m). The pictures are engine output (the stress
+frames and the path reference), which store the legacy shoulder, so luma
+is oracle_metrics.picture_luma. Sky pixels (display codes within 2 of
+(28, 36, 48), or a depth at the 50 m far plane) are left out.
 
 `lightingsc` lines supply rays and frames-to-95% (`full / near` >= 0.95).
 
@@ -16,7 +18,6 @@ usage:
 import json, os, re, sys
 import numpy as np
 
-LUM = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 DEPTH_RANGE = 50.0
 SKY = np.array([28, 36, 48], dtype=np.float32) / 255.0
 MARK = re.compile(r"^-?\s*MARK (\S+) frame=([0-9.]+)")
@@ -26,8 +27,11 @@ SC = re.compile(
 )
 
 
-def srgb_to_linear(c):
-    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+def picture_luma(rgb):
+    """Shoulder inverse shared with oracle_metrics. These PNGs are engine output."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import oracle_metrics
+    return oracle_metrics.picture_luma(rgb)
 
 
 def load_rgb(path):
@@ -36,7 +40,7 @@ def load_rgb(path):
 
 
 def lin_luma(path):
-    return srgb_to_linear(load_rgb(path)) @ LUM
+    return picture_luma(load_rgb(path))
 
 
 def distance_from_depth(path):
@@ -163,7 +167,7 @@ def find_capture(out, tag, kind):
 
 def score_dir(out, reference, log_text):
     ref = load_rgb(reference)
-    ref_l = srgb_to_linear(ref) @ LUM
+    ref_l = picture_luma(ref)
     marks, lamp, rows = parse_log(log_text)
     shots = []
     for mark in marks:
@@ -231,9 +235,9 @@ def codes_darker(live_path, other_path, depth_path, albedo_path, mask=None):
     if alb is not None and alb.shape != live.shape:
         from PIL import Image
         alb = np.asarray(Image.fromarray((alb * 255).astype(np.uint8)).resize(live.shape[1::-1], Image.NEAREST)) / 255.0
-    ly = srgb_to_linear(live) @ LUM
-    oy = srgb_to_linear(other) @ LUM
-    # 8-bit Rec.709 luma of the stored sRGB. "20 codes" is this display step.
+    ly = picture_luma(live)
+    oy = picture_luma(other)
+    # "20 codes" is a step of the stored display bytes, not the linear luma.
     w = np.array([0.2126, 0.7152, 0.0722])
     live8 = np.clip(np.round((live @ w) * 255.0), 0, 255)
     other8 = np.clip(np.round((other @ w) * 255.0), 0, 255)

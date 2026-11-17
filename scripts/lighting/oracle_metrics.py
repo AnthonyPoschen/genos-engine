@@ -8,6 +8,11 @@ lamps-switch from the lamps profile):
   sum(w |live - ref|) / sum(w ref) in linear luminance over 2x2 blocks, with
   w = 1 / max(distance, 0.5 m) from the depth view. Worst frame and mean.
 * ref_err: the same without the weight, for comparison.
+  Luminance undoes the legacy shoulder. A channel at or above the asymptote
+  is held at the last code of dither.glsl's noise (under one code) before
+  the inverse, so the 0.999 clamp does not enter the score. A pixel leaves
+  the sum only when both pictures are in that band. over_ceiling_frac is
+  the share of live pixels in the band.
 * grid_worst / grid_longest_run: the PR #94 checkerboard metric (grid_metric.py)
   over every saved frame of the uninterrupted pass.
 * grid_excess_worst / grid_excess_frame / grid_excess_longest_run: for every
@@ -70,16 +75,61 @@ def linear_from_display(c):
     return np.where(c <= 0.64, np.maximum(c, 0.0), 0.64 + 1.1 * k / (1.0 - k))
 
 
-# Shoulder ceiling: 0.64 + 0.14 = 0.78 (198.9/255). The PNG writers dither by
-# up to ~2/255, so anything within 3/255 of the ceiling is saturated: the tone
-# curve is flat there and the radiance that produced it is unrecoverable.
-SHOULDER_CEILING = 0.78
-CEILING_DITHER = 3.0 / 255.0
+# Legacy shoulder asymptote (hdr_shoulder.glsl): 0.64 + 0.14, never reached.
+SHOULDER_CEILING = 0.64 + 0.14
+# dither.glsl: dither_tpdf is in [-1, 1) codes and dither8's room is at most 1,
+# so the noise added before pack_rgb's round is under one code. The asymptote
+# is code 198.9; one code down is 197.9, which rounds to 198. Codes 196 and
+# 197 are below that band and stay measured.
+DITHER_CODES = 1.0
+CEILING_CODE = int(np.floor(SHOULDER_CEILING * 255.0 - DITHER_CODES + 0.5))
+
+
+def channel_code(rgb):
+    return np.floor(np.asarray(rgb, np.float64) * 255.0 + 0.5)
 
 
 def over_ceiling(rgb):
-    """Per-pixel mask: any channel at the shoulder ceiling (saturated)."""
-    return (rgb >= SHOULDER_CEILING - CEILING_DITHER).any(axis=-1)
+    """Per-pixel: any channel in the dither band of the shoulder asymptote."""
+    return (channel_code(rgb) >= CEILING_CODE).any(axis=-1)
+
+
+def picture_luma(rgb):
+    """Rec.709 luma after the shoulder inverse. A channel at or above the
+    asymptote has no inverse: linear_from_display clamps k at 0.999 and reads
+    ~1099. Hold that channel at the last code the dither band names. The
+    inverse itself is unchanged."""
+    rgb = np.asarray(rgb, np.float32)
+    top = np.float32(CEILING_CODE / 255.0)
+    held = np.where(rgb >= np.float32(SHOULDER_CEILING), top, rgb)
+    return linear_from_display(held) @ LUM
+
+
+def _resize_mask(mask, shape):
+    if mask.shape == shape:
+        return mask
+    from PIL import Image
+    img = Image.fromarray((mask.astype(np.uint8) * 255)).resize(shape[::-1], Image.NEAREST)
+    return np.asarray(img) > 127
+
+
+def both_over_ceiling(live_rgb, ref_rgb):
+    """Pixels left out of a ratio: both sides sit in the dither band.
+    A one-sided clip stays, so a saturated live pixel against a flat
+    reference cannot score as a match."""
+    live, ref = over_ceiling(live_rgb), over_ceiling(ref_rgb)
+    if live.shape != ref.shape:
+        live = _resize_mask(live, ref.shape)
+    return live & ref
+
+
+def energy_ratio(live, ref, drop):
+    """Summed live luma over summed reference luma. Pixels in `drop` (both
+    sides at the ceiling) are not measurable and do not dilute the ratio."""
+    keep = ~drop
+    if not np.any(keep):
+        return 1.0
+    return float(live[keep].sum()) / max(float(ref[keep].sum()), 1e-9)
 
 
 def load_rgb(path):
@@ -88,7 +138,7 @@ def load_rgb(path):
 
 
 def lin_luma(path):
-    return linear_from_display(load_rgb(path)) @ LUM
+    return picture_luma(load_rgb(path))
 
 
 def distance(path):
@@ -103,8 +153,8 @@ def block(a, b=2):
 
 def ref_error(live, ref, dist=None, mask=None):
     """(near-weighted, unweighted) share of the light that is wrong.
-    mask: pixels (at ref resolution) excluded from numerator and denominator,
-    i.e. saturated pixels, reported separately as over_ceiling_px."""
+    mask: pixels at the reference resolution left out of both sums. score()
+    passes it only where both pictures are in the shoulder dither band."""
     if live.shape != ref.shape:
         from PIL import Image
         live = np.asarray(Image.fromarray(live).resize(ref.shape[::-1], Image.BILINEAR))
@@ -150,11 +200,12 @@ def blotch(live, ref, s=None):
     return float(np.mean(np.abs(gblur(e, s) - gblur(e, 6.0 * s)) / base))
 
 
-def mid_err(live, ref):
+def mid_err(live, ref, mask=None):
     """Unweighted error over the middle half of the picture (each axis)."""
     h, w = ref.shape
     sl = (slice(h // 4, h - h // 4), slice(w // 4, w - w // 4))
-    return ref_error(live[sl], ref[sl])[1]
+    m = None if mask is None else mask[sl]
+    return ref_error(live[sl], ref[sl], mask=m)[1]
 
 
 def unchanged(frames, tile=8, eps=1.0 / 255.0):
@@ -254,10 +305,15 @@ def score_spec(out, n, s):
         ref, sp = stem + "-reference.png", stem + "-reference-spec.png"
         if not (os.path.exists(ref) and os.path.exists(sp)):
             continue
-        l, r = lin_luma(lv), lin_luma(ref)
+        lrgb, rrgb = load_rgb(lv), load_rgb(ref)
+        l, r = picture_luma(lrgb), picture_luma(rrgb)
         if l.shape != r.shape:
             continue
-        m = spec_mask(lin_luma(sp), r)
+        spec = picture_luma(load_rgb(sp))
+        if spec.shape != r.shape:
+            continue
+        # Both-ceiling pixels are unmeasurable. A one-sided clip stays in the mask.
+        m = spec_mask(spec, r) & ~both_over_ceiling(lrgb, rrgb)
         dp = stem + "-depth.png"
         dist = distance(dp) if os.path.exists(dp) else None
         f = int(re.search(r"f(\d+)$", stem).group(1))
@@ -317,15 +373,16 @@ def score(out):
             dp = stem + "-depth.png"
             lrgb, rrgb = load_rgb(lv), load_rgb(ref)
             oc_live = over_ceiling(lrgb)
-            m = oc_live | over_ceiling(rrgb) if oc_live.shape == rrgb.shape[:2] else over_ceiling(rrgb)
-            ll, rl = linear_from_display(lrgb) @ LUM, linear_from_display(rrgb) @ LUM
-            near, plain = ref_error(ll, rl, distance(dp) if os.path.exists(dp) else None, mask=m)
-            per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain, int(oc_live.sum())))
+            drop = both_over_ceiling(lrgb, rrgb)
+            ll, rl = picture_luma(lrgb), picture_luma(rrgb)
+            near, plain = ref_error(ll, rl, distance(dp) if os.path.exists(dp) else None, mask=drop)
+            per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain,
+                        int(oc_live.sum()), int(oc_live.size)))
             if ll.shape == rl.shape:
                 blots.append(blotch(ll, rl))
-                energy.append(float(ll.sum()) / max(float(rl.sum()), 1e-9))
+                energy.append(energy_ratio(ll, rl, drop))
                 if n.startswith("slant"):
-                    mids.append(mid_err(ll, rl))
+                    mids.append(mid_err(ll, rl, drop))
         if blots:
             s.update(blotch_mean=round(float(np.mean(blots)), 4), blotch_worst=round(max(blots), 4))
         if energy:
@@ -345,8 +402,10 @@ def score(out):
             s.update(ref_frames=len(per), ref_err_near_worst=round(worst[1], 4), ref_err_near_worst_frame=worst[0],
                      ref_err_near_mean=round(float(np.mean(near)), 4),
                      ref_err_mean=round(float(np.mean([p[2] for p in per])), 4),
-                     over_ceiling_px=max(p[3] for p in per))
-            # Saturated live pixels hide unbounded radiance: a live failure.
+                     over_ceiling_px=max(p[3] for p in per),
+                     over_ceiling_frac=round(max(p[3] / p[4] for p in per), 4))
+            # Share of live pixels in the dither band. A one-sided clip still
+            # moves ref_err; this flag does not stand in for that error.
             s["over_ceiling_ok"] = s["over_ceiling_px"] == 0
             if n == "switch" or n == "lamps-switch":
                 settled = per[-1][1]
