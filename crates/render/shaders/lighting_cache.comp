@@ -21,8 +21,9 @@ void lighting_tex_put(uint slot, vec4 v) {
     // size > 0.2), and a direct light that stays zero never marks the pixel.
     // Compose already recorded the blocks that read this slot. Mark those
     // when the packed irradiance the picture shows has changed.
-    // A held camera keeps the picture until frame 32. The cell still stores
-    // the new irradiance; compose reads it on that backstop.
+    // A held camera keeps the picture. A cell a change reaches still marks.
+    // The 32-frame pass is the drift under the dirty epsilon. The cell stores
+    // the new irradiance either way.
     if (lighting_compose_world_held(slot)) {
         return;
     }

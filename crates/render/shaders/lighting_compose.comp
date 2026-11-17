@@ -171,16 +171,19 @@ void main() {
         bounce = indirect(p, pos, n);
 #else
         // The linear-bounce slice holds the last full walk. A held frame
-        // reuses it (a camera move, or frame 32, walks again). Direct still
-        // updates. The walk is four cache finds per pixel; it was the steady
-        // compose. A cache clear zeros the slice for the next three frames
-        // (BOUNCE_FILL_FRAMES): the clear frame's walk is empty, and a held
-        // frame would keep that empty store, which is the direct picture.
+        // reuses it. The fill (the frames before the first 32-frame pass),
+        // that pass, a camera move, and a pixel a lamp or a mover reaches
+        // walk again. Direct still updates. The walk is four cache finds per
+        // pixel; it was the steady compose. A cache clear zeros the slice
+        // for the next three frames (BOUNCE_FILL_FRAMES): the clear frame's
+        // walk is empty, and a held frame would keep that empty store, which
+        // is the direct picture.
         uint pixels = pc.dims.x * pc.dims.y;
         uint slices = 2u + (gstats.ctrl_history != 0u ? 1u : 0u);
         uint at = slices * pixels + index;
         // This compile is not the sun shader, so the linear-bounce slice is free.
-        bool reuse_bounce = mode == 0u && lighting_view_held() && !lighting_still_refresh();
+        bool reuse_bounce = mode == 0u && lighting_view_held() && !lighting_still_refresh()
+            && !lighting_still_opening() && !lighting_pixel_reached(pos);
         uint stored = outc.px[at];
         if (reuse_bounce && stored != 0u) {
             bounce = lighting_unpack_rgb9e5(stored - 1u);

@@ -971,13 +971,20 @@ void main() {
         gbuf.words[idx * 5u + 3u] = packed;
         if (tracked) {
             uint c = (idx & 1u) * 2u;
-            work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
-            work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
             // Packed direct moved because the sun did. The sun compose writes
             // this frame's direct on every pixel. The block is not a GI dirty.
-            // Flag off: same mark.
+            // Flag off: same mark. The tracking word is the last marked sample.
+            // Writing it before the test made a sub-percent ramp the new
+            // previous value, so the steps never added up and the 32-frame
+            // pass saw packed == prev.
+            bool moved = lighting_compose_direct_moved(packed, prev_d);
+            bool other = glow != prev_e || pix_sig != prev_sig;
             bool sun_only = lighting_sun_small() && glow == prev_e && pix_sig == prev_sig;
-            if (!sun_only && (glow != prev_e || lighting_compose_direct_moved(packed, prev_d) || pix_sig != prev_sig)) {
+            if (other || moved) {
+                work.v[lighting_pix_at() + idx / 2u][c] = uintBitsToFloat(pix_sig);
+                work.v[lighting_pix_at() + idx / 2u][c + 1u] = uintBitsToFloat(packed);
+            }
+            if (!sun_only && (other || moved)) {
                 lighting_compose_mark_px(idx);
             }
         }

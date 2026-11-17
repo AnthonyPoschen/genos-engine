@@ -56,6 +56,8 @@ const LIGHTING_PC_BYTES: u32 = 48;
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
 const LIGHTING_DRAIN_FLAG_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 82;
+/// ckeys word of the last host-hash change frame (lighting_cache.glsl LIGHTING_LAMP_CATCH_AT).
+const LIGHTING_LAMP_CATCH_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 86;
 /// Strata of the screen probes' ray directions, one traced per frame, all kept
 /// (lighting_common.glsl LIGHTING_STRATA): the visibility history cap.
 pub(crate) const LIGHTING_STRATA: u32 = 8;
@@ -81,6 +83,13 @@ const LIGHTING_COMPOSE_CAP: u64 = 65535;
 /// frames whose rays make the bounce visible. The presented bounce gate reads
 /// the third draw.
 const BOUNCE_FILL_FRAMES: u32 = 3;
+/// Shader `LIGHTING_STILL_REFRESH`. The drift pass.
+const LIGHTING_STILL_REFRESH: u32 = 32;
+/// Shader `LIGHTING_FILL_WALK`. The fill walks this many frames, then the hold.
+const LIGHTING_FILL_WALK: u32 = 8;
+/// Shader `LIGHTING_SCENE_CHANGED_MARK`. Added to the change count's fraction
+/// when the host scene hash changed this frame.
+const LIGHTING_SCENE_CHANGED_MARK: f32 = 0.25;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
 fn lighting_compose_at() -> u64 {
@@ -234,6 +243,9 @@ pub(crate) struct Lighting {
     /// it has stayed the same.
     scene_hash: u64,
     still: u32,
+    /// Frame the host hash last changed. The hold reads it for LIGHTING_HOLD_CATCH
+    /// frames (shader LIGHTING_LAMP_CATCH_AT). 0 until the first change.
+    scene_catch: u32,
     /// Hash of this frame's draw instances (poses, colours, emission).
     pub(crate) draw_key: u64,
     /// Frames in a row drawn from held light (settled): the picture no longer changes.
@@ -630,6 +642,7 @@ impl Default for Lighting {
             draw_key: 0,
             held: 0,
             still: 0,
+            scene_catch: 0,
             stats: [Buffer::empty(), Buffer::empty()],
             stats_dev: [Buffer::empty(), Buffer::empty()],
             quiet: 0,
@@ -2260,7 +2273,7 @@ impl Gpu {
         // picture compile reads. On a held camera that lattice is already
         // filled. Frame 32 (and a camera move, which takes the full grid)
         // requests it again.
-        let refresh = self.lighting.frame != 0 && self.lighting.frame % 32 == 0;
+        let refresh = self.lighting.frame != 0 && self.lighting.frame % LIGHTING_STILL_REFRESH == 0;
         if self.lighting.still > 0 && !compose_full && !refresh {
             return;
         }
@@ -4153,6 +4166,17 @@ impl Gpu {
                 used = list.len();
             }
         }
+        // The shaders read this fraction as "the host hash changed". The
+        // integer count is what lighting_near_change walks. A lamp does not
+        // land in that list; the fraction is how the hold hears it this frame.
+        if self.lighting.still == 0 {
+            block[0] += LIGHTING_SCENE_CHANGED_MARK;
+            // The first frames are the fill. Arming the catch there keeps the
+            // wavelet off through the frames a still-hall gate scores.
+            if self.lighting.frame >= LIGHTING_STILL_REFRESH {
+                self.lighting.scene_catch = self.lighting.frame;
+            }
+        }
         sent += used;
         // Movers (surface cache): bounds of every occluder that moved in the
         // last LIGHTING_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
@@ -4395,7 +4419,11 @@ impl Gpu {
         // full-grid sun compose instead of that list. GENOS_LIGHTING_COMPOSE_ALL
         // turns `compose_reuse` off in the settings, which forces the full picture.
         let bounce_filling = self.lighting.bounce_fill < BOUNCE_FILL_FRAMES;
+        // The fill walks every frame until the first drift pass. Holding the
+        // frame-1 bounce and replacing it on frame 32 was the open-picture step.
+        let opening = self.lighting.frame != 0 && self.lighting.frame < LIGHTING_FILL_WALK;
         let compose_full = bounce_filling
+            || opening
             || !self.lighting.compose_valid
             || !(self.lighting.still > 0 || sun_amortise)
             || self.lighting.settings.world_mode() != 3
@@ -4587,6 +4615,12 @@ impl Gpu {
             }
                 let keys = self.lighting.cache_keys.buffer;
                 self.write_device(cmd, keys, lighting_sun_at() * 4, pod_bytes(&sun_words))?;
+                self.write_device(
+                    cmd,
+                    keys,
+                    LIGHTING_LAMP_CATCH_AT * 4,
+                    &self.lighting.scene_catch.to_ne_bytes(),
+                )?;
             }
             // The sun words are read by compute and as indirect args: the
             // indirect read needs the draw-indirect stage

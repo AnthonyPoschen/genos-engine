@@ -7,7 +7,8 @@
 // hold. A screen-sized B3 of the bilinear gather is not that kernel. The
 // luminance weight is nonlinear, so it does not commute with the bilinear.
 // ADR 0012's screen-space hold is not this path. A held camera does keep a
-// settled texel's wavelet until frame 32 (`lighting_still_refresh`). The hash blurs a texel while its
+// settled texel's wavelet until the drift pass (`lighting_still_refresh`),
+// except a texel a lamp or a mover reaches. The hash blurs a texel while its
 // spatial estimate is still wide and then holds that blur. Rebuilding from
 // the settled mean leaves the 12.5 cm grid, and a wider phi spreads energy
 // the hold never spread. That was the ceiling, wall, and floor blotch.
