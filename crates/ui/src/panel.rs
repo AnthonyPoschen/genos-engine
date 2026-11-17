@@ -545,8 +545,7 @@ impl PanelDropdown {
     fn selected_name(&self) -> String {
         self.choices
             .get(self.selected_index())
-            .map(|choice| choice.name.clone())
-            .unwrap_or_default()
+            .map_or_default(|choice| choice.name.clone())
     }
 }
 
@@ -597,8 +596,7 @@ impl PanelSlider {
     /// Discrete named steps. `value` selects the nearest step.
     pub fn named(id: u32, value: f64, steps: Vec<SliderStep>) -> Self {
         let text = slider::nearest_index(&steps, value)
-            .map(|index| steps[index].name.clone())
-            .unwrap_or_default();
+            .map_or_default(|index| steps[index].name.clone());
         let min = steps.first().map(|step| step.value).unwrap_or(0.0);
         let max = steps.last().map(|step| step.value).unwrap_or(min);
         Self {

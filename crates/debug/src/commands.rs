@@ -123,10 +123,16 @@ pub fn specs() -> Vec<CommandSpec> {
 }
 
 fn under_trusted_specs() -> Vec<CommandSpec> {
-    vec![spec(
-        "lighting_under_trusted",
-        "Displaying picture pixels whose fine world-cache read was under a full set count (gstats.diag[57], LIGHTING_DIAG_UNDER_TRUSTED). A full count of a real zero is dark and is not included. One frame behind the draw.",
-    )]
+    vec![
+        spec(
+            "lighting_under_trusted",
+            "Displaying picture pixels whose fine world-cache read was under a full set count (gstats.diag[57], LIGHTING_DIAG_UNDER_TRUSTED). A full count of a real zero is dark and is not included. One frame behind the draw.",
+        ),
+        spec(
+            "lighting_fill_compact_work",
+            "Fill scheduler work from the last frame: serial is gstats.pad2 (the one-thread plan's iteration count) and hist_groups is gstats.pad3 (the histogram dispatch's group count). A slot-table scan is hundreds of thousands of serial iterations. One frame behind the draw.",
+        ),
+    ]
 }
 
 fn reflection_specs() -> Vec<CommandSpec> {

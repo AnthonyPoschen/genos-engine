@@ -1,12 +1,16 @@
 #version 450
 // One group. Marks the screen tiles a mover's before and after bounds cover,
 // any tile whose direct shade stepped, and any tile a world cell's bounce
-// noted. The bounds are this frame's change-list spheres. #288's mover table
-// replaces that read; the mark stays. A clipped, off-screen, or screen-filling
-// footprint is not marked as local: the host unholds the picture. A lamp is
-// not in this list. The cell note is lighting_reach_note_cell. This pass
-// reads the count and clears it, so a tile drops once the step stops.
+// noted. It runs after direct and the cache in the same frame, so those notes
+// are in the mask the wavelet and compose read. The bounds are this frame's
+// change-list spheres. #288's mover table replaces that read; the mark stays.
+// A clipped, off-screen, or screen-filling footprint is not marked as local:
+// the host unholds the picture. A lamp is not in this list. The cell note is
+// lighting_reach_note_cell. This pass reads the count and clears it, so a
+// tile drops once the step stops.
 // pc.dims.z == 0xffffffff clears the slot stamps only, after the cache pass.
+// pc.dims.z == 0xfffffffe sets the field bit from the mask, after the screen
+// pass. A later block mark in that pass would clear a bit set earlier.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
@@ -32,7 +36,9 @@ void reach_mark_tile(uint tx, uint ty) {
         for (uint bx = 0u; bx < 4u; bx++) {
             uvec2 p = uvec2(tx * 32u + bx * 8u, ty * 32u + by * 8u);
             if (p.x < pc.dims.x && p.y < pc.dims.y) {
-                lighting_compose_mark_block((p.y >> 3u) * bw + (p.x >> 3u));
+                // The field bit is the signal compose already tests. A new
+                // bitset read in that shader does not fit under 248_000.
+                lighting_compose_mark_block_reason((p.y >> 3u) * bw + (p.x >> 3u), true);
             }
         }
     }
@@ -98,6 +104,19 @@ void main() {
         }
         return;
     }
+    if (pc.dims.z == 0xfffffffeu) {
+        uint base = lighting_reach_base();
+        uint tw = reach_tw();
+        uint th = (pc.dims.y + 31u) / 32u;
+        uint tiles = tw * th;
+        for (uint tile = id; tile < tiles && tile < LIGHTING_REACH_CHANGE_WORDS; tile += 64u) {
+            uint word = ckeys.key[base + (tile >> 5u)];
+            if ((word & (1u << (tile & 31u))) != 0u) {
+                reach_mark_tile(tile % tw, tile / tw);
+            }
+        }
+        return;
+    }
     if (id == 0u) {
         reach_hot_count = 0u;
     }
@@ -113,8 +132,8 @@ void main() {
     uint change_at = base + LIGHTING_REACH_MASK_WORDS;
     if (tw > 0u) {
         for (uint tile = id; tile < tiles && tile < LIGHTING_REACH_CHANGE_WORDS; tile += 64u) {
-            // A single relit pixel exceeds the one-percent test in almost
-            // every tile. A tile joins when enough of its pixels did.
+            // The one-percent dirty test fires in almost every tile. A tile
+            // joins when REACH_DIRECT_PIXELS pixels stepped by REACH_SHADOW.
             if (ckeys.key[change_at + tile] >= REACH_DIRECT_PIXELS) {
                 reach_mark_tile(tile % tw, tile / tw);
                 hot++;

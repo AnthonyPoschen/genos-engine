@@ -10,6 +10,47 @@ const COS_FLOOR: f32 = 0.05;
 const PLANE: f32 = 0.02;
 const NORMAL_MIN: f32 = 0.99;
 const SHARE_CAP: u32 = 32;
+/// Same clamp as `lighting_sc_set_seed`. A seed below this is not stored.
+const SEED_CONF_MIN: f32 = 0.05;
+const SEED_CONF: f32 = 0.25;
+const SHARE_RECEIVERS: u32 = 3;
+
+/// F4 knobs. High's starting values match the shader params and `FillSettings::high`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShareLimits {
+    /// In-tile sharing. Off leaves every neighbour unseeded.
+    pub enabled: bool,
+    pub t_min: f32,
+    pub w_cap: f32,
+    pub cos_floor: f32,
+    pub plane: f32,
+    pub normal_min: f32,
+    pub share_cap: u32,
+    /// Low confidence passed to the seed channel. It is not an own sample.
+    pub confidence: f32,
+    /// Distinct receivers one sample may seed. The tile holds the rest.
+    pub receivers: u32,
+    /// Own rays after which the fill seed's display weight is 0.
+    pub handover: u32,
+}
+
+impl ShareLimits {
+    #[must_use]
+    pub fn high() -> Self {
+        Self {
+            enabled: true,
+            t_min: T_MIN,
+            w_cap: W_CAP,
+            cos_floor: COS_FLOOR,
+            plane: PLANE,
+            normal_min: NORMAL_MIN,
+            share_cap: SHARE_CAP,
+            confidence: SEED_CONF,
+            receivers: SHARE_RECEIVERS,
+            handover: 16,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reject {
@@ -28,8 +69,14 @@ pub struct ShareCell {
     pub depth: f32,
     pub own_count: u32,
     pub stamp: u32,
+    /// Frame the cell's mean was committed. The stamp gate reads this.
     pub mean_frame: u32,
+    /// Frame a bounce read touched the cell. The stamp gate does not read it.
+    pub visit_frame: u32,
+    /// Upper bound once a short mean exists. A claim zero is not a bound.
     pub firefly: f32,
+    /// The cell has an MSME short mean. A cold cell does not clamp the seed.
+    pub short_mean: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,42 +114,62 @@ pub fn share_weight(
     faults: &Faults,
     path_frame: u32,
 ) -> Result<f32, Reject> {
+    share_weight_at(origin, hit, recv, *faults, path_frame, &ShareLimits::high())
+}
+
+fn share_weight_at(
+    origin: &ShareCell,
+    hit: &ShareHit,
+    recv: &ShareCell,
+    faults: Faults,
+    path_frame: u32,
+    limits: &ShareLimits,
+) -> Result<f32, Reject> {
     if !faults.gate1_off {
         let gap = recv.pos - origin.pos;
-        if origin.normal.dot(gap).abs() >= PLANE * origin.depth.max(recv.depth).max(1.0e-3) {
+        let depth = origin.depth.max(recv.depth).max(1.0e-3);
+        if origin.normal.dot(gap).abs() >= limits.plane * depth {
             return Err(Reject::Plane);
         }
-        if origin.normal.dot(recv.normal) < NORMAL_MIN {
+        if origin.normal.dot(recv.normal) < limits.normal_min {
             return Err(Reject::Normal);
         }
         if axis_id(origin.normal) != axis_id(recv.normal) {
             return Err(Reject::Axis);
         }
     }
-    if !faults.t_min_off && hit.t < T_MIN {
+    if !faults.t_min_off && hit.t < limits.t_min {
         return Err(Reject::NearHit);
     }
-    let scale = own_scale(recv.own_count);
-    if scale <= 0.0 {
+    if own_scale(recv.own_count, limits.share_cap) <= 0.0 {
         return Err(Reject::OwnCount);
     }
     if recv.stamp > recv.mean_frame && path_frame <= recv.stamp {
         return Err(Reject::Stamp);
     }
-    let raw = jacobian(origin, hit, recv) * scale;
-    let w = if faults.unclamped { raw } else { raw.min(W_CAP) };
-    if !w.is_finite() || w <= 0.0 {
+    let jac = jacobian(origin, hit, recv, limits.cos_floor);
+    let jac = if faults.unclamped {
+        jac
+    } else {
+        jac.min(limits.w_cap)
+    };
+    // The weight is the clamped reconnection. The own-count scale is the
+    // seed's confidence (`share_in_tile`), so a partial count does not darken
+    // the stored light.
+    if !jac.is_finite() || jac <= 0.0 {
         return Err(Reject::Plane);
     }
-    Ok(w)
+    Ok(jac)
 }
 
-fn own_scale(own: u32) -> f32 {
+fn own_scale(own: u32, cap: u32) -> f32 {
+    let cap = cap.max(1).min(u32::from(u16::MAX));
     let own_f = f32::from(u16::try_from(own.min(u32::from(u16::MAX))).unwrap_or(u16::MAX));
-    (1.0 - own_f / f32::from(u16::try_from(SHARE_CAP).unwrap_or(1))).max(0.0)
+    let cap_f = f32::from(u16::try_from(cap).unwrap_or(1));
+    (1.0 - own_f / cap_f).max(0.0)
 }
 
-fn jacobian(origin: &ShareCell, hit: &ShareHit, recv: &ShareCell) -> f32 {
+fn jacobian(origin: &ShareCell, hit: &ShareHit, recv: &ShareCell, cos_floor: f32) -> f32 {
     let to_o = hit.point - origin.pos;
     let to_j = hit.point - recv.pos;
     let len_j = to_j.length();
@@ -111,21 +178,18 @@ fn jacobian(origin: &ShareCell, hit: &ShareHit, recv: &ShareCell) -> f32 {
     }
     let dir_o = to_o.normalize();
     let dir_j = to_j.normalize();
-    let cos_theta_o = clamp_cos(origin.normal.dot(dir_o));
-    let cos_theta_j = clamp_cos(recv.normal.dot(dir_j));
-    let cos_phi_o = clamp_cos(hit.normal.dot(-dir_o));
-    let cos_phi_j = clamp_cos(hit.normal.dot(-dir_j));
+    let cos_theta_o = clamp_cos(origin.normal.dot(dir_o), cos_floor);
+    let cos_theta_j = clamp_cos(recv.normal.dot(dir_j), cos_floor);
+    let cos_phi_o = clamp_cos(hit.normal.dot(-dir_o), cos_floor);
+    let cos_phi_j = clamp_cos(hit.normal.dot(-dir_j), cos_floor);
     let t2 = hit.t.max(1.0e-3) * hit.t.max(1.0e-3);
     let d2 = len_j * len_j;
     (cos_theta_j / cos_theta_o) * ((cos_phi_j / d2) / (cos_phi_o / t2))
 }
 
-fn clamp_cos(v: f32) -> f32 {
-    if v <= COS_FLOOR {
-        COS_FLOOR
-    } else {
-        v
-    }
+fn clamp_cos(v: f32, floor: f32) -> f32 {
+    let floor = if floor > 0.0 { floor } else { COS_FLOOR };
+    if v <= floor { floor } else { v }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -153,7 +217,9 @@ fn cell(pos: Vec3, normal: Vec3) -> ShareCell {
         own_count: 0,
         stamp: 0,
         mean_frame: 0,
+        visit_frame: 0,
         firefly: 1.0e6,
+        short_mean: false,
     }
 }
 
@@ -220,8 +286,13 @@ fn luma_of(rgb: Vec3) -> f32 {
     0.2126 * rgb.x + 0.7152 * rgb.y + 0.0722 * rgb.z
 }
 
+/// Same weights as `FILL_MSME` in `lighting_fill.glsl`.
+fn msme_luma(rgb: Vec3) -> f32 {
+    0.299 * rgb.x + 0.587 * rgb.y + 0.114 * rgb.z
+}
+
 fn firefly(rgb: Vec3, cap: f32) -> Vec3 {
-    let luma = luma_of(rgb);
+    let luma = msme_luma(rgb);
     if luma > cap && luma > 0.0 {
         rgb * (cap / luma)
     } else {
@@ -408,9 +479,292 @@ pub fn near_hit_stays_home(faults: &Faults) -> bool {
     share_weight(&origin, &hit, &recv, faults, 1).is_err()
 }
 
+/// One other surface in the pick's screen tile.
+#[derive(Clone, Copy, Debug)]
+pub struct TileNeighbour {
+    pub id: u32,
+    pub cell: ShareCell,
+    /// False when the surface is outside this tile. F4a does not seed it.
+    pub in_tile: bool,
+}
+
+/// A shared sample stored on the existing low-confidence channel.
+///
+/// There is no count field. The receiver's own ray count is not this value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShareSeed {
+    pub id: u32,
+    pub rgb: Vec3,
+    pub confidence: f32,
+}
+
+/// What one traced sample does to the rest of its tile.
+#[derive(Clone, Copy, Debug)]
+pub struct TileShare {
+    pub seeds: [ShareSeed; 8],
+    pub count: u32,
+    /// Rays this sample consumed. Sharing does not change it.
+    pub rays: u32,
+    /// The origin cell's own paths after the share. Sharing does not change it.
+    pub origin_own: u32,
+}
+
+/// Claim word for one sample. Higher weight wins. The same weight keeps the
+/// lower ray index. Zero means no claim, so a real ray never packs to zero.
+#[must_use]
+pub fn share_claim(weight: f32, w_cap: f32, ray: u32) -> u32 {
+    let cap = if w_cap > 0.0 { w_cap } else { 1.0 };
+    let q = q10((weight / cap).clamp(0.0, 1.0));
+    let pack = (q << 22) | ((!ray) & 0x003F_FFFF);
+    if pack == 0 { 1 } else { pack }
+}
+
+/// The winning claim. An empty list wins nothing.
+#[must_use]
+pub fn share_elect(claims: &[u32]) -> u32 {
+    let mut best = 0u32;
+    for claim in claims {
+        if *claim > best {
+            best = *claim;
+        }
+    }
+    best
+}
+
+fn q10(t: f32) -> u32 {
+    let scaled = t.clamp(0.0, 1.0) * 1023.0;
+    let mut lo = 0u32;
+    let mut hi = 1024u32;
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        let mid_f = f32::from(u16::try_from(mid).unwrap_or(1023));
+        if mid_f <= scaled {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+fn seed_confidence(v: f32) -> f32 {
+    if !v.is_finite() {
+        return SEED_CONF;
+    }
+    v.clamp(SEED_CONF_MIN, 1.0)
+}
+
+/// One traced sample and the other surfaces in its tile.
+pub struct TileSample<'a> {
+    pub origin_id: u32,
+    pub origin: &'a ShareCell,
+    pub hit: &'a ShareHit,
+    pub irradiance: Vec3,
+    pub neighbours: &'a [TileNeighbour],
+    pub limits: &'a ShareLimits,
+    pub faults: Faults,
+    pub path_frame: u32,
+    pub rays: u32,
+}
+
+/// In-tile share (stage F4a). Each neighbour that passes the gates gets one
+/// low-confidence seed. The origin's own count and the ray budget stay put.
+/// A neighbour outside the tile gets nothing. Ring sharing is not this function.
+#[must_use]
+pub fn share_in_tile(sample: &TileSample<'_>) -> TileShare {
+    let mut out = TileShare {
+        seeds: [ShareSeed {
+            id: 0,
+            rgb: Vec3::ZERO,
+            confidence: 0.0,
+        }; 8],
+        count: 0,
+        rays: sample.rays,
+        origin_own: sample.origin.own_count,
+    };
+    if !sample.limits.enabled || !sample.irradiance.x.is_finite() {
+        return out;
+    }
+    let room = usize::try_from(sample.limits.receivers.min(8)).unwrap_or(0);
+    for neighbour in sample.neighbours {
+        if out.count >= u32::try_from(room).unwrap_or(0) {
+            break;
+        }
+        if !neighbour.in_tile || neighbour.id == sample.origin_id {
+            continue;
+        }
+        let Ok(jac) = share_weight_at(
+            sample.origin,
+            sample.hit,
+            &neighbour.cell,
+            sample.faults,
+            sample.path_frame,
+            sample.limits,
+        ) else {
+            continue;
+        };
+        let scale = own_scale(neighbour.cell.own_count, sample.limits.share_cap);
+        let contrib = sample.irradiance * jac;
+        let capped = if sample.faults.firefly_off || !neighbour.cell.short_mean {
+            contrib
+        } else {
+            firefly(contrib, neighbour.cell.firefly)
+        };
+        if !luma_of(capped).is_finite() || luma_of(capped) <= 0.0 {
+            continue;
+        }
+        let at = usize::try_from(out.count).unwrap_or(0);
+        if at >= out.seeds.len() {
+            break;
+        }
+        out.seeds[at] = ShareSeed {
+            id: neighbour.id,
+            rgb: capped,
+            confidence: seed_confidence(sample.limits.confidence * scale),
+        };
+        out.count += 1;
+    }
+    out
+}
+
+/// The wall gets no seed, the open fault does, and a coplanar neighbour does
+/// not spend another ray.
+#[must_use]
+pub fn tile_share_holds() -> bool {
+    let limits = ShareLimits::high();
+    let origin = cell(Vec3::ZERO, Vec3::Y);
+    let hit = ShareHit {
+        point: Vec3::new(0.0, 3.0, 0.0),
+        normal: -Vec3::Y,
+        radiance: Vec3::new(1.0, 1.0, 1.0),
+        t: 3.0,
+    };
+    let irr = Vec3::new(0.4, 0.4, 0.4);
+    let mut other = cell(Vec3::new(0.0, 0.02, 0.0), -Vec3::Y);
+    other.firefly = 1.0e6;
+    let wall = [TileNeighbour {
+        id: 2,
+        cell: other,
+        in_tile: true,
+    }];
+    let blocked = share_in_tile(&TileSample {
+        origin_id: 1,
+        origin: &origin,
+        hit: &hit,
+        irradiance: irr,
+        neighbours: &wall,
+        limits: &limits,
+        faults: Faults::default(),
+        path_frame: 1,
+        rays: 100_000,
+    });
+    let leaked = share_in_tile(&TileSample {
+        origin_id: 1,
+        origin: &origin,
+        hit: &hit,
+        irradiance: irr,
+        neighbours: &wall,
+        limits: &limits,
+        faults: Faults {
+            gate1_off: true,
+            ..Faults::default()
+        },
+        path_frame: 1,
+        rays: 100_000,
+    });
+    let mut flat = cell(Vec3::new(0.2, 0.0, 0.0), Vec3::Y);
+    flat.firefly = 1.0e6;
+    let plane = [TileNeighbour {
+        id: 3,
+        cell: flat,
+        in_tile: true,
+    }];
+    let shared = share_in_tile(&TileSample {
+        origin_id: 1,
+        origin: &origin,
+        hit: &hit,
+        irradiance: irr,
+        neighbours: &plane,
+        limits: &limits,
+        faults: Faults::default(),
+        path_frame: 1,
+        rays: 100_000,
+    });
+    blocked.count == 0
+        && blocked.rays == 100_000
+        && leaked.count == 1
+        && !leak_ok(Leak {
+            source: luma_of(irr),
+            other: luma_of(leaked.seeds[0].rgb),
+        })
+        && shared.count == 1
+        && shared.rays == 100_000
+        && shared.origin_own == origin.own_count
+        && shared.seeds[0].confidence < 1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fill-seed display. At and after `drop` own rays the weight is 0.
+    /// Below that the 16-set fade still mixes. The ray cap is not the drop.
+    fn fill_shown(seed: Vec3, confidence: f32, own: Vec3, rays: u32, drop: u32) -> Vec3 {
+        const HANDOVER_SETS: f32 = 16.0;
+        const HANDOVER_K: f32 = 2.0;
+        if rays >= drop.max(1) || confidence <= 0.0 {
+            return own;
+        }
+        if rays == 0 {
+            return seed;
+        }
+        let capped = rays.min(u32::from(u16::MAX));
+        let sets = (f32::from(u16::try_from(capped).unwrap_or(u16::MAX)) / 64.0).max(1.0);
+        let n = sets.floor().max(0.0);
+        let fade = (1.0 - n / HANDOVER_SETS).clamp(0.0, 1.0);
+        if fade <= 0.0 {
+            return own;
+        }
+        let k = HANDOVER_K * confidence.min(1.0) * fade;
+        let a = if n > 0.5 {
+            n / (n + k).max(1.0e-4)
+        } else {
+            0.0
+        };
+        seed * (1.0 - a) + own * a
+    }
+
+    /// Non-fill shown blend. Fade is zero at 16 sets. Fill seeds do not use this.
+    fn handover_shown(seed: Vec3, confidence: f32, own: Vec3, sets: f32) -> Vec3 {
+        const HANDOVER_SETS: f32 = 16.0;
+        const HANDOVER_K: f32 = 2.0;
+        let n = sets.floor().max(0.0);
+        let fade = (1.0 - n / HANDOVER_SETS).clamp(0.0, 1.0);
+        if fade <= 0.0 || confidence <= 0.0 {
+            return own;
+        }
+        let k = HANDOVER_K * confidence.min(1.0) * fade;
+        let a = if n > 0.5 {
+            n / (n + k).max(1.0e-4)
+        } else {
+            0.0
+        };
+        seed * (1.0 - a) + own * a
+    }
+
+    /// Own-mean fold. The seed is not an argument, so MSME cannot add it.
+    fn fold_own(mean: Vec3, rays: u32, sample: Vec3, n: u32) -> (Vec3, u32) {
+        let n = n.max(1);
+        let rays_f = f32::from(u16::try_from(rays.min(u32::from(u16::MAX))).unwrap_or(u16::MAX));
+        let n_f = f32::from(u16::try_from(n.min(u32::from(u16::MAX))).unwrap_or(1));
+        let k = n_f / (rays_f + n_f);
+        let next = if rays == 0 {
+            sample
+        } else {
+            mean + (sample - mean) * k
+        };
+        (next, rays.saturating_add(n))
+    }
 
     #[test]
     fn an_unoccluded_plane_stays_within_one_percent_past_t_min() {
@@ -460,11 +814,19 @@ mod tests {
         recv.own_count = 0;
         recv.stamp = 20;
         recv.mean_frame = 10;
+        // A bounce read this frame is not the mean. Comparing it would accept.
+        recv.visit_frame = 21;
+        assert_eq!(recv.visit_frame, 21);
         assert_eq!(
             share_weight(&origin, &hit, &recv, &Faults::default(), 20),
             Err(Reject::Stamp)
         );
         assert!(share_weight(&origin, &hit, &recv, &Faults::default(), 21).is_ok());
+        recv.mean_frame = 21;
+        assert!(
+            share_weight(&origin, &hit, &recv, &Faults::default(), 20).is_ok(),
+            "a mean committed after the stamp accepts"
+        );
     }
 
     #[test]
@@ -481,5 +843,320 @@ mod tests {
     #[test]
     fn the_firefly_bound_holds_the_contribution_and_the_weight_at_two() {
         assert!(firefly_bound_holds());
+    }
+
+    fn plane_hit() -> (ShareCell, ShareHit, Vec3) {
+        (
+            cell(Vec3::ZERO, Vec3::Y),
+            ShareHit {
+                point: Vec3::new(0.0, 3.0, 0.0),
+                normal: -Vec3::Y,
+                radiance: Vec3::new(1.0, 1.0, 1.0),
+                t: 3.0,
+            },
+            Vec3::new(0.4, 0.4, 0.4),
+        )
+    }
+
+    fn neighbour(id: u32, pos: Vec3, normal: Vec3, in_tile: bool) -> TileNeighbour {
+        let mut cell = cell(pos, normal);
+        cell.firefly = 1.0e6;
+        TileNeighbour { id, cell, in_tile }
+    }
+
+    fn run(
+        origin: &ShareCell,
+        hit: &ShareHit,
+        irr: Vec3,
+        neighbours: &[TileNeighbour],
+        limits: &ShareLimits,
+        faults: Faults,
+        frame_rays: (u32, u32),
+    ) -> TileShare {
+        share_in_tile(&TileSample {
+            origin_id: 1,
+            origin,
+            hit,
+            irradiance: irr,
+            neighbours,
+            limits,
+            faults,
+            path_frame: frame_rays.0,
+            rays: frame_rays.1,
+        })
+    }
+
+    #[test]
+    fn an_in_tile_neighbour_is_a_low_confidence_seed_and_the_budget_stays() {
+        let (origin, hit, irr) = plane_hit();
+        let mut origin = origin;
+        origin.own_count = 7;
+        let limits = ShareLimits::high();
+        let neighbours = [neighbour(3, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true)];
+        let got = run(
+            &origin,
+            &hit,
+            irr,
+            &neighbours,
+            &limits,
+            Faults::default(),
+            (1, 100_000),
+        );
+        assert_eq!(got.count, 1);
+        assert_eq!(got.rays, 100_000, "sharing must not spend another ray");
+        assert_eq!(got.origin_own, 7, "a shared sample must not raise own_count");
+        assert!((got.seeds[0].confidence - SEED_CONF).abs() < 1.0e-4);
+        assert!(got.seeds[0].confidence < 1.0);
+        let luma = luma_of(got.seeds[0].rgb);
+        assert!(luma > 0.0);
+        assert!(luma <= luma_of(irr) * W_CAP + 1.0e-3);
+    }
+
+    #[test]
+    fn a_gated_neighbour_gets_no_seed_and_the_fault_does() {
+        assert!(tile_share_holds());
+        let (origin, hit, irr) = plane_hit();
+        let limits = ShareLimits::high();
+        let outside = [neighbour(4, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, false)];
+        let skipped = run(&origin, &hit, irr, &outside, &limits, Faults::default(), (1, 8));
+        assert_eq!(skipped.count, 0);
+        assert_eq!(skipped.rays, 8);
+        let mut off = limits;
+        off.enabled = false;
+        let same = [neighbour(3, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true)];
+        let closed = run(&origin, &hit, irr, &same, &off, Faults::default(), (1, 8));
+        assert_eq!(closed.count, 0);
+        let mut full = neighbour(5, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true);
+        full.cell.own_count = SHARE_CAP;
+        let expired = run(&origin, &hit, irr, &[full], &limits, Faults::default(), (1, 8));
+        assert_eq!(expired.count, 0);
+        let mut stamped = neighbour(6, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true);
+        stamped.cell.stamp = 20;
+        stamped.cell.mean_frame = 10;
+        let stale = run(&origin, &hit, irr, &[stamped], &limits, Faults::default(), (20, 8));
+        assert_eq!(stale.count, 0);
+        let fresh = run(&origin, &hit, irr, &[stamped], &limits, Faults::default(), (21, 8));
+        assert_eq!(fresh.count, 1);
+        let near_hit = ShareHit { t: 0.5, ..hit };
+        let near = run(
+            &origin,
+            &near_hit,
+            irr,
+            &same,
+            &limits,
+            Faults::default(),
+            (1, 8),
+        );
+        assert_eq!(near.count, 0);
+    }
+
+    #[test]
+    fn the_receiver_cap_drops_the_fourth_cell_and_the_firefly_holds_the_seed() {
+        let (origin, hit, irr) = plane_hit();
+        let mut limits = ShareLimits::high();
+        limits.receivers = 3;
+        let neighbours = [
+            neighbour(2, Vec3::new(0.1, 0.0, 0.0), Vec3::Y, true),
+            neighbour(3, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true),
+            neighbour(4, Vec3::new(-0.1, 0.0, 0.0), Vec3::Y, true),
+            neighbour(5, Vec3::new(0.0, 0.0, 0.2), Vec3::Y, true),
+        ];
+        let got = run(
+            &origin,
+            &hit,
+            irr,
+            &neighbours,
+            &limits,
+            Faults::default(),
+            (1, 4),
+        );
+        assert_eq!(got.count, 3);
+        assert_eq!(got.rays, 4);
+        assert_ne!(got.seeds[0].id, 5);
+        assert_ne!(got.seeds[1].id, 5);
+        assert_ne!(got.seeds[2].id, 5);
+        let cap = running_upper(0.2, 0.0, 8.0);
+        let mut dim = neighbour(3, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true);
+        dim.cell.firefly = cap;
+        dim.cell.short_mean = true;
+        let bright = Vec3::new(8.0, 8.0, 8.0);
+        let held = run(&origin, &hit, bright, &[dim], &limits, Faults::default(), (1, 1));
+        let open = run(
+            &origin,
+            &hit,
+            bright,
+            &[dim],
+            &limits,
+            Faults {
+                firefly_off: true,
+                ..Faults::default()
+            },
+            (1, 1),
+        );
+        assert!(luma_of(held.seeds[0].rgb) <= cap + 1.0e-3);
+        assert!(luma_of(open.seeds[0].rgb) > cap + 1.0);
+    }
+
+    #[test]
+    fn the_higher_weight_claims_the_seed_and_a_tie_keeps_the_lower_ray() {
+        let heavy = share_claim(2.0, 2.0, 9);
+        let light = share_claim(1.0, 2.0, 1);
+        assert!(heavy > light);
+        assert_eq!(share_elect(&[light, heavy, 0]), heavy);
+        let early = share_claim(1.0, 2.0, 1);
+        let later = share_claim(1.0, 2.0, 5);
+        assert!(early > later);
+        let fresh = share_claim(1.0, 2.0, 4);
+        let stale = share_claim(0.5, 2.0, 4);
+        assert!(
+            fresh > stale,
+            "a higher own-count scale must win the same reconnection"
+        );
+        assert_ne!(share_claim(1.0, 2.0, 0), 0);
+        assert_ne!(share_claim(0.0, 2.0, 3), 0);
+    }
+
+    #[test]
+    fn a_same_normal_depth_step_shares_nothing_and_the_plane_is_what_stops_it() {
+        let (origin, hit, irr) = plane_hit();
+        let limits = ShareLimits::high();
+        // Depth is 3 m, so the plane gate is 0.06 m. The normals and the axis match.
+        let mut stepped = neighbour(3, Vec3::new(0.0, 0.2, 0.0), Vec3::Y, true);
+        stepped.cell.depth = 3.0;
+        assert_eq!(
+            share_weight(&origin, &hit, &stepped.cell, &Faults::default(), 1),
+            Err(Reject::Plane)
+        );
+        let blocked = run(
+            &origin,
+            &hit,
+            irr,
+            &[stepped],
+            &limits,
+            Faults::default(),
+            (1, 1),
+        );
+        assert_eq!(blocked.count, 0);
+        let opened = run(
+            &origin,
+            &hit,
+            irr,
+            &[stepped],
+            &limits,
+            Faults {
+                gate1_off: true,
+                ..Faults::default()
+            },
+            (1, 1),
+        );
+        assert_eq!(opened.count, 1, "dropping the plane test must leak");
+        let mut close = stepped;
+        close.cell.pos = Vec3::new(0.2, 0.0, 0.0);
+        let held = run(&origin, &hit, irr, &[close], &limits, Faults::default(), (1, 1));
+        assert_eq!(held.count, 1);
+        // Threshold is plane * depth = 0.06. 0.1 m is out, 0.01 m is in.
+        let mut edge = stepped;
+        edge.cell.pos = Vec3::new(0.0, 0.1, 0.0);
+        assert_eq!(
+            share_weight(&origin, &hit, &edge.cell, &Faults::default(), 1),
+            Err(Reject::Plane)
+        );
+        edge.cell.pos.y = 0.01;
+        assert!(share_weight(&origin, &hit, &edge.cell, &Faults::default(), 1).is_ok());
+    }
+
+    #[test]
+    fn the_firefly_clamp_uses_the_msme_luma() {
+        let red = Vec3::new(1.0, 0.0, 0.0);
+        assert!(luma_of(red) < 0.25, "Rec.709 of red is under the cap");
+        let capped = firefly(red, 0.25);
+        assert!((msme_luma(red) - 0.299).abs() < 1.0e-4);
+        assert!(capped.x < red.x, "MSME luma of red is over the cap");
+        assert!((msme_luma(capped) - 0.25).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn a_partial_own_count_scales_confidence_and_leaves_the_light() {
+        let (origin, hit, irr) = plane_hit();
+        let mut origin = origin;
+        origin.own_count = 7;
+        let limits = ShareLimits::high();
+        let cold = neighbour(3, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true);
+        let mut mid = cold;
+        mid.cell.own_count = 16;
+        let fresh = run(&origin, &hit, irr, &[cold], &limits, Faults::default(), (1, 8));
+        let aged = run(&origin, &hit, irr, &[mid], &limits, Faults::default(), (1, 8));
+        assert_eq!(fresh.count, 1);
+        assert_eq!(aged.count, 1);
+        assert_eq!(fresh.rays, 8);
+        assert_eq!(aged.origin_own, 7);
+        let cold_l = luma_of(fresh.seeds[0].rgb);
+        let aged_l = luma_of(aged.seeds[0].rgb);
+        assert!((cold_l - aged_l).abs() < 1.0e-4, "own count darkened the seed");
+        assert!((fresh.seeds[0].confidence - SEED_CONF).abs() < 1.0e-4);
+        assert!((aged.seeds[0].confidence - SEED_CONF * 0.5).abs() < 1.0e-4);
+        let mut full = cold;
+        full.cell.own_count = SHARE_CAP;
+        let done = run(&origin, &hit, irr, &[full], &limits, Faults::default(), (1, 8));
+        assert_eq!(done.count, 0);
+    }
+
+    #[test]
+    fn the_seed_fades_into_the_own_mean_and_msme_does_not_add_it() {
+        let (origin, hit, irr) = plane_hit();
+        let limits = ShareLimits::high();
+        let cold = neighbour(3, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true);
+        let seeded = run(&origin, &hit, irr, &[cold], &limits, Faults::default(), (1, 4));
+        assert_eq!(seeded.count, 1);
+        let seed = seeded.seeds[0].rgb;
+        let own = Vec3::new(1.0, 1.0, 1.0);
+        let at_zero = handover_shown(seed, seeded.seeds[0].confidence, own, 0.0);
+        let at_end = handover_shown(seed, seeded.seeds[0].confidence, own, 16.0);
+        let at_mid = handover_shown(seed, seeded.seeds[0].confidence, own, 8.0);
+        assert!((luma_of(at_zero) - luma_of(seed)).abs() < 1.0e-4);
+        assert!((luma_of(at_end) - luma_of(own)).abs() < 1.0e-4);
+        let mid_l = luma_of(at_mid);
+        assert!(mid_l > luma_of(seed) && mid_l < luma_of(own));
+        let sample = Vec3::new(0.5, 0.5, 0.5);
+        let (folded, rays) = fold_own(own, 4, sample, 1);
+        let k = 1.0 / 5.0;
+        let expect = own + (sample - own) * k;
+        assert_eq!(rays, 5);
+        assert!((luma_of(folded) - luma_of(expect)).abs() < 1.0e-4);
+        let poisoned = own + (seed - own) * k;
+        assert!((luma_of(folded) - luma_of(poisoned)).abs() > 1.0e-3);
+    }
+
+    #[test]
+    fn a_cold_cell_does_not_clamp_and_a_short_mean_does() {
+        let (origin, hit, _irr) = plane_hit();
+        let limits = ShareLimits::high();
+        let bright = Vec3::new(8.0, 8.0, 8.0);
+        let cap = running_upper(0.2, 0.0, 8.0);
+        let mut cold = neighbour(3, Vec3::new(0.2, 0.0, 0.0), Vec3::Y, true);
+        cold.cell.firefly = cap;
+        cold.cell.short_mean = false;
+        let open = run(&origin, &hit, bright, &[cold], &limits, Faults::default(), (1, 1));
+        cold.cell.short_mean = true;
+        let held = run(&origin, &hit, bright, &[cold], &limits, Faults::default(), (1, 1));
+        assert!(luma_of(open.seeds[0].rgb) > cap + 1.0);
+        assert!(luma_of(held.seeds[0].rgb) <= cap + 1.0e-3);
+    }
+
+    #[test]
+    fn a_cell_past_the_handover_matches_the_cell_without_a_seed() {
+        let drop = ShareLimits::high().handover;
+        let seed = Vec3::new(4.0, 0.2, 0.1);
+        let own = Vec3::new(1.0, 0.4, 0.2);
+        let with_seed = fill_shown(seed, SEED_CONF, own, drop, drop);
+        let bare = fill_shown(Vec3::ZERO, 0.0, own, drop, drop);
+        assert_eq!(with_seed, bare);
+        assert_eq!(with_seed, own);
+        // Eight stored sets, the ray cap, used to leave the seed in the mean.
+        assert_eq!(fill_shown(seed, SEED_CONF, own, 512, drop), own);
+        let early = fill_shown(seed, SEED_CONF, own, drop - 1, drop);
+        assert!((luma_of(early) - luma_of(own)).abs() > 1.0e-3);
+        let held = fill_shown(seed, SEED_CONF, own, drop, drop + 16);
+        assert!((luma_of(held) - luma_of(own)).abs() > 1.0e-3);
     }
 }

@@ -164,7 +164,24 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          (GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA)
   --surface-cache-ray-budget N
                          cache-round ray cap; 0 keeps the existing lists
-                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET)
+                         (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET).
+                         World mode 3 does not use this ceiling. It spends
+                         surface_cache.fill_budget every cache round
+                         (GENOS_LIGHTING_FILL_BUDGET, High 100000, 0 traces none).
+                         The other fill knobs are surface_cache.fill_* and
+                         GENOS_LIGHTING_FILL_TILE, FILL_LOD_NEAR, FILL_CELL_MAX,
+                         FILL_LEASH, FILL_LOOK_AHEAD, FILL_FAR, FILL_FAR_SHARE,
+                         FILL_OFFSCREEN_FLOOR, FILL_ERROR_TARGET, FILL_PROX_MIN,
+                         FILL_CHANGE_WEIGHT, FILL_CHECK_RATE, FILL_MAX_PICKS,
+                         FILL_LAMBDA_DECAY, FILL_WINDOW_FLOOR, FILL_CATCHUP_MAX,
+                         FILL_CHECK_SIGMA, FILL_WARMUP, FILL_RAY_CAP, FILL_FRAME_DT,
+                         FILL_SHARE, FILL_SHARE_MIN_HIT, FILL_SHARE_CAP,
+                         FILL_SHARE_PLANE, FILL_SHARE_NORMAL, FILL_SHARE_W_CAP,
+                         FILL_SHARE_COS, FILL_SHARE_CONF, FILL_SHARE_RECEIVERS,
+                         FILL_SHARE_HANDOVER.
+                         Check rays are one same-seed ray per fill_check_rate block.
+                         fill_share 1 seeds other cells in the same tile.
+                         0 turns that off. Ring is not a value here.
   --surface-cache-dormant-rays N
                          fresh rays per frame for a dormant cache entry, 0..16.
                          0 keeps one sweep in eight. 1..16 traces one new
@@ -320,6 +337,37 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_surface_cache_firefly_sigma",
     "lighting_surface_cache_ray_budget",
     "lighting_surface_cache_dormant_rays",
+    "lighting_fill_budget",
+    "lighting_fill_tile",
+    "lighting_fill_lod_near",
+    "lighting_fill_cell_max",
+    "lighting_fill_leash",
+    "lighting_fill_look_ahead",
+    "lighting_fill_far",
+    "lighting_fill_offscreen_floor",
+    "lighting_fill_error_target",
+    "lighting_fill_far_share",
+    "lighting_fill_prox_min",
+    "lighting_fill_change_weight",
+    "lighting_fill_check_rate",
+    "lighting_fill_max_picks",
+    "lighting_fill_lambda_decay",
+    "lighting_fill_window_floor",
+    "lighting_fill_catchup_max",
+    "lighting_fill_check_sigma",
+    "lighting_fill_warmup",
+    "lighting_fill_ray_cap",
+    "lighting_fill_frame_dt",
+    "lighting_fill_share",
+    "lighting_fill_share_min_hit",
+    "lighting_fill_share_cap",
+    "lighting_fill_share_plane",
+    "lighting_fill_share_normal",
+    "lighting_fill_share_w_cap",
+    "lighting_fill_share_cos",
+    "lighting_fill_share_conf",
+    "lighting_fill_share_receivers",
+    "lighting_fill_share_handover",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",
@@ -1467,8 +1515,7 @@ fn jump_camera(app: &mut App, name: Option<&str>, camera: &mut Camera) -> Result
             .entry()
             .checkpoints
             .first()
-            .map(|c| c.name.clone())
-            .unwrap_or_default(),
+            .map_or_default(|c| c.name.clone()),
     };
     if chosen.is_empty() {
         return Ok(());

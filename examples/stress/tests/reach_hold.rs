@@ -27,6 +27,15 @@ fn open() -> (MutexGuard, genos_window::Lifecycle<Renderer>) {
 
 type MutexGuard = std::sync::MutexGuard<'static, ()>;
 
+fn held_settings() -> LightingSettings {
+    let mut settings = LightingSettings::preset(LightingPreset::High);
+    // Screen-tile fill keeps spending rays on a held camera. A settled hold and
+    // a picture-wide unhold then differ by the rays those frames just added.
+    // This test measures the mover mask, so that budget is off.
+    settings.surface_cache.fill.budget = 0;
+    settings
+}
+
 fn hall() -> (Stage, Camera) {
     let mut stage = Stage::new(
         Scale::SMALL,
@@ -90,7 +99,7 @@ fn a_far_mover_leaves_the_other_corners_held() {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
-    renderer.set_lighting_settings(LightingSettings::preset(LightingPreset::High));
+    renderer.set_lighting_settings(held_settings());
     let (mut stage, camera) = hall();
     place_far(&mut stage, 3.0);
     let mut still = Sample {
@@ -300,7 +309,7 @@ fn capture(unhold: bool) -> Vec<Shot> {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
-    renderer.set_lighting_settings(LightingSettings::preset(LightingPreset::High));
+    renderer.set_lighting_settings(held_settings());
     renderer.lighting_picture_unhold(unhold);
     let (mut stage, mut camera) = hall();
     let mut spread = false;
