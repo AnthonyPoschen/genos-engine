@@ -1,6 +1,6 @@
 # Object-attached mover lighting cache
 
-Status: **in progress** (Stages A–G landed; H fill deposits + I compose polish + J lavapipe gates in flight).
+Status: **GPU path live** (Stages A–I + #286 pool port; Stage J lavapipe numbers in the PR).
 
 ## Intent
 
@@ -41,9 +41,12 @@ Moving objects must carry their own lighting records so a spin or slide does not
 | G | G-buffer object id; compose O(1) table + hashed span read |
 | H | Shared fill list; cache pass deposits world-direction lighting from the lattice |
 | I | Compose: O(1) mover read; Far → world cells only; hitch scan off when attach_movers |
-| #286 port | Presence list; hit never writes world; drop on-mover / stale change-volume cells |
+| #286 port | Presence list; hit never writes world; drop on-mover / stale change-volume cells; pool slide test |
 
-## Still open
+## Stage J / #286 numbers (lavapipe)
 
-- Stage J lavapipe: spin 0.027, knockout ≤ 0.213, ReSTIR REF_ERR 0.05, moving-boxes vs #282, rays/frame 10/100/1000.
-- Slide test (`a_mover_slides_without_stepping_on_world_cells`) adapted to the pool read.
+- Slide: before max step **1.7008** at 250 mm; after **0** (pool fine `[7,3,1]`). world_hit 0, object_hit 1, drops 1.
+- Rays/frame at 10/100/1000 Near movers (budget 4096): **4096 / 4096 / 4096**.
+- Compose SPIR-V: **246728** B (ceiling 248000).
+- ReSTIR `REF_ERR` 0.05 gate scenes: pass (merge oracle still fails on lighting-v3).
+- fill_knockout: early→late error 0.8244→0.5557 (gain ok). Knockout late ceiling 0.213 is a doc note, not a code constant.
