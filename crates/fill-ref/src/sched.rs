@@ -719,9 +719,10 @@ impl Estimator {
     }
 }
 
-/// Tile word above the slot id. Under `open_sets` commits, fewer commits
-/// outrank more so one slot cannot pin the tile. At and past `open_sets` the
-/// rank is `bucket`, which is the stored-variance priority, not zero.
+/// Tile word above the slot id. While the shown count is under `open_sets`,
+/// a lower shown count outranks a higher one so one slot cannot pin the tile.
+/// At and past `open_sets` the rank is `bucket`, which is the stored-variance
+/// priority, not zero.
 #[must_use]
 pub fn open_rank(shown: u32, bucket: u32, open_sets: u32) -> u32 {
     let bucket = bucket & 63;
