@@ -155,6 +155,10 @@ fn lighting_fill_param_words(pixels: u64) -> u64 {
 /// Each step adds. A table of [`FILL_TILE_WORDS`] slots used to carve the tiles
 /// out of `2 * slots - FILL_TILE_WORDS` and put the picks at `slots + 1`, which
 /// aliases and underflows the pick capacity.
+#[expect(
+    clippy::expect_used,
+    reason = "a fill table that does not fit in u64 is a broken layout"
+)]
 fn fill_list_end(slots: u64) -> (u64, u64, u64) {
     let rays = u64::from(LIGHTING_CACHE_BATCH)
         .checked_mul(u64::from(LIGHTING_CACHE_RAYS))
@@ -6914,8 +6918,14 @@ mod fill_layout_tests {
         let old_tile = slots * 2 - FILL_TILE_WORDS;
         let old_pick = slots + 1;
         assert!(old_pick > old_tile && old_pick < old_tile + FILL_TILE_WORDS);
-        let old_cap = (old_tile as u32).wrapping_sub(old_pick as u32);
-        assert!(old_cap > rays as u32, "old pick capacity underflows, got {old_cap}");
+        let old_tile_u = u32::try_from(old_tile).unwrap_or(u32::MAX);
+        let old_pick_u = u32::try_from(old_pick).unwrap_or(u32::MAX);
+        let old_cap = old_tile_u.wrapping_sub(old_pick_u);
+        let rays_u = u32::try_from(rays).unwrap_or(u32::MAX);
+        assert!(
+            old_cap > rays_u,
+            "old pick capacity underflows, got {old_cap}"
+        );
         let (big_tile, big_pick, _) = fill_list_end(1_048_576);
         assert_eq!(big_pick, big_tile + FILL_TILE_WORDS);
         let (_t, _p, host_end) = fill_list_end(FILL_LOCK_WORDS);

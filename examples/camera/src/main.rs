@@ -795,10 +795,9 @@ fn run() -> Result<i32, String> {
             }
         }
         if live_shot {
-            let png = pixels
-                .as_ref()
-                .map(|pixels| encode_png(renderer.width(), renderer.height(), pixels))
-                .unwrap_or_default();
+            let png = pixels.as_ref().map_or_default(|pixels| {
+                encode_png(renderer.width(), renderer.height(), pixels)
+            });
             genos_mcp::finish_shot(&png);
         }
         if want_read && (readback.is_some() || shot.is_some()) {

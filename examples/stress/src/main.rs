@@ -1479,10 +1479,9 @@ fn run() -> Result<i32, String> {
             },
         );
         if shot {
-            let png = pixels
-                .as_ref()
-                .map(|pixels| png::encode_png(renderer.width(), renderer.height(), pixels))
-                .unwrap_or_default();
+            let png = pixels.as_ref().map_or_default(|pixels| {
+                png::encode_png(renderer.width(), renderer.height(), pixels)
+            });
             genos_mcp::finish_shot(&png);
         }
         genos_mcp::publish_lighting(&lighting_text(renderer));

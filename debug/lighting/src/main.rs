@@ -1493,8 +1493,7 @@ fn jump_camera(app: &mut App, name: Option<&str>, camera: &mut Camera) -> Result
             .entry()
             .checkpoints
             .first()
-            .map(|c| c.name.clone())
-            .unwrap_or_default(),
+            .map_or_default(|c| c.name.clone()),
     };
     if chosen.is_empty() {
         return Ok(());
