@@ -7,7 +7,7 @@ outside, the same way every time: over the MCP port, from a script file, or head
 on a box. Lighting quality is judged against ground truth, not by eye alone.
 
 Every engine system ships a dedicated debug binary under `debug/<system>/`
-(`debug/lighting`, `debug/physics`, `debug/networking`, `debug/ui`,
+(`debug/lighting`, `debug/physics`, `debug/input`, `debug/networking`, `debug/ui`,
 `debug/assets`, and the same folder for any other system). The binary covers
 that system's features. The agent rubric scores this.
 
@@ -170,15 +170,24 @@ because a mapped window missed `xdg_wm_base.ping`.
 The ping is answered only inside the seat dispatch. A scene load runs on
 `genos-scene-load` and the frame draws a loading picture. Device waits and
 pipeline compiles keep a side thread answering pings, and that thread is joined
-before the next present. Quit joins the script thread (it is still freeing the
-rhai engine after the report and the `quit` reply), stops the MCP listener,
-idles the device while the window is mapped, destroys the device on the frame
-thread, then destroys the window and exits. The old scene is dropped on
-`genos-retire`.
+before the next present. Quit is the app lifecycle in `crates/window`: it stops
+the script and the MCP listener without a blind join, polls GPU fences, destroys
+our GPU objects, unmaps the window, and then exits. It does not call
+`vkDestroyDevice` or `vkDestroyInstance`, except when `--lifecycle-full-destroy`
+is set for the validation gate. Unix exit is `_exit`. Windows exit is
+`TerminateProcess`, so `DLL_PROCESS_DETACH` does not destroy the device after
+`lifecycle_visible_quit_ms` is printed. Dropping the device outside that
+lifecycle panics and does not wait idle. The event thread dispatches the
+seat between those steps. The old scene is dropped on `genos-retire`.
 
 Failure modes: a stall above 100 ms means the frame thread blocked inside a
-pump gap (a synchronous load, a device wait, or a teardown). The probes are the
-Perf row, `get_event_loop`, and the headless pump test in `genos-window`.
+pump gap (a synchronous load, a device wait, or a teardown). A phase line at
+or above 100 ms names that shutdown step. `lifecycle_visible_quit_ms` at or
+above 100 ms means the process stayed up after the window was gone. The probes are the Perf row,
+`get_event_loop`, `lifecycle_quit_gap_ms`, `lifecycle_visible_quit_ms`, `lifecycle_phase=`, and
+`lifecycle_quit_total_ms` on stdout, and the quit-gap test in `genos-window`.
+That test plants a 2000 ms fence inside the drain so lavapipe's instant fences
+cannot hide a blocked phase.
 
 ### Debug menu
 

@@ -118,8 +118,10 @@ const CTRL_DIRECT_FRESH: u32 = 32768;
 /// Denoiser iterations in bits 16..18. 0 in that field means the tuned 5.
 const CTRL_DENOISE_ITERS_SHIFT: u32 = 16;
 /// Screen wavelet over visible fine texels. Bit 19. Bits 19 and 21 were
-/// half-res and tiles (S79); 19 is this filter now. Bit 21 stays free.
+/// half-res and tiles (S79); 19 is this filter now.
 const CTRL_DENOISE_SCREEN: u32 = 1 << 19;
+/// Direct pixels use the GGX lobe. Bit 21. Off keeps Lambert on irradiance.
+const CTRL_DIRECT_SPECULAR: u32 = 1 << 21;
 /// Skip later wavelet iterations on stable texels. Bit 20. Off unless the
 /// experimental knob is on.
 const CTRL_DENOISE_ADAPTIVE: u32 = 1 << 20;
@@ -252,6 +254,9 @@ pub(crate) fn pack_lighting_ctrl(
     let mut bits = 0u32;
     if settings.direct.enabled {
         bits |= CTRL_DIRECT;
+    }
+    if settings.direct.specular {
+        bits |= CTRL_DIRECT_SPECULAR;
     }
     if settings.direct_this_frame(frame) {
         bits |= CTRL_DIRECT_FRESH;

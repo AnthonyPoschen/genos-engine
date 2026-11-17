@@ -31,7 +31,13 @@ Three stages, each a pure function of its inputs plus a settings header, so each
    - the `.gbake` SDF and cards via `crates/bake`;
    - collision subset (hull or triangle mesh) for the server profile;
    - a header with cook version and every cook setting; the cook hash is SHA-256 over source hash + header.
-3. **Runtime load** (`AssetServer` in `genos-load`). Opens a package (`.gpak`: manifest + aligned blobs, memory-mapped) or loose `.gcook` files. Resolves an `AssetId` (cook hash) to a handle at once; bytes arrive later. Uploads go through the transfer queue path #77 already uses. No transcode, no simplify, no tangent generation at runtime.
+3. **Runtime load** (`AssetServer` in `genos-load`). Opens a package (`.gpak`: manifest + aligned blobs, memory-mapped) or loose `.gcook` files. Resolves an `AssetId` (cook hash) to a handle at once; bytes arrive later. Uploads go through the transfer queue path #77 already uses. No transcode, no simplify, no tangent generation at runtime. Opt-in `--cooked DIR` (`RenderSettings::cooked_dir`, mirror `GENOS_COOKED`) loads `.gcook` geometry and `.gtex` BC7/BC5 into the #77 atlases (ADR 0035). Unset, the glTF and PNG path is unchanged. A bad hash logs `assets fallback` and loads that asset from source. `Package::verify` is the `--verify` check.
+
+- Replicated state: none. A cooked package is a local file. The wire still names `AssetId` and subset hashes; it does not carry the atlas.
+- Authority: the machine that has the file. No server authority over the cook directory.
+- Prediction / rollback: none. The load is not a predicted simulation step.
+- Determinism: the same package bytes decode to the same meshes, instances, and block rects on every machine.
+- Headless server: geometry may load from `.gcook` for collision. Textures are not uploaded. A missing BC feature falls back to source geometry and source images.
 
 Dev loop: a `.glb` passed straight to the runtime is imported and cooked on demand into `~/.cache/genos/cook/` (or `--cook-cache`), keyed by hash, then loaded the same way. Shipping uses `Prebuilt` packages only. Hot reload: a changed source hash recooks and swaps the handle's generation; it emits ADR 0013 change records (material edit ≠ geometry rebuild).
 

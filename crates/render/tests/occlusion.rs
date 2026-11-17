@@ -17,14 +17,14 @@ use genos_render::{Renderer, World};
 use genos_scene::{viewport_uv, Camera, Ceiling, Floor, Light, Scene, Shape, Solid, Vec3, Wall};
 use genos_window::Window;
 
-fn open() -> (std::sync::MutexGuard<'static, ()>, Window, Renderer) {
+fn open() -> (std::sync::MutexGuard<'static, ()>, genos_window::Lifecycle<Renderer>) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) -> Vec<u8> {
@@ -119,12 +119,14 @@ fn check(
     camera: &Camera,
     points: &[[f32; 3]],
 ) {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let mut dark = scene.clone();
     dark.lights = vec![hidden];
-    let dark_px = draw(&mut window, &mut renderer, &World::from_scene(dark), camera);
+    let dark_px = draw(window, renderer, &World::from_scene(dark), camera);
     if let Ok(dir) = std::env::var("OCC_DUMP") {
         let mut rgb = Vec::new();
         for px in dark_px.chunks(4) {
@@ -143,7 +145,7 @@ fn check(
     }
     let mut lit = scene;
     lit.lights = vec![control];
-    let lit_px = draw(&mut window, &mut renderer, &World::from_scene(lit), camera);
+    let lit_px = draw(window, renderer, &World::from_scene(lit), camera);
     let value = sample(&lit_px, width, height, camera, points[0]);
     assert!(
         value > 60.0,
@@ -203,6 +205,7 @@ fn a_lamp_sealed_in_walls_under_a_roof_lights_nothing_outside() {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.4, -4.5, std::f32::consts::PI);
@@ -241,6 +244,7 @@ fn a_lamp_above_the_roof_lights_nothing_under_it() {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.0, -3.0, std::f32::consts::PI);
@@ -271,6 +275,7 @@ fn a_lamp_inside_a_box_lights_nothing_outside() {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(0.0, -4.0, std::f32::consts::PI);
@@ -301,6 +306,7 @@ fn a_lamp_inside_a_cylinder_lights_nothing_outside_even_over_its_cap() {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut camera = Camera::new(-0.5, -4.0, 2.7);
@@ -321,7 +327,9 @@ fn a_lamp_inside_a_cylinder_lights_nothing_outside_even_over_its_cap() {
 /// last light build began (inside that box a face gets no light at all).
 #[test]
 fn a_turning_box_keeps_its_faces_lit_every_frame() {
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     let scene = Scene {
@@ -342,6 +350,7 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     let mut world = World::from_scene(scene);
@@ -351,7 +360,7 @@ fn a_turning_box_keeps_its_faces_lit_every_frame() {
     for step in 0..=36 {
         let yaw = (step as f32 * 5.0).to_radians();
         world.scene.solids[0].yaw = yaw;
-        let pixels = draw(&mut window, &mut renderer, &world, &camera);
+        let pixels = draw(window, renderer, &world, &camera);
         let (s, c) = yaw.sin_cos();
         // The four side faces: outward normals local -Z, +X, +Z, -X turned by yaw
         // (+X goes to (cos, 0, -sin)).

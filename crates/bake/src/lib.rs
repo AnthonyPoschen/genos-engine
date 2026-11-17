@@ -1,6 +1,15 @@
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::unnested_or_patterns, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::unnested_or_patterns,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! Import-time data for GI: a sparse signed distance field and surface cache
 //! cards per mesh, cached on disk by content hash.
@@ -110,30 +119,80 @@ impl std::error::Error for BakeError {}
 
 /// Build the SDF and cards now, with no cache.
 pub fn bake(mesh: &BakeMesh, settings: &BakeSettings) -> Baked {
-    Baked {
-        key: mesh.content_key(settings),
-        sdf: sdf::build(mesh, settings),
-        cards: cards::build(mesh, settings),
+    bake_keyed(mesh, settings, mesh.content_key(settings))
+}
+
+/// [`bake`] with `key` already computed. The key hashes every texel the
+/// scene holds, so it is worth computing once.
+fn bake_keyed(mesh: &BakeMesh, settings: &BakeSettings, key: u64) -> Baked {
+    bake_phased(mesh, settings, key, &mut BakePhases::default())
+}
+
+/// Wall time of each bake phase, for the cook tools' timing output.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BakePhases {
+    pub bvh: std::time::Duration,
+    pub sdf: std::time::Duration,
+    pub cards: std::time::Duration,
+    pub write: std::time::Duration,
+}
+
+impl BakePhases {
+    pub fn add(&mut self, other: &BakePhases) {
+        self.bvh += other.bvh;
+        self.sdf += other.sdf;
+        self.cards += other.cards;
+        self.write += other.write;
     }
+}
+
+/// [`bake_keyed`] with one BVH shared by the SDF and the cards, timing each phase.
+fn bake_phased(mesh: &BakeMesh, settings: &BakeSettings, key: u64, phases: &mut BakePhases) -> Baked {
+    let start = std::time::Instant::now();
+    let bvh = genos_mesh::Bvh::build(&mesh.triangles);
+    let built = std::time::Instant::now();
+    let sdf = sdf::build_with(mesh, settings, &bvh);
+    let sdf_done = std::time::Instant::now();
+    let cards = cards::build_with(mesh, settings, &bvh);
+    phases.bvh += built - start;
+    phases.sdf += sdf_done - built;
+    phases.cards += sdf_done.elapsed();
+    Baked { key, sdf, cards }
+}
+
+/// Every mesh of `scene` with its `content_key`, built on all cores. The key
+/// hashes every texel of the scene, so on a textured level it costs about as
+/// much as the bake; the meshes are independent, so they run side by side.
+pub fn prepare_meshes<'a>(scene: &'a genos_load::GltfScene, settings: &BakeSettings) -> Vec<(BakeMesh<'a>, u64)> {
+    let indices: Vec<usize> = (0..scene.meshes.len()).collect();
+    sdf::parallel_map(&indices, |&index| {
+        let mesh = BakeMesh::from_gltf(scene, index);
+        let key = mesh.content_key(settings);
+        (mesh, key)
+    })
 }
 
 /// The cache file for a mesh under these settings.
 pub fn cache_path(mesh: &BakeMesh, settings: &BakeSettings) -> PathBuf {
-    settings
-        .cache_dir
-        .join(format!("{:016x}.gbake", mesh.content_key(settings)))
+    key_path(settings, mesh.content_key(settings))
+}
+
+/// The cache file for a mesh whose `content_key` is `key`.
+pub fn key_path(settings: &BakeSettings, key: u64) -> PathBuf {
+    settings.cache_dir.join(format!("{key:016x}.gbake"))
 }
 
 /// Read the cached bake, or build and store it when the mode allows.
 pub fn load_or_bake(mesh: &BakeMesh, settings: &BakeSettings) -> Result<Baked, BakeError> {
-    let path = cache_path(mesh, settings);
+    let key = mesh.content_key(settings);
+    let path = key_path(settings, key);
     if let Some(baked) = read(&path) {
         return Ok(baked);
     }
     match settings.mode {
         BakeMode::Prebuilt => Err(BakeError::Missing { path }),
         BakeMode::OnLoad => {
-            let baked = bake(mesh, settings);
+            let baked = bake_keyed(mesh, settings, key);
             write(&path, &baked)?;
             Ok(baked)
         }
@@ -142,9 +201,30 @@ pub fn load_or_bake(mesh: &BakeMesh, settings: &BakeSettings) -> Result<Baked, B
 
 /// Build and store, whatever the cache holds (the `genos-bake` tool).
 pub fn rebake(mesh: &BakeMesh, settings: &BakeSettings) -> Result<(Baked, PathBuf), BakeError> {
-    let path = cache_path(mesh, settings);
-    let baked = bake(mesh, settings);
+    rebake_keyed(mesh, settings, mesh.content_key(settings))
+}
+
+/// [`rebake`] for a mesh whose `content_key` is `key`.
+pub fn rebake_keyed(
+    mesh: &BakeMesh,
+    settings: &BakeSettings,
+    key: u64,
+) -> Result<(Baked, PathBuf), BakeError> {
+    rebake_phased(mesh, settings, key, &mut BakePhases::default())
+}
+
+/// [`rebake_keyed`] that adds each phase's wall time to `phases`.
+pub fn rebake_phased(
+    mesh: &BakeMesh,
+    settings: &BakeSettings,
+    key: u64,
+    phases: &mut BakePhases,
+) -> Result<(Baked, PathBuf), BakeError> {
+    let path = key_path(settings, key);
+    let baked = bake_phased(mesh, settings, key, phases);
+    let start = std::time::Instant::now();
     write(&path, &baked)?;
+    phases.write += start.elapsed();
     Ok((baked, path))
 }
 

@@ -10,3 +10,6 @@ workspace = true
 [dependencies]
 genos-load = { path = "../load" }
 genos-math = { path = "../math" }
+
+[dev-dependencies]
+genos-window = { path = "../window" }

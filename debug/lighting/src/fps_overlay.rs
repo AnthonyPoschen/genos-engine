@@ -15,6 +15,7 @@ use genos_debug::png;
 use genos_render::{Renderer, World};
 use genos_scene::{
     Camera, EventLoopSettings, Floor, FogSettings, FpsCounterSettings, Light, MenuSettings,
+    ParticleSettings,
     ReflectionSettings, Scene, Vec3,
 };
 use genos_ui::FpsOverlay;
@@ -47,6 +48,7 @@ fn room() -> World {
         reflections: ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         menu: MenuSettings::default(),
     })
 }
@@ -103,8 +105,11 @@ fn fps_overlay_renders_on_lavapipe() {
 
     let mut window = Window::open_proof(320, 180).expect("proof window");
     let frame = window.pump();
-    let mut renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
+    let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let world = room();
     let camera = Camera::opening();
     let width = renderer.width();

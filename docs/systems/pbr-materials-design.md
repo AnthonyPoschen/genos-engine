@@ -24,7 +24,7 @@ A glTF 2.0 material looks the same to the G-buffer, the surface light cache, and
 |---|---|---|
 | `PbrMaterial` | `crates/load/src/gltf.rs` | Factors, metallic-roughness, normal, occlusion, emissive, `KHR_materials_emissive_strength`, alpha mode, double sided. `SUPPORTED_EXTENSIONS` is only the emissive-strength extension. |
 | `BakeMesh::surface` | `crates/bake/src/mesh.rs` | Diffuse albedo and emission at a UV. sRGB on base colour and emissive. Metallic-roughness is linear, metallic in B. Occlusion and the normal map are not read. Wrap is repeat. The sampler's wrap and filter are ignored. |
-| Colour and normal atlases | `crates/render/src/gltf_draw.rs`, `gbuffer.frag` | `bake_diffuse` stores sRGB of `linear(base) × (1 − metallic)`. The G-buffer multiplies by the base-colour factor. The normal uses a screen-space derivative tangent. Clamp and mirrored repeat are not in the shader. |
+| Colour and normal atlases | `crates/render/src/gltf_draw.rs`, `gbuffer.frag` | `bake_diffuse` stores sRGB of linear base colour. The G-buffer multiplies by the base-colour factor and, when the material flag is set, by `(1 − metallic)` at read time. Roughness is the factor, or the normal-atlas alpha when a metallic-roughness texture was baked. The normal uses a screen-space derivative tangent. Clamp and mirrored repeat are not in the shader. |
 | `surface_mean` | `gltf_draw.rs` | Area-weighted base colour and emission. Metallic does not darken it. That mean is the untextured draw colour and the SDF field's albedo. |
 | Path tracer | `crates/debug/src/reference.rs`, `crates/gpuref` | Flat albedo. The reference file says textures are not traced. |
 | `.gbake` | `crates/bake` | SDF and six cards. `content_key` is FNV-1a. Cards are not the runtime cache. |
@@ -62,7 +62,7 @@ The Khronos glTF 2.0 specification, Appendix B (the BRDF), together with the Fil
 
 **This is the pick.** The file is already a glTF material. `BakeMesh::surface` already implements the diffuse and emissive lines. One function can be called from the G-buffer, a cache hit, and the path tracer, which is what a reference match needs.
 
-**Departures from Appendix B and from Filament.** The real-time picture evaluates the diffuse term only. Filament evaluates the specular lobe in the real-time shader. We store metallic and roughness and leave the lobe to a later lighting commit. Until that commit, a metal's Lambert picture is darker than the path tracer, and `picture_metal` stays `NOT-IMPLEMENTED`. A pass that paints the metal with its base colour fails `metal_diffuse`. F0 stays 0.04. `KHR_materials_ior` and `KHR_materials_specular` are kept on the import document and are not shaded.
+**Departures from Appendix B and from Filament.** Bounce, the cache, and the default picture evaluate the diffuse term only. `direct_specular` (default off until the 4070 cost check) shades pixel direct with Appendix B `fresnel_mix`. A metal's Lambert picture is darker than the path tracer, and `picture_metal` stays `NOT-IMPLEMENTED`. A pass that paints the metal with its base colour fails `metal_diffuse`. F0 stays 0.04. `KHR_materials_ior` and `KHR_materials_specular` are kept on the import document and are not shaded.
 
 ### B. OpenPBR as the runtime model
 

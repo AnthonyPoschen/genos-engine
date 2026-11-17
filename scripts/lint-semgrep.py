@@ -20,6 +20,8 @@ RULES = (
     "genos-no-gi-v1-term",
     "genos-no-hardcoded-display",
     "genos-no-hyprctl",
+    "genos-no-process-exit",
+    "genos-no-device-teardown",
     "genos-stream-no-wait",
 )
 

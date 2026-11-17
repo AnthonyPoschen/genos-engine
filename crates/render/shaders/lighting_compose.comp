@@ -17,6 +17,20 @@
 // stays in outc[0..pixels); emitted light for this frame is outc[pixels..).
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
+// #142 (docs/systems/lighting/compose-read-only-design.md): compose is a pure
+// lookup. Its surface-cache claims, stamps, resample, parent seeds, first fill
+// and sc_offer compiled into this pipeline made the NVIDIA compile ~20 s and
+// vkDestroyDevice wait for its background recompile. GENOS_COMPOSE_MAINT is the
+// maintenance compile of this file: dispatched over the same blocks just before
+// compose, it does those writes and draws nothing. Specialization constant 0
+// true is the kill switch (GENOS_COMPOSE_SC_WRITES=1): compose writes as before
+// and the maintenance pass is skipped.
+#ifdef GENOS_COMPOSE_MAINT
+#define LIGHTING_SC_WRITES true
+#else
+layout(constant_id = 0) const bool COMPOSE_SC_WRITES = false;
+#define LIGHTING_SC_WRITES COMPOSE_SC_WRITES
+#endif
 #include "lighting_common.glsl"
 #include "dither.glsl"
 #include "froxel_compose.glsl"
@@ -25,14 +39,12 @@ layout(local_size_x = 8, local_size_y = 8) in;
 // the legacy shoulder with no extra buffers: declaring them here moved the
 // bounce between frames on lavapipe. `legacy_bytes` uses the plain compile.
 #ifdef GENOS_HDR_COMPOSE
-// Scene-referred radiance, before the display transform. w is eye distance in metres.
-layout(std430, set = 0, binding = 13) restrict buffer SceneReferred {
-    vec4 px[];
-} scene_lin;
+#include "hdr_scene.glsl"
 
-// x exposure (0 means 1), y display mode, z bloom intensity.
+// x exposure (0 means 1), y display mode, z bloom intensity. extra.w is the bloom divisor.
 layout(std430, set = 0, binding = 14) restrict readonly buffer HdrPost {
     vec4 v;
+    vec4 extra;
 } hdr;
 
 #include "hdr_display.glsl"
@@ -128,14 +140,14 @@ void main() {
 #ifdef GENOS_HDR_COMPOSE
         // The clear already wrote the toned sky. Keep those bytes. The grade
         // reads this linear sky and does not invert the shoulder.
-        scene_lin.px[index] = vec4(scene.sky.rgb, 1000.0);
+        scene_store(index, vec4(scene.sky.rgb, 1000.0));
 #endif
         return;
     }
     uint scale = max(gstats.ctrl_scale, 1u);
     uvec2 sp = (p / scale) * scale;
     uint sindex = sp.y * pc.dims.x + sp.x;
-    vec3 direct = lighting_unpack_rgb9e5(gbuf.px[sindex].w);
+    vec3 direct = lighting_unpack_rgb9e5(gbuf_word(sindex, 3u));
     vec3 glow;
     if ((gstats.ctrl_bits & 1u) == 0u) {
         // The pixel direct pass did not run, so gbuf.w is still emission
@@ -143,7 +155,7 @@ void main() {
         // was never written. Reading that half unpacks uninitialised rgb9e5,
         // which is a solid red field with bright speckles.
         direct = vec3(0.0);
-        uint emitted = gbuf.px[index].w;
+        uint emitted = gbuf_word(index, 3u);
         glow = emitted == ~0u || (gstats.ctrl_bits & 512u) == 0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
     } else {
         if (gstats.ctrl_history != 0u && (gstats.ctrl_bits & 32768u) == 0u) {
@@ -155,7 +167,9 @@ void main() {
             glow = vec3(0.0);
         }
     }
-    gbuf.px[index] = uvec4(~0u);
+#ifndef GENOS_COMPOSE_MAINT
+    gbuf_clear_pixel(index);
+#endif
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
     }
@@ -163,6 +177,11 @@ void main() {
     // 4 normal, 5 depth, 6 light, 7 texels.
     uint mode = scene.grid_at.w & 255u;
     vec3 shown;
+#ifdef GENOS_COMPOSE_MAINT
+    if (mode == 3u || mode == 4u || mode == 5u || mode == 7u || mode == 8u) {
+        return;
+    }
+#endif
     if (mode == 3u || mode == 4u || mode == 5u) {
         float depth = clamp(1.0 - length(pos - scene.eye.xyz) / 50.0, 0.0, 1.0);
         shown = mode == 3u ? albedo : (mode == 4u ? n * 0.5 + 0.5 : vec3(depth));
@@ -191,6 +210,9 @@ void main() {
     if (gi && ((gstats.ctrl_bits & 16384u) != 0u || gstats.ctrl_bounce > 0u)) {
         bounce = indirect(p, pos, n);
     }
+#ifdef GENOS_COMPOSE_MAINT
+    return;
+#endif
     if ((gstats.ctrl_bits & 4096u) != 0u) {
         vec3 sky_fill = vec3(gstats.ctrl_ambient_r, gstats.ctrl_ambient_g, gstats.ctrl_ambient_b);
         vec3 fill = sky_fill;
@@ -208,14 +230,16 @@ void main() {
         direct = vec3(0.0);
         glow = vec3(0.0);
     }
-    vec3 c = albedo * LAMBERT * (direct + bounce) + glow;
+    vec3 c = (gstats.ctrl_bits & 2097152u) != 0u
+        ? direct + albedo * LAMBERT * bounce + glow
+        : albedo * LAMBERT * (direct + bounce) + glow;
     // The column is the integral through 64 m plus the height-fog tail. History
     // is off, so this is the pixel's own column and not a reprojection.
     // A zero fog header leaves the radiance alone. The scene image stores that result.
     c = froxel_compose(c, p, pc.dims.xy);
 #ifdef GENOS_HDR_COMPOSE
-    scene_lin.px[index] = vec4(c, length(pos - scene.eye.xyz));
-    c = add_bloom(c, index);
+    scene_store(index, vec4(c, length(pos - scene.eye.xyz)));
+    c = add_bloom(c, index, pc.dims.x, pc.dims.y);
     float exposure = hdr.v.x;
     if (exposure == 0.0) {
         exposure = 1.0;

@@ -20,6 +20,7 @@ Checks use `genos-camera --proof`. That window stays floating and does not take 
 - `docs/adr/` holds the decisions.
 - `AGENTS.md` tells an agent which of those files to open.
 - `docs/engine/settings-principles.md` is the rule for an engine feature's settings. Lighting is the reference.
+- `docs/engine/quality-settings.md` is how quality knobs and graphics presets work.
 - `docs/references/breaking-point.md` names the old engine to read for math and camera ideas.
 
 The input behavior comes from [`input-zig`](https://github.com/AnthonyPoschen/input-zig). This repository will port that library to Rust.

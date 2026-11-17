@@ -23,14 +23,14 @@ use genos_stress::building::{Layout, LightMix};
 use genos_stress::stage::{Scale, Stage};
 use genos_window::Window;
 
-fn open() -> (MutexGuard, Window, Renderer) {
+fn open() -> (MutexGuard, genos_window::Lifecycle<Renderer>) {
     static GPU: Mutex<()> = Mutex::new(());
     let guard = GPU.lock().unwrap_or_else(|err| err.into_inner());
     let mut window = Window::open_proof(1280, 720).expect("proof window");
     let frame = window.pump();
-    let renderer = Renderer::open(window.display, window.surface, frame.width, frame.height)
+    let (renderer, permit) = Renderer::open(window.display, window.surface, frame.width, frame.height)
         .expect("renderer");
-    (guard, window, renderer)
+    (guard, genos_window::Lifecycle::new(window, renderer, permit))
 }
 
 type MutexGuard = std::sync::MutexGuard<'static, ()>;
@@ -215,7 +215,9 @@ fn score(name: &str, pixels: &[u8], width: u32, height: u32, camera: &Camera, sc
 fn the_small_stress_picture_matches_the_ray_trace() {
     let stage = stage();
     let scene = &stage.world.scene;
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     assert!(width >= 1280 && height >= 720, "{width}x{height}");
@@ -285,7 +287,7 @@ fn the_small_stress_picture_matches_the_ray_trace() {
     let mut frames = 0u32;
     let mut live_hall = Vec::new();
     while started.elapsed() < std::time::Duration::from_millis(100) || frames < 1 {
-        live_hall = draw(&mut window, &mut renderer, &stage.world, &hall, false);
+        live_hall = draw(window, renderer, &stage.world, &hall, false);
         frames += 1;
         if frames > 30 {
             break;
@@ -307,16 +309,16 @@ fn the_small_stress_picture_matches_the_ray_trace() {
         );
     }
 
-    let settled_hall = draw(&mut window, &mut renderer, &stage.world, &hall, true);
+    let settled_hall = draw(window, renderer, &stage.world, &hall, true);
     let mut scores = Vec::new();
     for point in &hall_points {
         scores.push(score(point.name, &settled_hall, width, height, &hall, scene, point));
     }
-    let settled_room = draw(&mut window, &mut renderer, &stage.world, &room, true);
+    let settled_room = draw(window, renderer, &stage.world, &room, true);
     for point in &room_points {
         scores.push(score(point.name, &settled_room, width, height, &room, scene, point));
     }
-    let settled_out = draw(&mut window, &mut renderer, &stage.world, &outside, true);
+    let settled_out = draw(window, renderer, &stage.world, &outside, true);
     for point in &yard_points {
         scores.push(score(point.name, &settled_out, width, height, &outside, scene, point));
     }
@@ -394,7 +396,9 @@ fn check_points(
 #[test]
 fn the_live_picture_tracks_the_ray_trace_within_100ms() {
     let mut stage = stage();
-    let (_gpu, mut window, mut renderer) = open();
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
     let width = renderer.width();
     let height = renderer.height();
     assert!(width >= 1280 && height >= 720, "{width}x{height}");
@@ -424,7 +428,7 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
             albedo: face_albedo,
         },
     ];
-    warmup(&mut window, &mut renderer, &stage.world, &hall);
+    warmup(window, renderer, &stage.world, &hall);
 
     let lamp = stage
         .world
@@ -439,13 +443,13 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
         .expect("hall lamp");
     let kept = stage.world.scene.lights[lamp].color;
     stage.world.scene.lights[lamp].color = [0.0, 0.0, 0.0];
-    let (pixels, frames, ms) = over_time(&mut window, &mut renderer, &stage.world, &hall, 100);
+    let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &hall, 100);
     println!("lamp_off frames={frames} ms={ms:.1}");
     assert!(ms < 250.0, "lamp off took {ms:.1} ms");
     check_points("lamp_off", &pixels, width, height, &hall, &stage.world.scene, &hall_points);
 
     stage.world.scene.lights[lamp].color = kept;
-    let (pixels, frames, ms) = over_time(&mut window, &mut renderer, &stage.world, &hall, 100);
+    let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &hall, 100);
     println!("lamp_on frames={frames} ms={ms:.1}");
     assert!(ms < 250.0, "lamp on took {ms:.1} ms");
     check_points("lamp_on", &pixels, width, height, &hall, &stage.world.scene, &hall_points);
@@ -472,7 +476,7 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
         // is the same pose with that gather blended in.
         let mut pixels = Vec::new();
         for _ in 0..2 {
-            pixels = draw(&mut window, &mut renderer, &stage.world, &hall, false);
+            pixels = draw(window, renderer, &stage.world, &hall, false);
         }
         check_points(
             &format!("pose{step}"),
@@ -502,7 +506,7 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
     stage.sun_frozen = true;
     let frozen = stage.world.scene.clone();
     stage.advance(1.5);
-    let (pixels, frames, ms) = over_time(&mut window, &mut renderer, &stage.world, &outside, 100);
+    let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &outside, 100);
     println!("outside_still frames={frames} ms={ms:.1}");
     check_points("outside_still", &pixels, width, height, &outside, &frozen, &yards);
 
@@ -523,15 +527,15 @@ fn the_live_picture_tracks_the_ray_trace_within_100ms() {
         sun_yard.albedo,
     ));
     assert!((before - after).abs() > 0.02, "sun did not move the yard: {before} {after}");
-    let (pixels, frames, ms) = over_time(&mut window, &mut renderer, &stage.world, &outside, 100);
+    let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &outside, 100);
     println!("sun_move frames={frames} ms={ms:.1}");
     check_points("sun_move", &pixels, width, height, &outside, &stage.world.scene, &yards);
 
     stage.day = 0.75;
     stage.apply();
-    let (pixels, frames, ms) = over_time(&mut window, &mut renderer, &stage.world, &outside, 100);
+    let (pixels, frames, ms) = over_time(window, renderer, &stage.world, &outside, 100);
     println!("sun_gone frames={frames} ms={ms:.1}");
-    let settled = draw(&mut window, &mut renderer, &stage.world, &outside, true);
+    let settled = draw(window, renderer, &stage.world, &outside, true);
     let _ = score("sun_gone_live_sun", &pixels, width, height, &outside, &stage.world.scene, &yards[0]);
     let _ = score("sun_gone_settled_sun", &settled, width, height, &outside, &stage.world.scene, &yards[0]);
     let _ = score("sun_gone_settled_shadow", &settled, width, height, &outside, &stage.world.scene, &yards[1]);

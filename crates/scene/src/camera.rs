@@ -220,6 +220,7 @@ impl Camera {
             body.inverse_mass = 1.0;
         }
         body.motor = true;
+        self.physics.reindex(index);
     }
 }
 
@@ -277,6 +278,24 @@ pub fn look_direction(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(sy * cp, sp, -cy * cp)
 }
 
+/// Eye position, view direction, and view-capsule velocity.
+///
+/// The frame copies these three into the audio listener. This crate does not
+/// name that listener.
+#[must_use]
+pub fn listener_state(camera: &Camera) -> (Vec3, Vec3, Vec3) {
+    let velocity = camera
+        .physics
+        .bodies
+        .get(camera.view)
+        .map_or(Vec3::ZERO, |body| body.velocity);
+    (
+        camera.position,
+        look_direction(camera.yaw, camera.pitch),
+        velocity,
+    )
+}
+
 /// Vertical distance from a solid's scene position to its collider center.
 fn center_lift(solid: &Solid) -> f32 {
     match solid.shape {
@@ -308,21 +327,36 @@ fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
             continue;
         }
         if !camera.codimations[index].running {
-            let body = &mut camera.physics.bodies[body_index];
-            body.inverse_mass = 0.0;
-            body.motor = false;
-            body.wish = Vec3::ZERO;
-            body.velocity = Vec3::ZERO;
+            let was_dynamic = {
+                let body = &mut camera.physics.bodies[body_index];
+                let was_dynamic = body.inverse_mass != 0.0 || body.motor;
+                body.inverse_mass = 0.0;
+                body.motor = false;
+                body.wish = Vec3::ZERO;
+                body.velocity = Vec3::ZERO;
+                was_dynamic
+            };
+            if was_dynamic {
+                camera.physics.reindex(body_index);
+            }
             continue;
         }
         let before = camera.codimations[index].motion.sample();
         camera.codimations[index].motion.advance(dt);
         let after = camera.codimations[index].motion.sample();
-        let body = &mut camera.physics.bodies[body_index];
-        if body.inverse_mass == 0.0 {
-            body.inverse_mass = 1.0;
+        let woke = {
+            let body = &mut camera.physics.bodies[body_index];
+            let woke = body.inverse_mass == 0.0;
+            if woke {
+                body.inverse_mass = 1.0;
+            }
+            body.motor = true;
+            woke
+        };
+        if woke {
+            camera.physics.reindex(body_index);
         }
-        body.motor = true;
+        let body = &mut camera.physics.bodies[body_index];
         let current = body.position - Vec3::Y * lift;
         let mut delta = after - current;
         let path_step = (after - before).length();

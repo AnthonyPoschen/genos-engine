@@ -328,10 +328,10 @@ pub fn summary_line(metric: &Metric) -> String {
 #[must_use]
 pub fn to_json(report: &Report) -> String {
     let mut body = String::from("{\n");
-    let case = format!("  \"case\": \"{}\",\n", report.case_name);
-    body.push_str(&case);
-    let source = format!("  \"source\": \"{}\",\n", report.source);
-    body.push_str(&source);
+    let case_field = format!("  \"case\": \"{}\",\n", report.case_name);
+    body.push_str(&case_field);
+    let source_field = format!("  \"source\": \"{}\",\n", report.source);
+    body.push_str(&source_field);
     body.push_str("  \"preset\": \"high\",\n");
     body.push_str("  \"metrics\": [\n");
     for (index, metric) in report.metrics.iter().enumerate() {
@@ -341,20 +341,20 @@ pub fn to_json(report: &Report) -> String {
             ","
         };
         body.push_str("    {");
-        let name = format!("\"name\": \"{}\"", metric.name);
-        body.push_str(&name);
-        let value = format!(", \"value\": {}", value_json(&metric.value));
-        body.push_str(&value);
-        let threshold = format!(", \"threshold\": {}", value_json(&metric.threshold));
-        body.push_str(&threshold);
-        let status = format!(", \"status\": \"{}\"", metric.status.as_str());
-        body.push_str(&status);
+        let name_field = format!("\"name\": \"{}\"", metric.name);
+        body.push_str(&name_field);
+        let value_field = format!(", \"value\": {}", value_json(&metric.value));
+        body.push_str(&value_field);
+        let threshold_field = format!(", \"threshold\": {}", value_json(&metric.threshold));
+        body.push_str(&threshold_field);
+        let status_field = format!(", \"status\": \"{}\"", metric.status.as_str());
+        body.push_str(&status_field);
         if let Some(detail) = metric.detail {
             let detail_field = format!(", \"detail\": \"{detail}\"");
             body.push_str(&detail_field);
         }
-        let end = format!("}}{comma}\n");
-        body.push_str(&end);
+        let tail = format!("}}{comma}\n");
+        body.push_str(&tail);
     }
     body.push_str("  ]\n}\n");
     body

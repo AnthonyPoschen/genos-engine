@@ -53,10 +53,7 @@
 #include "mesh_field.glsl"
 #include "lighting_pack.glsl"
 
-layout(std430, set = 0, binding = 6) buffer GBuffer {
-    uvec4 header;
-    uvec4 px[];
-} gbuf;
+#include "gbuffer_layout.glsl"
 
 layout(std430, set = 0, binding = 7) buffer Work {
     vec4 v[];
@@ -229,7 +226,8 @@ vec3 lighting_eye_dir(uvec2 p) {
 
 // G-buffer surface at pixel p: false where the pixel shows nothing.
 bool lighting_surface(uvec2 p, out vec3 pos, out vec3 n, out vec3 albedo, out bool two_sided) {
-    uvec4 g = gbuf.px[p.y * pc.dims.x + p.x];
+    uint pixel = p.y * pc.dims.x + p.x;
+    uvec4 g = gbuf_load4(pixel);
     float dist = uintBitsToFloat(g.x);
     pos = vec3(0.0);
     n = vec3(0.0, 1.0, 0.0);
@@ -243,6 +241,10 @@ bool lighting_surface(uvec2 p, out vec3 pos, out vec3 n, out vec3 albedo, out bo
     vec4 a = unpackUnorm4x8(g.z);
     albedo = a.rgb;
     two_sided = (uint(a.a * 255.0 + 0.5) & 1u) != 0u;
+    vec4 mr = unpackUnorm4x8(gbuf_word(pixel, 4u));
+    if ((uint(mr.a * GBUF_UNORM_BYTE + GBUF_UNORM_ROUND) & 1u) != 0u) {
+        albedo *= (1.0 - mr.g);
+    }
     return true;
 }
 
@@ -502,6 +504,10 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     origin = p + n * 0.02;
     uint q = lighting_cache_entry_quarter(r / LIGHTING_CACHE_RAYS, slot);
     uint rk = lighting_sc_ray_key(slot, key);
+    if (lighting_wrc_lone(slot)) {
+        dir = lighting_dir(rk, n, r % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS);
+        return true;
+    }
     dir = lighting_dir(rk, n, lighting_sc_stratum(rk, q * LIGHTING_CACHE_RAYS + r % LIGHTING_CACHE_RAYS, LIGHTING_CACHE_RAYS, LIGHTING_SC_SET_RAYS), LIGHTING_SC_SET_RAYS);
     return true;
 }

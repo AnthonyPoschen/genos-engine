@@ -1,0 +1,15 @@
+[package]
+name = "genos-jobs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Fiber-free work-stealing scheduler. Serial mode is the oracle."
+
+[lints]
+workspace = true
+
+[features]
+loom = ["dep:loom"]
+
+[dependencies]
+loom = { version = "0.7", optional = true }

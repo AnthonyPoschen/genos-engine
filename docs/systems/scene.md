@@ -36,7 +36,7 @@ The scene crate does not call Vulkan. It keeps the lights and the objects. The r
 
 The crate is `crates/scene`, package `genos-scene`.
 
-- `Camera`, `attach_scene`, `codimate`, `update`, `look_direction`, and `view_proj` are in `src/camera.rs`.
+- `Camera`, `attach_scene`, `codimate`, `update`, `look_direction`, `listener_state`, and `view_proj` are in `src/camera.rs`.
 - `Codimation` and `Easing` are in `src/codimation.rs`. `Easing` is `Linear`, `EaseIn`, `EaseOut`, or `EaseInOut`.
 - `Camera.position` is the eye. `Camera.physics` is the world. `Camera.view` is the capsule index.
 - `look_direction` returns the view direction.
@@ -69,6 +69,8 @@ Load a script with `load_path` once, before the loop. Call `Camera::attach_scene
 Each frame, read `move` and `look` from the input system. Measure the seconds since the previous frame. The first frame has no previous frame. Pass a finite positive fallback for that frame.
 
 Call `update` with the scene, those actions, and that interval. Call the particle advance with the same interval. Do not pass a fixed `1/60` s step as the frame interval.
+
+After `update`, copy `listener_state` into the audio listener: eye position, `look_direction`, and the view capsule's velocity. This crate does not depend on `genos-audio`.
 
 `update` writes the wish in units per second. The interval scales that wish. The physics solver runs at 1/60 s. It runs when the saved time reaches that step. A shorter remainder waits for the next frame. The camera loop caps one frame at 0.25 s.
 
