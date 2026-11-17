@@ -243,6 +243,9 @@ pub fn mover_gpu_pool_offset() -> u64 {
 /// Max mover-fill texel indices packed after the pool (shared scheduler list).
 pub const MOVER_FILL_LIST_CAP: u32 = 512;
 
+/// Compact live-slot list for GPU `lighting_mover_on` / change volume (≤ 64).
+pub const MOVER_PRESENCE_CAP: u32 = 64;
+
 /// Byte offset of the fill-index list inside the mover SSBO.
 #[must_use]
 pub fn mover_gpu_fill_offset(pool_cap: u32) -> u64 {
@@ -250,11 +253,16 @@ pub fn mover_gpu_fill_offset(pool_cap: u32) -> u64 {
         + u64::from(pool_cap.max(1)) * u64::try_from(MOVER_TEXEL_BYTES).unwrap_or(0)
 }
 
-/// Total mover SSBO bytes for a pool of `pool_cap` texels (includes fill list).
+/// Byte offset of the presence slot list (after the fill list).
+#[must_use]
+pub fn mover_gpu_presence_offset(pool_cap: u32) -> u64 {
+    mover_gpu_fill_offset(pool_cap) + u64::from(MOVER_FILL_LIST_CAP) * 4
+}
+
+/// Total mover SSBO bytes for a pool of `pool_cap` texels (fill + presence).
 #[must_use]
 pub fn mover_gpu_bytes(pool_cap: u32) -> u64 {
-    mover_gpu_fill_offset(pool_cap)
-        + u64::from(MOVER_FILL_LIST_CAP) * 4
+    mover_gpu_presence_offset(pool_cap) + u64::from(MOVER_PRESENCE_CAP) * 4
 }
 
 /// One dirty byte range for a partial SSBO upload.
@@ -378,6 +386,27 @@ impl MoverCache {
         for (i, idx) in self.fill_list.iter().enumerate() {
             write_bytes(&mut out, fill_off + u64_from_usize(i) * 4, idx);
         }
+        let presence = self.presence_slots();
+        let pres_off = mover_gpu_presence_offset(self.pool_cap);
+        for (i, slot) in presence.iter().enumerate() {
+            write_bytes(&mut out, pres_off + u64_from_usize(i) * 4, slot);
+        }
+        out
+    }
+
+    /// Live table slots for the GPU presence list (stable order, capped).
+    #[must_use]
+    pub fn presence_slots(&self) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (i, rec) in self.table.iter().enumerate() {
+            if !rec.is_live() {
+                continue;
+            }
+            out.push(u32_from_usize(i));
+            if out.len() as u32 >= MOVER_PRESENCE_CAP {
+                break;
+            }
+        }
         out
     }
 
@@ -429,14 +458,19 @@ impl MoverCache {
             });
             i += 1;
         }
-        // Fill list rides with the header whenever the scheduler ranked candidates.
-        if !self.fill_list.is_empty()
-            && (!self.dirty_table.is_empty() || !self.dirty_texels.is_empty())
-        {
-            let n = u32_from_usize(self.fill_list.len()).max(1);
+        // Fill + presence ride with the header whenever the table/scheduler moved.
+        if !self.dirty_table.is_empty() || !self.dirty_texels.is_empty() {
+            if !self.fill_list.is_empty() {
+                let n = u32_from_usize(self.fill_list.len()).max(1);
+                ranges.push(DirtyRange {
+                    offset: mover_gpu_fill_offset(self.pool_cap),
+                    size: u64::from(n) * 4,
+                });
+            }
+            let presence_n = u32_from_usize(self.presence_slots().len()).max(1);
             ranges.push(DirtyRange {
-                offset: mover_gpu_fill_offset(self.pool_cap),
-                size: u64::from(n) * 4,
+                offset: mover_gpu_presence_offset(self.pool_cap),
+                size: u64::from(presence_n.min(MOVER_PRESENCE_CAP)) * 4,
             });
         }
         ranges
@@ -472,6 +506,8 @@ impl MoverCache {
 
     fn write_header(&self, out: &mut [u8]) {
         let fill_off = u32::try_from(mover_gpu_fill_offset(self.pool_cap)).unwrap_or(0);
+        let presence = self.presence_slots();
+        let presence_off = u32::try_from(mover_gpu_presence_offset(self.pool_cap)).unwrap_or(0);
         let words = [
             self.pool_cap,
             MOVER_TABLE_SLOTS,
@@ -481,14 +517,15 @@ impl MoverCache {
             u32::try_from(mover_gpu_table_offset()).unwrap_or(0),
             u32::try_from(mover_gpu_pool_offset()).unwrap_or(0),
             self.free_top,
-            // Stage H fill list: count, byte offset, capacity, reserved.
+            // Stage H fill list: count, byte offset, capacity, rays.
             u32_from_usize(self.fill_list.len()),
             fill_off,
             MOVER_FILL_LIST_CAP,
             self.fill_rays,
-            0,
-            0,
-            0,
+            // Presence list for mover_on / change volume (#286 port).
+            u32_from_usize(presence.len()),
+            presence_off,
+            MOVER_PRESENCE_CAP,
             0,
         ];
         for (i, w) in words.iter().enumerate() {
@@ -1469,6 +1506,21 @@ mod tests {
         let hot = fill_priority(1.0, 2.0, true, 1.0);
         let cold = fill_priority(0.0, 0.0, false, 20.0);
         assert!(hot > cold);
+    }
+
+    #[test]
+    fn presence_list_lists_live_table_slots() {
+        let mut cache = MoverCache::new(64);
+        cache.upsert(record(1)).expect("a");
+        cache.upsert(record(2)).expect("b");
+        let slots = cache.presence_slots();
+        assert_eq!(slots.len(), 2);
+        assert!(slots.iter().all(|&s| cache.table[usize_from_u32(s)].is_live()));
+        let bytes = cache.pack_gpu();
+        assert_eq!(u64_from_usize(bytes.len()), mover_gpu_bytes(64));
+        // Header words 12..14: count, offset, cap.
+        let count = u32::from_le_bytes(bytes[12 * 4..12 * 4 + 4].try_into().unwrap());
+        assert_eq!(count, 2);
     }
 
     #[test]

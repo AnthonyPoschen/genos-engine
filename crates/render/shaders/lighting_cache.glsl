@@ -1023,6 +1023,8 @@ void lighting_sc_seed_apply(uint slot);
 // second, unlit copy of that patch.
 // ADR 0039 stage 2 SH-L1 store (defined with the SH reads below), for the claim's reset.
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz);
+uint lighting_mover_on(vec3 pos, vec3 n);
+bool lighting_sc_local_on();
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
@@ -1041,6 +1043,12 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     if (!claim || !LIGHTING_SC_WRITES) {
         return ~0u;
     }
+#ifndef GENOS_COMPOSE_NO_WALK
+    // #286 → pool: a hit on a mover never writes a world cell.
+    if (lighting_sc_local_on() && lighting_mover_on(pos, n) != ~0u) {
+        return ~0u;
+    }
+#endif
     [[dont_unroll]] for (uint i = free_at; i < LIGHTING_CACHE_SEARCH; i++) {
         uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
         uint prev = atomicCompSwap(ckeys.key[slot], 0u, key);
@@ -1426,12 +1434,50 @@ void lighting_mover_deposit(uint tex, vec3 rgb, float w) {
 }
 #endif
 
-// Packed hitch records: retired. Kept as zeros so call sites compile.
-uint lighting_movers_hitch() { return 0u; }
-vec4 lighting_mover(uint m, uint k) { return vec4(0.0); }
-
-// A point inside the bounds of a hitch-listed mover. Hitch list is empty after
-// the mover-table cutover; world-cell boost uses the host swept-brick path.
+// Presence list (header 12..14): live table slots for mover_on / change volume.
+// Stays out of compose (248k ceiling). Compose uses G-buffer object id only.
+#ifndef GENOS_COMPOSE_NO_WALK
+uint lighting_mover_presence_count() {
+    return min(movers_gpu.header[12], movers_gpu.header[14]);
+}
+uint lighting_mover_presence_off() { return movers_gpu.header[13] / 4u; }
+uint lighting_mover_presence_slot(uint i) {
+    return movers_gpu.header[lighting_mover_presence_off() + i];
+}
+uint lighting_movers_hitch() { return lighting_mover_presence_count(); }
+vec4 lighting_mover(uint m, uint k) {
+    if (m >= lighting_mover_presence_count()) {
+        return vec4(0.0);
+    }
+    uint slot = lighting_mover_presence_slot(m);
+    uint at = lighting_mover_table_off() + slot * 16u;
+    if (k == 0u) {
+        return vec4(
+            uintBitsToFloat(movers_gpu.header[at + 4u]),
+            uintBitsToFloat(movers_gpu.header[at + 5u]),
+            uintBitsToFloat(movers_gpu.header[at + 6u]),
+            uintBitsToFloat(movers_gpu.header[at + 7u]));
+    }
+    if (k == 1u) {
+        return vec4(
+            uintBitsToFloat(movers_gpu.header[at + 8u]),
+            uintBitsToFloat(movers_gpu.header[at + 9u]),
+            uintBitsToFloat(movers_gpu.header[at + 10u]),
+            float(movers_gpu.header[at]));
+    }
+    if (k == 2u) {
+        return vec4(
+            uintBitsToFloat(movers_gpu.header[at + 12u]),
+            uintBitsToFloat(movers_gpu.header[at + 13u]),
+            uintBitsToFloat(movers_gpu.header[at + 14u]),
+            0.0);
+    }
+    return vec4(
+        uintBitsToFloat(movers_gpu.header[at + 11u]),
+        uintBitsToFloat(movers_gpu.header[at + 15u]),
+        0.0,
+        0.0);
+}
 bool lighting_in_change(vec3 p) {
     uint n = lighting_movers_hitch();
     [[dont_unroll]] for (uint m = 0u; m < n; m++) {
@@ -1443,6 +1489,11 @@ bool lighting_in_change(vec3 p) {
     }
     return false;
 }
+#else
+uint lighting_movers_hitch() { return 0u; }
+vec4 lighting_mover(uint m, uint k) { return vec4(0.0); }
+bool lighting_in_change(vec3 p) { return false; }
+#endif
 
 // Mover m's frame: world point to local and back. An occluder turns about +Y
 // (scene_rays.glsl occ_local and occ_world); a traced mesh instance (id + 1 past
@@ -4514,8 +4565,7 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_parent = 0u;
     uint mode = lighting_world_mode();
     lighting_obj_salt = 0.0;
-    // Mover texel pool via G-buffer object id (O(1) table + hashed span).
-    // Far (tier ≥ 2): lookup returns ~0 → world cells; fill never lists Far.
+    // Mover texel pool via G-buffer object id (O(1)). Far → world cells.
     if (mode == 3u && lighting_px_object_id != 0u && lighting_sc_local_on()) {
         uint slot = lighting_mover_find_slot(lighting_px_object_id);
         if (slot != ~0u && lighting_mover_tier(slot) < 2u) {
@@ -4533,7 +4583,6 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
             }
         }
     }
-    // Hitch retired when attach_movers is on (scan is a no-op stub either way).
     uint om = mode == 3u && !lighting_sc_local_on() ? lighting_mover_on(pos, n) : ~0u;
     if (om != ~0u && lighting_sh_texel_detail_on()) {
         vec4 sh = lighting_sh_compose_lattice(pos, n, false);
@@ -6398,6 +6447,36 @@ void lighting_sc_forget(uint slot) {
     ckeys.key[lighting_sc_offer_word(slot)] = 0u;
     ckeys.key[lighting_sc_seed_word(slot)] = 0u;
 }
+#ifndef GENOS_COMPOSE_NO_WALK
+// #286 → pool: a world cell a mover sits on drops now. An unread world cell
+// inside this frame's change volume drops after two frames. Fresh cells stay
+// so the scheduler can relight the surface the mover was lighting.
+bool lighting_sc_drop_stale_mover_world(uint slot) {
+    if (!LIGHTING_SC_WRITES || lighting_world_mode() != 3u || slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    if (ckeys.key[slot] == 0u || cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5) {
+        return false;
+    }
+    vec3 p = cache.v[3u * slot].xyz;
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float size = cache.v[3u * slot + 1u].w;
+    bool on = lighting_mover_on(p, n) != ~0u;
+    bool aged = false;
+    if (!on && size > 0.2 && lighting_near_change(p)) {
+        uint last = floatBitsToUint(cache.v[3u * slot].w);
+        aged = last == 0u || int(lighting_frame() - last) > 2;
+    }
+    if (!on && !aged) {
+        return false;
+    }
+    ckeys.key[slot] = 0u;
+    lighting_sc_forget(slot);
+    cache.v[3u * slot + 1u] = vec4(0.0);
+    cache.v[3u * slot + 2u] = vec4(0.0);
+    return true;
+}
+#endif
 // Distance in bits 21..30 (plus one, so a real offer is never 0). Bit 31 stays
 // clear: glslc lowers atomicMin to a signed min, and a set sign bit would
 // keep the farther sample. The low bits are tangent offsets, so the word is
