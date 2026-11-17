@@ -698,6 +698,18 @@ pub struct SurfaceCacheSettings {
     /// errors of the round's own per-cell differences. `0` drops that test (the
     /// 1 % gap alone, as before).
     pub drain_sigma: f32,
+    /// Metres from the player inside which a 12.5 cm texel is created for a
+    /// surface the world cache already hit, on screen or not.
+    /// `0` creates none. Key `surface_cache.fine_lod_create`.
+    pub fine_lod_create: f32,
+    /// Metres past which an off-screen 12.5 cm texel is dropped. Farther than
+    /// `fine_lod_create`, so a surface is not created and destroyed on the
+    /// same edge. `0` does not drop by distance. Key `surface_cache.fine_lod_drop`.
+    pub fine_lod_drop: f32,
+    /// Metres the create and drop distances stretch ahead of the player's
+    /// motion and turn. A still view does not stretch the band. `0` keeps
+    /// the band centred on the player. Key `surface_cache.fine_lod_lookahead`.
+    pub fine_lod_lookahead: f32,
     /// Stage F2 scheduler. World mode 3 spends `fill.budget` every cache round.
     pub fill: FillSettings,
 }
@@ -1010,6 +1022,9 @@ impl LightingSettings {
                 sh_texel_ray_cut: true,
                 sh_probe_retire: true,
                 drain_sigma: 4.0,
+                fine_lod_create: 6.0,
+                fine_lod_drop: 8.0,
+                fine_lod_lookahead: 2.0,
                 fill: FillSettings::high(),
             },
             bounce: BounceSettings {
@@ -1088,6 +1103,12 @@ impl LightingSettings {
         } else {
             4.0
         };
+        self.surface_cache.fine_lod_create = finite_nonneg(self.surface_cache.fine_lod_create, 6.0).min(64.0);
+        self.surface_cache.fine_lod_drop = finite_nonneg(self.surface_cache.fine_lod_drop, 8.0)
+            .max(self.surface_cache.fine_lod_create)
+            .min(96.0);
+        self.surface_cache.fine_lod_lookahead =
+            finite_nonneg(self.surface_cache.fine_lod_lookahead, 2.0).min(32.0);
         let fill = &mut self.surface_cache.fill;
         fill.budget = fill.budget.min(FILL_BUDGET_MAX);
         fill.tile = fill.tile.clamp(1, 64);
@@ -1546,6 +1567,21 @@ impl LightingSettings {
             "surface_cache.drain_sigma={}",
             num_text(self.surface_cache.drain_sigma)
         );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_create={}",
+            num_text(self.surface_cache.fine_lod_create)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_drop={}",
+            num_text(self.surface_cache.fine_lod_drop)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_lookahead={}",
+            num_text(self.surface_cache.fine_lod_lookahead)
+        );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
         }
@@ -1815,6 +1851,23 @@ impl LightingSettings {
                 }
                 self.surface_cache.drain_sigma = sigma;
             }
+            "surface_cache.fine_lod_create" => {
+                self.surface_cache.fine_lod_create = nonneg_f32("surface_cache.fine_lod_create", value)?;
+            }
+            "surface_cache.fine_lod_drop" => {
+                self.surface_cache.fine_lod_drop = nonneg_f32("surface_cache.fine_lod_drop", value)?;
+            }
+            "surface_cache.fine_lod_lookahead" => {
+                self.surface_cache.fine_lod_lookahead =
+                    nonneg_f32("surface_cache.fine_lod_lookahead", value)?;
+            }
+            // The fill histogram does not read these. Kept so a saved file
+            // still parses. One warning, then the value is dropped.
+            "surface_cache.fine_budget_share"
+            | "surface_cache.fine_screen_boost"
+            | "surface_cache.fine_close_boost" => {
+                warn_fine_rank_removed(key);
+            },
             "cache_async" => self.experiments.cache_async = on(value)?,
             "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
             "cache_picks" => self.experiments.cache_picks = on(value)?,
@@ -2084,6 +2137,30 @@ impl LightingSettings {
             (
                 "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE",
                 "surface_cache.sh_probe_retire",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_CREATE",
+                "surface_cache.fine_lod_create",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_DROP",
+                "surface_cache.fine_lod_drop",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_LOOKAHEAD",
+                "surface_cache.fine_lod_lookahead",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_BUDGET_SHARE",
+                "surface_cache.fine_budget_share",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_SCREEN_BOOST",
+                "surface_cache.fine_screen_boost",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_CLOSE_BOOST",
+                "surface_cache.fine_close_boost",
             ),
             ("GENOS_LIGHTING_FILL_BUDGET", "surface_cache.fill_budget"),
             ("GENOS_LIGHTING_FILL_TILE", "surface_cache.fill_tile"),
@@ -2644,6 +2721,21 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI_DEBUG", "GENOS_LIGHTING_DEBUG"),
 ];
 
+fn warn_fine_rank_removed(key: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(key.to_string()) {
+        eprintln!(
+            "warning: {key} is removed; the fill budget is not split and the rank is not scaled (alias kept for one release)"
+        );
+    }
+}
+
 fn warn_screen_probe_retired(key: &'static str) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -2760,6 +2852,22 @@ fn parse_firefly_sigma(value: &str) -> Result<f32, String> {
         Ok(sigma)
     } else {
         Err(format!("expected a non-negative number, got {value}"))
+    }
+}
+
+fn nonneg_f32(key: &str, value: &str) -> Result<f32, String> {
+    let n = num_f32(value)?;
+    if !n.is_finite() || n < 0.0 {
+        return Err(format!("{key} is a non-negative number, got {value}"));
+    }
+    Ok(n)
+}
+
+fn finite_nonneg(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        fallback
     }
 }
 

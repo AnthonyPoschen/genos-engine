@@ -586,6 +586,16 @@ const float LIGHTING_WRC_NEAR = 6.0;
 const uint LIGHTING_SC_BUCKETS = 64u;
 const uint LIGHTING_SC_HIST_AT = 2u * LIGHTING_CACHE_SLOTS + 2u;
 const uint LIGHTING_SC_THR_AT = LIGHTING_SC_HIST_AT + LIGHTING_SC_BUCKETS;
+// Fine band (distance residency for 12.5 cm texels). Words are uploaded each
+// round; a zero create distance creates none. The count is zeroed before compact.
+const uint LIGHTING_FINE_COUNT_AT = LIGHTING_SC_HIST_AT + 86u;
+const uint LIGHTING_FINE_THR_AT = LIGHTING_SC_HIST_AT + 87u;
+const uint LIGHTING_FINE_CREATE_AT = LIGHTING_SC_HIST_AT + 90u;
+const uint LIGHTING_FINE_DROP_AT = LIGHTING_SC_HIST_AT + 91u;
+const uint LIGHTING_FINE_AHEAD_AT = LIGHTING_SC_HIST_AT + 92u;
+// Ranked seats for the fine band. One word per bucket, cleared when the
+// threshold is chosen. Stops before the lamp snapshot at +160.
+const uint LIGHTING_FINE_HIST_AT = LIGHTING_SC_HIST_AT + 96u;
 // WRC refresh (S61B, Anthony: a hard, fixed budget): at most LIGHTING_WRC_REFRESH
 // batch entries a round (~6 % of 65536) go to WRC cells outside the reveal
 // burst, from two lists: change-driven first (a mover nearby, or a lamp that
@@ -2953,6 +2963,7 @@ bool lighting_sh_detail_seed_rejected(uint slot) {
     }
     return !lighting_sh_detail_owner_lit(slot);
 }
+bool lighting_fine_has_prior(uint slot);
 vec4 lighting_sc_shown(uint slot) {
     // S72D coarse to fine: a texel shows the interpolation of the next level up
     // (level 0 from the 2-apart keys, else the 4-apart ones) until its own sets
@@ -3709,6 +3720,366 @@ uint lighting_sc_entries(uint slot, bool full) {
     // The ray budget is a ceiling on the dispatch lists (lighting_sc_cap_lists),
     // not a per-entry scale. Under budget this count is the fixed quarter count.
     return (full || lighting_world_mode() != 3u) ? LIGHTING_SC_QUARTERS - lighting_sc_quarter0(slot) : 1u;
+}
+// Fine band. A 12.5 cm texel is created from a world cell the cache already
+// hit, by distance from the player, in every direction. The drop distance is
+// farther than the create distance. Motion and a turn stretch the band ahead.
+// The camera only raises priority. The ray share is a slice of the existing room.
+const float LIGHTING_FINE_AHEAD_EPS = 1.0e-6;
+const float LIGHTING_FINE_AHEAD_STEP = 8.0;
+const float LIGHTING_FINE_AHEAD_TURN = 4.0;
+const float LIGHTING_FINE_VALID = 0.5;
+const float LIGHTING_FINE_REACH_MIN = 0.05;
+const float LIGHTING_FINE_SHARE_CAP = 0.5;
+const float LIGHTING_FINE_SCORE_NEAR = 0.25;
+const float LIGHTING_FINE_CHG_CAP = 4.0;
+const float LIGHTING_FINE_PLANE_EPS = 1.0e-3;
+const float LIGHTING_FINE_HALF = 0.5;
+// A texel under this many sets outranks one that already has them.
+const float LIGHTING_FINE_READY_SETS = 4.0;
+// Per-set luminance fraction when a texel has no estimator yet. The wide
+// regulariser uses the same 30% for an unestimated texel.
+const float LIGHTING_FINE_PRIOR_SIGMA = 0.3;
+// How far an unsettled texel jumps ahead of one that has yielded.
+const float LIGHTING_FINE_FRESH = 8.0;
+const float LIGHTING_FINE_SCORE_MIN = 1.0e-4;
+bool lighting_fine_has_prior(uint slot) {
+    return cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
+        && cache.v[LIGHTING_SC_SHOWN_AT + slot].z > LIGHTING_SC_SET_HALF;
+}
+// The prior mark has cleared. The child's own sets are what the filter uses.
+bool lighting_fine_retired(uint slot) {
+    return cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
+        && floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_FINE_READY_SETS
+        && !(cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH);
+}
+// The child's own mean, in the same sun scale as the prior blend. The
+// radiance is not clamped; the pack rejects a negative.
+void lighting_fine_store_own(uint slot) {
+    vec4 own = cache.v[3u * slot + 2u];
+    float ls = lighting_sc_sun_gain(slot);
+    vec3 outc = own.rgb * ls;
+    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(outc, vec3(0.0))));
+    if (!(abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].w) > 0.0)) {
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].w = 1.0;
+    }
+}
+// Parent prior plus the child's own mean. The prior counts as at most the
+// four sets the child's own filter needs, and that weight fades as the child
+// gains sets. A frozen parent variance is not a weight: dividing by it kept a
+// settled parent in the field forever. At four own sets this pass stores the
+// child's own field and clears the prior mark, on screen or off. Once a pixel
+// shows the child, the screen filter is the fine wavelet. A retired child
+// does not fill a missing wavelet weight from the 25 cm cells. The radiance
+// is not clamped.
+void lighting_fine_publish(uint slot) {
+    if (!lighting_fine_has_prior(slot)) {
+        return;
+    }
+    vec4 own = cache.v[3u * slot + 2u];
+    float child_sets = floor(max(own.w, 0.0));
+    if (child_sets >= LIGHTING_FINE_READY_SETS) {
+        lighting_fine_store_own(slot);
+        vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + slot];
+        mark.z = 0.0;
+        mark.w = 0.0;
+        cache.v[LIGHTING_SC_SHOWN_AT + slot] = mark;
+        return;
+    }
+    vec4 prior = lighting_sc_seed(slot);
+    if (!(prior.w > 0.0)) {
+        return;
+    }
+    vec3 outc = prior.rgb;
+    if (child_sets > LIGHTING_SC_SET_HALF) {
+        float pn = cache.v[LIGHTING_SC_SHOWN_AT + slot].z;
+        float cap = min(pn, LIGHTING_FINE_READY_SETS);
+        float fade = 1.0 - child_sets / LIGHTING_FINE_READY_SETS;
+        float pn_eff = cap * fade;
+        float ls = lighting_sc_sun_gain(slot);
+        vec3 child_rgb = own.rgb * ls;
+        float w = max(pn_eff + child_sets, LIGHTING_FINE_SCORE_MIN);
+        outc = (prior.rgb * pn_eff + child_rgb * child_sets) / w;
+    }
+    cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(lighting_pack_rgb9e5(max(outc, vec3(0.0))));
+    if (!(abs(cache.v[LIGHTING_SC_SPARSE_AT + slot].w) > 0.0)) {
+        cache.v[LIGHTING_SC_SPARSE_AT + slot].w = 1.0;
+    }
+}
+const float LIGHTING_FINE_BUCKET_SCALE = 8.0;
+const float LIGHTING_FINE_BUCKET_BIAS = 32.0;
+// Young in-band field chase, as a fraction of the normal 1/16 step.
+const float LIGHTING_FINE_FIELD_SLOW = 0.25;
+float lighting_fine_word(uint at) {
+    return uintBitsToFloat(ckeys.key[at]);
+}
+// Motion and a turn only. A still camera leaves the band centred: the view
+// raises priority, it does not change who is inside the distance.
+vec3 lighting_fine_ahead() {
+    vec4 last_eye = work.v[lighting_change_at() + 1u];
+    vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
+    if (!(last_eye.w > LIGHTING_FINE_VALID) || !(dot(last_fwd, last_fwd) > LIGHTING_FINE_VALID)) {
+        return vec3(0.0);
+    }
+    vec3 fwd = normalize(scene.view_forward.xyz + vec3(0.0, LIGHTING_FINE_AHEAD_EPS, 0.0));
+    vec3 step = scene.eye.xyz - last_eye.xyz;
+    vec3 turn = fwd - normalize(last_fwd);
+    vec3 motion = LIGHTING_FINE_AHEAD_STEP * step + LIGHTING_FINE_AHEAD_TURN * turn;
+    if (!(dot(motion, motion) > LIGHTING_FINE_AHEAD_EPS)) {
+        return vec3(0.0);
+    }
+    return normalize(motion);
+}
+float lighting_fine_reach(vec3 p) {
+    vec3 from = p - scene.eye.xyz;
+    float dist = length(from);
+    float look = lighting_fine_word(LIGHTING_FINE_AHEAD_AT);
+    if (!(look > 0.0)) {
+        return dist;
+    }
+    float along = dot(from, lighting_fine_ahead());
+    return dist - look * clamp(along / max(dist, LIGHTING_FINE_REACH_MIN), 0.0, 1.0);
+}
+bool lighting_fine_past_drop(vec3 p) {
+    float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
+    return drop > 0.0 && lighting_fine_reach(p) > drop;
+}
+// One probe window. Past the drop distance outranks a settled texel, which
+// outranks a young off-screen texel. The farthest reach wins a tie. A texel
+// a pixel showed in the last 60 frames is not a victim.
+bool lighting_fine_evict(vec3 pos, vec3 n) {
+    uint key = lighting_cache_key_sized(pos, n, LIGHTING_SC_TEXEL);
+    uint start = lighting_hash(key ^ 0x9e3779b9u);
+    uint best = ~0u;
+    uint best_key = 0u;
+    float best_reach = -1.0;
+    int best_rank = -1;
+    [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
+        uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
+        uint k = ckeys.key[slot];
+        if (k == 0u || k == key) {
+            continue;
+        }
+        if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
+            continue;
+        }
+        uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
+        if (lighting_sc_pixel_fresh(shown, 60)) {
+            continue;
+        }
+        vec3 p = lighting_sc_texel_pos(slot);
+        float reach = lighting_fine_reach(p);
+        bool far = lighting_fine_past_drop(p);
+        bool settled = lighting_sc_settled(slot, cache.v[3u * slot + 2u].w);
+        int rank = far ? 2 : (settled ? 1 : 0);
+        bool better = best == ~0u || rank > best_rank || (rank == best_rank && reach > best_reach);
+        if (better) {
+            best = slot;
+            best_key = k;
+            best_reach = reach;
+            best_rank = rank;
+        }
+    }
+    if (best == ~0u) {
+        return false;
+    }
+    if (atomicCompSwap(ckeys.key[best], best_key, 0u) != best_key) {
+        return false;
+    }
+    atomicAdd(gstats.freed, 1u);
+    lighting_sc_forget(best);
+    cache.v[3u * best + 1u] = vec4(0.0);
+    cache.v[3u * best + 2u] = vec4(0.0);
+    return true;
+}
+uint lighting_fine_claim(vec3 q, vec3 n) {
+    uint s = lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+    if (s != ~0u) {
+        return s;
+    }
+    if (!lighting_fine_evict(q, n)) {
+        atomicAdd(gstats.missed, 1u);
+        return ~0u;
+    }
+    s = lighting_cache_find_sized(q, n, true, LIGHTING_SC_TEXEL, q);
+    if (s == ~0u) {
+        atomicAdd(gstats.missed, 1u);
+    }
+    return s;
+}
+#ifndef GENOS_COMPOSE_NO_WALK
+// The parent cell's converged irradiance at a child's position. On-plane 25 cm
+// cells are bilinear, the same plane test as the world-cell read. When those
+// cells disagree by the sparse luminance ratio, the prior is the nearest cell:
+// averaging across a crease would invent a colour neither surface has. The
+// radiance is not clamped. sets and var are that prior's sample count and
+// luminance variance.
+void lighting_fine_prior(vec3 pos, vec3 n, out vec3 rgb, out float sets, out float var, out float sunfrac) {
+    rgb = vec3(0.0);
+    sets = 0.0;
+    var = 0.0;
+    sunfrac = 0.0;
+    const float cs = LIGHTING_SC_HIT;
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    uint ax = lighting_axis(n) >> 1u;
+    uint ua = (ax + 1u) % 3u;
+    uint ub = (ax + 2u) % 3u;
+    vec2 uv = vec2(pos[ua], pos[ub]) / cs - LIGHTING_FINE_HALF;
+    vec2 g0 = floor(uv);
+    vec2 fr = uv - g0;
+    vec3 cols[4];
+    float ns[4];
+    float vs[4];
+    float bs[4];
+    float ss[4];
+    uint ncorn = 0u;
+    float hi = 0.0;
+    float lo = 0.0;
+    bool any = false;
+    [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
+        vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u));
+        vec3 q = pos;
+        q[ua] = (c.x + LIGHTING_FINE_HALF) * cs;
+        q[ub] = (c.y + LIGHTING_FINE_HALF) * cs;
+        float bil = ((k & 1u) == 1u ? fr.x : 1.0 - fr.x) * ((k >> 1u) == 1u ? fr.y : 1.0 - fr.y);
+        uint s = lighting_cache_find_sized(q, n, false, cs, pos);
+        if (s == ~0u || !(bil > 0.0) || abs(dot(cache.v[3u * s].xyz - pos, n)) > LIGHTING_FINE_HALF * cs) {
+            continue;
+        }
+        vec4 v = cache.v[3u * s + 2u];
+        float cnt = floor(max(v.w, 0.0));
+        if (!(cnt > LIGHTING_SC_SET_HALF)) {
+            continue;
+        }
+        float g = lighting_sc_sun_gain(s);
+        float sup = abs(cache.v[LIGHTING_SC_SPARSE_AT + s].w);
+        vec3 ir = v.rgb * g;
+        if (sup > 0.0) {
+            ir = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + s].y));
+        }
+        float lum = dot(max(ir, vec3(0.0)), lw);
+        vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * s];
+        vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * s + 1u];
+        float sig = lum * LIGHTING_FINE_PRIOR_SIGMA;
+        float vr = (eb.x > 0.0 && eb.w > LIGHTING_SC_SET_HALF) ? max(ea.w, 0.0) : sig * sig;
+        cols[ncorn] = ir;
+        ns[ncorn] = cnt;
+        vs[ncorn] = vr;
+        bs[ncorn] = bil;
+        ss[ncorn] = lighting_sc_sunfrac_now(s);
+        if (!any || lum > hi) {
+            hi = lum;
+        }
+        if (!any || lum < lo) {
+            lo = lum;
+        }
+        any = true;
+        ncorn += 1u;
+    }
+    if (ncorn == 0u) {
+        return;
+    }
+    bool split = hi > LIGHTING_SC_LIT_LUMA && hi > LIGHTING_SC_SPARSE_RATIO * max(lo, 0.0);
+    if (split) {
+        uint best = 0u;
+        for (uint i = 1u; i < ncorn; i++) {
+            if (bs[i] > bs[best]) {
+                best = i;
+            }
+        }
+        rgb = cols[best];
+        sets = ns[best];
+        var = vs[best];
+        sunfrac = ss[best];
+        return;
+    }
+    float wsum = 0.0;
+    vec3 sum = vec3(0.0);
+    float nsum = 0.0;
+    float vsum = 0.0;
+    float fsum = 0.0;
+    for (uint i = 0u; i < ncorn; i++) {
+        sum += bs[i] * cols[i];
+        nsum += bs[i] * ns[i];
+        vsum += bs[i] * vs[i];
+        fsum += bs[i] * ss[i];
+        wsum += bs[i];
+    }
+    float inv = 1.0 / max(wsum, LIGHTING_FINE_SCORE_MIN);
+    rgb = sum * inv;
+    sets = nsum * inv;
+    var = vsum * inv;
+    sunfrac = fsum * inv;
+}
+#endif
+// Four 12.5 cm texels cover one 25 cm world cell. The stored hit is the surface.
+// SHOWN.y marks a cell whose children were already claimed, and each child.
+// The estimator sample-count word is not that flag. Leaving the drop distance
+// clears the parent mark so a later entry can spawn again.
+void lighting_fine_spawn(uint slot) {
+    float create = lighting_fine_word(LIGHTING_FINE_CREATE_AT);
+    if (!(create > 0.0) || lighting_world_mode() != 3u) {
+        return;
+    }
+    if (cache.v[LIGHTING_SC_OBJ_AT + slot].x > LIGHTING_FINE_VALID) {
+        return;
+    }
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    vec3 p = lighting_sc_texel_pos(slot);
+    float reach = lighting_fine_reach(p);
+    float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
+    if (drop > 0.0 && reach > drop) {
+        cache.v[LIGHTING_SC_SHOWN_AT + slot].y = 0.0;
+        return;
+    }
+    if (reach > create || cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID) {
+        return;
+    }
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 ta = vec3(0.0);
+    vec3 tb = vec3(0.0);
+    ta[(ax + 1u) % 3u] = 1.0;
+    tb[(ax + 2u) % 3u] = 1.0;
+    vec3 centre = lighting_sc_centre(p, n, LIGHTING_SC_HIT);
+    float h = LIGHTING_FINE_HALF * LIGHTING_SC_TEXEL;
+    bool all = true;
+    for (uint k = 0u; k < 4u; k++) {
+        float ox = (k & 1u) == 0u ? -h : h;
+        float oy = (k & 2u) == 0u ? -h : h;
+        vec3 q = centre + ta * ox + tb * oy;
+        float nd = n[ax];
+        if (abs(nd) > LIGHTING_FINE_PLANE_EPS) {
+            q[ax] += dot(p - q, n) / nd;
+        }
+        uint born = lighting_fine_claim(q, n);
+        if (born == ~0u) {
+            all = false;
+        } else {
+            vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + born];
+            mark.y = 1.0;
+#ifndef GENOS_COMPOSE_NO_WALK
+            vec3 pr;
+            float pn;
+            float pv;
+            float ps;
+            lighting_fine_prior(q, n, pr, pn, pv, ps);
+            if (pn > LIGHTING_SC_SET_HALF) {
+                lighting_sc_set_seed(born, pr, 1.0, ps);
+                mark.z = pn;
+                mark.w = pv;
+            }
+            cache.v[LIGHTING_SC_SHOWN_AT + born] = mark;
+            if (pn > LIGHTING_SC_SET_HALF) {
+                lighting_fine_publish(born);
+            }
+#else
+            cache.v[LIGHTING_SC_SHOWN_AT + born] = mark;
+#endif
+        }
+    }
+    if (all) {
+        cache.v[LIGHTING_SC_SHOWN_AT + slot].y = 1.0;
+    }
 }
 // WRC: did a lamp that reaches p move since frame `updated` (within the last
 // LIGHTING_WRC_CHANGE_FRAMES)? The ring holds moved lamps' spheres (both places,
@@ -4480,7 +4851,8 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // walk is out of every compose compile. Flag 32 is the only
         // sets/(sets+6) scale, so a mover with its own sets is the fine colour.
         // A mover is not seeded. An empty read falls through to the world cache.
-        bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
+        bool fine_prior = lighting_fine_has_prior(slot);
+        bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W && !fine_prior;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
         float detail_trust = 0.0;
@@ -4557,7 +4929,9 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // which used to skip this fallback and leave the texel on whatever
         // pixel wrote SPARSE.y. The own-sample count is the populated test.
         float own_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
-        if (!detail_kept && own_sets < LIGHTING_SC_SET_HALF && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u) {
+        // A band child already holds its parent prior. The coarse fallback
+        // would replace that prior every frame and drop it on the first own sample.
+        if (!detail_kept && own_sets < LIGHTING_SC_SET_HALF && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u && !fine_prior) {
             // S72L first fill: no texel, no parent lit yet; the hit-size patch
             // or its lit neighbours (what the rays read), not the probes.
             // A detail candidate already took the neighbour read. That read
@@ -4617,6 +4991,11 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         if (!stale) {
             if (detail_kept) {
                 sc_trust = clamp(detail_trust, 0.0, 1.0);
+            } else if (fine_prior) {
+                // The parent prior is the estimate until the child's own
+                // samples outweigh it. A zero own-count used to leave trust
+                // at 0, so the pixel stayed on the coarse cell.
+                sc_trust = 1.0;
             } else if (sets >= LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF) {
                 // A full count, including a real zero, is the texel.
                 sc_trust = 1.0;
@@ -4870,7 +5249,10 @@ vec4 lighting_svgf_in(uint s, out float var) {
     float t = floor(max(own.w, 0.0));
     var = -1.0;
     bool wrc = cache.v[3u * s + 1u].w > 0.2;
-    if (t < 0.5 || !lighting_svgf_active(s)) {
+    // A band child can feed the world-space filter without joining the screen
+    // list. The screen list still requires lighting_svgf_active.
+    bool band = cache.v[LIGHTING_SC_SHOWN_AT + s].y > LIGHTING_FINE_VALID;
+    if (t < 0.5 || (!lighting_svgf_active(s) && !band)) {
         return vec4(0.0);
     }
     // S72V7: each texel's light is carried to now (its sun/sky gain, as the
@@ -5655,6 +6037,16 @@ void lighting_svgf_variance(uint slot) {
         }
     }
     atomicAdd(gstats.diag[LIGHTING_DIAG_FILTER_HEAVY], 1u);
+    // A retired child's 7x7, and its estimator spread, are the parent gap:
+    // neighbors still on the prior widen phi until the wavelet accepts them.
+    // The weight is the child's own luminance fraction, the unestimated one.
+    if (lighting_fine_retired(slot)) {
+        float lum = dot(max(v.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        // phi is SIGMA_L times the square root, so the stored variance is the
+        // luminance fraction divided by that factor. The parent gap is not it.
+        float s = LIGHTING_FINE_PRIOR_SIGMA * max(lum, 0.0) / LIGHTING_SVGF_SIGMA_L;
+        var = s * s;
+    }
     if (var < 0.0) {
         // Spatial estimate, 7 x 7 moments weighted by w_z w_n.
         float s1 = 0.0;
@@ -5752,6 +6144,12 @@ void lighting_svgf_iter(uint slot, uint it) {
     }
     gv = gw > 0.0 ? gv / gw : varp;
     float phi = LIGHTING_SVGF_SIGMA_L * sqrt(max(gv, 0.0)) + 1.0e-10;
+    // The neighborhood variance is the parent gap, and SIGMA_L turns that
+    // into a phi wide enough to accept the parent. A retired child weights
+    // taps by its own luminance fraction.
+    if (lighting_fine_retired(slot)) {
+        phi = max(LIGHTING_FINE_PRIOR_SIGMA * max(lp, 0.0), LIGHTING_FINE_SCORE_MIN);
+    }
     const float h1[5] = float[5](1.0 / 16.0, 0.25, 0.375, 0.25, 1.0 / 16.0);
     vec3 sum = vec3(0.0);
     float wm = 0.0;
@@ -5768,6 +6166,11 @@ void lighting_svgf_iter(uint slot, uint it) {
             float w = h1[i + 2] * h1[j + 2] * lighting_svgf_wzn(slot, q);
             if (q != slot && vp.w > 0.0 && x.w > 0.0) {
                 w *= exp(-abs(lp - dot(x.rgb, LIGHTING_SVGF_LW)) / phi);
+            }
+            // A neighbor still on the parent prior would hand that prior back
+            // to a child that has already retired it.
+            if (lighting_fine_retired(slot) && q != slot && lighting_fine_has_prior(q)) {
+                w = 0.0;
             }
             float a = w * x.w;
             sum += a * x.rgb;
@@ -5825,7 +6228,10 @@ float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
 }
 const uint LIGHTING_PUSH_IDLE = 16u;
 // What the push stores before the settle step: the texel's filtered colour,
-// with the coarse cells filling whatever weight it does not have yet.
+// with the coarse cells filling whatever weight it does not have yet. A band
+// child that has retired its prior does not take that coarse term. The 25 cm
+// cells are the prior. The fine wavelet is the field, and a hole in it is
+// not filled from those cells.
 vec4 lighting_svgf_target(uint slot) {
     vec4 nb = cache.v[3u * slot + 1u];
     vec3 p = cache.v[3u * slot].xyz;
@@ -5843,6 +6249,13 @@ vec4 lighting_svgf_target(uint slot) {
     vec2 fr = uv - g0;
     vec3 csum = vec3(0.0);
     float cw = 0.0;
+    if (lighting_fine_retired(slot)) {
+        // No wavelet yet: keep the field this pass already stored. Do not
+        // invent the retired parent, and do not write black into the hole.
+        vec3 kept = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+        vec3 outc = W > 0.0 ? f.rgb : kept;
+        return vec4(outc, W);
+    }
     [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
         vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u));
         vec3 q = p;
@@ -5870,6 +6283,16 @@ vec4 lighting_svgf_target(uint slot) {
 }
 float lighting_sc_lambda(uint slot);
 void lighting_svgf_push(uint slot) {
+    if (lighting_fine_has_prior(slot)) {
+        float child_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
+        lighting_fine_publish(slot);
+        // Below four own sets the blend is the field. At four the publish
+        // stores the child's own field and clears the prior, and this push
+        // is the screen filter.
+        if (child_sets < LIGHTING_FINE_READY_SETS) {
+            return;
+        }
+    }
     vec4 nb = cache.v[3u * slot + 1u];
     if (nb.w > 0.2) {
         return;

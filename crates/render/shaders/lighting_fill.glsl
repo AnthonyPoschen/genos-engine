@@ -354,12 +354,23 @@ void lighting_fill_visit(uint slot) {
         lighting_fill_free(slot);
         return;
     }
-    // The world cell is the only store. A 12.5 cm screen texel outranks its
-    // parent while it is young, so the parent stays empty and compose shows a
-    // direct-only mean. Claim the parent; its own visit schedules the rays.
+    // The world cell is the store for a screen texel. A 12.5 cm screen texel
+    // outranks its parent while it is young, so the parent stays empty and
+    // compose shows a direct-only mean. Claim the parent; its own visit
+    // schedules the rays. An off-screen band child is a candidate in this
+    // same histogram. A child the frustum can see is not: it would take the
+    // parent's rays and the presented frame would stop filling.
+    uint seen_x;
+    uint seen_y;
+    bool seen = lighting_fill_pixel(p, seen_x, seen_y);
+    if (size >= base && !seen) {
+        lighting_fine_spawn(slot);
+    }
     if (size < base) {
         lighting_cache_find_sized(p, n, true, base, p);
-        return;
+        if (!(cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID) || seen) {
+            return;
+        }
     }
     if (size <= LIGHTING_WRC_CELL_SIZE && lighting_compact_hold_texel_rays(slot)) {
         return;
@@ -376,6 +387,15 @@ void lighting_fill_visit(uint slot) {
         uint cap = lighting_fill_off_cap();
         uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
         uint packed = lighting_fill_pack(slot, q);
+        // A band child does not take the cold-start rank, and it only
+        // contends for one bin in eight. An empty child in every bin
+        // outranks the cells the presented frame is still filling.
+        if (size < base) {
+            if ((bin & 7u) != 0u) {
+                return;
+            }
+            packed = ((q & 63u) << 21u) | (slot + 1u);
+        }
         atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
         uint rate = max(lighting_fill_u(16), 1u);
         uint block = slot / rate;
@@ -1501,4 +1521,68 @@ void lighting_fill_resolve(uint gid) {
     memoryBarrierBuffer();
     barrier();
     lighting_fill_share(gid);
+}
+
+// The birth frame often runs before the parent cell has a sample. Until the
+// child has its own sets, replace the stored prior when the parent has more
+// samples than the one already kept. A child the frustum can see is left as
+// it was: the screen push publishes that snapshot, and it does not track the
+// parent after it becomes visible.
+#ifndef GENOS_COMPOSE_NO_WALK
+void lighting_fine_adopt(uint slot) {
+    if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
+        return;
+    }
+    if (!(cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID)) {
+        return;
+    }
+    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_FINE_READY_SETS) {
+        return;
+    }
+    vec3 p;
+    vec3 n;
+    if (!lighting_sc_texel_world(slot, p, n)) {
+        return;
+    }
+    vec3 pr;
+    float pn;
+    float pv;
+    float ps;
+    lighting_fine_prior(p, n, pr, pn, pv, ps);
+    float have = cache.v[LIGHTING_SC_SHOWN_AT + slot].z;
+    if (!(pn > have + LIGHTING_SC_SET_HALF)) {
+        return;
+    }
+    lighting_sc_set_seed(slot, pr, 1.0, ps);
+    vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + slot];
+    mark.y = 1.0;
+    mark.z = pn;
+    mark.w = pv;
+    cache.v[LIGHTING_SC_SHOWN_AT + slot] = mark;
+    lighting_fine_publish(slot);
+}
+#endif
+// Off-screen, the field is the fading parent prior until four own sets. That
+// pass stores the child's own field and clears the mark. Later off-screen
+// samples keep the store on the current own mean until a pixel shows the
+// child. A child the frustum can see is published by the screen push.
+void lighting_fine_world_filter(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS || cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
+        return;
+    }
+    uint px;
+    uint py;
+    if (lighting_fill_pixel(lighting_sc_texel_pos(slot), px, py)) {
+        return;
+    }
+#ifndef GENOS_COMPOSE_NO_WALK
+    lighting_fine_adopt(slot);
+#endif
+    if (lighting_fine_has_prior(slot)) {
+        lighting_fine_publish(slot);
+    } else if (cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
+        && floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_FINE_READY_SETS
+        && floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z) == 0u) {
+        lighting_fine_store_own(slot);
+    }
 }
