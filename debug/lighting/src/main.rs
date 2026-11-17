@@ -347,8 +347,6 @@ const DROP_KNOBS: &[&str] = &[
 const VIEWS: [&str; 8] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance",
 ];
-const PRESETS: [&str; 4] = ["fallback", "low", "medium", "high"];
-
 struct Options {
     scene: String,
     checkpoint: Option<String>,
