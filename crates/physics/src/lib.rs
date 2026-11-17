@@ -18,7 +18,7 @@
     clippy::must_use_candidate,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
-#![expect(
+#![allow(
     clippy::needless_range_loop,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
