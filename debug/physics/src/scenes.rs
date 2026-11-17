@@ -12,8 +12,8 @@
 
 use genos_math::{Quat, Vec3};
 use genos_physics::{
-    aero_trim_world, chassis_rest_world, gear_miss_world, gear_plane_world, thruster_world, Body,
-    MotionQuality, World,
+    aero_trim_world, chassis_rest_world, gear_miss_world, gear_plane_world, locked_wheel_world,
+    thruster_world, Body, MotionQuality, World,
 };
 
 /// One entry in the scene picker.
@@ -32,7 +32,7 @@ impl SceneInfo {
     }
 }
 
-pub const SCENES: [SceneInfo; 12] = [
+pub const SCENES: [SceneInfo; 13] = [
     SceneInfo {
         name: "ship_lanes",
         summary: "four swept wedge-hull ship pairs head on at 30, 120, 600 and 3000 m/s, 36 m apart (tests/ship_impact.rs)",
@@ -80,6 +80,12 @@ pub const SCENES: [SceneInfo; 12] = [
         summary: "1 200 kg chassis on four wheel rays over a static plane (ADR 0040 G1)",
         steps: 180,
         build: chassis_rest,
+    },
+    SceneInfo {
+        name: "locked_wheel",
+        summary: "G1 chassis at 10 m/s with locked wheels and the P28 slip curve",
+        steps: 60,
+        build: locked_wheel,
     },
     SceneInfo {
         name: "aero_trim",
@@ -302,6 +308,10 @@ fn layer_filter() -> World {
 
 fn chassis_rest() -> World {
     chassis_rest_world(10.0)
+}
+
+fn locked_wheel() -> World {
+    locked_wheel_world()
 }
 
 fn aero_trim() -> World {

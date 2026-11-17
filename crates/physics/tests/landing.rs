@@ -388,6 +388,12 @@ fn g1_wheels(max_length: f32) -> [Wheel; 4] {
         max_length,
         hz: 4.0,
         damping_ratio: 0.7,
+        radius: 0.0,
+        omega: 0.0,
+        mu_peak: 1.0,
+        slip_peak: 0.1,
+        mu_slide: 0.7,
+        slip_denom: 1.0,
     };
     [
         wheel(Vec3::new(1.0, 0.0, 0.5)),

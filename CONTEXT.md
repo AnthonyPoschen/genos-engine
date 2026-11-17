@@ -160,6 +160,10 @@ _Avoid_: Shared stick, component
 A segment from a wheel's attach point along its chassis-frame direction, from the minimum length to the maximum length, excluding the chassis. G1 hits a plane or a box. A mesh is a miss. The suspension force is a spring-damper along that ray.
 _Avoid_: Speculative contact, time of impact
 
+**Tyre slip**:
+The ground payload's in-plane force from a wheel's spin against its contact speed. Longitudinal slip is `(omega * radius - forward speed) / max(planar speed, slip denominator)`. Lateral slip is the angle from the direction of travel, `atan2(lateral speed, |forward speed|)`. The force uses a three-point curve and is capped by the suspension load. It is not a contact-solver row. A wheel with no positive radius applies none.
+_Avoid_: Pacejka, wheel body
+
 **Thruster**:
 A force on the space payload. Throttle times max force along the chassis-frame direction, and torque `r × F` about the chassis origin. The existing integrator consumes that torque. Gravity stays the world's gravity.
 _Avoid_: Rocket body, orbit

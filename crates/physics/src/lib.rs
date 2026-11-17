@@ -45,8 +45,8 @@ mod solver;
 mod vehicle;
 
 pub use vehicle::{
-    aero_trim_world, chassis_rest_world, gear_miss_world, gear_plane_world, thruster_world,
-    Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle, Wheel, WheeledGround,
+    aero_trim_world, chassis_rest_world, gear_miss_world, gear_plane_world, locked_wheel_world,
+    thruster_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle, Wheel, WheeledGround,
 };
 
 pub use destruction::{
@@ -278,6 +278,9 @@ pub struct StepStats {
     pub wheel_rays: u32,
     /// Vehicles stored on the world. An empty list stays zero.
     pub vehicle_count: u32,
+    /// Wheels that applied a slip force this step. A miss, a sleep, and a
+    /// wheel with no radius stay at zero.
+    pub tyre_contacts: u32,
 }
 
 impl StepStats {
@@ -298,6 +301,7 @@ impl StepStats {
             solver_bodies: 0,
             wheel_rays: 0,
             vehicle_count: 0,
+            tyre_contacts: 0,
         }
     }
 }
