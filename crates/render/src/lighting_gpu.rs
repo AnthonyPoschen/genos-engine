@@ -74,6 +74,13 @@ const LIGHTING_SETTLE_FRAMES: u32 = 32;
 const LIGHTING_SETTLE_CHANGE: u32 = 2000;
 /// 8×8 compose blocks the quiet list can hold (lighting_cache.glsl LIGHTING_COMPOSE_CAP).
 const LIGHTING_COMPOSE_CAP: u64 = 65535;
+/// Frames after a cache clear that compose the whole picture and walk bounce.
+/// The clear frame's cache is empty, and that walk is stored as a finished
+/// black bounce (`pack + 1`). The next held frames reuse it and leave the
+/// previous picture in the buffer. Three frames covers the clear and the two
+/// frames whose rays make the bounce visible. The presented bounce gate reads
+/// the third draw.
+const BOUNCE_FILL_FRAMES: u32 = 3;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
 fn lighting_compose_at() -> u64 {
@@ -205,6 +212,10 @@ pub(crate) struct Lighting {
     /// The picture in the output buffer was drawn for this size. A new buffer
     /// has no picture yet, so the next compose covers every pixel.
     compose_valid: bool,
+    /// Frames since the cache was cleared, capped at [`BOUNCE_FILL_FRAMES`].
+    /// Below that, compose covers the picture and the bounce slice is zero,
+    /// so the shader walks instead of reusing the empty store.
+    bounce_fill: u32,
     /// The traced world as of the last frame's passes: the scene block (its
     /// occluder list is compared, lighting_changes) and the key of what else is traced
     /// (meshes, floor, roof); a change of the key drops every kept stratum.
@@ -607,6 +618,7 @@ impl Default for Lighting {
             gbuf_clear: false,
             work_clear: false,
             compose_valid: false,
+            bounce_fill: 0,
             kept_bytes: Vec::new(),
             kept_key: 0,
             trace_key: 0,
@@ -1367,10 +1379,11 @@ impl Gpu {
         // Picture, emitted light, and (when direct refresh is slower than every
         // frame) one stored direct value per pixel. High stays at pixels * 8.
         let hist = u64::from(settings.direct.refresh_frames > 1);
-        // One extra slice holds linear bounce for a sun direct-patch. The
-        // default compose does not write it. High (refresh every frame) is
-        // picture + glow + that slice. The screen wavelet appends two vec4
-        // slices (32 bytes a pixel) after that, so it does not alias the bounce.
+        // One extra slice holds linear bounce. Picture compose stores the last
+        // full walk there and a held frame reads it. A cache clear zeros it
+        // for BOUNCE_FILL_FRAMES. High (refresh every frame) is picture + glow
+        // + that slice. The screen wavelet appends two vec4 slices (32 bytes
+        // a pixel) after that, so it does not alias the bounce.
         // Hash keeps the GI buffer. Preset high uses the screen slices.
         let screen = u64::from(settings.denoiser.enabled && settings.denoiser.screen);
         self.lighting.out = self.make_buffer(
@@ -1461,6 +1474,7 @@ impl Gpu {
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
+        self.lighting.bounce_fill = 0;
         self.lighting.sun_bounce_live = false;
         self.lighting.gbuf_clear = true;
         self.lighting.work_clear = gi;
@@ -2033,6 +2047,11 @@ impl Gpu {
             }
             if self.lighting.cache_clear {
                 self.lighting.cache_clear = false;
+                // The picture still holds the previous view, and the bounce
+                // slice may hold an empty store from that view. The fill
+                // window composes the whole picture and zeros the slice.
+                self.lighting.bounce_fill = 0;
+                self.lighting.compose_valid = false;
                 // The async queue starts once this frame (its slot) is surely done.
                 self.lighting.world_hold = 2;
                 (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.cache_keys.buffer, 0, u64::MAX, 0);
@@ -4375,7 +4394,9 @@ impl Gpu {
         // cover the image. A small sun step, with the camera held, takes one
         // full-grid sun compose instead of that list. GENOS_LIGHTING_COMPOSE_ALL
         // turns `compose_reuse` off in the settings, which forces the full picture.
-        let compose_full = !self.lighting.compose_valid
+        let bounce_filling = self.lighting.bounce_fill < BOUNCE_FILL_FRAMES;
+        let compose_full = bounce_filling
+            || !self.lighting.compose_valid
             || !(self.lighting.still > 0 || sun_amortise)
             || self.lighting.settings.world_mode() != 3
             || !self.lighting.settings.compose_reuse
@@ -4782,6 +4803,11 @@ impl Gpu {
                 if pass == 7 {
                     self.lighting.compose_dispatches = 1;
                 }
+                if pass == 7 && self.lighting.bounce_fill < BOUNCE_FILL_FRAMES {
+                    // The clear frame stores an empty bounce. Zero the slice
+                    // so this frame's walk is what the picture shows.
+                    self.clear_bounce_slice(w, h);
+                }
                 if pass == 7 && sun_compose {
                     // One dispatch. The old path indirect-dispatched the dirty
                     // list (a near-full probe walk under a moving sun) and then
@@ -4790,18 +4816,8 @@ impl Gpu {
                     // the first frame stores bounce everywhere; later frames
                     // walk only the band.
                     if !self.lighting.sun_bounce_live {
-                        let hist = u64::from(self.lighting.settings.direct.refresh_frames > 1);
-                        let pixels = u64::from(w) * u64::from(h);
-                        let at = (2 + hist) * pixels * 4;
-                        (self.fns.cmd_fill_buffer)(
-                            self.cmd,
-                            self.lighting.out.buffer,
-                            at,
-                            pixels * 4,
-                            0,
-                        );
+                        self.clear_bounce_slice(w, h);
                         self.lighting.sun_bounce_live = true;
-                        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
                     }
                     (self.fns.cmd_dispatch)(self.cmd, w.div_ceil(8).max(1), h.div_ceil(8).max(1), 1);
                 } else if pass == 7 && !compose_full {
@@ -4994,7 +5010,23 @@ impl Gpu {
         }
         self.memory_barrier(0x1000, 0x800 | 0x1000 | 0x4000, 0x1000, 0x20 | 0x40 | 0x800 | 0x2000);
         self.lighting_dump_copy();
+        if self.lighting.bounce_fill < BOUNCE_FILL_FRAMES {
+            self.lighting.bounce_fill = self.lighting.bounce_fill.saturating_add(1);
+        }
         Ok(())
+    }
+
+    /// Zero the linear-bounce slice. `0` means empty; a real black bounce is
+    /// stored as `pack + 1`. The slice sits after the picture and the glow,
+    /// and before the screen-wavelet slices.
+    fn clear_bounce_slice(&mut self, w: u32, h: u32) {
+        let hist = u64::from(self.lighting.settings.direct.refresh_frames > 1);
+        let pixels = u64::from(w) * u64::from(h);
+        let at = (2 + hist) * pixels * 4;
+        unsafe {
+            (self.fns.cmd_fill_buffer)(self.cmd, self.lighting.out.buffer, at, pixels * 4, 0);
+        }
+        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
     }
 
     /// S78S: frames N and N + 1 (GENOS_LIGHTING_DUMP): copy the lighting buffers

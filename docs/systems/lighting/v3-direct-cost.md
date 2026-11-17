@@ -200,6 +200,8 @@ The filter's heavy kernels fell from about ten thousand texels to a few dozen. L
 
 A lamp change on a still camera waits up to 32 frames for the wavelet, the world-cell rect, and a new bounce. Direct that moves by more than one percent still redraws, added to the stored bounce.
 
+A cache clear does not reset `still` or the picture. The next held frames were reusing the bounce stored on the clear frame, which is empty (`pack + 1`, so it counts as a finished black bounce), and unmarked pixels kept the previous view. `the_bounce_adds_light_to_the_presented_frame` reads the third draw after that clear: full 17220106 against direct 17220280, so the bounce added nothing. The three frames after a clear (`BOUNCE_FILL_FRAMES`) compose the whole picture and zero the slice, so that third draw walks the cache that those frames traced. The hold starts on the frame after that.
+
 ### Not cut
 
 Direct is still the 4070's candidates 2.5, spatial 2.0, and shade 3.8. Half-res reservoirs (picture error 0.073) and one spatial neighbour (shadow row 0.063) stay rejected. Fewer candidates stays a variance proposal. `REF_ERR` was not loosened.

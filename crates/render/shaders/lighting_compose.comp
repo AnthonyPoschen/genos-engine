@@ -170,10 +170,12 @@ void main() {
         // compile below reuses that result on a held frame.
         bounce = indirect(p, pos, n);
 #else
-        // The sun band owns the linear-bounce slice. Every other held frame
-        // reuses the bounce stored on the last full walk (frame 1, a camera
-        // move, or frame 32). Direct still updates. The walk is four cache
-        // finds per pixel; it was the steady compose.
+        // The linear-bounce slice holds the last full walk. A held frame
+        // reuses it (a camera move, or frame 32, walks again). Direct still
+        // updates. The walk is four cache finds per pixel; it was the steady
+        // compose. A cache clear zeros the slice for the next three frames
+        // (BOUNCE_FILL_FRAMES): the clear frame's walk is empty, and a held
+        // frame would keep that empty store, which is the direct picture.
         uint pixels = pc.dims.x * pc.dims.y;
         uint slices = 2u + (gstats.ctrl_history != 0u ? 1u : 0u);
         uint at = slices * pixels + index;
