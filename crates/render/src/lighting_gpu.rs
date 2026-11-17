@@ -1405,7 +1405,7 @@ impl Gpu {
         self.idle_device();
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
-            .map(|w| LampPickCounts {
+            .map_or_else(|_| LampPickCounts::default(), |w| LampPickCounts {
                 pixels: w[LAMP_PICK_DIAG_WORD],
                 kept: w[LAMP_PICK_DIAG_WORD + 1],
                 fills: w[LAMP_PICK_DIAG_WORD + 2],
@@ -1423,7 +1423,6 @@ impl Gpu {
                 px_lamps: w[LAMP_PICK_DIAG_WORD - 10],
                 hit_lamps: w[LAMP_PICK_DIAG_WORD - 9],
             })
-            .unwrap_or_default()
     }
 
     /// A-trous dirty fraction, mode and threshold for the last frame drawn.
@@ -1432,8 +1431,7 @@ impl Gpu {
         self.idle_device();
         let slot = self.lighting.last_slot;
         self.read_stats16(self.lighting.stats[slot].memory)
-            .map(|w| lighting_atrous_from(&w))
-            .unwrap_or_default()
+            .map_or_else(|_| LightingAtrousStats::default(), |w| lighting_atrous_from(&w))
     }
 
     /// Build the sun compose pipeline the first time a small step needs it.
