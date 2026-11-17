@@ -6374,6 +6374,10 @@ mod sun_step {
     /// and the specialization-constant default are the same number. Changing
     /// one arm and not the others desyncs compose from the buffer.
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a test aborts when the slot count does not fit in a SPIR-V word"
+    )]
     fn compose_slot_literal_matches_the_host() {
         let src = include_str!("../shaders/lighting_cache_slots.glsl");
         let literals = slot_literals(src);
@@ -6511,7 +6515,7 @@ fn slot_literals(src: &str) -> Vec<u64> {
             continue;
         };
         let rest = line[eq + 1..].trim().trim_end_matches(';').trim();
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         if let Ok(n) = digits.parse() {
             out.push(n);
         }
@@ -6520,7 +6524,7 @@ fn slot_literals(src: &str) -> Vec<u64> {
 }
 
 fn spirv_has_u32(bytes: &[u8], want: u32) -> bool {
-    if bytes.len() < 20 || bytes.len() % 4 != 0 {
+    if bytes.len() < 20 || !bytes.len().is_multiple_of(4) {
         return false;
     }
     let mut words = Vec::with_capacity(bytes.len() / 4);

@@ -811,6 +811,10 @@ struct YawTurn {
     freed: u32,
 }
 
+fn mean_of(sum: f64, n: u32) -> f64 {
+    if n == 0 { 0.0 } else { sum / f64::from(n) }
+}
+
 fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: bool) -> YawTurn {
     let mut settings = LightingSettings::preset(LightingPreset::High);
     if !fill {
@@ -893,16 +897,8 @@ fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: b
         counted += 1;
         eprintln!("fill {fill} spot {i} pixel {px} entry {a:.4} later {b:.4}");
     }
-    let pixel_delta = if counted == 0 {
-        0.0
-    } else {
-        delta / f64::from(counted)
-    };
-    let mean_weight = if filled == 0 {
-        0.0
-    } else {
-        weight_sum / f64::from(filled)
-    };
+    let pixel_delta = mean_of(delta, counted);
+    let mean_weight = mean_of(weight_sum, filled);
     eprintln!(
         "fill {fill} shown {shown} filled {filled} mean_weight {mean_weight:.2} pixel_delta {pixel_delta:.4} counted {counted} rays {} missed {} freed {}",
         round.rays, round.missed, round.freed
@@ -974,11 +970,11 @@ fn a_fine_child_replaces_a_wrong_parent_prior() {
             pick_gap = gap;
         }
     }
-    let pick = pick.unwrap_or_else(|| {
-        panic!(
-            "no fine child reached {READY} own sets and differed from the parent in {HAND} frames"
-        )
-    });
+    assert!(
+        pick.is_some(),
+        "no fine child reached {READY} own sets and differed from the parent in {HAND} frames"
+    );
+    let pick = pick.unwrap_or(0);
     let (yaw, pitch) = aim(eye_of(&camera), spots[pick].position);
     camera.set_pose(camera.position, yaw, pitch);
     assert!(
