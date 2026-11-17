@@ -104,7 +104,11 @@ void main() {
     // positive floats order as uints), the same answer every frame.
     uint i = p.y * gbuf.header.x + p.x;
     float dist = max(length(v_pos - scene.eye.xyz), 1.0e-6);
-    atomicMin(gbuf.words[i * GBUF_STRIDE], floatBitsToUint(dist));
+    uint dist_bits = floatBitsToUint(dist);
+    // Elect the nearest fragment (positive floats order as uints). Object 0 and the
+    // shading fields take atomicMin; object id must follow the same winner so a
+    // farther mover fragment cannot leave its oid on a nearer static surface.
+    uint prev_dist = atomicMin(gbuf.words[i * GBUF_STRIDE], dist_bits);
     atomicMin(gbuf.words[i * GBUF_STRIDE + 1u], lighting_pack_normal(n));
     atomicMin(gbuf.words[i * GBUF_STRIDE + 2u], packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
     uint flags = (v_mat & 1u) != 0u ? 1u : 0u;
@@ -113,7 +117,10 @@ void main() {
     if (v_emit != 0u) {
         atomicMin(gbuf.words[i * GBUF_STRIDE + 3u], v_emit);
     }
-    // Object id is not depth-raced: last writer wins; all fragments share the instance id.
-    gbuf.words[i * GBUF_STRIDE + 5u] = v_object_id;
+    // Depth-consistent oid: only a fragment that is at least as near as the
+    // elected distance may publish. Ties keep one of the front-most ids.
+    if (dist_bits <= prev_dist) {
+        gbuf.words[i * GBUF_STRIDE + 5u] = v_object_id;
+    }
     out_color = vec4(albedo, 1.0);
 }

@@ -217,6 +217,10 @@ pub struct Pack {
     pub(crate) debug_view: u32,
     /// Shapes and particle spans in draw order.
     pub draws: Vec<PackedDraw>,
+    /// Parallel to `draws`: `world.objects` index for that draw (`usize::MAX` if none).
+    pub draw_object: Vec<usize>,
+    /// Parallel to `draws`: occluder index in `occs` when the object affects light.
+    pub draw_occluder: Vec<Option<u32>>,
     /// Cells over the occluders and the lamps the light passes walk.
     pub grid: SceneGrid,
 }
@@ -439,12 +443,14 @@ pub fn pack_frame(
     let mut staged: Vec<StagedDraw> = Vec::new();
     let mut shape_bytes = Vec::new();
     let mut occs = Vec::new();
+    let mut object_occluder: Vec<Option<u32>> = vec![None; world.objects.len()];
     let (fire, puffs) = particles::medium(world, eye);
     let mut reserved = 0usize;
     for (index, object) in world.objects.iter().enumerate() {
         if object.affects_light {
             if let Some(occ) = occluder(world, object) {
                 if occs.len() < MAX_OCCLUDERS {
+                    object_occluder[index] = Some(u32::try_from(occs.len()).unwrap_or(u32::MAX));
                     occs.push(occ);
                 }
             }
@@ -475,22 +481,34 @@ pub fn pack_frame(
                 .unwrap_or_else(|| shape_vertex_bytes(source));
             shape_bytes.push((*key, bytes));
         }
-        staged.push(StagedDraw::Ready { draw, color });
+        staged.push(StagedDraw::Ready {
+            draw,
+            color,
+            object_index: index,
+        });
         reserved += 1;
     }
     memory.admit_shapes(&shape_bytes);
     let places = resident_atlas(memory, world, view_proj);
     let mut draws = Vec::new();
+    let mut draw_object = Vec::new();
+    let mut draw_occluder = Vec::new();
     let mut objects = Vec::new();
     for item in staged {
         match item {
-            StagedDraw::Ready { draw, color } => {
+            StagedDraw::Ready {
+                draw,
+                color,
+                object_index,
+            } => {
                 if let PackedDraw::Shape { key, .. } = &draw {
                     if !memory.contains_shape(*key) {
                         continue;
                     }
                 }
                 draws.push(draw);
+                draw_object.push(object_index);
+                draw_occluder.push(object_occluder.get(object_index).copied().flatten());
                 objects.push(gpu_object(color));
             }
             StagedDraw::Particle { index, color } => {
@@ -510,6 +528,8 @@ pub fn pack_frame(
                     continue;
                 };
                 draws.push(draw);
+                draw_object.push(index);
+                draw_occluder.push(object_occluder.get(index).copied().flatten());
                 objects.push(gpu_object(color));
             }
         }
@@ -541,11 +561,17 @@ pub fn pack_frame(
         view_aspect: 1.0,
         debug_view: 0,
         draws,
+        draw_object,
+        draw_occluder,
     }
 }
 
 enum StagedDraw {
-    Ready { draw: PackedDraw, color: [f32; 3] },
+    Ready {
+        draw: PackedDraw,
+        color: [f32; 3],
+        object_index: usize,
+    },
     Particle { index: usize, color: [f32; 3] },
 }
 

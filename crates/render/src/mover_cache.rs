@@ -243,8 +243,9 @@ pub fn mover_gpu_pool_offset() -> u64 {
 /// Max mover-fill texel indices packed after the pool (shared scheduler list).
 pub const MOVER_FILL_LIST_CAP: u32 = 512;
 
-/// Compact live-slot list for GPU `lighting_mover_on` / change volume (≤ 64).
-pub const MOVER_PRESENCE_CAP: u32 = 64;
+/// Compact live-slot list for GPU `lighting_mover_on` / claim-block / on-mover
+/// drop. Sized for the 1000-Near design (table holds `MOVER_TABLE_SLOTS`).
+pub const MOVER_PRESENCE_CAP: u32 = 1024;
 
 /// Byte offset of the fill-index list inside the mover SSBO.
 #[must_use]
@@ -773,6 +774,20 @@ impl MoverCache {
         lamp_change_near: bool,
         distance_m: f32,
     ) -> FillStats {
+        // A still frame must not spend the shared cache batch on mover deposits:
+        // closeness alone would otherwise list every Near texel and starve the hall.
+        if measured_change <= 0.0 && distance_moved_m <= 0.0 && !lamp_change_near {
+            self.fill_list.clear();
+            self.fill_rays = 0;
+            if !self.dirty_table.contains(&0) {
+                self.dirty_table.push(0);
+            }
+            return FillStats {
+                candidates: 0,
+                deposited: 0,
+                rays: 0,
+            };
+        }
         let cands = self.fill_candidates(
             measured_change,
             distance_moved_m,
@@ -1189,21 +1204,23 @@ impl MoverCache {
         distance_m: f32,
     ) -> Vec<MoverFillCandidate> {
         let p = fill_priority(measured_change, distance_moved_m, lamp_change_near, distance_m);
-        let mut out = Vec::new();
+        // One pool pass (not O(movers × pool)): skip Far / vacant owners.
+        let mut fillable = std::collections::BTreeSet::new();
         for rec in &self.table {
-            if !rec.is_live() || rec.tier == MoverTier::Far || rec.texel_count == 0 {
+            if rec.is_live() && rec.tier != MoverTier::Far && rec.texel_count > 0 {
+                fillable.insert(rec.object_id);
+            }
+        }
+        let mut out = Vec::new();
+        for (i, t) in self.texels.iter().enumerate() {
+            if t.object_id == MOVER_ID_NONE || !fillable.contains(&t.object_id) {
                 continue;
             }
-            for (i, t) in self.texels.iter().enumerate() {
-                if t.object_id != rec.object_id {
-                    continue;
-                }
-                out.push(MoverFillCandidate {
-                    object_id: rec.object_id,
-                    texel_index: u32_from_usize(i),
-                    priority: p,
-                });
-            }
+            out.push(MoverFillCandidate {
+                object_id: t.object_id,
+                texel_index: u32_from_usize(i),
+                priority: p,
+            });
         }
         out.sort_by(|a, b| {
             b.priority
@@ -1587,6 +1604,32 @@ mod tests {
         assert!(!packed.is_empty());
         cache.clear_dirty();
         assert!(cache.dirty_ranges().is_empty());
+    }
+
+    #[test]
+    fn presence_list_covers_a_thousand_live_movers() {
+        let mut cache = MoverCache::high();
+        for id in 1..=1000 {
+            cache.upsert(record(id)).expect("insert");
+        }
+        let slots = cache.presence_slots();
+        assert_eq!(slots.len(), 1000);
+        assert!(u32_from_usize(slots.len()) <= MOVER_PRESENCE_CAP);
+        let packed = cache.pack_gpu();
+        assert_eq!(u64_from_usize(packed.len()), mover_gpu_bytes(cache.pool_cap()));
+    }
+
+    #[test]
+    fn prepare_fill_skips_still_frames() {
+        let mut cache = MoverCache::new(256);
+        cache.upsert(record(1)).expect("near");
+        cache
+            .update_tier_and_alloc(1, 2.0, 80.0)
+            .expect("alloc");
+        let stats = cache.prepare_fill(4096, 0.0, 0.0, false, 3.0);
+        assert_eq!(stats.deposited, 0);
+        assert_eq!(stats.rays, 0);
+        assert!(cache.fill_list().is_empty());
     }
 
     #[test]

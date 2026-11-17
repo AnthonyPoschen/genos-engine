@@ -90,6 +90,12 @@ const LIGHTING_FILL_WALK: u32 = 8;
 /// Shader `LIGHTING_SCENE_CHANGED_MARK`. Added to the change count's fraction
 /// when the host scene hash changed this frame.
 const LIGHTING_SCENE_CHANGED_MARK: f32 = 0.25;
+/// Host `prepare_fill` measured-change weight when `still == 0` (scene hash moved).
+const LIGHTING_MOVER_FILL_SCENE_CHANGE: f32 = LIGHTING_SCENE_CHANGED_MARK;
+/// Host `prepare_fill` metres-moved weight while any hitch record is live this sync.
+const LIGHTING_MOVER_FILL_MOVED_M: f32 = 0.05;
+/// Host `prepare_fill` eye-distance stand-in until per-mover camera range is wired.
+const LIGHTING_MOVER_FILL_DISTANCE_M: f32 = 3.0;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
 fn lighting_compose_at() -> u64 {
@@ -315,6 +321,8 @@ pub(crate) struct Lighting {
     mesh_poses: Vec<[f32; 16]>,
     mesh_movers: std::collections::BTreeMap<usize, u32>,
     mesh_spheres: Vec<[f32; 4]>,
+    /// Parallel to live field order: `FieldInstance::object` for draw→mesh oid.
+    mesh_field_object: Vec<Option<usize>>,
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
     stats_light: [u64; 2],
@@ -681,6 +689,7 @@ impl Default for Lighting {
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
+            mesh_field_object: Vec::new(),
             stats_light: [0; 2],
             stats_young: [false; 2],
             dump: Vec::new(),
@@ -844,6 +853,9 @@ impl Gpu {
     pub(crate) fn note_field_movers(&mut self, live: &[&crate::mesh_field::FieldInstance]) {
         let g = &mut self.lighting;
         lighting_mesh_movers(live, &mut g.mesh_poses, &mut g.mesh_movers, &mut g.mesh_spheres);
+        g.mesh_field_object.clear();
+        g.mesh_field_object
+            .extend(live.iter().map(|f| f.object));
     }
 
     /// Note how long a pipeline took to build (tests check it stays short).
@@ -4221,11 +4233,14 @@ impl Gpu {
             let mut records = packed;
             for &i in self.lighting.mesh_movers.keys() {
                 if let Some(sph) = self.lighting.mesh_spheres.get(i) {
+                    // Centre is the world bounds centre (sphere xyz), not origin.
+                    // Centre=[0,0,0] made every draw near the origin match the
+                    // first mesh mover and broke the local texel frame.
                     records.push([
                         *sph,
-                        [0.0, 0.0, 0.0, (10001 + i) as f32],
+                        [sph[0], sph[1], sph[2], (10001 + i) as f32],
                         [0.0; 4],
-                        [0.0; 4],
+                        [1.0, 0.0, 0.0, 0.0],
                     ]);
                 }
             }
@@ -5570,19 +5585,32 @@ fn lighting_occ_bounds(rec: &[u8]) -> [f32; 4] {
 
 
 impl Gpu {
-    /// Object id for a draw whose model translation matches a live mover centre.
-    /// Returns 0 when no mover owns that pose (static geometry / first frame).
-    pub(crate) fn mover_object_id_at(&self, translation: [f32; 3]) -> u32 {
-        const EPS2: f32 = 0.05 * 0.05;
-        for id in self.lighting.mover_cache.table_object_ids() {
-            let Some(rec) = self.lighting.mover_cache.get(id) else {
-                continue;
-            };
-            let dx = translation[0] - rec.centre[0];
-            let dy = translation[1] - rec.centre[1];
-            let dz = translation[2] - rec.centre[2];
-            if dx * dx + dy * dy + dz * dz <= EPS2 {
-                return id;
+    /// Stable draw→mover id at submission: occluder KEEP index + 1, or mesh
+    /// field KEEP index + 10001. Never matches by translation (that collided
+    /// static draws near a mover centre and origin-centred mesh movers).
+    pub(crate) fn mover_object_id_for_draw(
+        &self,
+        occluder_index: Option<u32>,
+        world_object: Option<usize>,
+    ) -> u32 {
+        if let Some(occ) = occluder_index {
+            let key = usize::try_from(occ).unwrap_or(usize::MAX);
+            if self.lighting.movers.contains_key(&key) {
+                return occ.saturating_add(1);
+            }
+        }
+        if let Some(obj) = world_object {
+            for (&field_i, _) in &self.lighting.mesh_movers {
+                if self
+                    .lighting
+                    .mesh_field_object
+                    .get(field_i)
+                    .copied()
+                    .flatten()
+                    == Some(obj)
+                {
+                    return 10001u32.saturating_add(u32::try_from(field_i).unwrap_or(0));
+                }
             }
         }
         0
@@ -5630,9 +5658,25 @@ impl Gpu {
         self.lighting.mover_cache.rebalance_all();
         // Stage H: rank mover texels into the shared fill list. The cache pass
         // deposits world-direction lighting from the lattice (Far never listed).
+        // Knobs (named): measured scene change, metres moved, lamp-near, eye distance.
+        // `still > 0` means no host scene change — pass zeros so KEEP hitch
+        // leftovers do not spend the world fill budget (fill_knockout late).
         let budget = self.lighting.settings.surface_cache.ray_budget;
         let budget = if budget == 0 { 4096 } else { budget };
-        let stats = self.lighting.mover_cache.prepare_fill(budget, 0.25, 0.05, false, 3.0);
+        let (measured_change, distance_moved_m) = if self.lighting.still == 0 {
+            (LIGHTING_MOVER_FILL_SCENE_CHANGE, LIGHTING_MOVER_FILL_MOVED_M)
+        } else {
+            (0.0, 0.0)
+        };
+        let lamp_change_near = false;
+        let distance_m = LIGHTING_MOVER_FILL_DISTANCE_M;
+        let stats = self.lighting.mover_cache.prepare_fill(
+            budget,
+            measured_change,
+            distance_moved_m,
+            lamp_change_near,
+            distance_m,
+        );
         self.lighting.mover_fill_rays = stats.rays;
         self.upload_mover_cache();
     }

@@ -397,12 +397,12 @@ One frame, passes in order (`crates/render/src/lighting_gpu.rs`, shaders `lighti
 
 ## Dynamic objects
 
-- **Ours:** each frame lists the bounds of objects that moved, came or went (up to 64; more drops every kept stratum). Kept rays crossing them are re-traced; light-cache patches near a change (1 m) are relit first and run short means (2 sets) in SC.
+- **Ours:** each frame lists the bounds of objects that moved, came or went (presence list up to `MOVER_PRESENCE_CAP` = 1024 for claim/on-mover drop; compose uses the O(1) table). Kept rays crossing them are re-traced; light-cache patches near a change (1 m) are relit first and run short means (2 sets) in SC.
 - **Reference:** Lumen: movers are in the SDF/BVH, their cards are recaptured, pixels whose rays hit movers switch to fast temporal update with stronger spatial filtering [W21 s.99, W22]. ReSTIR GI validates reused samples with visibility rays.
 - **Differences:** we invalidate by ray path (exact) rather than by hit velocity.
 - **SC movers (S42-S49):** occluders that moved in the last 240 frames are movers; pixels inside a mover's bounds and within 1 m of this frame's changes show the probes, texels near a change are relit first with 2-set means. While only the light changes (lamps move), texels stay shown and lag a little, as Lumen's surface cache does (S46/S47; swapping every pixel to the probes swapped methods and was most of the mix error).
 - **Scores:** P6 passes trail, mix, spin. SC (S49): mix 0.0084 / 0.0087 (target 0.0055), spin 0.0871 / flicker 0.0470 (the spinning green box is not caught as a mover; Anthony judges spin by eye). S54K (headless gi-check, not comparable bit for bit with the windowed rows): the movers never reached the GPU before S52 (the change block upload stopped after the changes); fixed, object-local texels pooled and trusted by sets (S53), texels kept shown next to movers (S54K): spin 0.0716 / 0.0397 (S49 headless 0.0861 / 0.0460), mix 0.0092 / 0.0095 (S49 headless 0.0084 / 0.0087, worse). Quick tier not yet run on the S54K defaults.
-- **Movers (2026-10-14 / 2026-11-17):** object-attached side pool + O(1) mover table (`surface_cache.attach_movers`, `mover_texels`). Lighting in world directions; Near/Mid/Far tiers; change-block 16-mover hitch list removed. GPU pool compose read still open. GIBS attaches everything; we attach movers only.
+- **Movers (2026-10-14 / 2026-11-17):** object-attached side pool + O(1) mover table (`surface_cache.attach_movers`, `mover_texels`). Lighting in world directions; Near/Mid/Far tiers; change-block 16-mover hitch list removed. GPU pool compose read is live (gbuffer oid + sphere gate). See `mover-attached-cache.md`. GIBS attaches everything; we attach movers only.
 
 ## Contact term
 

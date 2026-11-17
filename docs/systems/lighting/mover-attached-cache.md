@@ -49,10 +49,24 @@ Moving objects must carry their own lighting records so a spin or slide does not
 - Rays/frame at 10/100/1000 Near movers (budget 4096): **4096 / 4096 / 4096**.
 - Compose SPIR-V: **247488** B (ceiling 248000; after black-slab sphere check).
 - ReSTIR `REF_ERR` 0.05 gate scenes: pass (merge oracle still fails on lighting-v3).
-- fill_knockout: early→late error 0.8244→0.5557 (gain ok). Knockout late ceiling 0.213 is a doc note, not a code constant.
+- fill_knockout: early→late **0.5954 → 0.0828** (under frozen **0.213** ceiling). Gain gate `MIN_ERROR_GAIN=0.03` stays. The 0.5557 regression was stale-drop treating `last==0` as aged (wiped hall cells) + Stage H `prepare_fill` spending the batch on KEEP leftovers via closeness-only priority.
 
-## Black-slab fix (RTX 4070 / #288)
+## Black / missing-triangle fixes (RTX 4070 / #288)
 
-**Root cause:** G-buffer object id used the draw instance index (and `ids.x == 0` fell back to `instance + 1`), so static meshes collided with `MoverCache` keys (occluder index + 1). Compose then returned full-trust pool irradiance (`w = 1`) for those pixels — often empty/dark texels — as solid black slabs over walls/floor/ceiling. The moving box itself looked fine because its id matched.
+1. **Object-id collision (lighting):** G-buffer ids used the draw instance index (`ids.x == 0` → `instance + 1`), colliding with `MoverCache` keys. Compose returned full-trust pool irradiance on static pixels. Fix: `ids.x == 0` = not a mover; **stable draw→occluder/mesh KEEP id at submission** (not translation match); sphere gate before pool read; mesh hitch centres use world bounds (not `[0,0,0]`). G-buffer oid is depth-elected with distance. Slide `static_pool == 0`.
 
-**Fix:** `ids.x == 0` means not a mover (no instance fallback); live movers are tagged by matching model translation to the mover table; compose also requires the pixel inside the mover sphere before accepting a pool read. Regression: slide prod `static_pool == 0` (colliding oid on a far static point must not return the pool colour).
+2. **Instance SSBO stride (geometry, the transparent/sky holes):** First bad commit `eb154989` added `ids: [u32;4]` to `InstanceRec` (128→144 B) but only `gbuffer.vert` grew. `scene.vert` / `reflections_portal.vert` kept a 128 B local struct → depth and G-buffer disagreed; triangles after instance 0 vanished. Validation: 0 errors (in-bounds misread). Fix: one shared `instance_ssbo.glsl` included by all three verts; CI `instance_stride` asserts GLSL size/offsets == `InstanceRec` and bans local `struct Instance`. Coverage + `GENOS_BUFFER_POISON` stay.
+
+3. **Red-box dark bands (mover faces):** Compose returned `w = 1` whenever mover texel `samples > 0.5`, so underfilled pool texels painted full-trust dark patches. Trust now requires ≥ 8 sample sets before full-trust; otherwise fall through to world cells.
+
+## Review follow-ups (#288)
+
+| Item | Fix |
+|---|---|
+| Stable draw id | `pack.draw_occluder` / `draw_object` → `mover_object_id_for_draw` |
+| G-buffer oid | Write oid only when `dist_bits <= atomicMin` winner |
+| Presence ≤64 | `MOVER_PRESENCE_CAP = 1024` |
+| Knockout late | Stale age `>= 2` and never age-drop `last==0`; still frames skip mover fill |
+| Host fill scan | One pool pass + still-frame early out |
+| Knobs | `LIGHTING_MOVER_FILL_*` named constants |
+| README | Compose pool read marked live |

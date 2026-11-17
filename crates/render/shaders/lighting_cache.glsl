@@ -4591,7 +4591,12 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
                 uint tex = lighting_mover_texel_lookup(lighting_px_object_id, pos - centre);
                 if (tex != ~0u) {
                     vec4 mean = lighting_mover_texel_mean(tex);
-                    if (mean.w > 0.5) {
+                    // Trust follows sample sets. A binary full-trust at
+                    // samples > 0.5 painted dark bands on underfilled mover
+                    // faces (red box @ frames 180/400). Eight sets → full trust;
+                    // fewer fall through to world cells.
+                    const float LIGHTING_MOVER_FULL_SETS = 8.0;
+                    if (mean.w >= LIGHTING_MOVER_FULL_SETS) {
                         return vec4(mean.rgb, 1.0);
                     }
                 }
@@ -6464,8 +6469,8 @@ void lighting_sc_forget(uint slot) {
 }
 #ifndef GENOS_COMPOSE_NO_WALK
 // #286 → pool: a world cell a mover sits on drops now. An unread world cell
-// inside this frame's change volume drops after two frames. Fresh cells stay
-// so the scheduler can relight the surface the mover was lighting.
+// inside this frame's change volume drops after two frames (age >= 2). Fresh
+// cells (no stamp / last == 0) stay so the scheduler can relight.
 bool lighting_sc_drop_stale_mover_world(uint slot) {
     if (!LIGHTING_SC_WRITES || lighting_world_mode() != 3u || slot >= LIGHTING_CACHE_SLOTS) {
         return false;
@@ -6480,7 +6485,9 @@ bool lighting_sc_drop_stale_mover_world(uint slot) {
     bool aged = false;
     if (!on && size > LIGHTING_HIT_PATCH && lighting_near_change(p)) {
         uint last = floatBitsToUint(cache.v[3u * slot].w);
-        aged = last == 0u || int(lighting_frame() - last) > 2;
+        // last == 0 is unset / fresh — never age-drop those (was: last == 0
+        // treated as aged, which wiped the hall fill inside change volumes).
+        aged = last != 0u && int(lighting_frame() - last) >= 2;
     }
     if (!on && !aged) {
         return false;
