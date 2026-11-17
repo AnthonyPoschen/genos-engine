@@ -74,6 +74,7 @@ class QuitGapFilter(unittest.TestCase):
             "crates/input/src/lib.rs",
             "examples/stress/src/main.rs",
             "debug/lighting/src/main.rs",
+            "crates/ecs/src/world.rs",
             "Cargo.lock",
             ".github/workflows/lint.yml",
         ):
@@ -88,7 +89,6 @@ class QuitGapFilter(unittest.TestCase):
             "docs/systems/lighting.md",
             "README.md",
             "crates/jobs/src/pool.rs",
-            "crates/ecs/src/world.rs",
             "debug/particles/src/main.rs",
         ):
             with self.subTest(path=path):
