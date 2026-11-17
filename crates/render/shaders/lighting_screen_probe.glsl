@@ -114,7 +114,10 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     // coarser level maintenance already stored. Filled is a corner with
     // sets, not a non-zero mean and not a higher count than this pixel.
     // A miss is not black light.
-    if (!(coarse.w > LIGHTING_CACHE_HAS_W)) {
+    // SH cells are world mode 3. Mode 0 (bounce 0, no GI) keeps the distance
+    // cell. The 25 cm lattice is not that coarser level, and reading it paints
+    // a fine cell the mode left empty.
+    if (!(coarse.w > LIGHTING_CACHE_HAS_W) && lighting_sh_on()) {
         coarse = lighting_sh_compose_lattice(pos, n, false);
         if (!(coarse.w > LIGHTING_CACHE_HAS_W)) {
             return max(world.rgb, vec3(0.0));

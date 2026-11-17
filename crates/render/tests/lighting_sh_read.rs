@@ -200,7 +200,16 @@ fn mix(prior: [f32; 3], own: [f32; 3], weight: f32) -> [f32; 3] {
 #[test]
 fn an_axis_aligned_hit_falls_through_to_the_owning_cells_tilt() {
     let text = cache_shader();
-    let body = function_body(&text, "vec3 lighting_cache_irradiance(vec3 pos, vec3 n)");
+    let body = function_body(
+        &text,
+        "vec3 lighting_cache_irradiance_framed(vec3 pos, vec3 n)",
+    );
+    let wrap = function_body(&text, "vec3 lighting_cache_irradiance(vec3 pos, vec3 n)");
+    assert!(
+        wrap.contains("lighting_mover_frame(pos, n)"),
+        "a mover hit claims an object-local entry"
+    );
+    assert!(wrap.contains("lighting_cache_irradiance_framed(pos, n)"));
     assert!(
         !body.contains("lighting_sc_display || slanted"),
         "the display flag still selects the lattice blend for an axis-aligned hit"
@@ -305,10 +314,9 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
     assert!(read.contains("if (facing <= 0.0)"));
     assert!(read.contains("if (plane > LIGHTING_CELL_HALF * cs)"));
     assert!(
-        read.contains("if (!lighting_sh_smooth_mover)"),
-        "a static gather still cuts a corner past the half-cell plane gate"
+        !read.contains("lighting_sh_smooth_mover") && !read.contains("lighting_sh_mover_plane_w"),
+        "the gather keeps one half-cell cut"
     );
-    assert!(read.contains("lighting_sh_mover_plane_w"));
     assert!(read.contains("if (lighting_sc_stale(s))"));
     assert!(
         read.contains("ws > 0.0 ? vec4(sum / ws, 1.0) : vec4(0.0)"),
@@ -325,20 +333,28 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
         "vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n)",
     );
     assert!(
-        blend.contains("lighting_sh_mover_plane_w"),
-        "compose's corner blend fades a mover the same way the gather does"
+        blend.contains("if (plane > LIGHTING_CELL_HALF * cs)"),
+        "compose's corner blend uses the same half-cell cut"
     );
-    assert!(blend.contains("if (!lighting_sh_smooth_mover)"));
+    assert!(!blend.contains("lighting_sh_mover_plane_w"));
     let world = function_body(&text, "vec4 lighting_world_irradiance(vec3 pos, vec3 n)");
-    precedes(
-        world,
-        "lighting_sh_smooth_mover = true",
-        "lighting_sh_compose_lattice(pos, n, false)",
+    assert!(
+        !world.contains("lighting_sh_smooth_mover"),
+        "a detail-on mover does not fade a second plane test"
+    );
+    assert!(
+        world.contains("return vec4(max(sh.rgb, vec3(0.0)), 1.0);"),
+        "an empty object read stays trust 1 so a world cell cannot bleed in"
     );
     precedes(
         world,
-        "lighting_sh_compose_lattice(pos, n, false)",
-        "lighting_sh_smooth_mover = false",
+        "lighting_obj_salt = lighting_mover(om, 1u).w",
+        "lighting_sh_compose_lattice(lpos, ln, false)",
+    );
+    precedes(
+        world,
+        "lighting_mover_to_local(om, pos, false)",
+        "lighting_sh_compose_lattice(lpos, ln, false)",
     );
     let screen = function_body(
         &text,
@@ -489,7 +505,7 @@ fn the_sparse_handover_mixes_a_coarse_key_with_the_seed() {
     let text = cache_shader();
     assert!(text.contains("const float LIGHTING_SC_HANDOVER = 16.0;"));
     assert!(text.contains("const float LIGHTING_SC_HANDOVER_K = 2.0;"));
-    assert!(text.contains("lighting_sc_set_seed(slot, hc, 0.25,"));
+    assert!(text.contains("lighting_sc_seed_publish(slot, k, hc, 0.25,"));
     let shown = function_body(&text, "vec4 lighting_sc_shown(uint slot)");
     precedes(shown, "prior = sp.rgb * ck;", "prior += sd.rgb * sd.w;");
     precedes(shown, "pc = ck;", "pc += sd.w;");
@@ -636,7 +652,7 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     );
     let at = function_body(
         &text,
-        "vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t)",
+        "vec3 lighting_cache_irradiance_at_framed(vec3 pos, vec3 n, float t)",
     );
     assert!(
         !at.contains("lighting_sc_seed"),
@@ -647,7 +663,13 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
         "a ray hit must not load the seed store"
     );
     assert!(at.contains("!lighting_sc_slanted(n)"));
-    assert!(at.contains("return lighting_cache_irradiance(pos, n);"));
+    assert!(at.contains("return lighting_cache_irradiance_framed(pos, n);"));
+    let at_wrap = function_body(
+        &text,
+        "vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t)",
+    );
+    assert!(at_wrap.contains("lighting_mover_frame(pos, n)"));
+    assert!(at_wrap.contains("lighting_cache_irradiance_at_framed(pos, n, t)"));
     let seed_store = function_body(
         &text,
         "void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac)",

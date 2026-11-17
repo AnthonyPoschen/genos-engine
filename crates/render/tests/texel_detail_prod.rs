@@ -23,7 +23,7 @@ const STRIDE: usize = 17;
 const ROWS: usize = 37;
 const TRAILER: usize = 40;
 const PARITY: usize = 32;
-const STEP: usize = 14;
+const SLIDE: usize = 107;
 const READ_ROWS: usize = 12;
 const ABS: f32 = 1.0e-3;
 const DETAIL_BIT: u32 = 1 << 17;
@@ -75,14 +75,8 @@ fn slant_colour() -> [f32; 3] {
     tilt_colour([8.0, 0.0, 0.0])
 }
 
-fn motion_slant() -> [f32; 3] {
-    let mut sh = genos_render::lighting_sh::ShL1::default();
-    sh.c[2] = [-4.0, 0.0, 0.0];
-    sh.tilt([0.0, 0.0, 7.0], [0.0, 1.0, 0.0], slant_normal())
-}
-
 fn words_len() -> usize {
-    8 + ROWS * STRIDE + TRAILER + PARITY + STEP
+    8 + ROWS * STRIDE + TRAILER + PARITY + SLIDE
 }
 
 #[expect(
@@ -163,11 +157,14 @@ fn readonly_fixture_head_matches_the_folded_shader_constant() {
 }
 
 #[test]
-fn a_mover_does_not_step_across_a_world_cell() {
-    // High's picture reads the world lattice. Two queries 5 mm either side of
-    // the half-cell plane gate used to drop the only corner and step from the
-    // cell to black. Two queries 1 cm either side of a tangent boundary must
-    // stay a small fraction of the gap between the two cells.
+fn a_mover_slides_without_stepping_on_world_cells() {
+    // 1 mm steps across 75 cm. The before samples are the salt-0 world gather,
+    // which is the picture a detail-on mover showed: one lone corner stays
+    // full until it leaves the window, then the colour pops by the cell gap.
+    // The after samples are the object-local read. It stays on the object's
+    // colour. A mover hit must not claim a world cell. A world cell on the
+    // mover drops now; one inside the change volume drops after two unread
+    // frames and a fresh floor cell stays.
     let mut owner = open().expect("lavapipe device");
     let renderer = &mut *owner.device;
     assert_eq!(renderer.gpu_kind(), GpuKind::Software);
@@ -175,50 +172,122 @@ fn a_mover_does_not_step_across_a_world_cell() {
         .texel_detail_prod()
         .expect("production compose indirect");
     assert_eq!(words.len(), words_len());
-    let step_at = 8 + ROWS * STRIDE + TRAILER + PARITY;
-    let step = &words[step_at..step_at + STEP];
+    let slide = slide_block(&words);
+    let fine = [7.0, 3.0, 1.0];
     let red = [8.0, 0.0, 0.0];
-    let gate_on = [step[0], step[1], step[2]];
-    let gate_past = [step[4], step[5], step[6]];
+    let gap = rec709(red);
+    eprintln!(
+        "slide before max {before_step} at {before_mm} mm, after max {after_step} at {after_mm} mm, gap {gap}",
+        before_step = slide.before_step,
+        before_mm = slide.before_mm,
+        after_step = slide.after_step,
+        after_mm = slide.after_mm,
+    );
+    for i in 0..16 {
+        eprintln!(
+            "slide {cm} cm before {before:?} after {after:?}",
+            cm = i * 5,
+            before = slide.before[i],
+            after = slide.after[i],
+        );
+    }
     assert!(
-        (step[3] - 1.0).abs() <= ABS && (step[7] - 1.0).abs() <= ABS,
-        "the cell stays accepted across the half-cell gate, trust {} then {}, colours {gate_on:?} {gate_past:?}",
-        step[3],
-        step[7]
+        slide.before_step > 0.5 * gap,
+        "the world-cell read did not pop; max step {} at {} mm, the cell gap is {gap}",
+        slide.before_step,
+        slide.before_mm
     );
     assert!(
-        near(gate_on, red) && near(gate_past, red),
-        "gate colours {gate_on:?} {gate_past:?}, wanted {red:?}"
+        slide.after_step < 0.05 * gap,
+        "object-local GI stepped {} at {} mm; the cell gap is {gap}",
+        slide.after_step,
+        slide.after_mm
     );
-    let gate_gap = rec709(red);
-    let gate_jump = (rec709(gate_on) - rec709(gate_past)).abs();
+    for (i, rgb) in slide.after.iter().enumerate() {
+        assert!(
+            near(*rgb, fine),
+            "sample {i} showed {rgb:?}, wanted the object colour {fine:?}"
+        );
+        assert!(!near(*rgb, red), "sample {i} bled the stale world red");
+        assert!(
+            !near(*rgb, [0.0, 0.0, 7.0]),
+            "sample {i} bled the world blue"
+        );
+    }
     assert!(
-        gate_jump <= 0.05 * gate_gap,
-        "GI stepped {gate_jump} across the half-cell gate; the cell is {gate_gap}"
+        slide.world_hit.abs() <= ABS,
+        "a mover hit wrote a world cell"
     );
-    let before = [step[8], step[9], step[10]];
-    let after = [step[11], step[12], step[13]];
-    let want_before = [4.32, 0.0, 3.22];
-    let want_after = [3.68, 0.0, 3.78];
     assert!(
-        near(before, want_before) && near(after, want_after),
-        "tangent colours {before:?} {after:?}, wanted {want_before:?} {want_after:?}"
+        (slide.object_hit - 1.0).abs() <= ABS,
+        "a mover hit did not leave an object entry"
     );
-    let cell_gap = (rec709(red) - rec709([0.0, 0.0, 7.0])).abs();
-    let tangent_jump = (rec709(before) - rec709(after)).abs();
     assert!(
-        tangent_jump < 0.25 * cell_gap,
-        "GI stepped {tangent_jump} across 2 cm of a cell boundary; the two cells differ by {cell_gap}"
+        slide.object_salt > 0.5,
+        "object entry salt {}",
+        slide.object_salt
     );
-    // Row 32: the far corner is 0.1875 m off the plane. Smoothstep weight is
-    // 0.5, so it tints the near cell and does not replace it.
-    let plane = row(&words, 32);
-    let faded = [48.0 / 7.0, 6.0 / 7.0, 0.0];
+    assert!(slide.bleed.abs() <= ABS, "a world colour appeared on the box");
     assert!(
-        near(plane.shown, faded),
-        "off-plane corner showed {:?}, wanted {faded:?}",
-        plane.shown
+        (slide.drop_on - 1.0).abs() <= ABS,
+        "a world cell on the mover was kept"
     );
+    assert!(
+        (slide.drop_stale - 1.0).abs() <= ABS,
+        "an unread world cell in the change volume was kept"
+    );
+    assert!(
+        (slide.drop_kept - 1.0).abs() <= ABS,
+        "a fresh floor cell in the change volume was dropped"
+    );
+}
+
+struct Slide {
+    after: [[f32; 3]; 16],
+    after_step: f32,
+    after_mm: f32,
+    before: [[f32; 3]; 16],
+    before_step: f32,
+    before_mm: f32,
+    world_hit: f32,
+    object_hit: f32,
+    object_salt: f32,
+    bleed: f32,
+    drop_on: f32,
+    drop_stale: f32,
+    drop_kept: f32,
+}
+
+fn slide_block(words: &[f32]) -> Slide {
+    let at = 8 + ROWS * STRIDE + TRAILER + PARITY;
+    let w = &words[at..at + SLIDE];
+    let mut after = [[0.0; 3]; 16];
+    let mut before = [[0.0; 3]; 16];
+    for i in 0..16 {
+        after[i] = [w[i * 3], w[i * 3 + 1], w[i * 3 + 2]];
+    }
+    let after_step = w[48];
+    let after_mm = w[49];
+    for i in 0..16 {
+        let b = 50 + i * 3;
+        before[i] = [w[b], w[b + 1], w[b + 2]];
+    }
+    let tail = 50 + 48;
+    Slide {
+        after,
+        after_step,
+        after_mm,
+        before,
+        before_step: w[tail],
+        before_mm: w[tail + 1],
+        world_hit: w[tail + 2],
+        object_hit: w[tail + 3],
+        object_salt: w[tail + 4],
+        bleed: w[tail + 5],
+        drop_on: w[tail + 6],
+        drop_stale: w[tail + 7],
+        drop_kept: w[tail + 8],
+    }
 }
 
 #[test]
@@ -763,10 +832,14 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     );
     assert!((lamp_mover.cell_same - 1.0).abs() <= ABS);
 
+    // The mover query is local (0, 1, 0). That point sits halfway between the
+    // two object cells, so they weigh equally. The static row's 0.75/0.25 is
+    // the world-grid phase, which is what a mover must not follow.
+    let object_blend = [4.0, 0.0, 3.5];
     let mover_mix = &rows[28];
     assert!(
-        near(mover_mix.shown, blend),
-        "a mover between red and blue showed {:?}, wanted {blend:?}",
+        near(mover_mix.shown, object_blend),
+        "a mover between red and blue showed {:?}, wanted {object_blend:?}",
         mover_mix.shown
     );
     assert!(mover_mix.reads.abs() <= ABS);
@@ -786,8 +859,8 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
 
     let mover_black = &rows[30];
     assert!(
-        near(mover_black.shown, [6.0, 0.0, 0.0]),
-        "a mover with a valid black corner showed {:?}, wanted 0.75 of red",
+        near(mover_black.shown, [4.0, 0.0, 0.0]),
+        "a mover with a valid black corner showed {:?}, wanted half of red",
         mover_black.shown
     );
     assert!(mover_black.reads.abs() <= ABS);
@@ -806,16 +879,14 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!((mover_face.cell_same - 1.0).abs() <= ABS);
 
     let mover_plane = &rows[32];
-    // Near corner tri 0.421875 at full weight. Far corner tri 0.140625 at
-    // plane 0.1875 m, smoothstep weight 0.5. The near cell still leads.
-    let faded = [48.0 / 7.0, 6.0 / 7.0, 0.0];
+    // The far corner is 0.1875 m off the plane, past the half-cell cut.
+    // It adds no weight. The near cell is the picture.
     assert!(
-        near(mover_plane.shown, faded),
-        "a mover faded the off-plane corner, showed {:?}, wanted {faded:?}, not pure red and not {leak:?}",
+        near(mover_plane.shown, red),
+        "a mover cut the off-plane corner, showed {:?}, wanted {red:?}, not the leak {leak:?}",
         mover_plane.shown
     );
     assert!(!near(mover_plane.shown, leak));
-    assert!(!near(mover_plane.shown, red));
     assert!(mover_plane.reads.abs() <= ABS);
     assert!((mover_plane.skipped - 1.0).abs() <= ABS);
     assert!((mover_plane.cell_same - 1.0).abs() <= ABS);
@@ -836,7 +907,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     let trail = &words[8 + ROWS * STRIDE..8 + ROWS * STRIDE + TRAILER];
     assert_eq!(trail.len(), TRAILER);
     let orange = [9.0, 1.0, 0.0];
-    let blue_tilt = motion_slant();
+    let object_tilt = {
+        let mut sh = genos_render::lighting_sh::ShL1::default();
+        sh.c[2] = [-4.0, 0.0, 0.0];
+        sh.tilt(red, [0.0, 1.0, 0.0], slant_normal())
+    };
     assert!(
         near([trail[0], trail[1], trail[2]], red),
         "pose A {:?}",
@@ -850,10 +925,11 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     );
     assert!((trail[6] - 1.0).abs() <= ABS, "pose A mutated the cell");
     assert!(
-        near([trail[7], trail[8], trail[9]], blue),
-        "pose B {:?}",
+        near([trail[7], trail[8], trail[9]], red),
+        "pose B showed {:?}, wanted the object cell, not the world blue",
         &trail[7..10]
     );
+    assert!(!near([trail[7], trail[8], trail[9]], blue));
     assert!(trail[10].abs() <= ABS, "pose B reads {}", trail[10]);
     assert!((trail[11] - 1.0).abs() <= ABS);
     assert!(
@@ -862,14 +938,15 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     );
     assert!((trail[13] - 1.0).abs() <= ABS, "leaving A mutated a cell");
     assert!(
-        near([trail[14], trail[15], trail[16]], blue_tilt),
-        "rotated normal showed {:?}, wanted the tilt {blue_tilt:?}, not the axis mean {blue:?}",
+        near([trail[14], trail[15], trail[16]], object_tilt),
+        "rotated normal showed {:?}, wanted the object tilt {object_tilt:?}, not the axis mean {red:?}",
         &trail[14..17]
     );
     assert!(
-        (blue_tilt[0] - blue[0]).abs() > 0.5,
-        "tilt stayed on the mean {blue_tilt:?}"
+        (object_tilt[0] - red[0]).abs() > 0.5,
+        "tilt stayed on the mean {object_tilt:?}"
     );
+    assert!(!near([trail[14], trail[15], trail[16]], red));
     assert!(!near([trail[14], trail[15], trail[16]], blue));
     assert!(trail[17].abs() <= ABS);
     assert!((trail[18] - 1.0).abs() <= ABS);
@@ -881,13 +958,13 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
     assert!(trail[22].abs() <= ABS);
     assert!((trail[23] - 1.0).abs() <= ABS);
     assert!(
-        near([trail[24], trail[25], trail[26]], green),
-        "yawed -Z {:?}",
+        near([trail[24], trail[25], trail[26]], orange),
+        "yawed face showed {:?}, wanted the object-local orange cell, not the world green",
         &trail[24..27]
     );
     assert!(
-        !near([trail[24], trail[25], trail[26]], orange),
-        "yaw kept the old axis"
+        !near([trail[24], trail[25], trail[26]], green),
+        "yaw picked up the world cell at the new axis"
     );
     assert!(trail[27].abs() <= ABS);
     assert!((trail[28] - 1.0).abs() <= ABS);
@@ -972,51 +1049,8 @@ fn covered_pixels_skip_screen_probe_indirect_and_the_rest_keep_it() {
         "this dispatch presents nothing"
     );
     assert_eq!(
-        skip, 47,
+        skip, 43,
         "every indirect call skips the removed screen-probe read"
-    );
-
-    let step_at = 8 + ROWS * STRIDE + TRAILER + PARITY;
-    let step = &words[step_at..step_at + STEP];
-    let gate_on = [step[0], step[1], step[2]];
-    let gate_past = [step[4], step[5], step[6]];
-    assert!(
-        (step[3] - 1.0).abs() <= ABS && (step[7] - 1.0).abs() <= ABS,
-        "the cell stays accepted across the half-cell gate, trust {} then {}",
-        step[3],
-        step[7]
-    );
-    assert!(
-        near(gate_on, red),
-        "on the cell the mover showed {gate_on:?}, wanted {red:?}"
-    );
-    assert!(
-        near(gate_past, red),
-        "5 mm past the half-cell gate the mover showed {gate_past:?}, wanted {red:?}"
-    );
-    let gate_gap = rec709(red);
-    let gate_jump = (rec709(gate_on) - rec709(gate_past)).abs();
-    assert!(
-        gate_jump <= 0.05 * gate_gap,
-        "GI stepped {gate_jump} across the half-cell gate; the cell is {gate_gap}"
-    );
-    let before = [step[8], step[9], step[10]];
-    let after = [step[11], step[12], step[13]];
-    let want_before = [4.32, 0.0, 3.22];
-    let want_after = [3.68, 0.0, 3.78];
-    assert!(
-        near(before, want_before),
-        "1 cm before the cell boundary showed {before:?}, wanted {want_before:?}"
-    );
-    assert!(
-        near(after, want_after),
-        "1 cm after the cell boundary showed {after:?}, wanted {want_after:?}"
-    );
-    let cell_gap = (rec709(red) - rec709([0.0, 0.0, 7.0])).abs();
-    let tangent_jump = (rec709(before) - rec709(after)).abs();
-    assert!(
-        tangent_jump < 0.25 * cell_gap,
-        "GI stepped {tangent_jump} across 2 cm of a cell boundary; the two cells differ by {cell_gap}"
     );
 
     let parity = &words[8 + ROWS * STRIDE + TRAILER..8 + ROWS * STRIDE + TRAILER + PARITY];
@@ -1302,9 +1336,14 @@ fn readonly_compose_drops_a_stale_detail_seed_and_keeps_a_parent_seed() {
 
     let moved = &rows[7];
     assert!(
-        near(moved.shown, [0.0, 0.0, 7.0]),
-        "read-only mover on the blue cell showed {:?}",
+        near(moved.shown, [7.0, 3.0, 1.0]),
+        "read-only mover showed {:?}, wanted its object cell, not the world blue",
         moved.shown
+    );
+    assert!(
+        near(moved.cell, [0.0, 0.0, 7.0]),
+        "the world cell changed to {:?}",
+        moved.cell
     );
     assert!(moved.reads.abs() <= ABS);
     assert!((moved.skipped - 1.0).abs() <= ABS);

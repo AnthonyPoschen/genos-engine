@@ -24,8 +24,8 @@ const CACHE_BYTES: u64 = SLOTS * 392;
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
 // Row 34 is the trust-0 pop. Rows 35 and 36 are the settled mover and the
 // coarse miss. 8 head words, 37 rows of 17, the 40-word motion trailer, then
-// the 32-word lattice parity, then the 14-word cell-step measurement.
-const OUT_FLOATS: usize = 8 + 37 * 17 + 40 + 32 + 14;
+// the 32-word lattice parity, then the 107-word slide measurement.
+const OUT_FLOATS: usize = 8 + 37 * 17 + 40 + 32 + 107;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 3;

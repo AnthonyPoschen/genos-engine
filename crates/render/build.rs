@@ -505,10 +505,30 @@ fn compile_texel_detail(
         return path;
     }
     let mut bytes = std::fs::read(&path).expect("texel detail spirv");
-    let mut i = 5usize;
     let n = bytes.len() / 4;
+    let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut i = 5usize;
+    while i < n {
+        let word = u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("spirv word"));
+        let count = usize::try_from(word >> 16).expect("spirv word count");
+        let op = word & 0xffff;
+        if count == 0 || i + count > n {
+            panic!("texel detail spirv is truncated");
+        }
+        if op == 5 && count >= 3 {
+            let id = u32::from_le_bytes(bytes[(i + 1) * 4..(i + 2) * 4].try_into().expect("name id"));
+            let raw = &bytes[(i + 2) * 4..(i + count) * 4];
+            let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+            if let Ok(name) = std::str::from_utf8(&raw[..end]) {
+                names.insert(id, name.to_string());
+            }
+        }
+        i += count;
+    }
+    let mut i = 5usize;
     let mut fn_ctrl: Option<usize> = None;
     let mut fn_start = 0usize;
+    let mut fn_id = 0u32;
     while i < n {
         let word = u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().expect("spirv word"));
         let count = usize::try_from(word >> 16).expect("spirv word count");
@@ -519,11 +539,20 @@ fn compile_texel_detail(
         if op == 54 && count >= 4 {
             fn_ctrl = Some(i + 3);
             fn_start = i;
+            fn_id = u32::from_le_bytes(bytes[(i + 2) * 4..(i + 3) * 4].try_into().expect("fn id"));
         } else if op == 56 {
-            // Only the large functions. Marking every helper DontInline keeps a
-            // separate copy of each and the compiler heap does not fit.
+            // Only the large functions, plus the slide's shade calls. Marking
+            // every helper DontInline keeps a separate copy of each and the
+            // compiler heap does not fit. Leaving the shade calls inline makes
+            // lavapipe copy them once per slide step and the 16 GiB cgroup
+            // kills the compile.
+            let name = names.get(&fn_id).map(String::as_str).unwrap_or("");
+            let shade = name.contains("lighting_screen_probe_indirect")
+                || name.contains("prod_shade")
+                || name.contains("prod_world_shade")
+                || name.contains("prod_slide");
             if let Some(ctrl_i) = fn_ctrl {
-                if i - fn_start > 1000 {
+                if shade || i - fn_start > 1000 {
                     let at = ctrl_i * 4;
                     let ctrl =
                         u32::from_le_bytes(bytes[at..at + 4].try_into().expect("spirv control"));

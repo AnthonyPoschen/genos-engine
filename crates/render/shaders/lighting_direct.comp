@@ -162,14 +162,20 @@ void main() {
     uint tdl_sig = 0u;
     vec3 n_hit = n;
     if (LIGHTING_TDL && idx >= pixels && lighting_world_mode() == 3u && !lighting_grad_check_ray(ray)) {
-        uint ts = lighting_cache_find_sized(pos, n, false, LIGHTING_SC_TEXEL, pos);
+        float tdl_salt = lighting_obj_salt;
+        vec3 tdl_pos = pos;
+        vec3 tdl_n = n;
+        lighting_mover_frame(tdl_pos, tdl_n);
+        uint ts = lighting_cache_find_sized(tdl_pos, tdl_n, false, LIGHTING_SC_TEXEL, tdl_pos);
         // A hit off screen has no pixel texel, only the hit patch its bounce
         // lookup claimed (lighting_cache_irradiance). Its direct light is held
         // there too; without it each such hit walked every lamp in range every
         // relight (~80 % of the GI-on direct pass's lamp work, gi-on-direct-fix.md).
+        // A mover hit looks up the object-local entry, not a world cell.
         if (ts == ~0u) {
-            ts = lighting_cache_find_sized(pos, n, false, lighting_hit_size_n(pos, n), pos);
+            ts = lighting_cache_find_sized(tdl_pos, tdl_n, false, lighting_hit_size_n(tdl_pos, tdl_n), tdl_pos);
         }
+        lighting_obj_salt = tdl_salt;
         vec3 tp;
         vec3 tn;
         if (ts != ~0u && lighting_sc_texel_world(ts, tp, tn)) {

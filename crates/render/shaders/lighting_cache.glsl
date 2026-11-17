@@ -2312,25 +2312,17 @@ struct LightingShField {
 // stored under. The tilt uses n, not that axis. A corner is left out when it
 // is missing, has no samples, is stale, faces away (dot <= 0, the other side
 // of a thin wall), or its stored point is more than half a cell off the query
-// plane. A mover's display read fades that last corner out from half a cell
-// to one cell instead of cutting it off. Left-out corners add no weight, so
-// they do not darken the blend. A black mean with samples is light and does.
-// w is 1 when any corner remains.
+// plane. The same half-cell cut applies to every read, including a mover.
+// Left-out corners add no weight, so they do not darken the blend. A black
+// mean with samples is light and does. w is 1 when any corner remains.
 // `claim` stamps a corner this read accepted. It does not allocate. The seed
 // and the coverage test pass false, so a one-way read does not write the cell.
 // An empty read stamps nothing.
 // Mean trust of the corners the last blend accepted, sets over
 // LIGHTING_SC_FULL_SETS. 0 when nothing was accepted. A black mean with
-// sets still counts; radiance is not the populated test.
+// sets still counts; radiance is not the populated test. Display trust of a
+// kept read is 1. This ratio stays the ray cut, not the mix weight.
 float lighting_sh_blend_trust = 0.0;
-// Mover display (texel detail on) fades a corner past the half-cell plane
-// gate. Static gathers and the ray-cut walk leave this false and keep the cut.
-// Weight is 1 on the gate and 0 one cell off the plane.
-bool lighting_sh_smooth_mover = false;
-float lighting_sh_mover_plane_w(float plane, float limit) {
-    float t = clamp((plane - limit) / max(limit, 1.0e-4), 0.0, 1.0);
-    return 1.0 - t * t * (3.0 - 2.0 * t);
-}
 // Compose compiles define GENOS_COMPOSE_NO_WALK and do not contain this walk.
 #ifndef GENOS_COMPOSE_NO_WALK
 LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
@@ -2375,15 +2367,8 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
             continue;
         }
         float plane = abs(dot(cache.v[3u * s].xyz - p, n));
-        float plane_w = 1.0;
         if (plane > LIGHTING_CELL_HALF * cs) {
-            if (!lighting_sh_smooth_mover) {
-                continue;
-            }
-            plane_w = lighting_sh_mover_plane_w(plane, LIGHTING_CELL_HALF * cs);
-            if (!(plane_w > 0.0)) {
-                continue;
-            }
+            continue;
         }
         vec4 v = cache.v[3u * s + 2u];
         if (v.w < LIGHTING_CACHE_HAS_W) {
@@ -2398,7 +2383,7 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
         if (claim && LIGHTING_SC_WRITES) {
             cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
         }
-        float w = tri * facing * plane_w;
+        float w = tri * facing;
         vec3 lit = lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
         float y = dot(max(lit, vec3(0.0)), lw);
         if (!y_set) {
@@ -2464,12 +2449,26 @@ uint lighting_sh_lattice_key(uint ax, uint sgn, vec3 g0) {
     uint h = lighting_hash(floatBitsToUint(g0.x));
     h = lighting_hash(h ^ floatBitsToUint(g0.y));
     h = lighting_hash(h ^ floatBitsToUint(g0.z));
-    return lighting_hash(h ^ ax ^ (sgn << 8u));
+    h = lighting_hash(h ^ ax ^ (sgn << 8u));
+    // Salt 0 keeps the world key. An object id is mixed only when it is set,
+    // so a static lattice record does not move.
+    uint salt = uint(lighting_obj_salt + 0.5);
+    if (salt != 0u) {
+        h = lighting_hash(h ^ salt);
+    }
+    return h;
 }
 // Log-distance shell. Bin 0 is inside one metre. Farther shells are the next
 // powers of two, and the last bin holds everything past that.
 uint lighting_sh_dist_bin(vec3 p) {
-    float d = length(p - scene.eye.xyz);
+    vec3 w = p;
+    if (lighting_obj_salt > 0.5) {
+        uint m = lighting_mover_by_id(lighting_obj_salt);
+        if (m != ~0u) {
+            w = lighting_mover_to_world(m, p, false);
+        }
+    }
+    float d = length(w - scene.eye.xyz);
     if (d < 1.0) {
         return 0u;
     }
@@ -2525,21 +2524,14 @@ vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
             continue;
         }
         float plane = abs(dot(cache.v[3u * s].xyz - p, n));
-        float plane_w = 1.0;
         if (plane > LIGHTING_CELL_HALF * cs) {
-            if (!lighting_sh_smooth_mover) {
-                continue;
-            }
-            plane_w = lighting_sh_mover_plane_w(plane, LIGHTING_CELL_HALF * cs);
-            if (!(plane_w > 0.0)) {
-                continue;
-            }
+            continue;
         }
         vec4 v = cache.v[3u * s + 2u];
         if (v.w < LIGHTING_CACHE_HAS_W || lighting_sc_stale(s)) {
             continue;
         }
-        float w = tri * facing * plane_w;
+        float w = tri * facing;
         sum += w * lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
         ws += w;
         float sets = floor(max(v.w, 0.0));
@@ -2630,7 +2622,8 @@ void lighting_sh_lattice_request(vec3 p, vec3 n, bool claim) {
         return;
     }
     uint word = LIGHTING_SH_LATTICE_AT + slot * LIGHTING_SH_LATTICE_STRIDE;
-    uint pack = ax | (sgn << 2u) | (claim ? 8u : 0u) | (bin << 4u);
+    uint salt = uint(lighting_obj_salt + 0.5);
+    uint pack = ax | (sgn << 2u) | (claim ? 8u : 0u) | (bin << 4u) | (salt << 8u);
     ckeys.key[word + 1u] = pack;
     ckeys.key[word + 2u] = floatBitsToUint(g0.x);
     ckeys.key[word + 3u] = floatBitsToUint(g0.y);
@@ -2651,6 +2644,8 @@ void lighting_sh_lattice_fill_word(uint word) {
     uint ax = pack & 3u;
     uint sgn = (pack >> 2u) & 1u;
     bool claim = (pack & 8u) != 0u;
+    float saved_salt = lighting_obj_salt;
+    lighting_obj_salt = float(pack >> 8u);
     vec3 g0 = vec3(uintBitsToFloat(ckeys.key[word + 2u]), uintBitsToFloat(ckeys.key[word + 3u]), uintBitsToFloat(ckeys.key[word + 4u]));
     vec3 an = vec3(0.0);
     an[ax] = sgn == 1u ? -1.0 : 1.0;
@@ -2671,6 +2666,7 @@ void lighting_sh_lattice_fill_word(uint word) {
         }
         ckeys.key[word + 6u + k] = s;
     }
+    lighting_obj_salt = saved_salt;
 }
 void lighting_sh_lattice_commit(vec3 p, vec3 n, bool claim) {
     lighting_sh_lattice_request(p, n, claim);
@@ -2967,6 +2963,22 @@ vec4 lighting_sc_own_shown(uint slot) {
 // as before, which falls back to its lit neighbours, never black.
 const float LIGHTING_SC_READ_SETS = 4.0;
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n);
+vec3 lighting_cache_irradiance_framed(vec3 pos, vec3 n);
+// A world-space hit on a mover becomes that object's local entry. A call that
+// already set the salt (the display path, or this wrapper) is left as it is,
+// so a local coordinate is not transformed a second time.
+void lighting_mover_frame(inout vec3 pos, inout vec3 n) {
+    if (lighting_obj_salt >= 0.5 || lighting_world_mode() != 3u) {
+        return;
+    }
+    uint om = lighting_mover_on(pos, n);
+    if (om == ~0u) {
+        return;
+    }
+    lighting_obj_salt = lighting_mover(om, 1u).w;
+    pos = lighting_mover_to_local(om, pos, false);
+    n = lighting_mover_to_local(om, n, true);
+}
 // While lamps settle, a cache ray (lighting_direct.comp) reads a cell not relit
 // since the change at only the share the change surely left (lighting_lamp_keep):
 // old light can't feed back into the new sets past its new level, and
@@ -2977,7 +2989,7 @@ float lighting_lamp_keep(vec3 p, uint updated);
 float lighting_gather_keep(vec3 p, uint s) {
     return lighting_gather_strict ? lighting_lamp_keep(p, lighting_sc_updated(s)) : LIGHTING_KEEP_ALL;
 }
-vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
+vec3 lighting_cache_irradiance_at_framed(vec3 pos, vec3 n, float t) {
     if (!lighting_bounce_ok()) {
         return vec3(0.0);
     }
@@ -3000,11 +3012,11 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
             }
         }
     }
-    return lighting_cache_irradiance(pos, n);
+    return lighting_cache_irradiance_framed(pos, n);
 }
 
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
-vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
+vec3 lighting_cache_irradiance_framed(vec3 pos, vec3 n) {
     if (!lighting_bounce_ok()) {
         return vec3(0.0);
     }
@@ -3100,6 +3112,22 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
         lighting_bounce_path = 1u;
     }
     return e.rgb;
+}
+
+vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
+    float saved = lighting_obj_salt;
+    lighting_mover_frame(pos, n);
+    vec3 e = lighting_cache_irradiance_at_framed(pos, n, t);
+    lighting_obj_salt = saved;
+    return e;
+}
+
+vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
+    float saved = lighting_obj_salt;
+    lighting_mover_frame(pos, n);
+    vec3 e = lighting_cache_irradiance_framed(pos, n);
+    lighting_obj_salt = saved;
+    return e;
 }
 
 // S70A indirect dispatch (Anthony: GPU-resident, no work sized on the CPU): a
@@ -4248,25 +4276,21 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     uint mode = lighting_world_mode();
     // Detail off (GENOS_LIGHTING_SC_LOCAL=1): a mover still reads object-local
     // texels, trust 0, and is not a detail candidate. Detail on returns above
-    // that, before the local transform, through lighting_sh_read with claim
-    // false. That call does not enter the object-local texel loop.
+    // that, after the local transform, through the same neighbour blend with
+    // claim false. That call does not enter the object-local texel loop.
     uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
-    // Detail on: a mover shows the world-cell read at this world position and
-    // true normal. One store, salt 0. It does not enter the object-local texel
-    // loop, does not seed, and does not stamp (claim stays false). A corner
-    // past the half-cell plane gate fades out across the next half cell, so
-    // the 25 cm grid does not step as the surface crosses it. An empty read
-    // has w = 0, so a coarse miss keeps the fine world colour. Detail off
-    // still uses the object frame below.
+    // Detail on: a mover reads and shows object-local cells in this same table.
+    // The query is transformed each frame. Claim stays false. The plane cut is
+    // the same half-cell gate as a static read. Trust is 1 even when the read
+    // is empty, so a world cell the box left behind is not mixed in. Detail
+    // off still uses the object-local texel path below.
     if (om != ~0u && lighting_sh_texel_detail_on()) {
+        lighting_obj_salt = lighting_mover(om, 1u).w;
+        vec3 lpos = lighting_mover_to_local(om, pos, false);
+        vec3 ln = lighting_mover_to_local(om, n, true);
+        vec4 sh = lighting_sh_compose_lattice(lpos, ln, false);
         lighting_obj_salt = 0.0;
-        lighting_sh_smooth_mover = true;
-        vec4 sh = lighting_sh_compose_lattice(pos, n, false);
-        lighting_sh_smooth_mover = false;
-        if ((lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
-            return vec4(sh.rgb, 1.0);
-        }
-        return sh;
+        return vec4(max(sh.rgb, vec3(0.0)), 1.0);
     }
     vec3 lpos = pos;
     vec3 ln = n;
@@ -4430,14 +4454,12 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         bool detail_candidate = lighting_sh_texel_detail_on() && !obj && split && cache.v[3u * slot + 2u].w < LIGHTING_CACHE_HAS_W;
         bool detail_kept = false;
         vec3 detail_rgb = vec3(0.0);
-        float detail_trust = 0.0;
         if (detail_candidate) {
 #ifdef GENOS_COMPOSE_NO_WALK
             if (LIGHTING_SC_WRITES) {
                 lighting_sh_enqueue_texel(slot, q);
             }
             vec4 detail = lighting_sh_compose_lattice(q, n, false);
-            detail_trust = lighting_sh_blend_trust;
             if (detail.w > LIGHTING_CACHE_HAS_W) {
                 detail_rgb = detail.rgb;
                 detail_kept = true;
@@ -4447,7 +4469,6 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 cache.v[LIGHTING_SC_SPARSE_AT + slot].z = 0.0;
             }
             vec4 detail = lighting_sh_read(q, n, false);
-            detail_trust = lighting_sh_blend_trust;
             if (detail.w > LIGHTING_CACHE_HAS_W) {
                 if (detail_candidate && LIGHTING_SC_WRITES) {
                     lighting_sc_set_seed(slot, detail.rgb, LIGHTING_SH_DETAIL_CONF, 0.0);
@@ -4485,6 +4506,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         // overwrite them. A corner that never sets one keeps the unset shade.
         uint corner_path = lighting_px_shade;
         bool corner_parent = false;
+        bool hit_filled = false;
         vec4 v;
         if (detail_kept) {
             v = vec4(detail_rgb, 1.0);
@@ -4516,6 +4538,7 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
             // Path leaves 2 only when the cell had sets. A zero mean is still that cell.
             if (lighting_bounce_path != 2u) {
                 v = vec4(hc, 1.0);
+                hit_filled = true;
                 corner_parent = lighting_bounce_path == 3u;
                 corner_path = corner_parent ? 4u : 7u;
                 if (split) {
@@ -4562,8 +4585,12 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
         float sets = floor(max(own_w, 0.0));
         float sc_trust = 0.0;
         if (!stale) {
-            if (detail_kept) {
-                sc_trust = clamp(detail_trust, 0.0, 1.0);
+            if (detail_kept || (hit_filled && !obj)) {
+                // Population trust stays lighting_sh_blend_trust (sets/64) for
+                // the ray cut. The mix weight of a kept read, and of a hit
+                // cell that is the pixel, is 1. A detail-off mover stays on
+                // its set count so trust 0 still shows that cell.
+                sc_trust = 1.0;
             } else if (sets >= LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF) {
                 // A full count, including a real zero, is the texel.
                 sc_trust = 1.0;
@@ -6009,6 +6036,35 @@ uint lighting_sc_seed_word(uint slot) {
 void lighting_sc_forget(uint slot) {
     ckeys.key[lighting_sc_offer_word(slot)] = 0u;
     ckeys.key[lighting_sc_seed_word(slot)] = 0u;
+}
+// A world cell a mover is sitting on is dropped now. A world hit cell inside
+// this frame's change volume is dropped once nothing has read it for two
+// frames. An object-local entry is kept. A floor the picture or the rays
+// still touch keeps its stamp and stays for the change-list relight.
+bool lighting_sc_drop_stale_mover_world(uint slot) {
+    if (!LIGHTING_SC_WRITES || lighting_world_mode() != 3u || slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    if (ckeys.key[slot] == 0u || cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5) {
+        return false;
+    }
+    vec3 p = cache.v[3u * slot].xyz;
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float size = cache.v[3u * slot + 1u].w;
+    bool on = lighting_mover_on(p, n) != ~0u;
+    bool aged = false;
+    if (!on && size > 0.2 && lighting_near_change(p)) {
+        uint last = floatBitsToUint(cache.v[3u * slot].w);
+        aged = last == 0u || int(lighting_frame() - last) > 2;
+    }
+    if (!on && !aged) {
+        return false;
+    }
+    ckeys.key[slot] = 0u;
+    lighting_sc_forget(slot);
+    cache.v[3u * slot + 1u] = vec4(0.0);
+    cache.v[3u * slot + 2u] = vec4(0.0);
+    return true;
 }
 // Distance in bits 21..30 (plus one, so a real offer is never 0). Bit 31 stays
 // clear: glslc lowers atomicMin to a signed min, and a set sign bit would
