@@ -2,7 +2,8 @@
 //!
 //! The record holds a ground payload, an aircraft payload, and a space payload.
 //! This stage applies the wheeled ground spring-damper, the three-point slip
-//! curve when a wheel has a positive radius, steady aircraft lift, drag, and
+//! curve when a wheel has a positive radius, a gearbox and an open differential
+//! when the ground payload has a drive block, steady aircraft lift, drag, and
 //! thrust, including both on one landing chassis, and the space thrusters. Sea
 //! is not a field. A thruster writes force and torque through [`integrate_wrench`].
 //! The existing gyroscopic step then consumes that angular velocity. There is
@@ -33,7 +34,8 @@ pub enum GroundContact {
 /// chassis toward the surface.
 ///
 /// Slip force is off when `radius` is not positive. G1 leaves it at 0. The
-/// game writes `omega`. This stage does not integrate it.
+/// game writes `omega` unless the ground payload has a [`Drive`]. With a drive
+/// block, this stage integrates `omega` from the axle share and the tyre reaction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Wheel {
     pub local_position: Vec3,
@@ -55,6 +57,10 @@ pub struct Wheel {
     /// `max(planar speed, slip_denom)`. The plan names this term and does not
     /// give a number. The default here is 1.
     pub slip_denom: f32,
+    /// The open differential writes this wheel a share of the axle torque.
+    pub driven: bool,
+    /// Wheel inertia, kg·m². Not positive means the step does not integrate `omega`.
+    pub inertia: f32,
 }
 
 /// Four wheel rays and the last length of each ray.
@@ -64,6 +70,28 @@ pub struct Wheel {
 pub struct WheeledGround {
     pub wheels: [Wheel; 4],
     pub lengths: [f32; 4],
+    /// Engine, gearbox, and open differential. `None` leaves `omega` as the game wrote it.
+    pub drive: Option<Drive>,
+}
+
+/// Torque curve, gearbox, and clutch on one chassis.
+///
+/// `curve_rpm` and `curve_torque` are a table of `(rpm, N·m)`, in ascending
+/// rpm, length `curve_count` (at most 8). `ratios` includes a negative reverse.
+/// `gear` is an index the game sets. `clutch` is 0 or 1: only the bit pattern
+/// of `1.0` engages. Engine speed is the mean driven-wheel `omega` through the
+/// engaged ratio and `final_drive`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drive {
+    pub throttle: f32,
+    pub clutch: f32,
+    pub gear: i8,
+    pub final_drive: f32,
+    pub ratios: [f32; 8],
+    pub ratio_count: u8,
+    pub curve_rpm: [f32; 8],
+    pub curve_torque: [f32; 8],
+    pub curve_count: u8,
 }
 
 /// Steady lift, drag, and thrust through the centre of mass.
@@ -147,6 +175,60 @@ pub fn locked_wheel_world() -> World {
     world
 }
 
+/// The P29 fixture. The settled G1 chassis at rest, all four wheels driven.
+///
+/// Radius 0.3 m, inertia 0.5 kg·m². Throttle 1, clutch engaged, gear 0,
+/// ratio 3, reverse ratio −3, final drive 1. The curve is 200 N·m from 0 rpm
+/// to 5 000 rpm. `sleep_time` is 10 s.
+#[must_use]
+pub fn first_gear_world() -> World {
+    let mut world = World::new(GRAVITY);
+    world.sleep_time = 10.0;
+    world.insert(Body::plane(Vec3::Y, 0.0));
+    let mut chassis = Body::cuboid(
+        Vec3::new(0.0, 0.384_469, 0.0),
+        1_200.0,
+        Vec3::new(1.2, 0.15, 0.7),
+    );
+    chassis.friction = 0.6;
+    chassis.restitution = 0.0;
+    chassis.motion = MotionQuality::Discrete;
+    let index = world.insert(chassis);
+    let mut vehicle = g1_vehicle(index);
+    if let Some(GroundContact::Wheeled(ref mut ground)) = vehicle.ground {
+        for wheel in &mut ground.wheels {
+            wheel.radius = 0.3;
+            wheel.driven = true;
+            wheel.inertia = 0.5;
+        }
+        ground.drive = Some(plan_drive());
+    }
+    world.vehicles.push(vehicle);
+    world
+}
+
+fn plan_drive() -> Drive {
+    let mut ratios = [0.0; 8];
+    ratios[0] = 3.0;
+    ratios[1] = -3.0;
+    let mut curve_rpm = [0.0; 8];
+    curve_rpm[1] = 5_000.0;
+    let mut curve_torque = [0.0; 8];
+    curve_torque[0] = 200.0;
+    curve_torque[1] = 200.0;
+    Drive {
+        throttle: 1.0,
+        clutch: 1.0,
+        gear: 0,
+        final_drive: 1.0,
+        ratios,
+        ratio_count: 2,
+        curve_rpm,
+        curve_torque,
+        curve_count: 2,
+    }
+}
+
 /// The S1 fixture: one offset thruster on a 1 000 kg cube, gravity zero.
 ///
 /// Local position `(0, 2, 0)`, direction local +X, `max_force` 1 000, throttle 1.
@@ -192,6 +274,7 @@ fn g1_vehicle(chassis: usize) -> Vehicle {
         ground: Some(GroundContact::Wheeled(WheeledGround {
             wheels: g1_wheels(0.6),
             lengths: [0.4, 0.4, 0.4, 0.4],
+            drive: None,
         })),
         aircraft: None,
         space: None,
@@ -237,6 +320,8 @@ fn g1_wheels(max_length: f32) -> [Wheel; 4] {
         slip_peak: 0.1,
         mu_slide: 0.7,
         slip_denom: 1.0,
+        driven: false,
+        inertia: 0.0,
     };
     [
         wheel(Vec3::new(1.0, 0.0, 0.5)),
@@ -256,6 +341,7 @@ pub fn gear_miss_world() -> World {
         vehicle.ground = Some(GroundContact::Wheeled(WheeledGround {
             wheels: g1_wheels(0.5),
             lengths: [0.4, 0.4, 0.4, 0.4],
+            drive: None,
         }));
     }
     world
@@ -288,6 +374,7 @@ pub fn gear_plane_world() -> World {
         ground: Some(GroundContact::Wheeled(WheeledGround {
             wheels: g1_wheels(0.6),
             lengths: [0.4, 0.4, 0.4, 0.4],
+            drive: None,
         })),
         aircraft: Some(aircraft),
         space: None,
@@ -379,21 +466,26 @@ pub(crate) fn wake_sleeping_thrusters(world: &mut World) {
 /// the thruster uses. Aircraft force acts at the centre of mass. The aircraft
 /// sample runs before the thruster and before the ground push. Wheel index
 /// order is the only ground order. Each wheel applies its spring, then its
-/// slip force. Both use the velocity from the start of this pass.
+/// slip force. Both use the velocity from the start of this pass. With a drive
+/// block, wheel spin is integrated before the slip force, from that same
+/// velocity, and the force uses the updated spin.
 pub(crate) fn apply(world: &mut World, dt: f32) {
     world.step_stats.vehicle_count = u32::try_from(world.vehicles.len()).unwrap_or(u32::MAX);
     let mut rays = 0_u32;
     let mut contacts = 0_u32;
+    let mut driven = 0_u32;
     let count = world.vehicles.len();
     for index in 0..count {
         apply_aircraft(world, index, dt);
         apply_space(world, index, dt);
-        let (cast, slips) = apply_ground(world, index, dt);
+        let (cast, slips, wrote) = apply_ground(world, index, dt);
         rays = rays.saturating_add(cast);
         contacts = contacts.saturating_add(slips);
+        driven = driven.saturating_add(wrote);
     }
     world.step_stats.wheel_rays = rays;
     world.step_stats.tyre_contacts = contacts;
+    world.step_stats.drive_wheels = driven;
 }
 
 /// True when this chassis must stay awake the way a motor does.
@@ -583,18 +675,18 @@ fn finite_vec(value: Vec3) -> bool {
     value.x.is_finite() && value.y.is_finite() && value.z.is_finite()
 }
 
-fn apply_ground(world: &mut World, index: usize, dt: f32) -> (u32, u32) {
+fn apply_ground(world: &mut World, index: usize, dt: f32) -> (u32, u32, u32) {
     let Some(vehicle) = world.vehicles.get(index).copied() else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let Some(GroundContact::Wheeled(mut ground)) = vehicle.ground else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     let Some(chassis) = world.bodies.get(vehicle.chassis).copied() else {
-        return (0, 0);
+        return (0, 0, 0);
     };
     if chassis.presence != Presence::Live || chassis.inverse_mass == 0.0 || chassis.sleeping {
-        return (0, 0);
+        return (0, 0, 0);
     }
     let mut pushes = [None; 4];
     for (wheel_index, wheel) in ground.wheels.iter().enumerate() {
@@ -608,13 +700,36 @@ fn apply_ground(world: &mut World, index: usize, dt: f32) -> (u32, u32) {
     }
     let mut body = chassis;
     let mut slips = 0_u32;
-    for push in pushes {
+    for push in &pushes {
         let Some(push) = push else {
             continue;
         };
         accelerate(&mut body, push.arm, push.suspension, dt);
-        if push.slip.length_squared() > 0.0 {
-            accelerate(&mut body, push.arm, push.slip, dt);
+    }
+    let wrote = spin_wheels(&mut ground, &chassis, &pushes, dt);
+    // A driven wheel's slip force is the force at the updated spin. Using the
+    // pre-update spin applies the tyre's full slope one step late and the
+    // chassis speed oscillates through zero.
+    let driven = ground.drive.is_some();
+    for (index, push) in pushes.iter().enumerate() {
+        let Some(push) = push else {
+            continue;
+        };
+        let slip = if driven {
+            ground.wheels.get(index).map_or(Vec3::ZERO, |wheel| {
+                slip_force(
+                    &chassis,
+                    wheel,
+                    push.direction,
+                    push.arm,
+                    push.suspension.length(),
+                )
+            })
+        } else {
+            push.slip
+        };
+        if slip.length_squared() > 0.0 {
+            accelerate(&mut body, push.arm, slip, dt);
             slips = slips.saturating_add(1);
         }
     }
@@ -624,10 +739,14 @@ fn apply_ground(world: &mut World, index: usize, dt: f32) -> (u32, u32) {
     }
     if let Some(stored) = world.vehicles.get_mut(index) {
         if let Some(GroundContact::Wheeled(slot)) = &mut stored.ground {
-            slot.lengths = ground.lengths;
+            *slot = ground;
         }
     }
-    (u32::try_from(ground.wheels.len()).unwrap_or(0), slips)
+    (
+        u32::try_from(ground.wheels.len()).unwrap_or(0),
+        slips,
+        wrote,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -635,6 +754,7 @@ struct ContactPush {
     arm: Vec3,
     suspension: Vec3,
     slip: Vec3,
+    direction: Vec3,
 }
 
 fn accelerate(body: &mut Body, arm: Vec3, force: Vec3, dt: f32) {
@@ -674,8 +794,264 @@ fn sample_wheel(
             arm,
             suspension,
             slip,
+            direction,
         }),
     )
+}
+
+/// Axle share plus the tyre reaction. No drive block leaves `omega` alone.
+///
+/// Where the drive force fits in the rising part of the slip curve, the
+/// reaction slope is integrated implicitly. Explicit Euler at `1/60` steps
+/// over that slope and flips the sign of `omega`.
+fn spin_wheels(
+    ground: &mut WheeledGround,
+    chassis: &Body,
+    pushes: &[Option<ContactPush>; 4],
+    dt: f32,
+) -> u32 {
+    let Some(drive) = ground.drive else {
+        return 0;
+    };
+    let share = drive_share(&drive, ground);
+    let mut wrote = 0_u32;
+    for (index, wheel) in ground.wheels.iter_mut().enumerate() {
+        if !(wheel.inertia > 0.0) || !wheel.inertia.is_finite() {
+            continue;
+        }
+        let drive_torque = if wheel.driven { share } else { 0.0 };
+        let push = pushes.get(index).and_then(|item| item.as_ref());
+        let reaction = push.map_or(0.0, |item| tyre_reaction(chassis, wheel, item));
+        let next = advance_omega(
+            wheel.omega,
+            drive_torque,
+            reaction,
+            wheel,
+            chassis,
+            push,
+            dt,
+        );
+        if next.is_finite() {
+            wheel.omega = next;
+        }
+        if wheel.driven && drive_torque.abs() > 0.0 {
+            wrote = wrote.saturating_add(1);
+        }
+    }
+    wrote
+}
+
+/// Implicit step along the linear tyre slope when that slope can balance the drive.
+/// Otherwise one explicit step. Neither path allocates.
+fn advance_omega(
+    omega: f32,
+    drive_torque: f32,
+    reaction: f32,
+    wheel: &Wheel,
+    chassis: &Body,
+    push: Option<&ContactPush>,
+    dt: f32,
+) -> f32 {
+    let explicit = explicit_spin(omega, drive_torque, reaction, wheel.inertia, dt);
+    let Some(push) = push else {
+        return explicit;
+    };
+    let Some(sample) = tyre_sample(chassis, wheel, push) else {
+        return explicit;
+    };
+    let Some(slope) = grip_slope(wheel, sample.denom, sample.load) else {
+        return explicit;
+    };
+    let target = drive_torque / wheel.radius;
+    if !target.is_finite() || target.abs() > sample.max_longitudinal {
+        return explicit;
+    }
+    let free = sample.forward_speed / wheel.radius;
+    let step = dt / wheel.inertia;
+    let denom = 1.0 - step * slope;
+    if !(denom > 1.0e-6) || !free.is_finite() {
+        return explicit;
+    }
+    let next = (omega + step * (drive_torque - slope * free)) / denom;
+    if next.is_finite() {
+        next
+    } else {
+        explicit
+    }
+}
+
+fn explicit_spin(omega: f32, drive_torque: f32, reaction: f32, inertia: f32, dt: f32) -> f32 {
+    if !(inertia > 0.0) {
+        return omega;
+    }
+    let delta = (drive_torque + reaction) * dt / inertia;
+    if delta.is_finite() {
+        omega + delta
+    } else {
+        omega
+    }
+}
+
+struct TyreSample {
+    forward_speed: f32,
+    denom: f32,
+    load: f32,
+    max_longitudinal: f32,
+}
+
+fn tyre_sample(chassis: &Body, wheel: &Wheel, push: &ContactPush) -> Option<TyreSample> {
+    let heading = plane_heading(chassis, push.direction)?;
+    let lateral = push.direction.cross(heading).normalize();
+    if lateral.length_squared() == 0.0 || !(wheel.radius > 0.0) {
+        return None;
+    }
+    let at_point = chassis.velocity + chassis.angular_velocity.cross(push.arm);
+    let planar = at_point - push.direction * at_point.dot(push.direction);
+    let forward_speed = planar.dot(heading);
+    let lateral_speed = planar.dot(lateral);
+    let denom = planar.length().max(wheel.slip_denom);
+    let load = push.suspension.length();
+    if !(load > 0.0) || !(denom > 1.0e-8) || !forward_speed.is_finite() {
+        return None;
+    }
+    let mu_lat = signed_curve(slip_angle(lateral_speed, forward_speed), wheel).abs();
+    let room = if mu_lat < 1.0 {
+        (1.0 - mu_lat * mu_lat).sqrt()
+    } else {
+        0.0
+    };
+    let max_mu = wheel.mu_peak.min(room).max(0.0);
+    Some(TyreSample {
+        forward_speed,
+        denom,
+        load,
+        max_longitudinal: (max_mu * load).min(load.abs()),
+    })
+}
+
+/// `d(reaction) / d(omega)` on the rising part of the curve. Negative.
+fn grip_slope(wheel: &Wheel, denom: f32, load: f32) -> Option<f32> {
+    if !(wheel.radius > 0.0)
+        || !(wheel.slip_peak > 0.0)
+        || !(wheel.mu_peak > 0.0)
+        || !(denom > 1.0e-8)
+        || !(load > 0.0)
+    {
+        return None;
+    }
+    let slope = -wheel.radius * wheel.radius * load * wheel.mu_peak / (wheel.slip_peak * denom);
+    (slope.is_finite() && slope < 0.0).then_some(slope)
+}
+
+fn drive_share(drive: &Drive, ground: &WheeledGround) -> f32 {
+    let axle = axle_torque(drive, ground);
+    if !axle.is_finite() {
+        return 0.0;
+    }
+    let mut count: u8 = 0;
+    for wheel in &ground.wheels {
+        if wheel.driven && wheel.inertia > 0.0 && wheel.inertia.is_finite() {
+            count = count.saturating_add(1);
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        axle / f32::from(count)
+    }
+}
+
+fn axle_torque(drive: &Drive, ground: &WheeledGround) -> f32 {
+    if drive.clutch.to_bits() != 1.0_f32.to_bits() || !drive.throttle.is_finite() {
+        return 0.0;
+    }
+    let Some(ratio) = engaged_ratio(drive) else {
+        return 0.0;
+    };
+    if !drive.final_drive.is_finite() {
+        return 0.0;
+    }
+    let engine = mean_driven_omega(ground) * ratio * drive.final_drive;
+    let rpm = engine.abs() * (60.0 / std::f32::consts::TAU);
+    let axle = drive.throttle * curve_torque(drive, rpm) * ratio * drive.final_drive;
+    if axle.is_finite() {
+        axle
+    } else {
+        0.0
+    }
+}
+
+fn engaged_ratio(drive: &Drive) -> Option<f32> {
+    let index = usize::try_from(drive.gear).ok()?;
+    let count = usize::from(drive.ratio_count);
+    if index >= count || index >= drive.ratios.len() {
+        return None;
+    }
+    let ratio = drive.ratios[index];
+    ratio.is_finite().then_some(ratio)
+}
+
+fn mean_driven_omega(ground: &WheeledGround) -> f32 {
+    let mut sum = 0.0;
+    let mut count: u8 = 0;
+    for wheel in &ground.wheels {
+        if wheel.driven && wheel.omega.is_finite() {
+            sum += wheel.omega;
+            count = count.saturating_add(1);
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        sum / f32::from(count)
+    }
+}
+
+/// Linear interpolation. Outside the table the end samples hold.
+fn curve_torque(drive: &Drive, rpm: f32) -> f32 {
+    let count = usize::from(drive.curve_count).min(drive.curve_rpm.len());
+    if count == 0 || !rpm.is_finite() {
+        return 0.0;
+    }
+    let rpm = rpm.abs();
+    if rpm <= drive.curve_rpm[0] {
+        return drive.curve_torque[0];
+    }
+    let last = count - 1;
+    if rpm >= drive.curve_rpm[last] {
+        return drive.curve_torque[last];
+    }
+    let mut index = 0;
+    while index < last {
+        let right = drive.curve_rpm[index + 1];
+        if rpm <= right {
+            let left = drive.curve_rpm[index];
+            let span = right - left;
+            let t = if span > 1.0e-8 {
+                (rpm - left) / span
+            } else {
+                0.0
+            };
+            let low = drive.curve_torque[index];
+            let high = drive.curve_torque[index + 1];
+            return low + (high - low) * t;
+        }
+        index += 1;
+    }
+    drive.curve_torque[last]
+}
+
+/// Ground reaction on the wheel, N·m. A forward slip force slows a positive spin.
+fn tyre_reaction(chassis: &Body, wheel: &Wheel, push: &ContactPush) -> f32 {
+    let Some(heading) = plane_heading(chassis, push.direction) else {
+        return 0.0;
+    };
+    let longitudinal = push.slip.dot(heading);
+    if longitudinal.is_finite() && wheel.radius.is_finite() {
+        -longitudinal * wheel.radius
+    } else {
+        0.0
+    }
 }
 
 /// In-plane force from the three-point slip curve, capped by the spring load.
@@ -938,6 +1314,42 @@ fn conjugate(orientation: Quat) -> Quat {
 }
 
 #[cfg(test)]
+mod curve_tests {
+    use super::{curve_torque, Drive};
+
+    fn sloped() -> Drive {
+        let mut curve_rpm = [0.0; 8];
+        curve_rpm[0] = 1_000.0;
+        curve_rpm[1] = 5_000.0;
+        let mut torque = [0.0; 8];
+        torque[0] = 100.0;
+        torque[1] = 300.0;
+        Drive {
+            throttle: 1.0,
+            clutch: 1.0,
+            gear: 0,
+            final_drive: 1.0,
+            ratios: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ratio_count: 1,
+            curve_rpm,
+            curve_torque: torque,
+            curve_count: 2,
+        }
+    }
+
+    #[test]
+    fn torque_table_interpolates_inside_and_holds_at_the_ends() {
+        let drive = sloped();
+        assert!((curve_torque(&drive, 0.0) - 100.0).abs() < 1.0e-4);
+        assert!((curve_torque(&drive, -500.0) - 100.0).abs() < 1.0e-4);
+        assert!((curve_torque(&drive, 1_000.0) - 100.0).abs() < 1.0e-4);
+        assert!((curve_torque(&drive, 3_000.0) - 200.0).abs() < 1.0e-3);
+        assert!((curve_torque(&drive, 5_000.0) - 300.0).abs() < 1.0e-4);
+        assert!((curve_torque(&drive, 9_000.0) - 300.0).abs() < 1.0e-4);
+    }
+}
+
+#[cfg(test)]
 mod slip_angle_tests {
     use super::{plane_heading, slip_force, Wheel};
     use crate::{Body, MotionQuality};
@@ -958,6 +1370,8 @@ mod slip_angle_tests {
             slip_peak: 0.1,
             mu_slide: 0.7,
             slip_denom: 1.0,
+            driven: false,
+            inertia: 0.0,
         }
     }
 

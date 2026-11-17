@@ -1,7 +1,8 @@
 //! Wheeled ground. The chassis is one body. The wheels are rays.
 //!
 //! G1 is the spring. P28 is the three-point slip curve on that ray.
-//! The gearbox and steering are not in this stage.
+//! P29 spins driven wheels from a gearbox and an open differential.
+//! Steering is not in this stage.
 
 use genos_math::{Quat, Vec3};
 use genos_physics::{
@@ -29,6 +30,7 @@ fn a_chassis_rests_on_four_springs() {
         assert_eq!(world.step_stats.wheel_rays, 4);
         assert_eq!(world.step_stats.vehicle_count, 1);
         assert_eq!(world.step_stats.tyre_contacts, 0);
+        assert_eq!(world.step_stats.drive_wheels, 0);
         assert!(same_pose(&world, &twin), "two runs diverged");
     }
     let body = chassis(&world);
@@ -79,6 +81,7 @@ fn a_parked_chassis_sleeps_and_stops_casting() {
     assert_eq!(world.step_stats.wheel_rays, 0);
     assert_eq!(world.step_stats.vehicle_count, 1);
     assert_eq!(world.step_stats.tyre_contacts, 0);
+    assert_eq!(world.step_stats.drive_wheels, 0);
 }
 
 #[test]
@@ -178,6 +181,7 @@ fn a_world_without_a_vehicle_casts_no_rays() {
     assert_eq!(world.step_stats.wheel_rays, 0);
     assert_eq!(world.step_stats.vehicle_count, 0);
     assert_eq!(world.step_stats.tyre_contacts, 0);
+    assert_eq!(world.step_stats.drive_wheels, 0);
     assert_eq!(world.vehicles.len(), 0);
 }
 
@@ -199,6 +203,7 @@ fn a_locked_wheel_slows_the_car_and_a_free_wheel_rolls() {
         locked_body.velocity
     );
     assert_eq!(locked.step_stats.tyre_contacts, 4);
+    assert_eq!(locked.step_stats.drive_wheels, 0);
     assert_eq!(locked.step_stats.wheel_rays, 4);
     assert!(!locked.step_stats.ccd_applied);
     assert_eq!(locked.step_stats.toi_failed, 0);
@@ -226,10 +231,237 @@ fn a_locked_wheel_slows_the_car_and_a_free_wheel_rolls() {
         chassis(&mute).velocity
     );
     assert_eq!(mute.step_stats.tyre_contacts, 0);
+    assert_eq!(mute.step_stats.drive_wheels, 0);
     assert!(
         locked_speed < mute_speed,
         "locked was not slower than zero mu"
     );
+}
+
+/// First gear drives forward. Reverse drives backward. An open clutch does not.
+/// An airborne driven wheel spins faster than the driven wheel on the plane.
+#[test]
+fn first_gear_drives_forward_and_an_open_diff_spins_the_free_wheel() {
+    let (forward, _) = gear_run(120, Gear::Forward);
+    let forward_body = chassis(&forward);
+    assert!(
+        forward_body.velocity.x > 1.0,
+        "forward speed {} {:?}",
+        forward_body.velocity.x,
+        forward_body.velocity
+    );
+    assert!(
+        drive_ok(&forward_body),
+        "forward chassis left the bound {:?} {:?}",
+        forward_body.position,
+        forward_body.velocity
+    );
+    assert_eq!(forward.step_stats.drive_wheels, 4);
+    assert_eq!(forward.step_stats.wheel_rays, 4);
+
+    // Open diff, no tyre reaction: the four driven wheels take the same torque.
+    let (flat, _) = gear_run(120, Gear::Flat);
+    let Some(flat_ground) = ground(&flat) else {
+        assert!(ground(&flat).is_some());
+        return;
+    };
+    let flat_omega = flat_ground.wheels[0].omega;
+    assert!(
+        flat_ground
+            .wheels
+            .iter()
+            .all(|wheel| wheel.omega.to_bits() == flat_omega.to_bits()),
+        "open diff split {:?} ",
+        flat_ground.wheels.map(|wheel| wheel.omega)
+    );
+    let flat_x = chassis(&flat).velocity.x.abs();
+    assert!(flat_x < 0.05, "zero mu drove the chassis at {flat_x}");
+    assert!(forward_body.velocity.x > flat_x);
+
+    let (reverse, _) = gear_run(120, Gear::Reverse);
+    let reverse_body = chassis(&reverse);
+    assert!(
+        reverse_body.velocity.x < 0.0,
+        "reverse speed {}",
+        reverse_body.velocity.x
+    );
+    assert!(
+        reverse_body.velocity.z.abs() < 0.05,
+        "reverse lateral speed {}",
+        reverse_body.velocity.z
+    );
+    assert!(
+        reverse_body.position.z.abs() < 0.05,
+        "reverse lateral drift {}",
+        reverse_body.position.z
+    );
+
+    // Negative control: throttle stays 1 and the clutch is open.
+    let (open, _) = gear_run(120, Gear::Open);
+    let open_x = chassis(&open).velocity.x.abs();
+    assert!(open_x < 0.05, "open clutch moved {open_x}");
+    assert_eq!(open.step_stats.drive_wheels, 0);
+    assert!(forward_body.velocity.x > open_x);
+
+    let (air, _) = gear_run(60, Gear::Airborne);
+    let Some(air_ground) = ground(&air) else {
+        assert!(ground(&air).is_some());
+        return;
+    };
+    let airborne = air_ground.wheels[0].omega;
+    let grounded = air_ground.wheels[1].omega;
+    assert!(
+        airborne > grounded,
+        "airborne {airborne} grounded {grounded}"
+    );
+    assert_eq!(
+        air_ground.lengths[0].to_bits(),
+        air_ground.wheels[0].max_length.to_bits()
+    );
+    assert_eq!(air.step_stats.drive_wheels, 2);
+    assert!(drive_ok(&chassis(&air)));
+}
+
+/// Explicit Euler flips omega dozens of times on this fixture. The implicit grip step must not.
+#[test]
+fn wheel_spin_stays_in_the_slip_band_without_sign_flips() {
+    for (label, kind) in [("forward", Gear::Forward), ("reverse", Gear::Reverse)] {
+        let mut world = genos_physics::first_gear_world();
+        let mut twin = genos_physics::first_gear_world();
+        prepare(&mut world, kind);
+        prepare(&mut twin, kind);
+        let mut prev = [0.0_f32; 4];
+        let mut flips = 0_u32;
+        let mut max_step = 0.0_f32;
+        for _ in 0..120 {
+            step(&mut world, DT);
+            step(&mut twin, DT);
+            assert!(same_pose(&world, &twin), "{label} runs diverged");
+            let Some(sampled) = ground(&world) else {
+                assert!(ground(&world).is_some());
+                return;
+            };
+            for (index, wheel) in sampled.wheels.iter().enumerate() {
+                let delta = wheel.omega - prev[index];
+                if delta.abs() > max_step {
+                    max_step = delta.abs();
+                }
+                let crossed = (prev[index] > 0.0 && wheel.omega < 0.0)
+                    || (prev[index] < 0.0 && wheel.omega > 0.0);
+                if crossed {
+                    flips = flips.saturating_add(1);
+                }
+                prev[index] = wheel.omega;
+            }
+        }
+        let body = chassis(&world);
+        assert_eq!(flips, 0, "{label} omega sign flips {flips}");
+        assert!(
+            max_step < 2.0,
+            "{label} |d omega| {max_step} rad/s in one step"
+        );
+        assert!(
+            body.velocity.z.abs() < 0.05,
+            "{label} lateral speed {}",
+            body.velocity.z
+        );
+        assert!(
+            body.position.z.abs() < 0.05,
+            "{label} lateral drift {}",
+            body.position.z
+        );
+        let Some(sampled) = ground(&world) else {
+            assert!(ground(&world).is_some());
+            return;
+        };
+        let road = body.velocity.x / 0.3;
+        let band = 0.1 * body.velocity.x.abs().max(1.0) / 0.3;
+        for wheel in &sampled.wheels {
+            let error = (wheel.omega - road).abs();
+            assert!(
+                error <= band,
+                "{label} omega {} is {error} from road speed/radius {road}, band {band}",
+                wheel.omega
+            );
+        }
+        if label == "forward" {
+            assert!(body.velocity.x > 1.0, "forward {}", body.velocity.x);
+            assert!(sampled.wheels.iter().all(|wheel| wheel.omega > 0.0));
+        } else {
+            assert!(body.velocity.x < 0.0, "reverse {}", body.velocity.x);
+            assert!(sampled.wheels.iter().all(|wheel| wheel.omega < 0.0));
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Gear {
+    Forward,
+    Reverse,
+    Open,
+    Airborne,
+    Flat,
+}
+
+fn gear_run(steps: u32, kind: Gear) -> (World, World) {
+    let mut world = genos_physics::first_gear_world();
+    let mut twin = genos_physics::first_gear_world();
+    prepare(&mut world, kind);
+    prepare(&mut twin, kind);
+    for _ in 0..steps {
+        step(&mut world, DT);
+        step(&mut twin, DT);
+        assert!(same_pose(&world, &twin), "two gearbox runs diverged");
+        let body = chassis(&world);
+        assert!(
+            drive_ok(&body),
+            "chassis left the bound {:?} {:?}",
+            body.position,
+            body.velocity
+        );
+    }
+    (world, twin)
+}
+
+fn prepare(world: &mut World, kind: Gear) {
+    let Some(ground) = ground_mut(world) else {
+        return;
+    };
+    match kind {
+        Gear::Forward => {}
+        Gear::Reverse => {
+            if let Some(drive) = ground.drive.as_mut() {
+                drive.gear = 1;
+            }
+        }
+        Gear::Open => {
+            if let Some(drive) = ground.drive.as_mut() {
+                drive.clutch = 0.0;
+            }
+        }
+        Gear::Airborne => {
+            ground.wheels[0].direction = Vec3::Y;
+            ground.wheels[2].driven = false;
+            ground.wheels[3].driven = false;
+        }
+        Gear::Flat => {
+            for wheel in &mut ground.wheels {
+                wheel.mu_peak = 0.0;
+                wheel.mu_slide = 0.0;
+            }
+        }
+    }
+}
+
+fn ground_mut(world: &mut World) -> Option<&mut WheeledGround> {
+    match world
+        .vehicles
+        .first_mut()
+        .and_then(|vehicle| vehicle.ground.as_mut())
+    {
+        Some(GroundContact::Wheeled(ground)) => Some(ground),
+        None => None,
+    }
 }
 
 /// Matched-roll reverse stays straight. A reverse sideslip is pushed back; a zero curve is not.
@@ -464,6 +696,8 @@ fn g1_wheel(local_position: Vec3) -> Wheel {
         slip_peak: 0.1,
         mu_slide: 0.7,
         slip_denom: 1.0,
+        driven: false,
+        inertia: 0.0,
     }
 }
 
@@ -478,6 +712,7 @@ fn g1_vehicle(chassis: usize) -> Vehicle {
                 g1_wheel(Vec3::new(-1.0, 0.0, -0.5)),
             ],
             lengths: [0.4, 0.4, 0.4, 0.4],
+            drive: None,
         })),
         aircraft: None,
         space: None,

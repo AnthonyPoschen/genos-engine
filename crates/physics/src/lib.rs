@@ -45,8 +45,9 @@ mod solver;
 mod vehicle;
 
 pub use vehicle::{
-    aero_trim_world, chassis_rest_world, gear_miss_world, gear_plane_world, locked_wheel_world,
-    thruster_world, Aircraft, GroundContact, SpaceCraft, Thruster, Vehicle, Wheel, WheeledGround,
+    aero_trim_world, chassis_rest_world, first_gear_world, gear_miss_world, gear_plane_world,
+    locked_wheel_world, thruster_world, Aircraft, Drive, GroundContact, SpaceCraft, Thruster,
+    Vehicle, Wheel, WheeledGround,
 };
 
 pub use destruction::{
@@ -281,6 +282,9 @@ pub struct StepStats {
     /// Wheels that applied a slip force this step. A miss, a sleep, and a
     /// wheel with no radius stay at zero.
     pub tyre_contacts: u32,
+    /// Driven wheels that received a non-zero axle share this step. An open
+    /// clutch, a missing drive block, and a gear index past the ratio list stay at zero.
+    pub drive_wheels: u32,
 }
 
 impl StepStats {
@@ -302,6 +306,7 @@ impl StepStats {
             wheel_rays: 0,
             vehicle_count: 0,
             tyre_contacts: 0,
+            drive_wheels: 0,
         }
     }
 }

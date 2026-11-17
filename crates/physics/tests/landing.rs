@@ -394,6 +394,8 @@ fn g1_wheels(max_length: f32) -> [Wheel; 4] {
         slip_peak: 0.1,
         mu_slide: 0.7,
         slip_denom: 1.0,
+        driven: false,
+        inertia: 0.0,
     };
     [
         wheel(Vec3::new(1.0, 0.0, 0.5)),
@@ -424,6 +426,7 @@ fn compressed_aircraft(plane: bool) -> World {
         ground: Some(GroundContact::Wheeled(WheeledGround {
             wheels: g1_wheels(0.6),
             lengths: [0.4; 4],
+            drive: None,
         })),
         aircraft: Some(trim_aircraft(1_000.0, GRAVITY)),
         space: None,
@@ -466,6 +469,7 @@ fn geared_ignition(thrust_max: f32, throttle: f32) -> World {
         ground: Some(GroundContact::Wheeled(WheeledGround {
             wheels: g1_wheels(0.5),
             lengths: [0.4; 4],
+            drive: None,
         })),
         aircraft: Some(Aircraft {
             wing_area: 10.0,
