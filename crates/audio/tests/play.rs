@@ -1,11 +1,32 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::as_conversions,
+        reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_possible_truncation,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::cast_precision_loss,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Real ALSA submit. A missing device is recorded and is not a silent success.
 
-use genos_audio::{mix, submit, Listener, Source, Vec3};
+use genos_audio::{mix, start_with, AlsaDevice, Command, Listener, Source, Vec3};
 use genos_load::{load_pcm, MemorySource};
 
 #[test]
@@ -35,18 +56,33 @@ fn alsa_consumes_every_frame_of_the_mix_when_the_device_opens() {
     };
     let mixed = mix(std::slice::from_ref(&source), &listener, &[], 48_000, 2_400);
     assert!(mixed.iter().any(|sample| *sample != 0));
-    match submit(&mixed, 48_000) {
-        Ok(frames) => {
-            assert_eq!(
-                frames,
-                mixed.len() as u64 / 2,
-                "the device consumed a short buffer"
-            );
-            let again = submit(&mixed, 48_000).expect("second submit");
-            assert_eq!(again, frames);
+    let stream = match start_with(AlsaDevice::new(), vec![pcm], &[]) {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("alsa open failed: {err}");
+            return;
         }
-        Err(err) => eprintln!("alsa open failed: {err}"),
+    };
+    stream.set_listener(listener);
+    assert!(stream.push(Command::Play {
+        voice: 0,
+        clip: 0,
+        positional: true,
+        looping: false,
+        gain: 1.0,
+        position: Vec3::new(-1.5, 1.7, -3.0),
+        velocity: Vec3::new(0.0, 0.0, 8.0),
+    }));
+    let started = std::time::Instant::now();
+    while stream.stats().periods_written < 2
+        && started.elapsed() < std::time::Duration::from_secs(2)
+    {
+        std::thread::yield_now();
     }
+    let stats = stream.stats();
+    stream.stop();
+    assert!(stats.periods_written >= 2, "held device wrote no quantum");
+    assert_eq!(stats.device_period_frames, 480);
 }
 
 fn wav_bytes(samples: &[i16]) -> Vec<u8> {

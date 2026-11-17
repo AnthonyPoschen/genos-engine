@@ -1,6 +1,14 @@
 # Job system (design)
 
-Status: proposed, 27 Oct 2026. Owner: Engine. No code in this change.
+Status: accepted, 10 Nov 2026. Owner: Engine. The pool is `genos-jobs` (`crates/jobs`). [ADR 0031](../adr/0031-job-system.md) is the decision. `debug/jobs` is the headless check.
+
+What landed with the crate, and what did not:
+
+- The deque is Chase-Lev and bounded. It does not grow. A full push returns an error. Capacity is the batch size, rounded up to a power of two.
+- Workers are named `genos-job-N` and joined before `Scheduler::run` returns, including when a later spawn fails. They are not kept across frames. A loom model of push, pop, and the last-element steal is `cargo test -p genos-jobs --features loom --lib deque::loom_tests` and is not part of the default test run. The rest of the crate tests stay on `std` atomics, because a loom deque panics outside a model.
+- `run` puts conflicting jobs in a later batch, in index order. `ensure_parallel` is the hard error for a caller that asked for one parallel set.
+- `JobSettings` has `to_text`, `parse`, and `set_key`. It is not a field on `Scene` yet.
+- The camera loop, `command::take`, and `seat_enter` are not wired. `suspend_slack` and `resume_slack` are the seat hooks. Soon and Slack compare elapsed time since the frame started, not the absolute clock. Stats are the last frame: the next `run` clears them. `Scheduler::counters` reports that frame's wall times, not zeros. `jobs.slack_during_fence` increments when Slack runs while the seat is held, and stays 0 when the seat skips Slack. A failed worker spawn sets a stop flag and joins; it does not clear the in-flight job count.
 
 This is the CPU scheduler the rest of the building blocks wait on. [Animation](animation.md) samples many skeletons on the CPU. The [physics plan](physics/plan.md) (P23, P24, P26) runs a wide solve that must hash-match the one-thread step. Save, load, and the net snapshot are ordered by the [scene ECS](ecs-scene.md), and that order is only useful if the parallel pass reduces in the same order every time. The scheduler is the piece that makes those four wide without making the server or a replay depend on which worker finished first.
 
@@ -85,7 +93,7 @@ The stage list for the camera frame follows `examples/camera/src/main.rs`. Names
 
 `Renderer::draw` stays on the thread that opened the device (`Renderer::open`). A task that needs a GPU buffer fills a `Vec` the draw copies, the same way the physics plan's `PoseBuffer` is a `Vec` the renderer can copy later.
 
-A pumped load stays `run_pumped` in `crates/window/src/stall.rs`. The frame thread pumps inside `PUMP_BUDGET` (100 ms) while `genos-scene-load` reads the file. Moving that read onto a pool worker is a later step. The pump loop stays in the window crate either way, because a join inside `Renderer::draw` cannot answer a ping.
+A pumped load stays `run_pumped` in `crates/window/src/stall.rs`. The frame thread pumps inside `PUMP_BUDGET` (100 ms) while `genos-scene-load` reads the file. That 100 ms is the pump thread's own time, from the dispatch mark through the pump callback until the wait for the worker. The wait is half the budget. A late wakeup inside it is not pump work, and one wait that covers the whole load is a stall. Moving that read onto a pool worker is a later step. The pump loop stays in the window crate either way, because a join inside `Renderer::draw` cannot answer a ping.
 
 ## 7. Script thread and MCP threads
 

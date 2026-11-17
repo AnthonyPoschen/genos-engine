@@ -5,7 +5,8 @@
 
 use genos_math::{height_optical_depth_f32, phase_hg_f32};
 use genos_scene::{
-    Camera, Floor, FogSettings, FogShape, FogVolume, LightingPreset, LightingSettings, Scene, Vec3,
+    Camera, Floor, FogSettings, FogShape, FogVolume, LightingPreset, LightingSettings,
+    ParticleSettings, Scene, Vec3,
     Wall,
 };
 
@@ -470,6 +471,7 @@ fn shaft_scene() -> (
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
@@ -495,6 +497,7 @@ fn empty_scene() -> Scene {
         event_loop: genos_scene::EventLoopSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     }
@@ -940,6 +943,7 @@ pub fn composed_frame_scene(enabled: bool) -> Scene {
         },
         reflections: genos_scene::ReflectionSettings::default(),
         menu: genos_scene::MenuSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
     }
 }
 

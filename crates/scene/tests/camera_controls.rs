@@ -29,6 +29,7 @@ fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {
         reflections: genos_scene::ReflectionSettings::default(),
         hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
+        particles: genos_scene::ParticleSettings::default(),
         menu: genos_scene::MenuSettings::default(),
     };
     update(camera, &mut scene, actions, dt);

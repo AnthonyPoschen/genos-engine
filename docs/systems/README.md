@@ -19,7 +19,7 @@ Each record uses these headings:
 
 ## Records
 
-- [Input](input.md) owns the keyboard, the mouse, the gamepad slots, and the action maps.
+- [Input](input.md) owns the keyboard, the mouse, the gamepad slots, the touch points, and the action maps.
 - [Window](window.md) owns the Wayland seat, focus, pointer lock, and fullscreen.
 - [Math](math.md) owns positions, directions, matrices, quaternions, the headless exposure curves, and the proposed bloom chain.
 - [Physics](physics.md) owns the collision step, including mass, friction, springs, capsule, box, and mesh shapes, and the fracture hot-swap. The next pipeline is [physics/plan.md](physics/plan.md).
@@ -41,11 +41,11 @@ Each record uses these headings:
 
 These are plans. They are not system records. A step edits the matching record when it changes a goal, an intent, a game use, or a limit.
 
-- [Job system](job-system.md): a fiber-free work-stealing pool, serial when the server or a replay needs one order. Proposed.
-- [Scene ECS](ecs-scene.md): archetype storage, a stable scene handle, a transform parent, and change records for lighting. Proposed.
+- [Job system](job-system.md): a fiber-free work-stealing pool, serial when the server or a replay needs one order. Accepted ([ADR 0031](../adr/0031-job-system.md)). The crate is `genos-jobs`. The camera loop does not call it yet.
+- [Scene ECS](ecs-scene.md): archetype storage, a stable scene handle, a transform parent, and change records for lighting. Accepted ([ADR 0032](../adr/0032-scene-ecs-and-transform-hierarchy.md)). The tables are `genos-ecs`. The scene vecs move onto them next.
 - [Asset plan](assets/plan.md): import, the cook, the cache, streaming, packaging, pre-fractured chunks, shared asset ids, and the assets debug binary.
 - [CCD and destruction](physics-ccd-destruction-design.md): speculative contacts, time-of-impact sub-steps, offline Voronoi chunks, and the bond graph ([ADR 0016](../adr/0016-physics-ccd-destruction.md)). Accepted. Speculative contacts, swept time of impact, and the hot-swap are in the physics step. `slice_chunk` is not.
-- [Vehicle domains](../adr/0040-vehicle-domains.md): ground, aircraft, and space forces on one chassis body ([ADR 0040](../adr/0040-vehicle-domains.md)). Proposed. G1 wheel rays and S1 thruster forces are in the physics step. Aircraft and sea are not. Sea stays buoyancy and quadratic drag, and it is not a stage. The orbit is not in the step.
+- [Vehicle domains](../adr/0040-vehicle-domains.md): ground, aircraft, and space forces on one chassis body ([ADR 0040](../adr/0040-vehicle-domains.md)). Proposed. G1 wheel rays, A1 aircraft forces, the T1 landing trial, and S1 thruster forces are in the physics step. Sea is not. Sea stays buoyancy and quadratic drag, and it is not a stage. The orbit is not in the step.
 - [PBR materials design](pbr-materials-design.md): glTF metallic-roughness, the shared shade, textures, and emissive lights ([ADR 0014](../adr/0014-pbr-materials.md)). Proposed. It does not copy the mesh-loading parsers.
 - [Rendering extras plan](rendering/extras-plan.md): materials, shadows outside the lighting pass, particles, post, terrain, foliage, water, sky, decals, and culling. Client culling follows the asset plan's relevancy set.
 - [HDR output design](hdr-output-design.md): scene-referred colour, exposure, AgX, bloom, HDR10 on Linux and scRGB on Windows ([ADR 0015](../adr/0015-hdr-output.md)). The metric gate is `crates/render/tests/hdr_output_gate.rs`.

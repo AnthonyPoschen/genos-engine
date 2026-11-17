@@ -1,11 +1,23 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::expect_used, reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::expect_used,
+    reason = "TODO(lint-2026-10-14): pre-existing. docs/LINT_RULES.md"
+)]
 
 //! Submit one mixed buffer through the platform device.
 
-use genos_audio::{mix, submit, Barrier, Listener, Source, Vec3};
+use genos_audio::{mix, start_with, AlsaDevice, Barrier, Command, Listener, Source, Vec3};
 use genos_load::{load_pcm, MemorySource};
 
 fn main() {
@@ -55,18 +67,40 @@ fn main() {
         eprintln!("mix was silence or the dry clip");
         genos_window::exit(1);
     }
-    match submit(&mixed, 48_000) {
-        Ok(frames) => {
-            println!("frames={frames}");
-            if frames != mixed.len() as u64 / 2 {
-                eprintln!("short write: {frames}");
-                genos_window::exit(1);
-            }
-        }
+    let stream = match start_with(AlsaDevice::new(), vec![pcm], &[wall]) {
+        Ok(stream) => stream,
         Err(err) => {
             eprintln!("alsa open failed: {err}");
             genos_window::exit(2);
         }
+    };
+    stream.set_listener(listener);
+    let playing = stream.push(Command::Play {
+        voice: 0,
+        clip: 0,
+        positional: true,
+        looping: true,
+        gain: 1.0,
+        position: Vec3::new(-2.0, 1.7, -4.0),
+        velocity: Vec3::new(0.0, 0.0, 15.0),
+    });
+    if !playing {
+        eprintln!("command ring rejected play");
+        stream.stop();
+        genos_window::exit(1);
+    }
+    let started = std::time::Instant::now();
+    while stream.stats().periods_written < 2
+        && started.elapsed() < std::time::Duration::from_secs(2)
+    {
+        std::thread::yield_now();
+    }
+    let periods = stream.stats().periods_written;
+    println!("periods={periods}");
+    stream.stop();
+    if periods == 0 {
+        eprintln!("the device wrote no quantum");
+        genos_window::exit(1);
     }
 }
 

@@ -162,6 +162,7 @@ fn run_one(
             renderer.resize(pumped.width, pumped.height)?;
         }
         stage.advance(STEP);
+        renderer.set_particle_dt(STEP);
         if *profiled {
             match renderer.draw_profiled(&stage.world, camera, &[], false, false) {
                 Ok((_, timing)) => {

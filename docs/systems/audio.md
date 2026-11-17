@@ -22,38 +22,44 @@ The GPU pass is one compute dispatch on the renderer's Vulkan device. It reads t
 
 The crate is `crates/audio`, package `genos-audio`.
 
-- `mix` is in `src/mix.rs`. Doppler, balance, distance, and transmission are in `src/space.rs`.
-- `submit` is in `src/device.rs`. ALSA, WASAPI, and CoreAudio are compiled only on their own operating system.
+- `mix` and `mix_into` are in `src/mix.rs`. `mix_into` sums into a caller-owned buffer and does not allocate. `mix` quantizes that sum into the returned buffer.
+- Sine, cosine, and the barrier exponential are the Cephes `sinf`, `cosf`, and `expf` polynomials in `src/poly.rs`, with range reduction. The mix does not call the platform math library for those and does not use a fused multiply-add.
+- Doppler, balance, distance, and transmission are in `src/space.rs`.
+- `start_with` in `src/engine.rs` runs the `genos-audio` thread. It mixes one quantum and writes a `DevicePath`. ALSA, WASAPI, and CoreAudio stay open. The command ring holds 256 commands. A full ring drops the newest and counts `audio_command_drop`. The listener is a latest-wins slot.
+- The frame copies `listener_state` from `crates/scene` into that slot. `genos-audio` does not depend on `genos-scene`.
+- `cook_ima` in `crates/load/src/adpcm.rs` writes the cooked record. A clip over 2 seconds and over 256 KiB is disk-fed: `genos-audio-io` decodes into a 200 ms ring. An empty ring fades 64 frames and counts `audio_underrun`.
 - `Renderer::transmission_gains` is in `crates/render/src/gpu.rs`. The shader is `crates/render/shaders/transmit.comp`.
 
 `crates/audio-check` calls `mix`. It does not copy the mixer.
 
 ## Game use
 
-Load PCM with `genos-load`. Build a `Listener` and one `Source` per clip. Call `mix` with the barriers, the device rate, and the frame count.
+Load PCM with `genos-load`. Build a `Listener` and one `Source` per clip. Call `mix` with the barriers, the device rate, and the frame count. A realtime caller keeps the stereo buffer and calls `mix_into`.
 
 Set `positional` to false for music and UI. Set `looping` to keep a clip playing. Set `transmission` when `Renderer::transmission_gains` already computed that source.
 
-Call `submit` with the interleaved buffer. Open one `Renderer`. Call `retain_scene` when the solids change and the frame will not draw. A draw also refreshes that same resident scene when the light data changes. Call `transmission_gains` with the listener and the source positions.
+A running game calls `start_with` and `Stream::push`. After the camera step it copies `listener_state` into `Listener` and calls `Stream::set_listener`. It does not open the device per buffer. Open one `Renderer`. Call `retain_scene` when the solids change and the frame will not draw. A draw also refreshes that same resident scene when the light data changes. Call `transmission_gains` with the listener and the source positions.
 
 ## Limits
 
 There is no HRTF, no elevation cue, and no surround layout. There is no reflection, reverb, diffraction, air absorption, or frequency-dependent wall filter.
 
-The loader does not open a device. Compressed audio, voice chat, MIDI, and synthesis are not in this crate.
+The loader does not open a device. The cooked clip is IMA ADPCM. Voice chat, MIDI, and synthesis are not in this crate.
 
 The transmission pass reads the resident occluder bounds and absorption. The camera scene does not open a sound device.
 
 WASAPI and CoreAudio are not run from this Linux machine.
 
-Buses, a held device, disk-fed clips, reverb zones, a console write, and a cross-platform buffer hash are the plan in [the audio design](audio-design.md). This record stays the description of the code until a stage in that design lands.
+Buses, reverb zones, and a console write are the plan in [the audio design](audio-design.md).
+
+`cargo test -p genos-audio` hashes the mix of `tests/golden/tape.pcm` at 48 kHz. The expected digest is `tests/golden/positional.sha256`. A second digest, `tests/golden/paths.sha256`, covers loop wrap, a Doppler cursor that wraps, a non-trivial exp reduction, an `i16` clip, and two voices. Those tests do not open a device.
 
 ## Networking
 
 - **Replicated state.** None. The mixed buffer stays in the process that called `mix`.
 - **Authority.** That process.
 - **Prediction / rollback.** None. `mix` does not rewind.
-- **Determinism.** `mix` is a pure function of its arguments. A stored hash of that buffer is stage 2 of the audio design. Today's tests check relationships.
+- **Determinism.** `mix` is a pure function of its arguments. The stored-tape hash is the check.
 - **Headless server.** No sound device. The server does not call `submit`. The design's play-command lines replace this section in the commit that sends them.
 
 ## Decisions

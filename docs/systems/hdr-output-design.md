@@ -70,9 +70,9 @@ Frame reuse, as the extras plan describes it, skips the pyramid when the scene k
 
 The lighting work caps are unchanged. Post has its own ceilings in §7. A slow bloom does not borrow rays from the cache, and a lighting frame does not skip the display pass to pay for GI.
 
-Presets stay the lighting presets. `HdrSettings` is a second struct on the scene, not new fields inside `LightingSettings`, so a lighting preset replace cannot turn bloom on inside the cache. Potato and Low force SDR output. Medium and High use `output=auto`. Every preset keeps the scene-referred image, including Potato, so the grade is the same buffer on every preset. Potato does not run the pyramid or the histogram. Its exposure is fixed.
+Presets stay the lighting presets. `HdrSettings` is a second struct on the scene, not new fields inside `LightingSettings`, so a lighting preset replace cannot turn bloom on inside the cache. Potato and Low force SDR output on desktop and on the Deck LCD. Low on the Deck OLED may take listed HDR10 and still refuses scRGB. Medium and High use `output=auto`. Every preset keeps the scene-referred image, including Potato, so the grade is the same buffer on every preset. Potato does not run the pyramid or the histogram. Its exposure is fixed.
 
-Near the camera still matters most, and it matters in the grade, not by allocating a finer bloom. Pixels whose G-buffer distance is under 2 m have weight 4 in the scene-referred score. Far pixels have weight 1. Bloom is half resolution and coarser down the pyramid on every preset. That is the Jimenez pyramid, not a camera-dependent kernel. A camera-dependent kernel would change the filter as the camera moves, which is the pop this design is written to avoid.
+Near the camera still matters most, and it matters in the grade, not by allocating a finer bloom. Pixels whose G-buffer distance is under 2 m have weight 4 in the scene-referred score. Far pixels have weight 1. Bloom on Medium and above is the Jimenez pyramid: half resolution, then coarser. Low's four levels start at quarter resolution. That first step averages four half-resolution Karis samples, which is not the Jimenez kernel. It is there so the chain stays inside 0.80 ms. A camera-dependent kernel would change the filter as the camera moves, which is the pop this design is written to avoid.
 
 ## 4. Alternatives
 
@@ -88,7 +88,7 @@ Near the camera still matters most, and it matters in the grade, not by allocati
 
 **Pick: AgX base**, the Eary Chow generator ([AgX_LUT_Gen](https://github.com/EaryChow/AgX_LUT_Gen) `AgX_Base_Rec2020`, then the sRGB cube path). Log2 runs from −10 to +6.5 around middle grey 0.18. The sigmoid slope is 2.4 and both powers are 1.5. The hue mix is 40%. The SDR code is power 2.4, which is what that cube stores. The CPU reference is `agx_rec709`. The gate compares it to generator samples, max CIEDE2000 ≤ 0.5.
 
-**Departure:** `legacy_bytes` binds the plain compose compile. That SPIR-V is the pre-HDR compose shader, with no scene-image or bloom binding. The HDR compile (`GENOS_HDR_COMPOSE`) stores scene radiance, adds bloom, applies exposure, and writes the shoulder. The lattice sample is a later pass (`hdr_agx.comp`) that samples `agx_rec709`. It is not a branch in the GI compose shader.
+**Departure:** `legacy_bytes` binds the plain compose compile. That SPIR-V is the pre-HDR compose shader, with no scene-image or bloom binding. The HDR compile (`GENOS_HDR_COMPOSE`) stores scene radiance, adds bloom, applies exposure, and writes the shoulder. AgX is a later pass (`hdr_agx.comp`) that evaluates `agx_rec709`. The 32³ lattice is not uploaded. It is not a branch in the GI compose shader.
 
 **Rejected as the implementation of this pick:** Krzysztof Narkowicz, "ACES Filmic Tone Mapping Curve", 2016, [knarkowicz.wordpress.com](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/). The coefficients `(2.51, 0.03, 2.43, 0.59, 0.14)` are a rational fit of an older ACES curve, then a clamp to 1. Shipping that fit and calling it ACES or AgX would be a silent departure. `display=aces` is the Academy 2.0 transform, not this fit. It lands in phase 5's alternate, after AgX is the default.
 
@@ -126,13 +126,15 @@ Auto and camera meet at EV100. Compensation adds stops after that: `exposure ×=
 |---|---|---|---|
 | Format | 44 or 37, color space 0 | 10-bit UNORM (`A2B10G10R10` 64, else `A2R10G10B10` 58) with `VK_COLOR_SPACE_HDR10_ST2084_EXT` (1000104008) | `R16G16B16A16_SFLOAT` (97) with `VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT` (1000104002) |
 | Encoding | the display transform writes the 8-bit code | PQ, SMPTE ST 2084:2014, BT.2100 | linear extended sRGB. Code 1.0 is 80 nits |
-| Extra bandwidth at 1440p, 3 images | already paid | none (4 bytes, same as SDR) | 42.19 MiB over the SDR images |
+| Bytes per pixel | 4 | 4, the same as SDR | 8 |
+
+This row is the swapchain image only. It is not part of `hdr_vram_bytes` and it is not added to §7. HDR10 stays 4 bytes a pixel, the same as SDR. scRGB is 8 bytes a pixel (4 more than SDR) on each swapchain image. §7's 42.188 MiB is the post encode image (`2560 × 1440 × 12`), counted once for HDR10 and for scRGB.
 
 The Vulkan wording is the `VkColorSpaceKHR` table in the `VK_EXT_swapchain_colorspace` extension. HDR10 is "HDR10 (BT.2020), encoded according to SMPTE ST 2084". Extended sRGB linear is "extended sRGB color space, encoded using a linear transfer function". The nonlinear extended-sRGB enum (1000104014) is the scRGB specification's other encoding. We do not pick it. Windows literature for the linear one is `DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709`. We do not call DXGI.
 
-**Pick:** query `vkGetPhysicalDeviceSurfaceFormatsKHR` after the surface exists. On Linux (Wayland) prefer HDR10 when that pair is listed, else scRGB, else the current SDR pair (44, then 37, color space 0). On Windows prefer scRGB, else HDR10, else SDR. Potato and Low ignore HDR pairs and take SDR. Medium and High follow the host preference when `output=auto`. macOS takes the first HDR pair MoltenVK listed, else SDR. The reference is `pick_hdr_output`.
+**Pick:** query `vkGetPhysicalDeviceSurfaceFormatsKHR` after the surface exists. On Linux (Wayland) prefer HDR10 when that pair is listed, else scRGB, else the current SDR pair (44, then 37, color space 0). On Windows prefer scRGB, else HDR10, else SDR. Potato ignores HDR pairs and takes SDR. Low does the same on desktop and on the Deck LCD. Low on the Deck OLED may take HDR10 when that pair is listed, and it still refuses scRGB. Medium and High follow the host preference when `output=auto`. macOS takes the first HDR pair MoltenVK listed, else SDR. The reference is `pick_hdr_output`.
 
-**Departure:** `create_targets` records that pick (`resolve_swapchain` through `surface_choice`) and computes graphics-white codes with `swapchain_nits` (`pq_st2084`, `scrgb_code`). The SDR search is still 44, then 37, and it does not read the color space. When the resolved pair is listed, the image is that pair: `A2B10G10R10` or `A2R10G10B10` with `HDR10_ST2084`, or `R16G16B16A16_SFLOAT` with `EXTENDED_SRGB_LINEAR`. `VK_EXT_swapchain_colorspace` is enabled when the instance lists it. `VK_EXT_hdr_metadata` is enabled when the device lists it, and `vkSetHdrMetadataEXT` runs only for a created HDR10 image (BT.2020 primaries, peak 1000 nits). An unlisted mode stays on the SDR image. The display pass still writes the 8-bit `AgX` code for that fallback, and it also writes the PQ or scRGB values into a side buffer so a readback can grade them. A listed 10-bit image is packed in that pass. A listed fp16 image is copied from the half-float tail of the same buffer.
+**Departure:** `create_targets` records that pick (`resolve_swapchain` through `surface_choice`) and computes graphics-white codes with `swapchain_nits` (`pq_st2084`, `scrgb_code`). The SDR search is still 44, then 37, and it does not read the color space. When the resolved pair is listed, the image is that pair: `A2B10G10R10` or `A2R10G10B10` with `HDR10_ST2084`, or `R16G16B16A16_SFLOAT` with `EXTENDED_SRGB_LINEAR`. `VK_EXT_swapchain_colorspace` is enabled when the instance lists it. `VK_EXT_hdr_metadata` is enabled when the device lists it, and `vkSetHdrMetadataEXT` runs only for a created HDR10 image (BT.2020 primaries, peak 1000 nits). An unlisted mode stays on the SDR image. The display pass still writes the 8-bit `AgX` code for that fallback, and it also writes the PQ or scRGB values into a side buffer so a readback can grade them. A listed 10-bit image is packed in that pass. A listed fp16 image is copied from the RGBA16F region at the start of that buffer.
 
 **Why the split.** HDR10 is PQ in a 10-bit UNORM image, which is the usual Wayland HDR advertisement. scRGB stores linear extended sRGB, which is the Windows linear HDR path (`DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709` in the Windows literature; we do not call DXGI). This preference is a decision, not a driver measurement.
 
@@ -180,7 +182,8 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 - There is no artist threshold and no soft knee. A threshold pops. The slides argue for thresholdless; some ports add a knee anyway. We do not.
 - The Karis luma is Rec.709, the same weights as `luminance` in `trace.rs`. The course does not pin the coefficients.
 - Karis does not commute with exposure. It runs on scene luminance, before exposure, so a later exposure change does not reshape the firefly weight. Named, because a purely linear filter would commute.
-- The pyramid is a GPU pass on the scene image compose just stored (`hdr_bloom.comp`), same frame, before the display pass. It follows `bloom_pyramid`: Karis, then the 13-tap, then the tent, bloom only. `bloom_pyramid` stays the CPU reference the gate grades. Intensity 0 does not read the buffer. The histogram is still one frame late.
+- Low's first downsample averages four half-resolution Karis samples into a quarter-resolution mip. The Jimenez first step is one half-resolution downsample. Medium and above keep that step. Low does not, because the half-resolution four-level pyramid missed the 0.80 ms ceiling.
+- The pyramid is a GPU pass on the scene image compose just stored (`hdr_bloom.comp`), same frame, before the display pass. Medium and above follow `bloom_pyramid`: Karis, then the 13-tap, then the tent, bloom only. Low's first step is the quarter-resolution average above. `bloom_pyramid` stays the CPU reference the gate grades for Medium and above. Intensity 0 does not read the buffer. The histogram is still one frame late.
 
 **Rejected:** Kawase, because the energy contract is weaker and a single bright pixel is less stable. Convolution, because the FFT and the kernel asset do not pay for themselves on a GTX 1060, and because a lens-dirt texture is a non-goal. Either can be a later mode once the dual filter has a measured cost. The mode would be a new glossary term in that change.
 
@@ -209,9 +212,9 @@ GPU images, all `R16G16B16A16_SFLOAT` unless noted:
 | Image | Size at 1440p | Notes |
 |---|---|---|
 | Scene-referred | 2560×1440, one image | Not per frame in flight. Compose writes it. The grade reads it. |
-| Bloom levels | 1280×720 down to 40×22 | The whole pyramid is kept so a reused frame samples it. |
+| Bloom levels | preset pyramid. Finest mip RGBA16F, later mips RGB16F pairs | Medium and above start at half resolution. High is 1280×720 down to 40×22. Low's four levels start at quarter resolution, 640×360 down to 80×45. The first Low downsample averages four half-resolution Karis samples. Later taps are the 13-tap and the tent. No full-resolution bloom image. |
 | Exposed | same as the scene, or the swapchain's transient | The display pass can read the scene and the bloom sum and write the swapchain. A stored exposed image is not required for SDR. |
-| Histogram | 256 × `uint` | Device buffer. The CPU reads it after the fence. |
+| Histogram | preset bin count × `uint`, plus two short luma halves | High is 256 bins and 128 still samples. Fixed exposure does not allocate it. The CPU reads the header after the fence. |
 | Exposure state | two floats | Current scale and target scale. CPU owned. |
 
 Passes, in order, each skipped when its inputs are off:
@@ -251,7 +254,7 @@ Low's histogram is 64 bins so the reduction is smaller. The EV100 formula does n
 
 ## 7. VRAM and milliseconds
 
-1440p is 2560×1440. Bytes are MiB (`÷ 1024²`). These milliseconds are ceilings. `post_ms_device` is the bloom and display timestamp. `post_vram_device` is the post allocation. The 1.50 ms ceiling is the 4070 at 1440p. Lavapipe reports the timestamp and is not that score.
+1440p is 2560×1440. Bytes are MiB (`÷ 1024²`). These milliseconds are ceilings. `post_ms_device` is the bloom and display timestamp. `post_vram_device` is the post allocation. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p. The gate applies it on a hardware device. A software rasterizer (`VK_PHYSICAL_DEVICE_TYPE_CPU`, lavapipe and llvmpipe) still has to print a finite positive timestamp. That timestamp is not the 1.50 score.
 
 Scene image: `2560 × 1440 × 8 = 28.125 MiB`.
 
@@ -272,8 +275,8 @@ Bloom pyramid:
 | Bloom | 0 | 9.338 | 9.366 | 9.373 |
 | Histogram | 0 | < 0.01 | < 0.01 | < 0.01 |
 | **Working set** | **28.125** | **37.463** | **37.491** | **37.498** |
-| Swapchain extra | 0 | 0 | 0, or 42.188 if scRGB is chosen | 42.188 if scRGB, else 0 |
-| **With scRGB** | 28.125 | 37.463 (SDR forced) | **79.678** | **79.685** |
+| Encode image | 0 | 0 | 42.188 for HDR10 or scRGB | 42.188 for HDR10 or scRGB |
+| **With the encode image** | 28.125 | 37.463 (SDR forced) | **79.678** | **79.685** |
 | ms ceiling, 4070, 1440p | 0.25 | 0.80 | 1.00 | 1.20 |
 | ms ceiling, 1060, 1440p | 1.00 | 2.50 | not the target | not the target |
 
@@ -283,7 +286,9 @@ Frame budgets, using numbers already in the tree:
 
 - Basic scene, above 500 fps, means a frame under 2.0 ms. High post 1.20 ms plus the frozen lighting floor of 0.43 ms from ADR 0013 is 1.63 ms.
 - Stress scene, about 100 fps, means a frame under 10 ms. High post 1.20 ms plus the ADR 0013 High lighting cap of 8 ms at 1080p is 9.20 ms. The 8 ms cap is not a 1440p measurement. If 1440p lighting exceeds 8.80 ms, the lighting cap moves. This design does not raise the post ceiling to pay for it.
-The three-decimal rows are the unrounded sums, then rounded. Medium with scRGB is 79.678 MiB. High is 79.685 MiB. Rounding those to two decimals is 79.68 and 79.69. Adding the coarser parts `28.13 + 9.37 + 42.19` made both columns 79.69, because Medium bloom is 9.366.
+The three-decimal rows are the unrounded sums, then rounded. Medium with the encode image is 79.678 MiB. High is 79.685 MiB. Rounding those to two decimals is 79.68 and 79.69. Adding the coarser parts `28.13 + 9.37 + 42.19` made both columns 79.69, because Medium bloom is 9.366. The gate does not round: it compares allocated bytes with ceiling × 1024².
+
+42.188 MiB is `2560 × 1440 × 12`, the post encode image: tightly packed RGBA16F codes, then one BGRA word per pixel. HDR10 and scRGB both allocate it, so both use 79.68 and 79.69. The §4.3 swapchain row is not this number and is not added here. The swapchain image is not in `hdr_vram_bytes`. HDR10's 10-bit swapchain is 4 bytes, the same as SDR. An scRGB swapchain is 8 bytes and copies the RGBA16F region of the encode image. Potato and Low force SDR on desktop and on the Deck LCD, so their encode image stays 0 in the table. Low on the Deck OLED may allocate the same 12-byte image for HDR10. At the Deck's 1280×800 that chain is 21,118,832 bytes, under the frozen 37.46 MiB ceiling, so the unlock stays. An edited Potato stays locked on every panel, including OLED. scRGB stays locked.
 
 - 4 GB is the minimum. High with scRGB is 79.685 MiB of post, plus the lighting soft budget of about 200 MB. The sum stays under 512 MB. The rest of the 4 GB is the working set the renderer already has.
 
@@ -318,14 +323,14 @@ The relative luminance error is the reference-check formula, on Rec.709 `Y`:
 | `gpu_bloom` | ≤ 1e−3 | GPU bloom buffer, and the bloom the display pass added, against that same tap pyramid. The added value is the encode buffer on SDR. The graded frame changes the lamp, so the previous frame's pyramid does not match | PASS. A pyramid that doubles energy fails. A display add that scales the pyramid by 4 fails |
 | `hdr_encode` | ≤ 0.02 | lavapipe readback of the encode buffer on the shipped hall, Medium with GI off, fixed EV100 2, bloom off, `output=hdr10`, against `hdr10_pq(agx_display_linear(exposure × scene))`. Paper white is 203 nits. The surface is the SDR pair or a listed HDR10 pair | PASS. An 80-nit paper white fails |
 | `hdr_scrgb` | ≤ 0.02 | the same frame with `output=scrgb`, against `scrgb_from_display` of that display-linear colour. Code 1.0 stays 80 nits. The surface is the SDR pair or a listed scRGB pair | PASS. An 80-nit paper white fails |
-| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR. Potato and Low force SDR. An asked HDR pair that is not listed is SDR | PASS. `pick_hdr_output` and `resolve_swapchain`. Forcing HDR10 when it is not listed fails |
+| `output_pick` | = 0 mismatches | Linux: HDR10, else scRGB, else SDR. Windows: scRGB, else HDR10, else SDR. macOS: first listed HDR pair, else SDR. Potato and Low force SDR. Low on the Deck OLED may take listed HDR10 and still refuses scRGB. An asked HDR pair that is not listed is SDR | PASS. `pick_hdr_output` and `resolve_swapchain`. Forcing HDR10 when it is not listed fails |
 | `agx_de` | ≤ 0.5 | max CIEDE2000 of `agx_rec709` against `AgX_LUT_Gen` sRGB-cube samples | PASS |
 | `agx_highlight` | outside `[0.998, 0.9995]` is 0 | power-2.4 code of linear 16. A hard clip to 1 fails | PASS |
 | `aces_ctl` | ≤ 1e−3 | `aces2_rec709` against Academy CTL `Output.Academy.Rec709-D65_100nit_in_Rec709-D65_sRGB-Piecewise` | NOT-IMPLEMENTED. The function returns `None` until that CTL is the body |
 | `pq_st2084` | ≤ 1e−7 | `pq_st2084` at 0, 100, 203, 1000, and 10000 nits against the ST 2084 inverse EOTF | PASS. Zero nits is `c1^m2`, not a hard 0 |
 | `scrgb_code` | = 2.5375 | `scrgb_code(203)` against the literal 2.5375. The expected code is not recomputed as `203/80` | PASS. An 80-nit paper white (`80/80`) fails |
-| `post_ms_device` | ≤ 1.50 on the 4070 | `hdr_ms`, bloom plus the display pass, one frame behind. Zero when the device has no timestamps. Lavapipe prints the timestamp and passes when the query returned. It does not apply the 1.50 ceiling | PASS when the timestamp is finite and positive. A missing timestamp fails |
-| `post_vram_device` | ≤ 96 | post buffers in MiB: scene image, host copy, bloom, encode, lattice, params, meter | PASS. The sum is the allocation |
+| `post_ms_device` | ≤ 1.50 on hardware | `hdr_ms`, bloom plus the display pass, one frame behind. Zero when the device has no timestamps. A hardware device passes only when the timestamp is finite, positive, and at most 1.50. A software rasterizer passes when the timestamp is finite and positive, and the row prints it | PASS at or under 1.50 on hardware. A missing timestamp fails on every device. A timestamp over 1.50 fails on hardware and is printed on software |
+| `post_vram_device` | ≤ 37.50 on the picture window | post buffers in MiB on the grade window: scene image, host copy, bloom, encode, params, meter. The 1440p rows are the per-preset ceiling | PASS at or under 37.50. There is no 96 MiB ceiling |
 
 The §7 ceilings are not rows. They are not measured, and comparing them to themselves is not a result.
 
@@ -370,7 +375,7 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 --out DIR
 ```
 
-`GENOS_HDR_EXPOSURE_MODE`, `GENOS_HDR_EV100`, `GENOS_HDR_COMPENSATION`, `GENOS_HDR_ISO`, `GENOS_HDR_APERTURE`, `GENOS_HDR_SHUTTER`, `GENOS_HDR_ADAPT_DOWN`, `GENOS_HDR_ADAPT_UP`, `GENOS_HDR_DISPLAY`, `GENOS_HDR_BLOOM`, `GENOS_HDR_BLOOM_INTENSITY`, `GENOS_HDR_BLOOM_LEVELS`, `GENOS_HDR_OUTPUT`, and `GENOS_HDR_OUT` mirror those arguments. The thirteen design-table keys are the first thirteen. `GENOS_HDR_OUT` mirrors `--out`. The argument wins. The variable applies only when the argument was omitted. `--help` lists each one. The debug menu does not. `get_hdr` and the lighting stats return `hdr_ms`, `post_ms_device`, `hdr_vram_bytes`, and `post_vram_device`. `post_ms_device` is `hdr_ms`: bloom plus the display pass, one frame behind, zero when the device has no timestamps. `post_vram_device` is the post buffers in MiB. The 1.50 ms ceiling is the 4070 at 1440p. Lavapipe time is not that score. The 96 MiB ceiling is the allocation.
+`GENOS_HDR_EXPOSURE_MODE`, `GENOS_HDR_EV100`, `GENOS_HDR_COMPENSATION`, `GENOS_HDR_ISO`, `GENOS_HDR_APERTURE`, `GENOS_HDR_SHUTTER`, `GENOS_HDR_ADAPT_DOWN`, `GENOS_HDR_ADAPT_UP`, `GENOS_HDR_DISPLAY`, `GENOS_HDR_BLOOM`, `GENOS_HDR_BLOOM_INTENSITY`, `GENOS_HDR_BLOOM_LEVELS`, `GENOS_HDR_OUTPUT`, and `GENOS_HDR_OUT` mirror those arguments. The thirteen design-table keys are the first thirteen. `GENOS_HDR_OUT` mirrors `--out`. The argument wins. The variable applies only when the argument was omitted. `--help` lists each one. The debug menu does not. `get_hdr` and the lighting stats return `hdr_ms`, `post_ms_device`, `hdr_vram_bytes`, and `post_vram_device`. `post_ms_device` is `hdr_ms`: bloom plus the display pass, one frame behind, zero when the device has no timestamps. `post_vram_device` is the post buffers in MiB. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p. The gate applies it on a hardware device. A software rasterizer prints a finite positive timestamp and is not that score. The allocation ceiling is the preset row in §7. There is no 96 MiB ceiling.
 
 Screenshots and the histogram dump go to `./genos-debug/hdr-output/` unless `--out` is set. Nothing is written under `$HOME`.
 
@@ -430,7 +435,7 @@ Collected so a phase cannot drift in silence. Lighting departures also belong in
 | Jimenez, SIGGRAPH 2014 | 13-tap, 9-tap, thresholdless pyramid, weights sum to 1 | Not every frame. No knee. Rec.709 Karis luma |
 | Karis, same course | `1 / (1 + Y)` on the first downsample | Runs before exposure, so it does not commute with that scale |
 | SMPTE ST 2084, BT.2100, BT.2408 | PQ, BT.2020, graphics white at 203 nits on HDR10 and on scRGB | scRGB code of that white is 2.5375, written 2.54. Code 1.0 stays 80 nits |
-| Vulkan `VK_EXT_swapchain_colorspace` | The two enums and the SDR color space | Potato and Low force SDR even when HDR is listed |
+| Vulkan `VK_EXT_swapchain_colorspace` | The two enums and the SDR color space | Potato, and Low on desktop and the Deck LCD, force SDR even when HDR is listed. Deck OLED Low may take listed HDR10 |
 | ADR 0012 | Stored light ignores the camera | Exposure and bloom are downstream of compose |
 | ADR 0013 | Budgets are ceilings. A cheap check decides a skip | The check is the histogram max bin. Post ceilings are not the lighting caps |
 | extras plan, step 7 | `tone(exposure × (linear + bloom))`, byte match at exposure 1 and bloom 0 | The grade reads the scene image before that product. AgX replaces the curve only in phase 5 |
@@ -454,7 +459,7 @@ P2 is before P5 on purpose. AgX is not invertible. Shipping it before the linear
 ## 13. Open questions
 
 1. On the owner's NVIDIA driver, does Hyprland list HDR color spaces without `VK_hdr_layer`? Phase 6 records the list. A missing list is SDR. We do not vendor the layer in this design.
-2. Low forces SDR. HDR10 is 4 bytes, the same as today. If a 1060 timing shows the 10-bit encode inside the Low ceiling, Low can allow HDR10 and still refuse scRGB. That is a later measurement, not the default.
+2. Desktop and Deck LCD Low stay on SDR, including scRGB. ADR 0027 lets Deck OLED Low take HDR10 when the compositor lists that pair. The frozen ceilings do not move for that exception.
 3. The HDR peak is the fixed 1000 nits, including `vkSetHdrMetadataEXT`. A display that reports 400 nits should win. That read is not in this implementation. ADR 0015 records it as a phase-6 departure.
 4. FXAA's shader is 8-bit. Phase 6 skips it on HDR10 and on scRGB rather than widening it in the same change.
 5. ADR 0013's 8 ms lighting cap is 1080p. The stress sum at 1440p is unmeasured. Post stays at 1.20 ms on High either way.

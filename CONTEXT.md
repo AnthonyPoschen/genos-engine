@@ -49,16 +49,28 @@ The state in which a window receives the keyboard and the pointer from the displ
 _Avoid_: Active, selected
 
 **Input system**:
-The owner of the keyboard, the mouse, and the gamepad slots.
+The owner of the keyboard, the mouse, the gamepad slots, and the touch points.
 _Avoid_: Input manager, event bus
 
 **Device**:
-The keyboard, the mouse, or one gamepad slot.
+The keyboard, the mouse, one gamepad slot, or the touch surface.
 _Avoid_: Controller, peripheral
 
 **Gamepad slot**:
 A stable player slot for one gamepad. Slot 0 stays player one while that gamepad is disconnected.
 _Avoid_: Joystick index, controller id
+
+**Glyph set**:
+The picture family for the device the player is using: keyboard and mouse, Xbox, PlayStation, Steam Deck, a generic gamepad, or touch. The input system reports the active family.
+_Avoid_: Icon theme, prompt set
+
+**Touch point**:
+One finger sample: an id, a position, and a phase. The window writes the points. The input system does not read the touch hardware.
+_Avoid_: Touch event, pointer event
+
+**Gesture**:
+A tap, a swipe, or a pinch recognized from touch points. An action binds one gesture.
+_Avoid_: Touch event, flick
 
 **Input code**:
 The shared token for a key, a mouse button, or a gamepad control.
@@ -81,8 +93,12 @@ The view a game uses to look at the world.
 _Avoid_: Viewport, spectator
 
 **Scene handle**:
-A stable name for one floor, wall, solid, or light in the live scene. The floor name is `floor`.
+A stable name for one placed object. It is an index plus a generation. A stale generation misses after the slot is reused. The floor's handle is index 0, generation 1, and its MCP string stays `floor`.
 _Avoid_: Entity id
+
+**Prefab**:
+A `.gprefab` file of components. Spawning it copies those components onto new scene handles. An override is a component on the instance. The room script stays a script.
+_Avoid_: Blueprint
 
 **Agent endpoint**:
 The loopback MCP session on the running camera. An agent reads and edits the live scene there.
@@ -133,7 +149,7 @@ One update that moves bodies by gravity, contact, and springs. A speculative bod
 _Avoid_: Lighting ray, cascade
 
 **Vehicle**:
-Extra state on one chassis body. The chassis is that body's index. Ground, aircraft, and space are optional payloads. A wheel, a wing, and a thruster are not bodies.
+Extra state on one chassis body. The chassis is that body's index. Ground, aircraft, and space are optional payloads. A wheel, a wing, and a thruster are not bodies. The aircraft payload applies steady lift, drag, and thrust at the centre of mass. Its lift coefficient is stored. Angle of attack is not read. The landing trial sets that payload and wheeled ground together. Space combined with either is outside the current trial.
 _Avoid_: Body id, pawn
 
 **Chassis payload**:
