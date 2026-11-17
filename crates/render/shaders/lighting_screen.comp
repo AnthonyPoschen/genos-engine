@@ -8,7 +8,7 @@
 // luminance weight is nonlinear, so it does not commute with the bilinear.
 // ADR 0012's screen-space hold is not this path. A held camera does keep a
 // settled texel's wavelet until the drift pass (`lighting_still_refresh`),
-// except a texel a lamp or a mover reaches. The hash blurs a texel while its
+// except a lamp, which unholds the picture, or a mover tile. The hash blurs a texel while its
 // spatial estimate is still wide and then holds that blur. Rebuilding from
 // the settled mean leaves the 12.5 cm grid, and a wider phi spreads energy
 // the hold never spread. That was the ceiling, wall, and floor blotch.
@@ -154,17 +154,19 @@ uvec3 screen_gather(uvec2 p) {
 
 // One pixel per hit cell walks the wavelet taps. The walk lists active
 // cells; it does not take the list lock away from another hit's walk.
+// A mover used to force this rebuild for the whole picture. That walk, five
+// taps of 24 hash finds per cell, is the filter's extra cost with boxes
+// moving. A dropped change list still rebuilds. A reached tile rewalks its
+// own cell below, and the others stay on the list.
 bool screen_list_changed() {
-    if (lighting_movers_count() > 0u) {
-        return true;
-    }
     vec4 head = work.v[lighting_change_at()];
-    return head.y <= 0.5 && head.x > 0.5;
+    return head.y > 0.5;
 }
 
 // Append path: the list already holds the previous build. New cells go after
 // that count. screen_appending is per invocation.
 bool screen_appending = false;
+bool screen_reach_src = false;
 
 uint screen_list_base_word(uint frame) {
     return (frame & 1u) == 0u ? LIGHTING_SCREEN_LIST_BASE0 : LIGHTING_SCREEN_LIST_BASE1;
@@ -204,6 +206,9 @@ bool screen_list_add(uint slot) {
     }
     if (!lighting_svgf_active(slot)) {
         return false;
+    }
+    if (screen_reach_src) {
+        lighting_reach_stamp(slot);
     }
     uint gen = screen_appending ? screen_list_gen() : lighting_frame() + 1u;
     if (screen_appending && ckeys.key[LIGHTING_SCREEN_LIST_AT + slot] == gen) {
@@ -315,6 +320,15 @@ void main() {
                     screen_appending = false;
                 }
             }
+            if (slot < LIGHTING_CACHE_SLOTS && cache.v[3u * slot + 1u].w > 0.0 && !(cache.v[3u * slot + 1u].w > 0.2) && lighting_reach_tile_bit(p)) {
+                // Append. The coarse counter is the full rebuild, and this
+                // walk is only the cell the mover reached plus its taps.
+                screen_appending = true;
+                screen_reach_src = true;
+                screen_list_from(slot);
+                screen_reach_src = false;
+                screen_appending = false;
+            }
             return;
         }
         if (slot >= LIGHTING_CACHE_SLOTS) {
@@ -327,7 +341,9 @@ void main() {
         if (atomicExchange(ckeys.key[LIGHTING_SCREEN_OWNER_AT + slot], stamp) == stamp) {
             return;
         }
+        screen_reach_src = lighting_reach_tile_bit(p);
         screen_list_from(slot);
+        screen_reach_src = false;
         return;
     }
     uint n = screen_list_n();

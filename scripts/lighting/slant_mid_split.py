@@ -18,7 +18,7 @@ The gate, from ``oracle_metrics.score``:
     mid_err = sum(|block2(live)-block2(ref)|) / (sum(block2(ref)) + 1e-6)
 
 over the middle half of ``oracle/<scene>/f*-live.png`` and the matching
-``f*-reference.png``. ``lin_luma`` is sRGB-decoded Rec.709. This is not
+``f*-reference.png``. ``lin_luma`` undoes the legacy shoulder. This is not
 ``compare_linear`` on the path tracer's float radiance, and it is not the
 mean absolute luma.
 
@@ -393,7 +393,7 @@ def _guard_sources():
     if "return lighting_sh_read(pos, n, false);" not in shader:
         raise SystemExit("a slanted screen read does not use the neighbour blend")
     metrics = _source("scripts/lighting/oracle_metrics.py")
-    if "mids.append(mid_err(ll, rl))" not in metrics:
+    if "mids.append(mid_err(ll, rl" not in metrics:
         raise SystemExit("slant_mid_err_mean is no longer the mean of mid_err")
     if "slant_mid_err_mean=round(float(np.mean(mids)), 4)" not in metrics:
         raise SystemExit("the harness no longer rounds slant_mid_err_mean to 4 decimals")
@@ -664,7 +664,7 @@ def main(argv):
         "premise": PREMISE,
         "gate": (
             "slant_mid_err_mean = round(mean(oracle_metrics.mid_err), 4) on "
-            "sRGB-decoded Rec.709 luma of f*-live.png and f*-reference.png, "
+            "legacy-shoulder luma of f*-live.png and f*-reference.png, "
             "middle half, 2x2 blocks, sum(|live-ref|) / (sum(ref) + 1e-6). "
             "proxy_abs_mean is not this number."
         ),

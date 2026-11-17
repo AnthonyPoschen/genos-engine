@@ -275,6 +275,17 @@ const uint LIGHTING_DIAG_SCREEN_COARSE = 63u;
 // counts the texels whose mean moved, plus every plain texel on the
 // 32-frame backstop. The host reads it as LightingAtrousStats::filter_heavy.
 const uint LIGHTING_DIAG_FILTER_HEAVY = 60u;
+// Reach pack. diag[8] is otherwise unused. Low 16 bits are marked tiles, the
+// next 12 are tiles kept because the bounce still moved, and the top 4 are
+// the picture's corner tiles (bit set means that corner was unheld).
+const uint LIGHTING_DIAG_REACH = 8u;
+// Tile mask, one bit per 32 px tile, then one change word per tile, then one
+// bit per cache slot. lighting_gpu.rs sizes the key buffer with the same counts.
+// A measured change notes a tile by storing 1 in its change word. The reach
+// pass turns that into a mask bit. The compare that decides "changed" is
+// LIGHTING_DIRTY_EPS, the same one-percent test as the direct hold.
+const uint LIGHTING_REACH_MASK_WORDS = 2048u;
+const uint LIGHTING_REACH_CHANGE_WORDS = 65536u;
 bool lighting_diag_reserved(uint i) {
     return i == LIGHTING_DIAG_SCREEN_LIST_COARSE || i == LIGHTING_DIAG_SCREEN_LIST_FINE
         || (i >= LIGHTING_DIAG_SCREEN_CHANGED && i <= LIGHTING_DIAG_SCREEN_COARSE);
@@ -5474,9 +5485,8 @@ void lighting_svgf_inactive(uint slot) {
 // whole picture, long enough to cover the next drift pass. That pass then
 // sees a bounce that has already been walking, not a frozen one.
 const uint LIGHTING_HOLD_CATCH = 16u;
-// The CPU stored the frame the host hash last changed. Age 0 is that frame.
-// A mover still on the keep list unholds the picture too: the list is the
-// window after the box stops, and walking it per texel overflowed the stack.
+// The CPU stored the frame a lamp, the camera, or the sky last changed.
+// Age 0 is that frame. Occluder motion does not arm this catch.
 bool lighting_lamp_catch_scene() {
     uint stamp = ckeys.key[LIGHTING_LAMP_CATCH_AT];
     if (stamp == 0u) {
@@ -5485,30 +5495,364 @@ bool lighting_lamp_catch_scene() {
     int age = int(lighting_frame()) - int(stamp);
     return age >= 0 && age <= int(LIGHTING_HOLD_CATCH);
 }
+// Defined after the fill lists. The body is arithmetic, not a call into the
+// fill helpers: compose is at the byte ceiling, and a call keeps those helpers.
+uint lighting_reach_base();
+void lighting_reach_or_tile(uint tile) {
+    if (tile >= LIGHTING_REACH_CHANGE_WORDS) {
+        return;
+    }
+    atomicOr(ckeys.key[lighting_reach_base() + (tile >> 5u)], 1u << (tile & 31u));
+}
+bool lighting_reach_tile_bit(uvec2 p) {
+    uint tw = (pc.dims.x + 31u) / 32u;
+    if (tw == 0u) {
+        return false;
+    }
+    uint tile = (p.y >> 5u) * tw + (p.x >> 5u);
+    if (tile >= LIGHTING_REACH_CHANGE_WORDS) {
+        return false;
+    }
+    uint word = ckeys.key[lighting_reach_base() + (tile >> 5u)];
+    return (word & (1u << (tile & 31u))) != 0u;
+}
+bool lighting_reach_slot_bit(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    uint at = lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + LIGHTING_REACH_CHANGE_WORDS + (slot >> 5u);
+    return (ckeys.key[at] & (1u << (slot & 31u))) != 0u;
+}
+void lighting_reach_stamp(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    uint at = lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + LIGHTING_REACH_CHANGE_WORDS + (slot >> 5u);
+    atomicOr(ckeys.key[at], 1u << (slot & 31u));
+}
+const float REACH_NDC_Z = 0.05;
+const float REACH_NEAR_Z = 0.25;
+const float REACH_TAN_FLOOR = 1.0e-4;
+const float REACH_HALF = 0.5;
+const float REACH_TILE = 32.0;
+// Half the diagonal of a unit square. A cell of edge `size` is covered by a
+// sphere of radius size * this.
+const float REACH_CELL_DIAG = 0.70710677;
+// A relit pixel crosses the one-percent hold in most tiles. A shadow is a
+// much larger step. The tile count below asks for a region of those.
+const float REACH_SHADOW = 0.25;
+// One cell, or this many direct-shade pixels, is a tile. A single relit
+// pixel is not: the one-percent hold fires in almost every tile.
+const uint REACH_DIRECT_PIXELS = 128u;
+// How fast a fill cell's residual variance follows the raw sample. A hot
+// sample does not teach the band, so a step stays outside it. Quiet samples
+// pull the band in. The multi-scale estimator does not use this word.
+const float REACH_RESID_RATE = 0.08;
+// The raw fill sample is a heavy-tailed residual against the stored mean.
+// Two standard errors, the texel rule, marks thousands of settled cells and
+// the picture unholds. Thirty-two standard errors is the tail that is not
+// that noise. A multi-scale estimate still uses LIGHTING_DIRTY_SE.
+const float REACH_RESID_SE = 32.0;
+// One projection. No change-list walk: that overflowed lavapipe's stack.
+bool lighting_reach_project(vec3 world, out uvec2 px) {
+    px = uvec2(0u);
+    vec3 rel = world - scene.eye.xyz;
+    float z = dot(rel, scene.view_forward.xyz);
+    if (z < REACH_NDC_Z) {
+        return false;
+    }
+    float t = max(scene.view_right.w, REACH_TAN_FLOOR);
+    float aspect = max(scene.view_forward.w, REACH_TAN_FLOOR);
+    float ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
+    float ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
+    float sx = (ndc_x + 1.0) * REACH_HALF * float(pc.dims.x);
+    float sy = (1.0 - ndc_y) * REACH_HALF * float(pc.dims.y);
+    if (sx < 0.0 || sy < 0.0 || sx >= float(pc.dims.x) || sy >= float(pc.dims.y)) {
+        return false;
+    }
+    px = uvec2(uint(sx), uint(sy));
+    return true;
+}
+bool lighting_reach_world(vec3 world) {
+    uvec2 px;
+    if (!lighting_reach_project(world, px)) {
+        return false;
+    }
+    return lighting_reach_tile_bit(px);
+}
+// True on a frame that uploaded mover bounds. A still picture's own
+// convergence is not a mover, and a lamp is already picture-wide.
+// The reach pass reads the count once and clears it, so a tile drops
+// the frame after the shade step stops.
+bool lighting_reach_noting() {
+    vec4 head = work.v[lighting_change_at()];
+    return head.y <= LIGHTING_CHANGES_DROPPED && head.x > LIGHTING_CHANGES_DROPPED;
+}
+// Counts a pixel whose direct shade stepped. The reach pass turns a
+// full-enough count into a tile. One pixel does not: the relight is stochastic.
+void lighting_reach_count_px(uvec2 p) {
+    if (!lighting_reach_noting()) {
+        return;
+    }
+    uint tw = (pc.dims.x + 31u) / 32u;
+    uint tx = p.x >> 5u;
+    uint ty = p.y >> 5u;
+    uint th = (pc.dims.y + 31u) / 32u;
+    if (tw == 0u || tx >= tw || ty >= th) {
+        return;
+    }
+    atomicAdd(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + ty * tw + tx], 1u);
+}
+// lighting_sc_noise is unknown when the multi-scale flag is off. A fill cell
+// keeps the squared luminance residual of the raw sample against the stored
+// mean in the estimator's z. That is the band. The short variance is the
+// residual against a mean that chases the sample, so it calls a settled
+// sample hot. No residual yet is a seed, not a reach.
+vec2 lighting_reach_noise(uint slot) {
+    vec2 nz = lighting_sc_noise(slot);
+    if (nz.x >= 0.0) {
+        return nz;
+    }
+    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+    if (b.x > 0.0 || !(b.w > REACH_HALF) || !(b.z > 0.0)) {
+        return nz;
+    }
+    float lum = dot(max(cache.v[3u * slot + 2u].rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+    if (!(lum > 0.0)) {
+        return nz;
+    }
+    float sd = sqrt(b.z);
+    return vec2(sd / lum, sd);
+}
+// The squared step of the raw sample against the stored mean. The first
+// sample is at least a quarter of the mean, so a quiet seed does not freeze
+// the band shut. Later samples pull it toward the residual the fill
+// actually writes. A hot sample is in that residual: leaving it out ratchets
+// the band down to the quiet core and keeps the tail hot forever.
+void lighting_reach_note_resid(uint slot, vec3 taken, vec3 mean) {
+    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+    if (b.x > 0.0) {
+        return;
+    }
+    float dl = abs(dot(max(taken, vec3(0.0)) - max(mean, vec3(0.0)), LIGHTING_SVGF_LW));
+    float resid = dl * dl;
+    if (!(b.z > 0.0)) {
+        float lum = dot(max(mean, vec3(0.0)), LIGHTING_SVGF_LW);
+        b.z = max(resid, REACH_SHADOW * REACH_SHADOW * lum * lum);
+    } else {
+        b.z = mix(b.z, resid, REACH_RESID_RATE);
+    }
+    cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = b;
+}
+// The new sample against the stored mean. Unpacked luminance, not an rgb9e5
+// pack: one bucket does not keep a settled cell hot, and a pack that matches
+// while the sample is still outside the band does not clear it. The sample
+// has to clear REACH_SHADOW, the same quarter as a direct shade step. A
+// running estimator, including a fill cell's stored deviation, also has to
+// clear the cell's own noise. A fill cell with no residual yet stays quiet:
+// that sample is the seed. The tile drops on the next reach pass once the
+// sample is inside the band. A cell the mover reaches joins without this test.
+bool lighting_reach_radiance_hot(vec3 taken, vec3 mean, uint slot) {
+    float ys = dot(max(taken, vec3(0.0)), LIGHTING_SVGF_LW);
+    float ym = dot(max(mean, vec3(0.0)), LIGHTING_SVGF_LW);
+    float peak = max(max(ys, ym), REACH_SHADOW);
+    float dl = abs(ys - ym);
+    if (dl <= REACH_SHADOW * peak) {
+        return false;
+    }
+    vec2 nz = lighting_sc_noise(slot);
+    float se = LIGHTING_DIRTY_SE;
+    if (!(nz.x >= 0.0)) {
+        nz = lighting_reach_noise(slot);
+        se = REACH_RESID_SE;
+    }
+    // No residual yet. This sample is the seed, not a departure from a
+    // band. Marking it joins every newly filled cell while a mover is
+    // listed, and one of those cells sits on the camera.
+    if (!(nz.x >= 0.0)) {
+        return false;
+    }
+    return dl > se * nz.y * lighting_sc_sun_gain(slot);
+}
+// The last change word is not a tile. A hot cell whose square covers half
+// the picture sets it. A cell on or behind the camera has no footprint and
+// does not. `reach_cell_span` is the same test.
+void lighting_reach_wide_note() {
+    atomicMax(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + LIGHTING_REACH_CHANGE_WORDS - 1u], 1u);
+}
+// Tiles the cell's square covers. The centre alone misses the rest of the
+// cell. A cell on or behind the camera covers nothing. A rect of half the
+// picture is not a local mask: the reach pass unholds the picture.
+void lighting_reach_raise_px(uvec2 px);
+void lighting_reach_note_bounds(vec3 centre, float rad) {
+    vec3 rel = centre - scene.eye.xyz;
+    float z = dot(rel, scene.view_forward.xyz);
+    // On or behind the camera there is no screen footprint. A fill outlier
+    // there used to set the picture unhold, and one such cell a frame
+    // dropped the hold everywhere. A rect that covers half the picture
+    // still does: that cell is in front and its square is not local.
+    if (z < -rad || z <= REACH_NEAR_Z) {
+        return;
+    }
+    float t = max(scene.view_right.w, REACH_TAN_FLOOR);
+    float aspect = max(scene.view_forward.w, REACH_TAN_FLOOR);
+    float zc = max(z, REACH_NEAR_Z);
+    float ndc_x = 0.0;
+    float ndc_y = 0.0;
+    if (z > REACH_NDC_Z) {
+        ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
+        ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
+    }
+    float px = (ndc_x + 1.0) * REACH_HALF * float(pc.dims.x);
+    float py = (1.0 - ndc_y) * REACH_HALF * float(pc.dims.y);
+    float pry = (rad / zc) / t * (REACH_HALF * float(pc.dims.y));
+    float prx = (rad / zc) / (t * aspect) * (REACH_HALF * float(pc.dims.x));
+    float pr = max(prx, pry);
+    int x0 = int(floor((px - pr) / REACH_TILE));
+    int y0 = int(floor((py - pr) / REACH_TILE));
+    int x1 = int(floor((px + pr) / REACH_TILE));
+    int y1 = int(floor((py + pr) / REACH_TILE));
+    uint tw = (pc.dims.x + 31u) / 32u;
+    uint th = (pc.dims.y + 31u) / 32u;
+    if (x1 < 0 || y1 < 0 || x0 >= int(tw) || y0 >= int(th) || tw == 0u || th == 0u) {
+        return;
+    }
+    if (x0 < 0) {
+        x0 = 0;
+    }
+    if (y0 < 0) {
+        y0 = 0;
+    }
+    if (x1 >= int(tw)) {
+        x1 = int(tw) - 1;
+    }
+    if (y1 >= int(th)) {
+        y1 = int(th) - 1;
+    }
+    uint span = uint(x1 - x0 + 1) * uint(y1 - y0 + 1);
+    if (span * 2u >= tw * th) {
+        if (lighting_reach_noting()) {
+            lighting_reach_wide_note();
+        }
+        return;
+    }
+    bool noting = lighting_reach_noting();
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            uvec2 p = uvec2(uint(x) * 32u, uint(y) * 32u);
+            if (noting || lighting_reach_tile_bit(p)) {
+                lighting_reach_raise_px(p);
+            }
+        }
+    }
+}
+void lighting_reach_raise_px(uvec2 px) {
+    if (px.x >= pc.dims.x || px.y >= pc.dims.y) {
+        return;
+    }
+    uint tw = (pc.dims.x + 31u) / 32u;
+    uint tx = px.x >> 5u;
+    uint ty = px.y >> 5u;
+    uint th = (pc.dims.y + 31u) / 32u;
+    if (tw == 0u || tx >= tw || ty >= th) {
+        return;
+    }
+    uint tile = ty * tw + tx;
+    if (tile >= LIGHTING_REACH_CHANGE_WORDS) {
+        return;
+    }
+    atomicMax(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + tile], REACH_DIRECT_PIXELS);
+}
+// A world cell whose new sample left its mean. The note is the cell's square,
+// not the centre: a centre tile misses the rest of the footprint. While a
+// mover is listed those tiles join even outside the mover disc. A tile
+// already marked stays while the sample is still outside the band, including
+// the frames after the mover stops, and drops once it is not. A cell the
+// mover reaches joins while that mover is listed. A cell on or behind the
+// camera covers nothing. Half the picture unholds the picture.
+void lighting_reach_note_cell(uint slot, vec3 mean, vec3 taken) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    float size = cache.v[3u * slot + 1u].w;
+    if (!(size > LIGHTING_HIT_PATCH)) {
+        return;
+    }
+    // No stored mean yet. The first sample is the mean, not a departure
+    // from one. A cell behind the camera would otherwise unhold the picture.
+    if (!(cache.v[3u * slot + 2u].w > REACH_HALF)) {
+        return;
+    }
+    bool hot = lighting_reach_radiance_hot(taken, mean, slot);
+    lighting_reach_note_resid(slot, taken, mean);
+    // The residual tail is a few cells and it is not the mover: fill noise
+    // hides a far box's bounce. A cell the mover actually reaches joins on
+    // that fact. The quarter-and-residual test is what joins a cell outside
+    // that disc.
+    if (!hot && lighting_reach_noting() && lighting_near_change(cache.v[3u * slot].xyz)) {
+        hot = true;
+    }
+    if (!hot) {
+        return;
+    }
+    lighting_reach_note_bounds(cache.v[3u * slot].xyz, size * REACH_CELL_DIAG);
+}
+// The stamp is one load. The projection stays out of the picture compose:
+// that shader is at its SPIR-V ceiling, and the screen pass stamps the slot.
+bool lighting_slot_loose(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    if (lighting_reach_slot_bit(slot)) {
+        return true;
+    }
+    bool screen = (gstats.ctrl_bits & (1u << 19u)) != 0u;
+    // #288 deletes this branch with the object-local salt. Until then an
+    // object-space slot has no world point to project, so the hash wavelet
+    // unholds it while the attach list is live.
+    if (cache.v[LIGHTING_SC_OBJ_AT + slot].x > LIGHTING_CACHE_HAS_W) {
+        return !screen && lighting_movers_count() > 0u;
+    }
+    return lighting_reach_world(cache.v[3u * slot].xyz);
+}
 bool lighting_change_reaches() {
     if (lighting_still_opening() || lighting_scene_changed() || lighting_lamp_catch_scene()) {
         return true;
     }
     vec4 head = work.v[lighting_change_at()];
-    if (head.y > LIGHTING_CHANGES_DROPPED) {
-        return true;
-    }
-    return lighting_movers_count() > 0u;
+    return head.y > LIGHTING_CHANGES_DROPPED;
 }
-// Compose has a pixel. The reach is the picture, so the position is not a walk.
+// A lamp, the open, or a dropped change list is the whole picture. A mover is
+// the tile the reach pass marked. Compose has already stored the pixel.
 bool lighting_pixel_reached(vec3 p) {
+    // Compose reads the block stamp at the call. The tile bitset's address
+    // does not fit in that compile. The screen wavelet still uses the bitset.
+#ifdef GENOS_COMPOSE_NO_WALK
     return lighting_change_reaches() || p.x != p.x;
+#else
+    return lighting_change_reaches() || p.x != p.x || lighting_reach_tile_bit(lighting_compose_px);
+#endif
 }
 bool lighting_slot_reached(uint slot) {
     if (slot >= LIGHTING_CACHE_SLOTS) {
         return true;
     }
-    return lighting_change_reaches();
+    return lighting_change_reaches() || lighting_reach_slot_bit(slot) || lighting_slot_loose(slot);
 }
 // The steady hold. False while the picture is still filling, on the drift
-// pass, on a moving camera, and on a texel a change reaches.
+// pass, on a moving camera, on a lamp catch, and on a slot the screen pass
+// stamped. The hash projection is lighting_slot_loose, checked by the wavelet.
 bool lighting_wavelet_held(uint slot) {
-    return slot < LIGHTING_CACHE_SLOTS && lighting_view_held() && !lighting_still_refresh() && !lighting_change_reaches();
+    // The hash wavelet reads the per-slot stamp. Compose does not: the block
+    // stamp is what `lighting_pixel_reached` reads, and the slot bitset does
+    // not fit in that compile.
+#ifdef GENOS_COMPOSE_NO_WALK
+    return slot < LIGHTING_CACHE_SLOTS && lighting_view_held() && !lighting_still_refresh()
+        && !lighting_change_reaches();
+#else
+    return slot < LIGHTING_CACHE_SLOTS && lighting_view_held() && !lighting_still_refresh()
+        && !lighting_change_reaches() && !lighting_reach_slot_bit(slot);
+#endif
 }
 // A texel with 16 sets used to rerun variance and every a-trous level on
 // every frame, so the dirty early-out never fired once the set count closed.
@@ -5519,7 +5863,8 @@ bool lighting_svgf_plain_rebuild(uint slot) {
     if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) < LIGHTING_SC_PLAIN_SETS) {
         return false;
     }
-    return lighting_still_refresh() || !lighting_view_held() || lighting_change_reaches();
+    return lighting_still_refresh() || !lighting_view_held() || lighting_change_reaches()
+        || lighting_reach_slot_bit(slot) || lighting_slot_loose(slot);
 }
 void lighting_svgf_variance(uint slot) {
     // A texel that has closed its set count used to rerun the 7x7 and then
@@ -5530,7 +5875,7 @@ void lighting_svgf_variance(uint slot) {
     // The dirty test below does not catch this: the mean keeps crossing one
     // percent, so the early-out never fires and the kernel stays the picture.
     float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
-    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_svgf_was_active(slot) && lighting_wavelet_held(slot)) {
+    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_svgf_was_active(slot) && lighting_wavelet_held(slot) && !lighting_slot_loose(slot)) {
         return;
     }
     float var;
@@ -5790,7 +6135,7 @@ void lighting_svgf_push(uint slot) {
     // Pushing the raw mean on the frames in between was the frame-to-frame
     // step. A moving camera still pushes.
     float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
-    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_wavelet_held(slot)) {
+    if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_wavelet_held(slot) && !lighting_slot_loose(slot)) {
         // The wavelet stays put. Every fourth frame, until the first drift
         // pass, a field that has split from its raw mean by the sparse ratio
         // steps toward that mean. After that pass the filter owns the field:
@@ -6663,3 +7008,12 @@ void lighting_gdirty_mark(uint probe) {
     work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());
 }
 #include "lighting_fill.glsl"
+// Past the fill lists. One constant, so compose keeps a multiply and an add
+// and not a chain of adds. Same end as `lighting_fill_keys_words`.
+const uint LIGHTING_REACH_TAIL = LIGHTING_FILL_PARAMS + LIGHTING_CACHE_SLOTS + 8u
+    + LIGHTING_FILL_OFF_CAP + LIGHTING_FILL_HIST_WORDS + LIGHTING_FILL_PLAN_WORDS
+    + LIGHTING_FILL_EXTRA_WORDS + LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS * 5u
+    + LIGHTING_FILL_TILE_CAP;
+uint lighting_reach_base() {
+    return LIGHTING_SC_SEED_PAY_AT + pc.dims.x * pc.dims.y * 8u + LIGHTING_REACH_TAIL;
+}
