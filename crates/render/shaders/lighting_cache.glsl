@@ -273,12 +273,11 @@ const uint LIGHTING_DIAG_FILTER_HEAVY = 60u;
 // next 12 are tiles kept because the bounce still moved, and the top 4 are
 // the picture's corner tiles (bit set means that corner was unheld).
 const uint LIGHTING_DIAG_REACH = 8u;
-// Metres past a mover's before and after bounds. A corner box in the 25 m
-// hall must not cover the far side of the picture. A lamp is not dilated:
-// its catch stays the whole picture.
-const float LIGHTING_BOUNCE_REACH = 3.0;
 // Tile mask, one bit per 32 px tile, then one change word per tile, then one
 // bit per cache slot. lighting_gpu.rs sizes the key buffer with the same counts.
+// A measured change notes a tile by storing 1 in its change word. The reach
+// pass turns that into a mask bit. The compare that decides "changed" is
+// LIGHTING_DIRTY_EPS, the same one-percent test as the direct hold.
 const uint LIGHTING_REACH_MASK_WORDS = 2048u;
 const uint LIGHTING_REACH_CHANGE_WORDS = 65536u;
 bool lighting_diag_reserved(uint i) {
@@ -5356,23 +5355,61 @@ void lighting_reach_stamp(uint slot) {
     uint at = lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + LIGHTING_REACH_CHANGE_WORDS + (slot >> 5u);
     atomicOr(ckeys.key[at], 1u << (slot & 31u));
 }
+const float REACH_NDC_Z = 0.05;
+const float REACH_TAN_FLOOR = 1.0e-4;
+const float REACH_HALF = 0.5;
+// A relit pixel crosses the one-percent hold in most tiles. A shadow is a
+// much larger step. The tile count below asks for a region of those.
+const float REACH_SHADOW = 0.25;
 // One projection. No change-list walk: that overflowed lavapipe's stack.
-bool lighting_reach_world(vec3 world) {
+bool lighting_reach_project(vec3 world, out uvec2 px) {
+    px = uvec2(0u);
     vec3 rel = world - scene.eye.xyz;
     float z = dot(rel, scene.view_forward.xyz);
-    if (z < 0.05) {
+    if (z < REACH_NDC_Z) {
         return false;
     }
-    float t = max(scene.view_right.w, 1.0e-4);
-    float aspect = max(scene.view_forward.w, 1.0e-4);
+    float t = max(scene.view_right.w, REACH_TAN_FLOOR);
+    float aspect = max(scene.view_forward.w, REACH_TAN_FLOOR);
     float ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
     float ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
-    float px = (ndc_x + 1.0) * 0.5 * float(pc.dims.x) - 0.5;
-    float py = (1.0 - ndc_y) * 0.5 * float(pc.dims.y) - 0.5;
-    if (px < 0.0 || py < 0.0 || px >= float(pc.dims.x) || py >= float(pc.dims.y)) {
+    float sx = (ndc_x + 1.0) * REACH_HALF * float(pc.dims.x);
+    float sy = (1.0 - ndc_y) * REACH_HALF * float(pc.dims.y);
+    if (sx < 0.0 || sy < 0.0 || sx >= float(pc.dims.x) || sy >= float(pc.dims.y)) {
         return false;
     }
-    return lighting_reach_tile_bit(uvec2(uint(px + 0.5), uint(py + 0.5)));
+    px = uvec2(uint(sx), uint(sy));
+    return true;
+}
+bool lighting_reach_world(vec3 world) {
+    uvec2 px;
+    if (!lighting_reach_project(world, px)) {
+        return false;
+    }
+    return lighting_reach_tile_bit(px);
+}
+// True on a frame that uploaded mover bounds. A still picture's own
+// convergence is not a mover, and a lamp is already picture-wide.
+// The reach pass reads the count once and clears it, so a tile drops
+// the frame after the shade step stops.
+bool lighting_reach_noting() {
+    vec4 head = work.v[lighting_change_at()];
+    return head.y <= LIGHTING_CHANGES_DROPPED && head.x > LIGHTING_CHANGES_DROPPED;
+}
+// Counts a pixel whose direct shade stepped. The reach pass turns a
+// full-enough count into a tile. One pixel does not: the relight is stochastic.
+void lighting_reach_count_px(uvec2 p) {
+    if (!lighting_reach_noting()) {
+        return;
+    }
+    uint tw = (pc.dims.x + 31u) / 32u;
+    uint tx = p.x >> 5u;
+    uint ty = p.y >> 5u;
+    uint th = (pc.dims.y + 31u) / 32u;
+    if (tw == 0u || tx >= tw || ty >= th) {
+        return;
+    }
+    atomicAdd(ckeys.key[lighting_reach_base() + LIGHTING_REACH_MASK_WORDS + ty * tw + tx], 1u);
 }
 // The stamp is one load. The projection stays out of the picture compose:
 // that shader is at its SPIR-V ceiling, and the screen pass stamps the slot.
@@ -5384,7 +5421,10 @@ bool lighting_slot_loose(uint slot) {
         return true;
     }
     bool screen = (gstats.ctrl_bits & (1u << 19u)) != 0u;
-    if (cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5) {
+    // #288 deletes this branch with the object-local salt. Until then an
+    // object-space slot has no world point to project, so the hash wavelet
+    // unholds it while the attach list is live.
+    if (cache.v[LIGHTING_SC_OBJ_AT + slot].x > LIGHTING_CACHE_HAS_W) {
         return !screen && lighting_movers_count() > 0u;
     }
     return lighting_reach_world(cache.v[3u * slot].xyz);

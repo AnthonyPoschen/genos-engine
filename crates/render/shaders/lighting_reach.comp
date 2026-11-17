@@ -1,16 +1,19 @@
 #version 450
-// One group. Marks the screen tiles a mover's before and after bounds can
-// reach, dilated by LIGHTING_BOUNCE_REACH, and any tile whose packed bounce
-// still differed from the stored one. The hash wavelet loads one of those
-// bits. It does not walk the change list. A lamp is not in this list: the
-// picture-wide catch is unchanged. pc.dims.z == 0xffffffff clears the slot
-// stamps only. That runs after the cache pass, so the pass still sees the
-// stamps from the previous frame.
+// One group. Marks the screen tiles a mover's before and after bounds cover,
+// and any tile a measured direct or cell change noted. The bounds are this
+// frame's change-list spheres. #288's mover table replaces that read; the
+// mark stays. A clipped, off-screen, or screen-filling footprint is not
+// marked as local: the host unholds the picture. A lamp is not in this list.
+// pc.dims.z == 0xffffffff clears the slot stamps only, after the cache pass.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
 shared uint reach_hot_count;
+
+const float REACH_NEAR_Z = 0.25;
+const float REACH_TILE = 32.0;
+const uint REACH_DIRECT_PIXELS = 128u;
 
 uint reach_tw() {
     return (pc.dims.x + 31u) / 32u;
@@ -41,27 +44,27 @@ void reach_disc(vec3 centre, float rad) {
     if (z < -rad) {
         return;
     }
-    float t = max(scene.view_right.w, 1.0e-4);
-    float aspect = max(scene.view_forward.w, 1.0e-4);
-    float zc = max(z, 0.25);
+    float t = max(scene.view_right.w, REACH_TAN_FLOOR);
+    float aspect = max(scene.view_forward.w, REACH_TAN_FLOOR);
+    float zc = max(z, REACH_NEAR_Z);
     float ndc_x = 0.0;
     float ndc_y = 0.0;
-    if (z > 0.05) {
+    if (z > REACH_NDC_Z) {
         ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
         ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
     }
-    float px = (ndc_x + 1.0) * 0.5 * float(pc.dims.x);
-    float py = (1.0 - ndc_y) * 0.5 * float(pc.dims.y);
-    float pry = (rad / zc) / t * (0.5 * float(pc.dims.y));
-    float prx = (rad / zc) / (t * aspect) * (0.5 * float(pc.dims.x));
+    float px = (ndc_x + 1.0) * REACH_HALF * float(pc.dims.x);
+    float py = (1.0 - ndc_y) * REACH_HALF * float(pc.dims.y);
+    float pry = (rad / zc) / t * (REACH_HALF * float(pc.dims.y));
+    float prx = (rad / zc) / (t * aspect) * (REACH_HALF * float(pc.dims.x));
     float pr = max(prx, pry);
-    if (z <= 0.25) {
+    if (z <= REACH_NEAR_Z) {
         pr = max(pr, float(pc.dims.x + pc.dims.y));
     }
-    int x0 = int(floor((px - pr) / 32.0));
-    int y0 = int(floor((py - pr) / 32.0));
-    int x1 = int(floor((px + pr) / 32.0));
-    int y1 = int(floor((py + pr) / 32.0));
+    int x0 = int(floor((px - pr) / REACH_TILE));
+    int y0 = int(floor((py - pr) / REACH_TILE));
+    int x1 = int(floor((px + pr) / REACH_TILE));
+    int y1 = int(floor((py + pr) / REACH_TILE));
     uint tw = reach_tw();
     uint th = (pc.dims.y + 31u) / 32u;
     if (x0 < 0) {
@@ -109,7 +112,9 @@ void main() {
     uint change_at = base + LIGHTING_REACH_MASK_WORDS;
     if (tw > 0u) {
         for (uint tile = id; tile < tiles && tile < LIGHTING_REACH_CHANGE_WORDS; tile += 64u) {
-            if (ckeys.key[change_at + tile] > uint(LIGHTING_DIRTY_EPS * 1000000.0)) {
+            // A single relit pixel exceeds the one-percent test in almost
+            // every tile. A tile joins when enough of its pixels did.
+            if (ckeys.key[change_at + tile] >= REACH_DIRECT_PIXELS) {
                 reach_mark_tile(tile % tw, tile / tw);
                 hot++;
             }
@@ -118,11 +123,11 @@ void main() {
     atomicAdd(reach_hot_count, hot);
     if (id == 0u) {
         vec4 head = work.v[lighting_change_at()];
-        if (head.y <= 0.5 && tw > 0u) {
+        if (head.y <= LIGHTING_CHANGES_DROPPED && tw > 0u) {
             uint n = min(uint(head.x), LIGHTING_CHANGES);
             for (uint i = 0u; i < n; i++) {
                 vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + i];
-                reach_disc(b.xyz, b.w + LIGHTING_BOUNCE_REACH);
+                reach_disc(b.xyz, b.w);
             }
         }
     }

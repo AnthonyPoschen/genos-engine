@@ -6,7 +6,7 @@
 use std::sync::Mutex;
 
 use genos_render::Renderer;
-use genos_scene::{Camera, LightingPreset, LightingSettings, Vec3};
+use genos_scene::{Camera, LightingPreset, LightingSettings, Shape, Solid, Vec3};
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::stage::{Scale, Stage};
 use genos_window::Window;
@@ -157,4 +157,274 @@ fn a_far_mover_leaves_the_other_corners_held() {
         lamp_walks > 1000,
         "a lamp toggle left the bounce held (walks {lamp_walks})"
     );
+}
+
+struct Shot {
+    px: Vec<u8>,
+    mask: Vec<u32>,
+    tiles: u32,
+    walks: u32,
+    rebuilt: u32,
+    wide: bool,
+}
+
+fn tile_on(mask: &[u32], tile: u32) -> bool {
+    let i = tile as usize;
+    mask.get(i / 32)
+        .is_some_and(|word| word & (1 << (i % 32)) != 0)
+}
+
+fn tile_mean_abs(a: &[u8], b: &[u8], tx: u32, ty: u32) -> f64 {
+    let mut sum = 0.0f64;
+    let mut n = 0u32;
+    let y0 = ty * TILE;
+    let x0 = tx * TILE;
+    for y in y0..(y0 + TILE).min(HEIGHT) {
+        for x in x0..(x0 + TILE).min(WIDTH) {
+            let i = ((y * WIDTH + x) * 4) as usize;
+            if i + 2 >= a.len() || i + 2 >= b.len() {
+                continue;
+            }
+            sum += (f64::from(a[i]) - f64::from(b[i])).abs();
+            sum += (f64::from(a[i + 1]) - f64::from(b[i + 1])).abs();
+            sum += (f64::from(a[i + 2]) - f64::from(b[i + 2])).abs();
+            n += 3;
+        }
+    }
+    if n == 0 { 0.0 } else { sum / f64::from(n) }
+}
+
+/// Largest per-tile mean absolute code difference. `outside` uses tiles whose
+/// mask bit is clear. A picture-wide frame compares every tile.
+fn max_tile_diff(local: &Shot, control: &Shot, outside: bool) -> (f64, u32) {
+    let tw = WIDTH.div_ceil(TILE);
+    let th = HEIGHT.div_ceil(TILE);
+    let mut worst = 0.0f64;
+    let mut count = 0u32;
+    for ty in 0..th {
+        for tx in 0..tw {
+            let tile = ty * tw + tx;
+            if outside && !local.wide && tile_on(&local.mask, tile) {
+                continue;
+            }
+            count += 1;
+            worst = worst.max(tile_mean_abs(&local.px, &control.px, tx, ty));
+        }
+    }
+    (worst, count)
+}
+
+fn box_at(stage: &mut Stage, x: f32, y: f32, z: f32, size: f32, height: f32) {
+    let solid = stage
+        .world
+        .scene
+        .solids
+        .iter_mut()
+        .find(|solid| solid.color[0] > 0.8 && solid.color[1] < 0.2)
+        .expect("red box");
+    solid.position = Vec3::new(x, y, z);
+    solid.size = size;
+    solid.height = height;
+    solid.yaw = 0.0;
+}
+
+fn push_spread(stage: &mut Stage) {
+    let spots = [
+        (8.0, 8.0),
+        (12.0, 10.0),
+        (16.0, 12.0),
+        (10.0, 16.0),
+        (14.0, 18.0),
+        (18.0, 20.0),
+    ];
+    for (i, (x, z)) in spots.into_iter().enumerate() {
+        stage.world.scene.solids.push(Solid {
+            shape: Shape::Square,
+            position: Vec3::new(x, 0.0, z),
+            size: 2.5,
+            height: 2.0,
+            yaw: 0.0,
+            color: [0.2, 0.2, 0.2 + i as f32 * 0.05],
+            absorption: 0.0,
+            reflectance: -1.0,
+            color_mix: -1.0,
+        });
+    }
+}
+
+fn apply_frame(stage: &mut Stage, camera: &mut Camera, frame: u32, spread: &mut bool) {
+    let base = Vec3::new(14.5, 1.7, 23.5);
+    camera.set_pose(base, -0.3554, 0.08);
+    if frame < 36 {
+        box_at(stage, 3.0, 0.4, 4.0, 1.0, 1.0);
+        return;
+    }
+    if frame < 60 {
+        let step = if frame < 44 { (frame - 35) as f32 } else { 8.0 };
+        let x = 3.0 + 0.12 * step;
+        box_at(stage, x, 0.4, 4.0, 1.0, 1.0);
+        return;
+    }
+    if frame < 66 {
+        box_at(stage, 14.5, 0.4, 32.0, 1.0, 1.0);
+        return;
+    }
+    if frame < 72 {
+        let x = 12.0 + 0.2 * (frame - 66) as f32;
+        box_at(stage, x, 0.0, 14.0, 8.0, 6.0);
+        return;
+    }
+    if frame < 78 {
+        if !*spread {
+            push_spread(stage);
+            *spread = true;
+        }
+        let n = stage.world.scene.solids.len();
+        let shift = 0.15 * (frame - 71) as f32;
+        for solid in stage
+            .world
+            .scene
+            .solids
+            .iter_mut()
+            .skip(n.saturating_sub(6))
+        {
+            solid.position.x += shift;
+        }
+        return;
+    }
+    box_at(stage, 3.0 + 0.2 * (frame - 77) as f32, 0.4, 4.0, 1.0, 1.0);
+    camera.set_pose(Vec3::new(14.5 + 0.35, 1.7, 23.5), -0.3554, 0.08);
+}
+
+fn capture(unhold: bool) -> Vec<Shot> {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_lighting_settings(LightingSettings::preset(LightingPreset::High));
+    renderer.lighting_picture_unhold(unhold);
+    let (mut stage, mut camera) = hall();
+    let mut spread = false;
+    let mut shots = Vec::new();
+    for frame in 0..82u32 {
+        apply_frame(&mut stage, &mut camera, frame, &mut spread);
+        let _ = window.pump();
+        let px = renderer
+            .draw(&stage.world, &camera, true)
+            .expect("draw")
+            .expect("pixels");
+        let stats = renderer.lighting_atrous_stats();
+        let mask = renderer.lighting_reach_mask();
+        shots.push(Shot {
+            px,
+            mask,
+            tiles: stats.reach_tiles,
+            walks: stats.cache_walks,
+            rebuilt: stats.list_rebuilt,
+            wide: stats.reach_wide,
+        });
+    }
+    shots
+}
+
+#[test]
+fn outside_the_mask_matches_a_picture_wide_unhold() {
+    let control = capture(true);
+    let local = capture(false);
+    let tile_count = WIDTH.div_ceil(TILE) * HEIGHT.div_ceil(TILE);
+    let still = max_tile_diff(&local[35], &control[35], false);
+    eprintln!(
+        "reach control still max tile diff {:.3} over {} tiles",
+        still.0, still.1
+    );
+    // Two lavapipe runs of the same held picture differ by a couple of codes
+    // in a tile. A stale shadow is much larger.
+    assert!(
+        still.0 < 6.0,
+        "two settled runs already differ by {:.3} codes",
+        still.0
+    );
+
+    let mut local_disc = false;
+    for frame in 40..44 {
+        let (diff, n) = max_tile_diff(&local[frame], &control[frame], true);
+        eprintln!(
+            "reach corner {frame} tiles {} wide {} rebuilt {} walks {} outside {n} max {diff:.3}",
+            local[frame].tiles, local[frame].wide, local[frame].rebuilt, local[frame].walks
+        );
+        assert_eq!(local[frame].rebuilt, 0, "a mover rebuilt the screen list");
+        assert!(
+            diff < 8.0,
+            "stale bounce outside the mask, frame {frame}, {diff:.3} codes"
+        );
+        if !local[frame].wide && local[frame].tiles > 0 && local[frame].tiles * 2 < tile_count {
+            local_disc = true;
+            assert!(n > 0, "a local mask had no outside tile to compare");
+        }
+    }
+    assert!(local_disc, "the corner box never stayed a local disc");
+
+    for frame in 44..47 {
+        let (diff, _) = max_tile_diff(&local[frame], &control[frame], true);
+        eprintln!(
+            "reach tail-early {frame} tiles {} wide {} diff {diff:.3}",
+            local[frame].tiles, local[frame].wide
+        );
+        assert!(
+            local[frame].tiles > 0 || local[frame].wide || diff < 8.0,
+            "the mask cleared while the picture still differed ({diff:.3})"
+        );
+    }
+    let tail = &local[59];
+    let (tail_diff, _) = max_tile_diff(tail, &control[59], true);
+    eprintln!(
+        "reach tail-stop tiles {} wide {} diff {tail_diff:.3}",
+        tail.tiles, tail.wide
+    );
+    assert!(
+        tail.tiles == 0 || tail.wide,
+        "the mask stayed hot after the box stopped (tiles {})",
+        tail.tiles
+    );
+    assert!(
+        tail_diff < 8.0,
+        "the stopped picture differs from the unhold by {tail_diff:.3}"
+    );
+
+    for (label, frames, want_wide) in [
+        ("offscreen", 62..66, true),
+        ("large", 68..72, true),
+        ("many", 74..78, true),
+    ] {
+        for frame in frames {
+            let (diff, _) = max_tile_diff(&local[frame], &control[frame], true);
+            eprintln!(
+                "reach {label} {frame} tiles {} wide {} walks {} diff {diff:.3}",
+                local[frame].tiles, local[frame].wide, local[frame].walks
+            );
+            assert!(diff < 12.0, "{label} stale outside the mask ({diff:.3})");
+            if want_wide {
+                assert!(
+                    local[frame].wide || local[frame].tiles * 2 >= tile_count,
+                    "{label} stayed a small disc (tiles {} of {tile_count})",
+                    local[frame].tiles
+                );
+            }
+        }
+    }
+    for frame in 78..82 {
+        let (diff, _) = max_tile_diff(&local[frame], &control[frame], false);
+        eprintln!(
+            "reach camera {frame} tiles {} wide {} walks {} diff {diff:.3}",
+            local[frame].tiles, local[frame].wide, local[frame].walks
+        );
+        assert!(
+            local[frame].walks > 1000,
+            "a camera move with a mover held the bounce (walks {})",
+            local[frame].walks
+        );
+        assert!(
+            diff < 8.0,
+            "camera+mover differs from the unhold by {diff:.3}"
+        );
+    }
 }
