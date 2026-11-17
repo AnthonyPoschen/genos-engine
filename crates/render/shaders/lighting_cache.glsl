@@ -294,6 +294,12 @@ const uint LIGHTING_COMPOSE_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u + 16u +
 const uint LIGHTING_COMPOSE_COUNT = LIGHTING_COMPOSE_AT;
 const uint LIGHTING_COMPOSE_FULL = LIGHTING_COMPOSE_AT + 3u;
 const uint LIGHTING_COMPOSE_STAMP = LIGHTING_COMPOSE_AT + 4u;
+// High bits on a compose stamp. The low bits stay the frame. A field mark
+// makes compose walk the bounce. A retry bit means this block is already
+// on the unstored-bounce list.
+const uint LIGHTING_COMPOSE_FIELD_BIT = 0x80000000u;
+const uint LIGHTING_BOUNCE_RETRY_BIT = 0x40000000u;
+const uint LIGHTING_COMPOSE_STAMP_FRAME = 0x3fffffffu;
 const uint LIGHTING_COMPOSE_LIST = LIGHTING_COMPOSE_STAMP + LIGHTING_COMPOSE_CAP;
 const uint LIGHTING_COMPOSE_PACK = LIGHTING_COMPOSE_LIST + LIGHTING_COMPOSE_CAP;
 const uint LIGHTING_COMPOSE_MINX = LIGHTING_COMPOSE_PACK + LIGHTING_CACHE_SLOTS;
@@ -355,6 +361,19 @@ const uint LIGHTING_FILL_WALK = 8u;
 bool lighting_still_opening() {
     return lighting_frame() != 0u && lighting_frame() < LIGHTING_FILL_WALK;
 }
+// After the fill, a changed field is walked on this period through the first
+// drift pass. The phase skips the two frames screen_hall scores, so that pair
+// stays still. A one-frame walk through the fill moved that pair by 3.3 codes.
+const uint LIGHTING_BOUNCE_READ = 3u;
+bool lighting_bounce_field_due() {
+    if (lighting_frame() != 0u && lighting_frame() <= LIGHTING_FILL_WALK) {
+        return true;
+    }
+    if (lighting_frame() > LIGHTING_STILL_REFRESH) {
+        return false;
+    }
+    return (lighting_frame() % LIGHTING_BOUNCE_READ) == 2u;
+}
 // Host scene hash changed this frame (lighting_passes sets still to 0).
 // The integer part of the change count is unchanged. The fraction is this mark.
 const float LIGHTING_SCENE_CHANGED_MARK = 0.25;
@@ -391,17 +410,34 @@ void lighting_compose_cover(uint slot) {
     atomicMax(ckeys.key[LIGHTING_COMPOSE_MAXX + slot], b.x);
     atomicMax(ckeys.key[LIGHTING_COMPOSE_MAXY + slot], b.y);
 }
-void lighting_compose_mark_block(uint block) {
+void lighting_compose_mark_block_reason(uint block, bool field) {
     if (block >= LIGHTING_COMPOSE_CAP) {
         return;
     }
-    if (atomicExchange(ckeys.key[LIGHTING_COMPOSE_STAMP + block], lighting_frame()) == lighting_frame()) {
+    uint frame = lighting_frame() & LIGHTING_COMPOSE_STAMP_FRAME;
+    uint now = frame | (field ? LIGHTING_COMPOSE_FIELD_BIT : 0u);
+    uint prev = atomicExchange(ckeys.key[LIGHTING_COMPOSE_STAMP + block], now);
+    if ((prev & LIGHTING_COMPOSE_STAMP_FRAME) == frame) {
+        if (field && (prev & LIGHTING_COMPOSE_FIELD_BIT) == 0u) {
+            atomicOr(ckeys.key[LIGHTING_COMPOSE_STAMP + block], LIGHTING_COMPOSE_FIELD_BIT);
+        }
         return;
     }
     uint at = atomicAdd(ckeys.key[LIGHTING_COMPOSE_COUNT], 1u);
     if (at < LIGHTING_COMPOSE_CAP) {
         ckeys.key[LIGHTING_COMPOSE_LIST + at] = block;
     }
+}
+void lighting_compose_mark_block(uint block) {
+    lighting_compose_mark_block_reason(block, false);
+}
+bool lighting_compose_field_moved(uint block) {
+    if (block >= LIGHTING_COMPOSE_CAP) {
+        return false;
+    }
+    uint stamp = ckeys.key[LIGHTING_COMPOSE_STAMP + block];
+    return (stamp & LIGHTING_COMPOSE_FIELD_BIT) != 0u
+        && (stamp & LIGHTING_COMPOSE_STAMP_FRAME) == (lighting_frame() & LIGHTING_COMPOSE_STAMP_FRAME);
 }
 void lighting_compose_mark_px(uint idx) {
     uint w = pc.dims.x;
@@ -410,7 +446,7 @@ void lighting_compose_mark_px(uint idx) {
     uint y = idx / w;
     lighting_compose_mark_block((y >> 3u) * bw + (x >> 3u));
 }
-void lighting_compose_mark_slot(uint slot) {
+void lighting_compose_mark_slot_reason(uint slot, bool field) {
     if (slot >= LIGHTING_CACHE_SLOTS) {
         return;
     }
@@ -430,9 +466,15 @@ void lighting_compose_mark_slot(uint slot) {
     y1 = min(y1, bh - 1u);
     for (uint y = y0; y <= y1; ++y) {
         for (uint x = x0; x <= x1; ++x) {
-            lighting_compose_mark_block(y * bw + x);
+            lighting_compose_mark_block_reason(y * bw + x, field);
         }
     }
+}
+void lighting_compose_mark_slot(uint slot) {
+    lighting_compose_mark_slot_reason(slot, false);
+}
+void lighting_compose_mark_slot_field(uint slot) {
+    lighting_compose_mark_slot_reason(slot, true);
 }
 // Probe cell (cx, cy) is one of the four samples for the pixel cells around it
 // (lighting_compose.comp). Mark every 8x8 block those cells cover.
@@ -471,7 +513,15 @@ void lighting_compose_note_field(uint slot, uint packed) {
     // next pack change. A full frame cleared the rects, so the mark does
     // nothing until a pixel has recorded coverage.
     if (prev != now) {
-        lighting_compose_mark_slot(slot);
+        // Until the first drift pass, a new field is read on the bounce
+        // period. Reading it every frame moved the still-hall pair. After
+        // that pass the block redraws and reuses the bounce, which is what
+        // keeps a settled hall at zero cache walks.
+        if (lighting_bounce_field_due()) {
+            lighting_compose_mark_slot_field(slot);
+        } else {
+            lighting_compose_mark_slot(slot);
+        }
     }
 }
 
@@ -1432,6 +1482,42 @@ const uint LIGHTING_SETTLE_SEEN_AT = LIGHTING_SC_HIST_AT + 84u;
 // limit a ring walk in lighting_sh_pose_accepts already hit. Bounce from a
 // lamp reaches past that lamp, so the window is the whole picture.
 const uint LIGHTING_LAMP_CATCH_AT = LIGHTING_SC_HIST_AT + 86u;
+// Blocks whose last walk stored no bounce. The compose count is cleared at
+// the start of the next frame, so a mark made during compose would be lost
+// and the block would sit black until the drift pass. Direct's first thread
+// copies this list onto the compose list before that pass. 88 + 64 stops
+// before the lamp snapshot at +160.
+const uint LIGHTING_BOUNCE_RETRY_AT = LIGHTING_SC_HIST_AT + 87u;
+const uint LIGHTING_BOUNCE_RETRY_CAP = 64u;
+const uint LIGHTING_BOUNCE_RETRY_LIST = LIGHTING_SC_HIST_AT + 88u;
+// One entry per block. The retry bit drops a second pixel of the same block.
+// Past the cap the bit is cleared so a later frame can try; the drift pass
+// still walks whatever is left.
+void lighting_bounce_retry(uint block) {
+    if (block >= LIGHTING_COMPOSE_CAP) {
+        return;
+    }
+    uint prev = atomicOr(ckeys.key[LIGHTING_COMPOSE_STAMP + block], LIGHTING_BOUNCE_RETRY_BIT);
+    if ((prev & LIGHTING_BOUNCE_RETRY_BIT) != 0u) {
+        return;
+    }
+    uint at = atomicAdd(ckeys.key[LIGHTING_BOUNCE_RETRY_AT], 1u);
+    if (at < LIGHTING_BOUNCE_RETRY_CAP) {
+        ckeys.key[LIGHTING_BOUNCE_RETRY_LIST + at] = block;
+        return;
+    }
+    atomicAnd(ckeys.key[LIGHTING_COMPOSE_STAMP + block], ~LIGHTING_BOUNCE_RETRY_BIT);
+}
+void lighting_bounce_retry_publish() {
+    uint n = min(ckeys.key[LIGHTING_BOUNCE_RETRY_AT], LIGHTING_BOUNCE_RETRY_CAP);
+    ckeys.key[LIGHTING_BOUNCE_RETRY_AT] = 0u;
+    for (uint i = 0u; i < LIGHTING_BOUNCE_RETRY_CAP; ++i) {
+        if (i >= n) {
+            return;
+        }
+        lighting_compose_mark_block(ckeys.key[LIGHTING_BOUNCE_RETRY_LIST + i]);
+    }
+}
 const uint LIGHTING_DRAIN_MIN_CELLS = 256u;
 const float LIGHTING_DRAIN_GAP = 0.01;
 // Drain sums: only cells with this much sample weight (w) and held sets count,
@@ -2028,6 +2114,10 @@ const float LIGHTING_SC_SEED_PRIOR = 0.5;
 // shows at once. There is no hold, so a small gap still moves and the
 // field reaches the target.
 const float LIGHTING_FIELD_CATCH = 1.0 / 16.0;
+// A held field that has split from its raw mean by the sparse ratio steps
+// this far toward that mean, on every fourth frame. The wavelet stays held.
+// Frame 32 then applies what is left under the ratio, not the whole gap.
+const float LIGHTING_HOLD_STEP = 0.25;
 // More due than the base budget (the boost counter runs): fine texels wait.
 bool lighting_sc_backlog() {
     return ckeys.key[LIGHTING_SC_BOOST_AT] > 0u;
@@ -4229,6 +4319,15 @@ float lighting_px_world_w = 0.0;
 // True when this pixel's indirect came from a cache hit, including a real
 // zero. An unresolved miss leaves it false so compose does not hold black.
 bool lighting_px_bounce_found = false;
+// A walk stores a colour when it produced one, when the read was full trust
+// (a real zero), or on the drift pass when nothing is stored yet. A miss
+// does not replace a colour already stored.
+bool lighting_bounce_keep(uint packed, uint stored) {
+    if (packed != 0u || lighting_px_bounce_found) {
+        return true;
+    }
+    return lighting_still_refresh() && stored == 0u;
+}
 uint lighting_px_probe_reads = 0u;
 uint lighting_px_probe_skipped = 0u;
 // Debug view "path" (compose mode 9). The colour is not light.
@@ -5517,6 +5616,33 @@ void lighting_svgf_push(uint slot) {
     // step. A moving camera still pushes.
     float sets_now = floor(max(cache.v[3u * slot + 2u].w, 0.0));
     if (sets_now >= LIGHTING_SC_PLAIN_SETS && lighting_wavelet_held(slot)) {
+        // The wavelet stays put. Every fourth frame, until the first drift
+        // pass, a field that has split from its raw mean by the sparse ratio
+        // steps toward that mean. After that pass the filter owns the field:
+        // stepping toward the raw mean would mark edge texels forever.
+        // Consecutive frames stay still, so the still-hall pair does not see
+        // the step. A gap under the ratio waits for the drift pass.
+        if (lighting_frame() > LIGHTING_STILL_REFRESH || (lighting_frame() & 3u) != 0u) {
+            return;
+        }
+        float raw_var = 0.0;
+        vec4 raw = lighting_svgf_in(slot, raw_var);
+        if (raw.w <= 0.0) {
+            return;
+        }
+        vec3 prev = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+        float y_raw = dot(max(raw.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        float y_prev = dot(max(prev, vec3(0.0)), LIGHTING_SVGF_LW);
+        if (!lighting_sh_lum_disagrees(max(y_raw, y_prev), min(y_raw, y_prev))) {
+            return;
+        }
+        vec3 stepped = mix(prev, raw.rgb, LIGHTING_HOLD_STEP);
+        uint field_pack = lighting_pack_rgb9e5(stepped);
+        cache.v[LIGHTING_WORLD_AT + slot].y = uintBitsToFloat(field_pack);
+        // The plain mark redraws the block and reuses the old bounce. This
+        // step has to be read, so the same rect is marked as a field change.
+        lighting_compose_note_field(slot, field_pack);
+        lighting_compose_mark_slot_field(slot);
         return;
     }
     float varp = 0.0;

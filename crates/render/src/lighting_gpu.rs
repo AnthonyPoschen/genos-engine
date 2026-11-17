@@ -4422,8 +4422,13 @@ impl Gpu {
         // The fill walks every frame until the first drift pass. Holding the
         // frame-1 bounce and replacing it on frame 32 was the open-picture step.
         let opening = self.lighting.frame != 0 && self.lighting.frame < LIGHTING_FILL_WALK;
+        // The drift pass visits every pixel. A miss that never resolved is
+        // stored then, and a block the retry list could not hold is not left
+        // black. Later held frames reuse that store.
+        let refresh = self.lighting.frame != 0 && self.lighting.frame % LIGHTING_STILL_REFRESH == 0;
         let compose_full = bounce_filling
             || opening
+            || refresh
             || !self.lighting.compose_valid
             || !(self.lighting.still > 0 || sun_amortise)
             || self.lighting.settings.world_mode() != 3
@@ -6144,10 +6149,11 @@ mod sun_step {
     #[test]
     fn compose_spirv_stays_near_the_picture_pass() {
         // The missing-field read, the path debug view, the texels population
-        // record, and the shown-mean age tally sit in this pass. Compose is
-        // 236_816 bytes. 240_000 still rejects a second occluder walk.
+        // record, the shown-mean age tally, the bounce store rule, and the
+        // retry list sit in this pass. Compose is 245_364 bytes. 248_000
+        // still rejects a second occluder walk.
         assert!(
-            LIGHTING_COMPOSE_SPV.len() < 240_000,
+            LIGHTING_COMPOSE_SPV.len() < 248_000,
             "compose SPIR-V is {} bytes",
             LIGHTING_COMPOSE_SPV.len()
         );

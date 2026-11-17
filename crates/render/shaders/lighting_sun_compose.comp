@@ -182,11 +182,10 @@ void main() {
     }
     if (store) {
         // Same rule as lighting_compose.comp. An unresolved miss stays 0, so
-        // the next frame walks it. A resolved zero is stored: leaving it at 0
-        // would walk that pixel every frame and skip the sun band.
+        // the next full-grid frame walks it. A resolved zero is stored.
+        // A miss does not replace a colour already stored.
         uint packed = lighting_pack_rgb9e5(max(bounce, vec3(0.0)));
-        bool hold = packed != 0u || stored != 0u || lighting_px_bounce_found || lighting_still_refresh();
-        if (hold) {
+        if (lighting_bounce_keep(packed, stored)) {
             outc.px[lighting_bounce_word(index)] = packed + 1u;
         }
     }

@@ -27,6 +27,12 @@ const uint RESTIR_DIAG_POINT_ADD = 45u;
 const float LAMP_PICK_DEPTH_FLOOR = 1.0e-4;
 const float DIRECT_DIR_EPS = 1.0e-6;
 void main() {
+    if (gl_GlobalInvocationID.x == 0u) {
+        // Unstored bounce blocks from last frame. The compose count was
+        // cleared at the start of this frame, so this is what puts them
+        // back on the list before compose.
+        lighting_bounce_retry_publish();
+    }
     lighting_sun_mark();
     uint idx = gl_GlobalInvocationID.x;
     uint pixels = pc.dims.x * pc.dims.y;

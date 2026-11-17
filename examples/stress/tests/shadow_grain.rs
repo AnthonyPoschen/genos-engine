@@ -24,7 +24,12 @@ use genos_window::Window;
 
 const WIDTH: u32 = 960;
 const HEIGHT: u32 = 540;
-const FRAMES: u32 = 16;
+const FRAMES: u32 = 40;
+/// Four direct-mask draws run before the timed loop, and the lighting frame
+/// increments at the start of each draw. Loop index 27 is lighting frame 32.
+/// The settled window is lighting frames 32–39.
+const SETTLED_AT: usize = 27;
+const SETTLED_END: usize = 35;
 const STRIDE: u32 = 8;
 const TEXEL: f32 = 0.125;
 /// Presented linear luma below this is a black shadow pixel. Full indirect
@@ -251,6 +256,7 @@ fn a_held_shadow_does_not_keep_the_first_black_bounce() {
         watched.normal
     );
     let mut series: Vec<Vec<f64>> = samples.iter().map(|_| Vec::new()).collect();
+    let mut medians = Vec::new();
     for frame in 0..FRAMES {
         let _ = window.pump();
         let displayed = renderer
@@ -265,6 +271,7 @@ fn a_held_shadow_does_not_keep_the_first_black_bounce() {
         }
         let dark = frame_y.iter().filter(|y| **y < BLACK).count();
         let zeros = frame_y.iter().filter(|y| **y < ZERO).count();
+        medians.push(median(&frame_y));
         let query = CacheQuery {
             position: samples
                 .get(watched_index)
@@ -297,14 +304,19 @@ fn a_held_shadow_does_not_keep_the_first_black_bounce() {
     let mut zero_px = 0usize;
     let mut var_sum = 0.0f64;
     for row in &series {
-        let late = row.get(late_start..).unwrap_or(&[]);
-        let (mean, var) = mean_var(late);
+        // Frames 8–15 are the climb. A stuck black bounce shows up here.
+        // Variance of that climb is the fill, so the grain bound is the
+        // settled window (lighting frames 32–39).
+        let early = row.get(late_start..16).unwrap_or(&[]);
+        let (mean, _) = mean_var(early);
         if mean < BLACK {
             black_px += 1;
         }
         if mean < ZERO {
             zero_px += 1;
         }
+        let settled_row = row.get(SETTLED_AT..SETTLED_END).unwrap_or(&[]);
+        let (_, var) = mean_var(settled_row);
         var_sum += var;
     }
     let n = f64_f32(f32_u32(u32::try_from(samples.len()).unwrap_or(0)));
@@ -359,6 +371,53 @@ fn a_held_shadow_does_not_keep_the_first_black_bounce() {
     assert!(
         var_mean < 1.0e-3,
         "mean temporal variance {var_mean:.6} of settled shadow pixels"
+    );
+    let early = medians.get(8..16).unwrap_or(&[]);
+    let settled = medians.get(SETTLED_AT..SETTLED_END).unwrap_or(&[]);
+    let (early_mean, _) = mean_var(early);
+    let (settled_mean, settled_var) = mean_var(settled);
+    let mut settled_zero = 0usize;
+    let mut wiped = 0usize;
+    for row in &series {
+        let window = row.get(SETTLED_AT..SETTLED_END).unwrap_or(&[]);
+        let (mean, _) = mean_var(window);
+        if mean < ZERO {
+            settled_zero += 1;
+        }
+        let before = row.get(12..16).unwrap_or(&[]);
+        let (before_mean, _) = mean_var(before);
+        if before_mean > BLACK && window.iter().any(|y| *y < ZERO) {
+            wiped += 1;
+        }
+    }
+    let mut max_step = 0.0f64;
+    let mut prev = medians.get(4).copied().unwrap_or(0.0);
+    for value in medians.iter().copied().skip(5) {
+        let step = (value - prev).abs();
+        if step > max_step {
+            max_step = step;
+        }
+        prev = value;
+    }
+    eprintln!(
+        "shadow_grain early_median {early_mean:.4} settled_median {settled_mean:.4} settled_var {settled_var:.6} settled_zero {settled_zero} wiped {wiped} max_step {max_step:.4}"
+    );
+    assert!(
+        settled_zero == 0,
+        "settled window kept {settled_zero} exact-zero shadow samples"
+    );
+    assert!(
+        wiped == 0,
+        "a later miss replaced a lit shadow sample on {wiped} pixels"
+    );
+    // The old hold stepped the median from about 0.08 to 0.35 at frame 32.
+    assert!(
+        max_step < 0.08,
+        "shadow median stepped {max_step:.4} on a held camera"
+    );
+    assert!(
+        settled_var < 1.0e-4,
+        "settled window variance {settled_var:.6}"
     );
 }
 
