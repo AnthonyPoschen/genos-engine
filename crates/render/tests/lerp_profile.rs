@@ -53,8 +53,7 @@ fn scene() -> genos_scene::Scene {
 
 fn red_box(scene: &genos_scene::Scene) -> Vec3 {
     scene
-        .solids
-        .iter()
+        .solids()
         .find(|solid| {
             solid.shape == Shape::Square
                 && solid.color[0] > 0.8
