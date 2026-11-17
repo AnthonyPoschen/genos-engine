@@ -1036,11 +1036,18 @@ fn a_fine_child_replaces_a_wrong_parent_prior() {
         }
         checked += 1;
         let gap_field = (field - own).abs();
-        // The blend at three own sets still holds a quarter of the parent.
-        // A retired prior is the screen filter, closer than that leftover.
+        // The raw store matches own within an rgb9e5 step, under 0.001. The
+        // gate on 3d68c466 left the aimed field there. A wavelet step moves it.
         assert!(
-            gap_field < gap_seed * 0.15,
-            "spot {i} stayed on the parent: own {own:.4} seed {seed:.4} field {field:.4}"
+            gap_field > 0.002,
+            "spot {i} kept the raw store, so the screen filter did not run: own {own:.4} seed {seed:.4} field {field:.4}"
+        );
+        // Same bar as the off-screen read. 0.15 of the parent gap let the
+        // old aimed leftover through: field 0.7685, own 0.4215, seed 7.4908
+        // is 0.049 of that gap and 0.347 absolute, above 0.02 of the larger luma.
+        assert!(
+            gap_field < scale * 0.02,
+            "spot {i} walked back toward the parent: own {own:.4} seed {seed:.4} field {field:.4}"
         );
     }
     assert!(

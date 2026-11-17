@@ -3736,6 +3736,12 @@ bool lighting_fine_has_prior(uint slot) {
     return cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
         && cache.v[LIGHTING_SC_SHOWN_AT + slot].z > LIGHTING_SC_SET_HALF;
 }
+// The prior mark has cleared. The child's own sets are what the filter uses.
+bool lighting_fine_retired(uint slot) {
+    return cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
+        && floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_FINE_READY_SETS
+        && !(cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH);
+}
 // The child's own mean, in the same sun scale as the prior blend. The
 // radiance is not clamped; the pack rejects a negative.
 void lighting_fine_store_own(uint slot) {
@@ -3752,8 +3758,9 @@ void lighting_fine_store_own(uint slot) {
 // gains sets. A frozen parent variance is not a weight: dividing by it kept a
 // settled parent in the field forever. At four own sets this pass stores the
 // child's own field and clears the prior mark, on screen or off. Once a pixel
-// shows the child, the screen filter may walk that field closer to the own
-// mean. A step that leaves the mean is not stored. The radiance is not clamped.
+// shows the child, the screen filter is the fine wavelet. A retired child
+// does not fill a missing wavelet weight from the 25 cm cells. The radiance
+// is not clamped.
 void lighting_fine_publish(uint slot) {
     if (!lighting_fine_has_prior(slot)) {
         return;
@@ -5685,6 +5692,16 @@ void lighting_svgf_variance(uint slot) {
         }
     }
     atomicAdd(gstats.diag[LIGHTING_DIAG_FILTER_HEAVY], 1u);
+    // A retired child's 7x7, and its estimator spread, are the parent gap:
+    // neighbors still on the prior widen phi until the wavelet accepts them.
+    // The weight is the child's own luminance fraction, the unestimated one.
+    if (lighting_fine_retired(slot)) {
+        float lum = dot(max(v.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        // phi is SIGMA_L times the square root, so the stored variance is the
+        // luminance fraction divided by that factor. The parent gap is not it.
+        float s = LIGHTING_FINE_PRIOR_SIGMA * max(lum, 0.0) / LIGHTING_SVGF_SIGMA_L;
+        var = s * s;
+    }
     if (var < 0.0) {
         // Spatial estimate, 7 x 7 moments weighted by w_z w_n.
         float s1 = 0.0;
@@ -5782,6 +5799,12 @@ void lighting_svgf_iter(uint slot, uint it) {
     }
     gv = gw > 0.0 ? gv / gw : varp;
     float phi = LIGHTING_SVGF_SIGMA_L * sqrt(max(gv, 0.0)) + 1.0e-10;
+    // The neighborhood variance is the parent gap, and SIGMA_L turns that
+    // into a phi wide enough to accept the parent. A retired child weights
+    // taps by its own luminance fraction.
+    if (lighting_fine_retired(slot)) {
+        phi = max(LIGHTING_FINE_PRIOR_SIGMA * max(lp, 0.0), LIGHTING_FINE_SCORE_MIN);
+    }
     const float h1[5] = float[5](1.0 / 16.0, 0.25, 0.375, 0.25, 1.0 / 16.0);
     vec3 sum = vec3(0.0);
     float wm = 0.0;
@@ -5798,6 +5821,11 @@ void lighting_svgf_iter(uint slot, uint it) {
             float w = h1[i + 2] * h1[j + 2] * lighting_svgf_wzn(slot, q);
             if (q != slot && vp.w > 0.0 && x.w > 0.0) {
                 w *= exp(-abs(lp - dot(x.rgb, LIGHTING_SVGF_LW)) / phi);
+            }
+            // A neighbor still on the parent prior would hand that prior back
+            // to a child that has already retired it.
+            if (lighting_fine_retired(slot) && q != slot && lighting_fine_has_prior(q)) {
+                w = 0.0;
             }
             float a = w * x.w;
             sum += a * x.rgb;
@@ -5855,7 +5883,10 @@ float lighting_svgf_lum_at(uint slot, ivec2 off, out bool ok) {
 }
 const uint LIGHTING_PUSH_IDLE = 16u;
 // What the push stores before the settle step: the texel's filtered colour,
-// with the coarse cells filling whatever weight it does not have yet.
+// with the coarse cells filling whatever weight it does not have yet. A band
+// child that has retired its prior does not take that coarse term. The 25 cm
+// cells are the prior. The fine wavelet is the field, and a hole in it is
+// not filled from those cells.
 vec4 lighting_svgf_target(uint slot) {
     vec4 nb = cache.v[3u * slot + 1u];
     vec3 p = cache.v[3u * slot].xyz;
@@ -5873,6 +5904,13 @@ vec4 lighting_svgf_target(uint slot) {
     vec2 fr = uv - g0;
     vec3 csum = vec3(0.0);
     float cw = 0.0;
+    if (lighting_fine_retired(slot)) {
+        // No wavelet yet: keep the field this pass already stored. Do not
+        // invent the retired parent, and do not write black into the hole.
+        vec3 kept = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
+        vec3 outc = W > 0.0 ? f.rgb : kept;
+        return vec4(outc, W);
+    }
     [[dont_unroll]] for (uint k = 0u; k < 4u; k++) {
         vec2 c = g0 + vec2(float(k & 1u), float(k >> 1u));
         vec3 q = p;
@@ -6039,24 +6077,6 @@ void lighting_svgf_push(uint slot) {
                 catch_up = (1.0 - lam) * catch_up + lam;
             }
             outc = mix(prev, outc, catch_up);
-        }
-    }
-    // A retired band child already stored its own field, off screen or on.
-    // The wavelet may walk that field closer to the own mean. A step that
-    // leaves the mean puts the parent blend back, so the stored field stays.
-    float retired_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
-    if (cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
-        && retired_sets >= LIGHTING_FINE_READY_SETS && !(nb.w > LIGHTING_HIT_PATCH)) {
-        float raw_var = 0.0;
-        vec4 raw = lighting_svgf_in(slot, raw_var);
-        if (raw.w > 0.0) {
-            vec3 stored = lighting_unpack_rgb9e5(floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].y));
-            float y_own = dot(max(raw.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
-            float y_stored = dot(max(stored, vec3(0.0)), LIGHTING_SVGF_LW);
-            float y_new = dot(max(outc, vec3(0.0)), LIGHTING_SVGF_LW);
-            if (abs(y_new - y_own) > abs(y_stored - y_own)) {
-                outc = stored;
-            }
         }
     }
     uint field_pack = lighting_pack_rgb9e5(outc);
