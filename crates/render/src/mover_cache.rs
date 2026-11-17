@@ -189,6 +189,70 @@ impl MoverRecord {
     }
 }
 
+/// GPU header at the start of the mover SSBO (64 B).
+pub const MOVER_GPU_HEADER_BYTES: usize = 64;
+/// GPU table record size (matches [`GpuMoverRecord`]).
+pub const MOVER_GPU_RECORD_BYTES: usize = 64;
+
+/// Packed GPU mover table record (64 B).
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct GpuMoverRecord {
+    pub object_id: u32,
+    pub tier: u32,
+    pub texel_base: u32,
+    pub texel_count: u32,
+    pub sphere: [f32; 4],
+    pub centre: [f32; 3],
+    pub yaw_cos: f32,
+    pub half_extents: [f32; 3],
+    pub yaw_sin: f32,
+}
+
+const _: () = assert!(std::mem::size_of::<GpuMoverRecord>() == MOVER_GPU_RECORD_BYTES);
+
+/// Packed GPU mover texel (64 B). Lighting in world directions.
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C)]
+pub struct GpuMoverTexel {
+    pub local_pos: [f32; 3],
+    pub object_id: u32,
+    pub mean: [f32; 3],
+    pub samples: f32,
+    pub local_n: [f32; 3],
+    pub next_free: u32,
+    /// World-frame SH band-1 as four packed rgb9e5 words (x/y/z axes + pad).
+    pub sh_packed: [u32; 4],
+}
+
+const _: () = assert!(std::mem::size_of::<GpuMoverTexel>() == MOVER_TEXEL_BYTES);
+
+/// Byte offset of the table inside the mover SSBO.
+#[must_use]
+pub fn mover_gpu_table_offset() -> u64 {
+    u64::try_from(MOVER_GPU_HEADER_BYTES).unwrap_or(0)
+}
+
+/// Byte offset of the texel pool inside the mover SSBO.
+#[must_use]
+pub fn mover_gpu_pool_offset() -> u64 {
+    mover_gpu_table_offset()
+        + u64::from(MOVER_TABLE_SLOTS) * u64::try_from(MOVER_GPU_RECORD_BYTES).unwrap_or(0)
+}
+
+/// Total mover SSBO bytes for a pool of `pool_cap` texels.
+#[must_use]
+pub fn mover_gpu_bytes(pool_cap: u32) -> u64 {
+    mover_gpu_pool_offset() + u64::from(pool_cap.max(1)) * u64::try_from(MOVER_TEXEL_BYTES).unwrap_or(0)
+}
+
+/// One dirty byte range for a partial SSBO upload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirtyRange {
+    pub offset: u64,
+    pub size: u64,
+}
+
 /// Fixed mover texel pool plus open-address table keyed by object id.
 #[derive(Clone, Debug)]
 pub struct MoverCache {
@@ -199,6 +263,12 @@ pub struct MoverCache {
     free_count: u32,
     table: Vec<MoverRecord>,
     live_movers: u32,
+    /// Full SSBO rewrite on the next upload.
+    dirty_full: bool,
+    /// Dirty table slots (merged into ranges on pack).
+    dirty_table: Vec<u32>,
+    /// Dirty texel indices.
+    dirty_texels: Vec<u32>,
 }
 
 impl MoverCache {
@@ -219,6 +289,9 @@ impl MoverCache {
             free_count: cap,
             table: vec![MoverRecord::vacant(); usize_from_u32(MOVER_TABLE_SLOTS)],
             live_movers: 0,
+            dirty_full: true,
+            dirty_table: Vec::new(),
+            dirty_texels: Vec::new(),
         }
     }
 
@@ -256,6 +329,141 @@ impl MoverCache {
             .filter(|r| r.is_live())
             .map(|r| r.object_id)
             .collect()
+    }
+
+    /// SSBO byte length for the current pool.
+    #[must_use]
+    pub fn gpu_bytes(&self) -> u64 {
+        mover_gpu_bytes(self.pool_cap)
+    }
+
+    /// Packs the full SSBO (header + table + pool) for upload.
+    #[must_use]
+    pub fn pack_gpu(&self) -> Vec<u8> {
+        let mut out = vec![0u8; usize_from_u32(u32::try_from(self.gpu_bytes()).unwrap_or(u32::MAX))];
+        self.write_header(&mut out);
+        for (i, rec) in self.table.iter().enumerate() {
+            write_bytes(
+                &mut out,
+                mover_gpu_table_offset() + u64_from_usize(i) * u64_from_usize(MOVER_GPU_RECORD_BYTES),
+                &pack_record(rec),
+            );
+        }
+        let pool_off = mover_gpu_pool_offset();
+        for (i, tex) in self.texels.iter().enumerate() {
+            write_bytes(
+                &mut out,
+                pool_off + u64_from_usize(i) * u64_from_usize(MOVER_TEXEL_BYTES),
+                &pack_texel(tex),
+            );
+        }
+        out
+    }
+
+    /// Dirty ranges for a partial upload. Empty when nothing changed. A full
+    /// rewrite returns one range covering the whole SSBO.
+    #[must_use]
+    pub fn dirty_ranges(&self) -> Vec<DirtyRange> {
+        if self.dirty_full {
+            return vec![DirtyRange {
+                offset: 0,
+                size: self.gpu_bytes(),
+            }];
+        }
+        let mut ranges = Vec::new();
+        // Header always when anything is dirty (live counts).
+        if !self.dirty_table.is_empty() || !self.dirty_texels.is_empty() {
+            ranges.push(DirtyRange {
+                offset: 0,
+                size: u64_from_usize(MOVER_GPU_HEADER_BYTES),
+            });
+        }
+        let mut slots = self.dirty_table.clone();
+        slots.sort_unstable();
+        slots.dedup();
+        for &slot in &slots {
+            ranges.push(DirtyRange {
+                offset: mover_gpu_table_offset()
+                    + u64::from(slot) * u64_from_usize(MOVER_GPU_RECORD_BYTES),
+                size: u64_from_usize(MOVER_GPU_RECORD_BYTES),
+            });
+        }
+        let mut tex = self.dirty_texels.clone();
+        tex.sort_unstable();
+        tex.dedup();
+        // Merge contiguous texel indices into runs.
+        let mut i = 0usize;
+        while i < tex.len() {
+            let start = tex[i];
+            let mut end = start;
+            while i + 1 < tex.len() && tex[i + 1] == end + 1 {
+                i += 1;
+                end = tex[i];
+            }
+            let count = end - start + 1;
+            ranges.push(DirtyRange {
+                offset: mover_gpu_pool_offset()
+                    + u64::from(start) * u64_from_usize(MOVER_TEXEL_BYTES),
+                size: u64::from(count) * u64_from_usize(MOVER_TEXEL_BYTES),
+            });
+            i += 1;
+        }
+        ranges
+    }
+
+    /// Clears dirty flags after a successful GPU upload.
+    pub fn clear_dirty(&mut self) {
+        self.dirty_full = false;
+        self.dirty_table.clear();
+        self.dirty_texels.clear();
+    }
+
+    /// Packs only the dirty ranges into `(offset, bytes)` pairs for upload.
+    #[must_use]
+    pub fn pack_dirty(&self) -> Vec<(u64, Vec<u8>)> {
+        let ranges = self.dirty_ranges();
+        if ranges.is_empty() {
+            return Vec::new();
+        }
+        if self.dirty_full {
+            return vec![(0, self.pack_gpu())];
+        }
+        let full = self.pack_gpu();
+        ranges
+            .into_iter()
+            .filter_map(|r| {
+                let start = usize_from_u64(r.offset);
+                let end = start.saturating_add(usize_from_u64(r.size));
+                full.get(start..end).map(|slice| (r.offset, slice.to_vec()))
+            })
+            .collect()
+    }
+
+    fn write_header(&self, out: &mut [u8]) {
+        let words = [
+            self.pool_cap,
+            MOVER_TABLE_SLOTS,
+            self.live_movers,
+            self.free_count,
+            u32::try_from(MOVER_GPU_HEADER_BYTES).unwrap_or(0),
+            u32::try_from(mover_gpu_table_offset()).unwrap_or(0),
+            u32::try_from(mover_gpu_pool_offset()).unwrap_or(0),
+            self.free_top,
+        ];
+        for (i, w) in words.iter().enumerate() {
+            let at = i * 4;
+            if let Some(dst) = out.get_mut(at..at + 4) {
+                dst.copy_from_slice(&w.to_le_bytes());
+            }
+        }
+    }
+
+    fn mark_table_dirty(&mut self, slot: u32) {
+        self.dirty_table.push(slot);
+    }
+
+    fn mark_texel_dirty(&mut self, index: u32) {
+        self.dirty_texels.push(index);
     }
 
     /// O(1) open-address lookup by object id. Returns the table slot.
@@ -296,6 +504,7 @@ impl MoverCache {
             record.texel_base = dst.texel_base;
             record.texel_count = dst.texel_count;
             *dst = record;
+            self.mark_table_dirty(slot);
             return Ok(slot);
         }
         let start = table_hash(record.object_id);
@@ -307,6 +516,7 @@ impl MoverCache {
                 record.texel_count = 0;
                 *dst = record;
                 self.live_movers = self.live_movers.saturating_add(1);
+                self.mark_table_dirty(slot);
                 return Ok(slot);
             }
         }
@@ -418,6 +628,7 @@ impl MoverCache {
         let dst = &mut self.table[usize_from_u32(slot)];
         dst.texel_count = want;
         dst.texel_base = owned.first().copied().unwrap_or(u32::MAX);
+        self.mark_table_dirty(slot);
         Ok(())
     }
 
@@ -449,6 +660,7 @@ impl MoverCache {
         self.free_all_for(object_id);
         self.table[usize_from_u32(slot)] = MoverRecord::vacant();
         self.live_movers = self.live_movers.saturating_sub(1);
+        self.mark_table_dirty(slot);
         // Rehash the probe chain so later keys stay reachable.
         self.rehash_from(slot);
         true
@@ -493,6 +705,7 @@ impl MoverCache {
             local_n,
             next_free: 0,
         };
+        self.mark_texel_dirty(idx);
         Ok(idx)
     }
 
@@ -545,6 +758,7 @@ impl MoverCache {
             };
             self.free_top = i;
             self.free_count = self.free_count.saturating_add(1).min(self.pool_cap);
+            self.mark_texel_dirty(i);
         }
     }
 
@@ -575,6 +789,69 @@ pub enum MoverCacheError {
 fn table_hash(object_id: u32) -> u32 {
     // Knuth multiplicative hash into MOVER_TABLE_SLOTS (power of two).
     object_id.wrapping_mul(2654435761) & (MOVER_TABLE_SLOTS - 1)
+}
+
+fn pack_record(rec: &MoverRecord) -> GpuMoverRecord {
+    GpuMoverRecord {
+        object_id: rec.object_id,
+        tier: u32::from(rec.tier as u8),
+        texel_base: rec.texel_base,
+        texel_count: rec.texel_count,
+        sphere: rec.sphere,
+        centre: rec.centre,
+        yaw_cos: rec.yaw_cos,
+        half_extents: rec.half_extents,
+        yaw_sin: rec.yaw_sin,
+    }
+}
+
+fn pack_texel(tex: &MoverTexel) -> GpuMoverTexel {
+    GpuMoverTexel {
+        local_pos: tex.local_pos,
+        object_id: tex.object_id,
+        mean: tex.mean,
+        samples: tex.samples,
+        local_n: tex.local_n,
+        next_free: tex.next_free,
+        sh_packed: [
+            pack_rgb9e5(tex.sh1[0]),
+            pack_rgb9e5(tex.sh1[1]),
+            pack_rgb9e5(tex.sh1[2]),
+            0,
+        ],
+    }
+}
+
+fn pack_rgb9e5(rgb: [f32; 3]) -> u32 {
+    // Shared-exponent RGB9E5 (RGB9E5_FLOAT). Enough for SH band-1 transport.
+    let max_c = rgb[0].abs().max(rgb[1].abs()).max(rgb[2].abs()).max(1.0e-6);
+    let exp = (max_c.log2().ceil() as i32).clamp(-15, 15);
+    let scale = 2.0f32.powi(exp);
+    let enc = |c: f32| -> u32 {
+        let n = ((c / scale) * 511.0).round().clamp(0.0, 511.0) as u32;
+        n
+    };
+    let e = (exp + 15) as u32;
+    enc(rgb[0]) | (enc(rgb[1]) << 9) | (enc(rgb[2]) << 18) | (e << 27)
+}
+
+fn write_bytes<T: Copy>(out: &mut [u8], offset: u64, value: &T) {
+    let len = std::mem::size_of::<T>();
+    let start = usize_from_u64(offset);
+    let Some(dst) = out.get_mut(start..start.saturating_add(len)) else {
+        return;
+    };
+    // SAFETY: T is repr(C) POD (GpuMoverRecord / GpuMoverTexel); we only read bytes.
+    let src = unsafe { std::slice::from_raw_parts(std::ptr::from_ref(value).cast::<u8>(), len) };
+    dst.copy_from_slice(src);
+}
+
+fn u64_from_usize(v: usize) -> u64 {
+    u64::try_from(v).unwrap_or(u64::MAX)
+}
+
+fn usize_from_u64(v: u64) -> usize {
+    usize::try_from(v).unwrap_or(usize::MAX)
 }
 
 /// World-cell brick size for the mover dirty boost (1 m, DDGI-style +1 cell).
@@ -1010,6 +1287,37 @@ mod tests {
     }
 
     /// Stage E scaling report: 10 / 100 / 1000 Near movers on a High pool.
+    #[test]
+    fn gpu_pack_is_header_plus_table_plus_pool() {
+        let cache = MoverCache::new(32);
+        let bytes = cache.pack_gpu();
+        assert_eq!(u64_from_usize(bytes.len()), mover_gpu_bytes(32));
+        assert_eq!(std::mem::size_of::<GpuMoverTexel>(), MOVER_TEXEL_BYTES);
+        assert_eq!(std::mem::size_of::<GpuMoverRecord>(), MOVER_GPU_RECORD_BYTES);
+        // High pool stays near the 2 MiB texel budget (+ table/header).
+        let high = mover_gpu_bytes(MOVER_TEXELS_HIGH);
+        assert!(high > 2 * 1024 * 1024);
+        assert!(high < 3 * 1024 * 1024);
+    }
+
+    #[test]
+    fn dirty_ranges_cover_only_changed_texels_after_clear() {
+        let mut cache = MoverCache::new(64);
+        cache.clear_dirty();
+        assert!(cache.dirty_ranges().is_empty());
+        cache.upsert(record(1)).expect("insert");
+        cache
+            .claim_texel(1, [0.0; 3], [0.0, 1.0, 0.0])
+            .expect("claim");
+        let ranges = cache.dirty_ranges();
+        assert!(!ranges.is_empty());
+        assert!(ranges.iter().any(|r| r.offset == 0)); // header
+        let packed = cache.pack_dirty();
+        assert!(!packed.is_empty());
+        cache.clear_dirty();
+        assert!(cache.dirty_ranges().is_empty());
+    }
+
     #[test]
     fn scaling_10_100_1000_reports_pool_use_and_boost() {
         fn run(n: u32) -> (u32, u32, usize, usize) {

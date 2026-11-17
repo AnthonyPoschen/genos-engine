@@ -46,6 +46,12 @@ uint lighting_sc_id(uint slot) {
 
 // Per frame, read back by the CPU to tell when the light has settled: the largest
 // relative change of a relit patch (millionths), patches relit, live patches.
+// Object-attached mover table + texel pool (mover_cache.rs). Header is 16 uints
+// (64 B), then MOVER_TABLE_SLOTS × 4 vec4 records, then pool_cap × 4 vec4 texels.
+layout(std430, set = 0, binding = 15) buffer MoverCacheBuf {
+    uint header[];
+} movers_gpu;
+
 layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint max_change;
     uint relit;

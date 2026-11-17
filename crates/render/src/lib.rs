@@ -69,9 +69,10 @@ pub use gpu::{
     release_software_compiler_heap,
 };
 pub use mover_cache::{
-    classify_tier, fill_priority, mover_matters, swept_boost_bricks, MoverCache, MoverCacheError,
-    MoverFillCandidate, MoverRecord, MoverTexel, MoverTier, MOVER_DIRTY_BRICK_M, MOVER_TABLE_SLOTS,
-    MOVER_TEXELS_HIGH, MOVER_TEXELS_LOW, MOVER_TEXELS_MEDIUM, MOVER_TEXEL_BYTES,
+    classify_tier, fill_priority, mover_gpu_bytes, mover_matters, swept_boost_bricks, DirtyRange,
+    GpuMoverRecord, GpuMoverTexel, MoverCache, MoverCacheError, MoverFillCandidate, MoverRecord,
+    MoverTexel, MoverTier, MOVER_DIRTY_BRICK_M, MOVER_GPU_HEADER_BYTES, MOVER_GPU_RECORD_BYTES,
+    MOVER_TABLE_SLOTS, MOVER_TEXELS_HIGH, MOVER_TEXELS_LOW, MOVER_TEXELS_MEDIUM, MOVER_TEXEL_BYTES,
     MOVER_TIER_MID_TEXELS, MOVER_TIER_NEAR_TEXELS,
 };
 pub use hdr_output::{

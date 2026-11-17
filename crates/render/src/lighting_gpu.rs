@@ -306,6 +306,8 @@ pub(crate) struct Lighting {
     movers: std::collections::BTreeMap<usize, u32>,
     /// Object-attached mover texel pool + O(1) table (replaces the change-block hitch list).
     mover_cache: crate::mover_cache::MoverCache,
+    /// GPU SSBO: header + table + texel pool (binding 15). Host-visible upload.
+    mover_buf: Buffer,
     /// Traced mesh instances (mesh_field order): last poses, the ones that moved in
     /// the last LIGHTING_MOVER_KEEP frames, and every instance's bounding sphere now.
     mesh_poses: Vec<[f32; 16]>,
@@ -672,6 +674,7 @@ impl Default for Lighting {
             cache_rays: 0,
             movers: std::collections::BTreeMap::new(),
             mover_cache: crate::mover_cache::MoverCache::high(),
+            mover_buf: Buffer::empty(),
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
@@ -863,7 +866,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -952,7 +955,8 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 48 };
+            // 3 sets × 16 storage bindings (added mover table/pool at 15).
+            let size = Size { kind: 7, count: 51 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -1487,6 +1491,26 @@ impl Gpu {
         self.lighting.restir_have_prev = false;
         self.lighting.restir_slot = 0;
         self.lighting.restir_frame = false;
+        // Mover table + texel pool SSBO (binding 15). Host-visible so dirty
+        // ranges upload each frame. Stand-in when the pool is off.
+        {
+            let mut old = std::mem::replace(&mut self.lighting.mover_buf, Buffer::empty());
+            self.destroy_buffer(&mut old);
+            let pool = settings.surface_cache.mover_texels;
+            let bytes = if pool == 0 {
+                256
+            } else {
+                crate::mover_cache::mover_gpu_bytes(pool)
+            };
+            self.lighting.mover_buf = self.make_buffer(bytes, 0x20 | 0x2, Memory::Upload)?;
+            if pool > 0 {
+                self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
+            }
+            let packed = self.lighting.mover_cache.pack_gpu();
+            let n = packed.len().min(self.lighting.mover_buf.size as usize);
+            self.write_buffer(&self.lighting.mover_buf, &packed[..n])?;
+            self.lighting.mover_cache.clear_dirty();
+        }
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
@@ -1545,6 +1569,7 @@ impl Gpu {
                 (8, self.lighting.out.buffer),
                 (13, self.lighting.scene_lin.buffer),
                 (14, self.lighting.hdr_params.buffer),
+                (15, self.bound_or_standin(&self.lighting.mover_buf)),
                 (16, self.bound_or_standin(&self.lighting.bloom)),
                 (17, self.bound_or_standin(&self.lighting.hdr_encode)),
                 (18, if meter.is_null() { self.lighting.hdr_params.buffer } else { meter }),
@@ -5581,6 +5606,28 @@ impl Gpu {
             let _ = self.lighting.mover_cache.upsert(rec);
         }
         self.lighting.mover_cache.rebalance_all();
+        self.upload_mover_cache();
+    }
+
+    /// Uploads dirty mover table/pool ranges to binding 15 (full rewrite when needed).
+    fn upload_mover_cache(&mut self) {
+        if self.lighting.mover_buf.buffer.is_null() {
+            return;
+        }
+        let chunks = self.lighting.mover_cache.pack_dirty();
+        if chunks.is_empty() {
+            return;
+        }
+        for (offset, bytes) in chunks {
+            if bytes.is_empty() {
+                continue;
+            }
+            if offset.saturating_add(bytes.len() as u64) > self.lighting.mover_buf.size {
+                continue;
+            }
+            let _ = self.write_buffer_at(&self.lighting.mover_buf, offset, &bytes);
+        }
+        self.lighting.mover_cache.clear_dirty();
     }
 }
 
