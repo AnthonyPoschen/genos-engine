@@ -36,7 +36,7 @@ void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (lighting_ray_fill_on()) {
         if (gid == 0u) {
-            gstats.live = ckeys.key[lighting_fill_header_at() + 2u];
+            gstats.live = ckeys.key[lighting_fill_header_at() + 3u];
             lighting_wrc_note_lamps();
             lighting_ls_note();
         }
@@ -64,35 +64,6 @@ void main() {
     }
     if (gid == 0u) {
         gstats.live = lighting_live_count();
-        // Scheduler: the next round lists the buckets from the top down until
-        // they fill what the young leave of the batch; the histogram restarts.
-        if (lighting_world_mode() == 3u && LIGHTING_SC_SCHED) {
-            lighting_wrc_note_lamps();
-            lighting_ls_note();
-            uint room = lighting_sc_room() >> lighting_sc_budget_shift();
-            uint base = lighting_sc_base_room() >> lighting_sc_budget_shift();
-            uint young = min(lighting_young_count(), base);
-            uint total = 0u;
-            for (uint b = 0u; b < LIGHTING_SC_BUCKETS; b++) {
-                total += ckeys.key[LIGHTING_SC_HIST_AT + b];
-            }
-            uint c = total > base - young ? min(ckeys.key[LIGHTING_SC_BOOST_AT] + 1u, 100000u) : 0u;
-            ckeys.key[LIGHTING_SC_BOOST_AT] = c;
-            bool boost = c > 0u && c <= LIGHTING_SC_BOOST_ROUNDS;
-            gstats.pad3 = boost ? 1u : 0u;
-            uint budget = (boost ? room : base) - young;
-            uint acc = 0u;
-            uint thr = 0u;
-            for (int b = int(LIGHTING_SC_BUCKETS) - 1; b >= 0; b--) {
-                acc += ckeys.key[LIGHTING_SC_HIST_AT + uint(b)];
-                ckeys.key[LIGHTING_SC_HIST_AT + uint(b)] = 0u;
-                if (acc >= budget && thr == 0u) {
-                    thr = uint(b);
-                }
-            }
-            ckeys.key[LIGHTING_SC_THR_AT] = thr;
-            gstats.sched_thr = thr;
-        }
     }
     if (j >= LIGHTING_CACHE_BATCH) {
         return;

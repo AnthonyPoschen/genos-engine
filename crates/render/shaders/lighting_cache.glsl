@@ -1442,7 +1442,6 @@ bool lighting_wrc_lamp_changed(vec3 p, uint updated);
 bool lighting_lamp_settling();
 bool lighting_lamp_settling_raw();
 bool lighting_wrc_lone(uint slot);
-uint lighting_settle_turns(bool first);
 const uint LIGHTING_SETTLE_COUNT_AT = LIGHTING_SC_HIST_AT + 76u;
 const uint LIGHTING_SETTLE_LAST_AT = LIGHTING_SC_HIST_AT + 77u;
 const uint LIGHTING_SETTLE_ROOM_AT = LIGHTING_SC_HIST_AT + 78u;
@@ -3683,10 +3682,6 @@ bool lighting_wrc_lamp_changed(vec3 p, uint updated) {
 // the others), so the whole cache is draining or filling until then: every texel
 // is due each round (a whole set, lighting_compact.comp), the old light leaving
 // one bounce per round.
-// Settle turns: the batch entries every cell and texel would take this round
-// (counted by the compact pass) and the young room the args pass gave last
-// round. Each takes its whole set one round in lighting_settle_turns, by hash,
-// so a full relight is spread evenly over that many rounds.
 // A WRC cell relit while a lamp change settles: one 16-ray sample a round
 // (lighting_compact.comp), traced as its own 4 x 4 hemisphere pattern so the
 // round's sample is not one band of the 64-ray set (wa = 1 keeps it whole).
@@ -3695,20 +3690,6 @@ const float LIGHTING_WRC_CELL_SIZE = 0.2;
 const int LIGHTING_SETTLE_SCREEN_FRAMES = 2;
 bool lighting_wrc_lone(uint slot) {
     return lighting_world_mode() == 3u && cache.v[3u * slot + 1u].w > LIGHTING_WRC_CELL_SIZE && lighting_lamp_settling();
-}
-uint lighting_settle_turns(bool first) {
-    // The first tier (WRC cells) shares the room; the rest
-    // take turns in what it leaves (at least a quarter of the room), so the
-    // young list does not overflow and drop the same texels every round.
-    uint room = max(ckeys.key[LIGHTING_SETTLE_ROOM_AT], 1u);
-    uint head = min(ckeys.key[LIGHTING_SETTLE_FIRST_LAST_AT], ckeys.key[LIGHTING_SETTLE_LAST_AT]);
-    uint head_turns = clamp((head + room - 1u) / room, 1u, 64u);
-    if (first) {
-        return head_turns;
-    }
-    uint rest = ckeys.key[LIGHTING_SETTLE_LAST_AT] - head;
-    uint left = max(room - min(head / head_turns, room - room / 4u), 1u);
-    return clamp((rest + left - 1u) / left, 1u, 64u);
 }
 // A scene whose lamps never stop changing would settle forever, every round at
 // the settle cost (whole room to the young list, WRC lone samples, strict

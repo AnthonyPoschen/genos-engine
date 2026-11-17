@@ -151,15 +151,28 @@ fn lighting_fill_param_words(pixels: u64) -> u64 {
     lighting_sh_keys_words() + pixels * 8
 }
 
+/// Tile start, pick start, and end, as word offsets from the fill lock base.
+/// Each step adds. A table of [`FILL_TILE_WORDS`] slots used to carve the tiles
+/// out of `2 * slots - FILL_TILE_WORDS` and put the picks at `slots + 1`, which
+/// aliases and underflows the pick capacity.
+fn fill_list_end(slots: u64) -> (u64, u64, u64) {
+    let rays = u64::from(LIGHTING_CACHE_BATCH)
+        .checked_mul(u64::from(LIGHTING_CACHE_RAYS))
+        .expect("fill ray words");
+    let header = slots.checked_add(4).expect("fill header");
+    let tile = header
+        .checked_add(rays.checked_mul(FILL_TAIL_PER_RAY).expect("link words"))
+        .expect("tile words");
+    let pick = tile.checked_add(FILL_TILE_WORDS).expect("pick words");
+    let end = pick.checked_add(rays).expect("fill end");
+    assert!(pick >= tile + FILL_TILE_WORDS);
+    assert!(end > pick);
+    (tile, pick, end)
+}
+
 pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
-    let rays = (LIGHTING_CACHE_BATCH as u64) * (LIGHTING_CACHE_RAYS as u64);
-    lighting_fill_param_words(pixels)
-        + FILL_PARAM_WORDS
-        + FILL_LOCK_WORDS
-        + 4
-        + rays * FILL_TAIL_PER_RAY
-        + FILL_TILE_WORDS
-        + rays
+    let (_tile, _pick, end) = fill_list_end(FILL_LOCK_WORDS);
+    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + end
 }
 
 fn lighting_compose_minx() -> u64 {
@@ -6884,5 +6897,31 @@ mod sh_knob_tests {
             .expect("LIGHTING_CACHE_RAYS in lighting_cache_slots.glsl");
         assert!(rays.contains(&format!("= {LIGHTING_CACHE_RAYS}u;")), "{rays}");
         assert_eq!(u64::from(crate::cache_probe::SLOTS), LIGHTING_CACHE_SLOTS);
+    }
+}
+
+#[cfg(test)]
+mod fill_layout_tests {
+    use super::*;
+
+    #[test]
+    fn fill_lists_do_not_alias_at_262144_slots() {
+        let slots = 262_144u64;
+        let (tile, pick, end) = fill_list_end(slots);
+        let rays = u64::from(LIGHTING_CACHE_BATCH) * u64::from(LIGHTING_CACHE_RAYS);
+        assert_eq!(pick, tile + FILL_TILE_WORDS);
+        assert_eq!(end, pick + rays);
+        let old_tile = slots * 2 - FILL_TILE_WORDS;
+        let old_pick = slots + 1;
+        assert!(old_pick > old_tile && old_pick < old_tile + FILL_TILE_WORDS);
+        let old_cap = (old_tile as u32).wrapping_sub(old_pick as u32);
+        assert!(old_cap > rays as u32, "old pick capacity underflows, got {old_cap}");
+        let (big_tile, big_pick, _) = fill_list_end(1_048_576);
+        assert_eq!(big_pick, big_tile + FILL_TILE_WORDS);
+        let (_t, _p, host_end) = fill_list_end(FILL_LOCK_WORDS);
+        assert_eq!(
+            lighting_fill_keys_words(0) - lighting_fill_param_words(0),
+            FILL_PARAM_WORDS + host_end
+        );
     }
 }

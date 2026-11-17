@@ -441,7 +441,7 @@ void lighting_fill_dispatch() {
     }
     ckeys.key[lighting_fill_header_at()] = ranked;
     ckeys.key[lighting_fill_header_at() + 1u] = far_n - far_got;
-    ckeys.key[lighting_fill_header_at() + 2u] = live;
+    ckeys.key[lighting_fill_header_at() + 3u] = live;
     ckeys.key[LIGHTING_ARGS_AT + 15u] = n;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((budget + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
@@ -454,7 +454,7 @@ void lighting_fill_dispatch() {
     ckeys.key[LIGHTING_ARGS_AT + 8u] = n;
     ckeys.key[LIGHTING_ARGS_AT + 9u] = n;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = n;
-    gstats.rays = budget;
+    gstats.rays = 0u;
     gstats.due = n;
     gstats.scouts = budget - n;
     gstats.round_entries = (budget + 15u) / 16u;

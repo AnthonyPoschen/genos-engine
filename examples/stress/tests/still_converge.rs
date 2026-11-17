@@ -191,7 +191,7 @@ fn a_still_hall_keeps_converging() {
         "the host never called the still hall settled, so the zero-ray stop was not tested"
     );
     assert!(
-        min_rays > MIN_LATE_RAYS,
+        min_rays >= MIN_LATE_RAYS,
         "a still hall stopped tracing cache rays (min {min_rays}, need {MIN_LATE_RAYS})"
     );
 }

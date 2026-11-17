@@ -108,6 +108,9 @@ void main() {
         bool live;
         rec = work.v[lighting_hit_at(ray)];
         live = lighting_ray(ray, origin, dir, from_n);
+        if (live && lighting_ray_fill_on()) {
+            atomicAdd(gstats.rays, 1u);
+        }
         if (rec.x < 0.0 || !live) {
             return;
         }

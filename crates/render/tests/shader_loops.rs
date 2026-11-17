@@ -134,8 +134,22 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
     );
     let relight = source("lighting_cache.comp");
     assert!(
-        relight.contains("lighting_fill_header_at() + 2u"),
+        relight.contains("lighting_fill_header_at() + 3u"),
         "the fill reports occupied cells, not the empty due lists"
+    );
+    assert!(
+        !fill.contains("gstats.rays = budget"),
+        "the fill must count rays it launches, not the budget"
+    );
+    let direct = source("lighting_direct.comp");
+    assert!(
+        direct.contains("atomicAdd(gstats.rays, 1u)"),
+        "a launched fill ray increments the ray counter"
+    );
+    let cache_src = source("lighting_cache.glsl");
+    assert!(
+        !cache_src.contains("uint lighting_settle_turns"),
+        "the settle walk is gone; the fill visit replaced it"
     );
 }
 
