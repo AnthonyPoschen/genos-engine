@@ -79,6 +79,19 @@ pub const MOVER_TIER_NEAR_TEXELS: u32 = 384;
 /// Mid-tier texel budget before pool pressure.
 pub const MOVER_TIER_MID_TEXELS: u32 = 24;
 
+/// Distance (m) enter Near / leave Near (hysteresis).
+pub const MOVER_NEAR_ENTER_M: f32 = 8.0;
+pub const MOVER_NEAR_LEAVE_M: f32 = 10.0;
+/// Distance (m) enter Mid / leave Mid (beyond this → Far).
+pub const MOVER_MID_ENTER_M: f32 = 40.0;
+pub const MOVER_MID_LEAVE_M: f32 = 48.0;
+/// Screen radius (px) enter Near / leave Near.
+pub const MOVER_NEAR_ENTER_PX: f32 = 40.0;
+pub const MOVER_NEAR_LEAVE_PX: f32 = 32.0;
+/// Screen radius (px) enter Mid / leave Mid.
+pub const MOVER_MID_ENTER_PX: f32 = 8.0;
+pub const MOVER_MID_LEAVE_PX: f32 = 6.0;
+
 impl MoverTier {
     #[must_use]
     pub fn texel_budget(self) -> u32 {
@@ -86,6 +99,47 @@ impl MoverTier {
             Self::Near => MOVER_TIER_NEAR_TEXELS,
             Self::Mid => MOVER_TIER_MID_TEXELS,
             Self::Far => 0,
+        }
+    }
+}
+
+/// Classifies a mover's tier from distance and projected screen radius, with
+/// hysteresis against `prev` so a border wobble does not thrash the share.
+#[must_use]
+pub fn classify_tier(prev: MoverTier, distance_m: f32, screen_radius_px: f32) -> MoverTier {
+    let near = distance_m <= MOVER_NEAR_ENTER_M || screen_radius_px >= MOVER_NEAR_ENTER_PX;
+    let mid = distance_m <= MOVER_MID_ENTER_M || screen_radius_px >= MOVER_MID_ENTER_PX;
+    let leave_near = distance_m > MOVER_NEAR_LEAVE_M && screen_radius_px < MOVER_NEAR_LEAVE_PX;
+    let leave_mid = distance_m > MOVER_MID_LEAVE_M && screen_radius_px < MOVER_MID_LEAVE_PX;
+    match prev {
+        MoverTier::Near => {
+            if leave_near {
+                if leave_mid {
+                    MoverTier::Far
+                } else {
+                    MoverTier::Mid
+                }
+            } else {
+                MoverTier::Near
+            }
+        }
+        MoverTier::Mid => {
+            if near {
+                MoverTier::Near
+            } else if leave_mid {
+                MoverTier::Far
+            } else {
+                MoverTier::Mid
+            }
+        }
+        MoverTier::Far => {
+            if near {
+                MoverTier::Near
+            } else if mid {
+                MoverTier::Mid
+            } else {
+                MoverTier::Far
+            }
         }
     }
 }
@@ -217,7 +271,7 @@ impl MoverCache {
             .map(|slot| &self.table[usize_from_u32(slot)])
     }
 
-    /// Inserts or refreshes a mover. Does not allocate texels (Stage B).
+    /// Inserts or refreshes a mover. Keeps any existing texel span.
     pub fn upsert(&mut self, mut record: MoverRecord) -> Result<u32, MoverCacheError> {
         if record.object_id == MOVER_ID_NONE {
             return Err(MoverCacheError::InvalidId);
@@ -235,6 +289,8 @@ impl MoverCache {
             let slot = (start + step) & (MOVER_TABLE_SLOTS - 1);
             let dst = &mut self.table[usize_from_u32(slot)];
             if dst.object_id == MOVER_ID_NONE {
+                record.texel_base = u32::MAX;
+                record.texel_count = 0;
                 *dst = record;
                 self.live_movers = self.live_movers.saturating_add(1);
                 return Ok(slot);
@@ -243,18 +299,158 @@ impl MoverCache {
         Err(MoverCacheError::TableFull)
     }
 
+    /// How many live movers currently need a non-zero texel share (Near or Mid).
+    #[must_use]
+    pub fn needy_movers(&self) -> u32 {
+        let mut n = 0u32;
+        for rec in &self.table {
+            if rec.is_live() && rec.tier.texel_budget() > 0 {
+                n = n.saturating_add(1);
+            }
+        }
+        n
+    }
+
+    /// Per-mover share under pool pressure: `min(tier_budget, pool_cap / needy)`.
+    /// A crowded High pool of 1000 Near movers yields about 32 each.
+    #[must_use]
+    pub fn share_for(&self, tier: MoverTier) -> u32 {
+        let budget = tier.texel_budget();
+        if budget == 0 {
+            return 0;
+        }
+        let needy = self.needy_movers().max(1);
+        let fair = self.pool_cap / needy;
+        budget.min(fair)
+    }
+
+    /// Updates `object_id`'s tier from distance / screen size (hysteresis) and
+    /// resizes its texel span to the current pressure share.
+    pub fn update_tier_and_alloc(
+        &mut self,
+        object_id: u32,
+        distance_m: f32,
+        screen_radius_px: f32,
+    ) -> Result<u32, MoverCacheError> {
+        let Some(slot) = self.find_slot(object_id) else {
+            return Err(MoverCacheError::MissingMover);
+        };
+        let prev = self.table[usize_from_u32(slot)].tier;
+        let tier = classify_tier(prev, distance_m, screen_radius_px);
+        self.table[usize_from_u32(slot)].tier = tier;
+        let want = self.share_for(tier);
+        self.resize_span(slot, want)?;
+        Ok(want)
+    }
+
+    /// Resizes every live mover's span to the current pressure share. Call after
+    /// a burst of upserts so fair shares settle together.
+    pub fn rebalance_all(&mut self) {
+        let mut slots = Vec::new();
+        for (i, rec) in self.table.iter().enumerate() {
+            if rec.is_live() {
+                slots.push(u32_from_usize(i));
+            }
+        }
+        for slot in slots {
+            let tier = self.table[usize_from_u32(slot)].tier;
+            let want = self.share_for(tier);
+            let _ = self.resize_span(slot, want);
+        }
+    }
+
+    fn resize_span(&mut self, slot: u32, want: u32) -> Result<(), MoverCacheError> {
+        let rec = self.table[usize_from_u32(slot)];
+        let object_id = rec.object_id;
+        let have = self.count_texels_for(object_id);
+        if want == have {
+            let dst = &mut self.table[usize_from_u32(slot)];
+            dst.texel_count = want;
+            if want == 0 {
+                dst.texel_base = u32::MAX;
+            }
+            return Ok(());
+        }
+        if want < have {
+            // Drop extras (highest pool indices first) so a shrink frees the tail.
+            let mut owned = self.indices_for(object_id);
+            owned.sort_unstable();
+            while u32_from_usize(owned.len()) > want {
+                if let Some(i) = owned.pop() {
+                    self.free_span(i, 1);
+                }
+            }
+            let dst = &mut self.table[usize_from_u32(slot)];
+            dst.texel_count = want;
+            dst.texel_base = owned.first().copied().unwrap_or(u32::MAX);
+            return Ok(());
+        }
+        // Grow: claim more empty texels; keep existing bodies.
+        let mut owned = self.indices_for(object_id);
+        while u32_from_usize(owned.len()) < want {
+            match self.claim_texel(object_id, [0.0; 3], [0.0, 1.0, 0.0]) {
+                Ok(i) => owned.push(i),
+                Err(e) => {
+                    // Leave whatever we already hold; record the partial count.
+                    owned.sort_unstable();
+                    let dst = &mut self.table[usize_from_u32(slot)];
+                    dst.texel_count = u32_from_usize(owned.len());
+                    dst.texel_base = owned.first().copied().unwrap_or(u32::MAX);
+                    return Err(e);
+                }
+            }
+        }
+        owned.sort_unstable();
+        let dst = &mut self.table[usize_from_u32(slot)];
+        dst.texel_count = want;
+        dst.texel_base = owned.first().copied().unwrap_or(u32::MAX);
+        Ok(())
+    }
+
+    fn count_texels_for(&self, object_id: u32) -> u32 {
+        let mut n = 0u32;
+        for t in &self.texels {
+            if t.object_id == object_id {
+                n = n.saturating_add(1);
+            }
+        }
+        n
+    }
+
+    fn indices_for(&self, object_id: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        for (i, t) in self.texels.iter().enumerate() {
+            if t.object_id == object_id {
+                out.push(u32_from_usize(i));
+            }
+        }
+        out
+    }
+
     /// Drops a mover and returns its texels to the free stack (no orphans).
     pub fn remove(&mut self, object_id: u32) -> bool {
         let Some(slot) = self.find_slot(object_id) else {
             return false;
         };
-        let rec = self.table[usize_from_u32(slot)];
-        self.free_span(rec.texel_base, rec.texel_count);
+        self.free_all_for(object_id);
         self.table[usize_from_u32(slot)] = MoverRecord::vacant();
         self.live_movers = self.live_movers.saturating_sub(1);
         // Rehash the probe chain so later keys stay reachable.
         self.rehash_from(slot);
         true
+    }
+
+    /// Returns every live texel owned by `object_id` to the free stack.
+    fn free_all_for(&mut self, object_id: u32) {
+        if object_id == MOVER_ID_NONE {
+            return;
+        }
+        for i in 0..self.pool_cap {
+            let t = &self.texels[usize_from_u32(i)];
+            if t.object_id == object_id {
+                self.free_span(i, 1);
+            }
+        }
     }
 
     /// Claims one free texel for `object_id`. Stage A helper for lookup tests.
@@ -297,17 +493,14 @@ impl MoverCache {
         }
     }
 
-    /// Nearest live texel for `object_id` at object-local `pos` (linear scan of
-    /// that mover's span, or of all live texels with that id when unspanned).
+    /// Nearest live texel for `object_id` at object-local `pos`.
+    ///
+    /// The CPU reference scans the pool by object id. The GPU path hashes
+    /// `(object_id, local cell)` into the same pool.
     #[must_use]
     pub fn lookup_texel(&self, object_id: u32, local_pos: [f32; 3]) -> Option<(u32, &MoverTexel)> {
         if object_id == MOVER_ID_NONE {
             return None;
-        }
-        if let Some(rec) = self.get(object_id) {
-            if rec.texel_count > 0 && rec.texel_base != u32::MAX {
-                return self.nearest_in_span(rec.texel_base, rec.texel_count, object_id, local_pos);
-            }
         }
         let mut best: Option<(u32, f32)> = None;
         for (i, t) in self.texels.iter().enumerate() {
@@ -318,31 +511,6 @@ impl MoverCache {
             match best {
                 Some((_, bd)) if bd <= d => {}
                 _ => best = Some((u32_from_usize(i), d)),
-            }
-        }
-        best.and_then(|(i, _)| self.texel(i).map(|t| (i, t)))
-    }
-
-    fn nearest_in_span(
-        &self,
-        base: u32,
-        count: u32,
-        object_id: u32,
-        local_pos: [f32; 3],
-    ) -> Option<(u32, &MoverTexel)> {
-        let mut best: Option<(u32, f32)> = None;
-        for off in 0..count {
-            let i = base.saturating_add(off);
-            let Some(t) = self.texels.get(usize_from_u32(i)) else {
-                break;
-            };
-            if t.object_id != object_id {
-                continue;
-            }
-            let d = dist2(t.local_pos, local_pos);
-            match best {
-                Some((_, bd)) if bd <= d => {}
-                _ => best = Some((i, d)),
             }
         }
         best.and_then(|(i, _)| self.texel(i).map(|t| (i, t)))
@@ -387,6 +555,7 @@ pub enum MoverCacheError {
     InvalidId,
     TableFull,
     PoolFull,
+    MissingMover,
 }
 
 fn table_hash(object_id: u32) -> u32 {
@@ -482,15 +651,6 @@ mod tests {
         let i1 = cache
             .claim_texel(3, [0.2, 0.0, 0.0], [0.0, 1.0, 0.0])
             .expect("t1");
-        // Attach a contiguous span so remove frees them.
-        let slot = cache.find_slot(3).expect("slot");
-        {
-            let rec = &mut cache.table[usize_from_u32(slot)];
-            rec.texel_base = i0.min(i1);
-            rec.texel_count = 2;
-            // Ensure both indices sit in that span for this small pool claim order.
-            assert_eq!(rec.texel_base, 0);
-        }
         assert!(cache.remove(3));
         assert!(cache.get(3).is_none());
         assert_eq!(cache.live_movers(), 0);
@@ -552,5 +712,85 @@ mod tests {
             cache.claim_texel(1, [2.0; 3], [0.0, 1.0, 0.0]),
             Err(MoverCacheError::PoolFull)
         );
+    }
+
+    #[test]
+    fn tier_hysteresis_holds_near_across_the_enter_band() {
+        assert_eq!(
+            classify_tier(MoverTier::Far, 7.0, 0.0),
+            MoverTier::Near
+        );
+        // Still inside leave band: stay Near.
+        assert_eq!(
+            classify_tier(MoverTier::Near, 9.0, 0.0),
+            MoverTier::Near
+        );
+        // Past leave distance and small on screen: drop to Mid.
+        assert_eq!(
+            classify_tier(MoverTier::Near, 11.0, 0.0),
+            MoverTier::Mid
+        );
+        // Far past mid leave: Far.
+        assert_eq!(
+            classify_tier(MoverTier::Mid, 50.0, 0.0),
+            MoverTier::Far
+        );
+        // Screen size alone can promote Far → Mid.
+        assert_eq!(
+            classify_tier(MoverTier::Far, 100.0, 10.0),
+            MoverTier::Mid
+        );
+    }
+
+    #[test]
+    fn update_tier_allocates_near_and_frees_on_far() {
+        let mut cache = MoverCache::new(512);
+        cache.upsert(record(1)).expect("insert");
+        let n = cache
+            .update_tier_and_alloc(1, 2.0, 80.0)
+            .expect("near alloc");
+        assert_eq!(n, MOVER_TIER_NEAR_TEXELS);
+        assert_eq!(cache.get(1).map(|r| r.texel_count), Some(MOVER_TIER_NEAR_TEXELS));
+        assert_eq!(cache.used_texels(), MOVER_TIER_NEAR_TEXELS);
+        let z = cache
+            .update_tier_and_alloc(1, 60.0, 0.0)
+            .expect("far frees");
+        assert_eq!(z, 0);
+        assert_eq!(cache.get(1).map(|r| r.texel_count), Some(0));
+        assert_eq!(cache.used_texels(), 0);
+        assert!(cache.lookup_texel(1, [0.0; 3]).is_none());
+    }
+
+    #[test]
+    fn pool_pressure_shrinks_each_share() {
+        // 1000 Near movers on a High pool → about 32 each.
+        let mut cache = MoverCache::high();
+        for id in 1..=1000 {
+            let mut r = record(id);
+            r.tier = MoverTier::Near;
+            cache.upsert(r).expect("insert");
+        }
+        cache.rebalance_all();
+        let share = cache.share_for(MoverTier::Near);
+        assert_eq!(share, MOVER_TEXELS_HIGH / 1000);
+        assert_eq!(share, 32);
+        let got = cache.get(1).expect("m1");
+        assert_eq!(got.texel_count, 32);
+        assert_eq!(cache.used_texels(), 32 * 1000);
+        // Dropping one returns its texels; no orphans for that id.
+        assert!(cache.remove(1));
+        assert!(cache.lookup_texel(1, [0.0; 3]).is_none());
+        assert_eq!(cache.used_texels(), 32 * 999);
+    }
+
+    #[test]
+    fn mid_tier_caps_at_twenty_four() {
+        let mut cache = MoverCache::new(256);
+        cache.upsert(record(5)).expect("insert");
+        let n = cache
+            .update_tier_and_alloc(5, 20.0, 0.0)
+            .expect("mid");
+        assert_eq!(n, MOVER_TIER_MID_TEXELS);
+        assert_eq!(cache.get(5).map(|r| r.tier), Some(MoverTier::Mid));
     }
 }

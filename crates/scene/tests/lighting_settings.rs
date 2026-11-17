@@ -55,6 +55,28 @@ fn surface_cache_attach_movers_round_trips() {
 }
 
 #[test]
+fn surface_cache_mover_texels_round_trips_and_presets() {
+    let high = LightingSettings::preset(LightingPreset::High);
+    assert_eq!(high.surface_cache.mover_texels, 32_768);
+    let medium = LightingSettings::preset(LightingPreset::Medium);
+    assert_eq!(medium.surface_cache.mover_texels, 16_384);
+    let low = LightingSettings::preset(LightingPreset::Low);
+    assert_eq!(low.surface_cache.mover_texels, 4_096);
+    let mut settings = high;
+    settings
+        .set_key("surface_cache.mover_texels", "1024")
+        .unwrap();
+    assert_eq!(settings.surface_cache.mover_texels, 1024);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed.surface_cache.mover_texels, 1024);
+    settings
+        .set_key("surface_cache.mover_texels", "999999")
+        .unwrap();
+    settings.sanitize();
+    assert_eq!(settings.surface_cache.mover_texels, 32_768);
+}
+
+#[test]
 fn surface_cache_sh_probe_retire_round_trips() {
     let high = LightingSettings::preset(LightingPreset::High);
     assert!(high.surface_cache.sh_probe_retire);
