@@ -581,6 +581,10 @@ pub struct SurfaceCacheSettings {
     /// errors of the round's own per-cell differences. `0` drops that test (the
     /// 1 % gap alone, as before).
     pub drain_sigma: f32,
+    /// Fixed pool of object-attached mover texels (~64 B each), not world-hash
+    /// slots. High defaults to 32768 (~2 MiB). `0` disables the mover pool.
+    /// Key `surface_cache.mover_pool`.
+    pub mover_pool: u32,
 }
 
 /// Surface cache switches the renderer uses when nothing sets `sc_flags`
@@ -764,6 +768,7 @@ impl LightingSettings {
             }
             LightingPreset::DayCycle => {
                 clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_pool = 0;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
                 s.probes.enabled = false;
@@ -790,12 +795,14 @@ impl LightingSettings {
                 // One bounce reads the world cache. The directional product
                 // stays a High and Medium default.
                 clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_pool = 4_096;
                 s.denoiser.enabled = false;
                 s.prefill = false;
                 s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Potato => {
                 clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_pool = 0;
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -815,6 +822,7 @@ impl LightingSettings {
                 // passes are gone on every preset. The knobs can still turn
                 // the bits on.
                 clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_pool = 4_096;
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
                 s.probes.enabled = false;
@@ -836,6 +844,7 @@ impl LightingSettings {
             LightingPreset::Medium => {
                 // High's directional product stays on: SH cells, texel detail,
                 // the ray cut, and probe retire.
+                s.surface_cache.mover_pool = 16_384;
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
@@ -887,6 +896,7 @@ impl LightingSettings {
                 sh_texel_ray_cut: true,
                 sh_probe_retire: true,
                 drain_sigma: 4.0,
+                mover_pool: 32_768,
             },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
@@ -964,6 +974,14 @@ impl LightingSettings {
         } else {
             4.0
         };
+        // Power-of-two pool, capped at 1M texels (~64 MiB). Zero disables.
+        if self.surface_cache.mover_pool > 0 {
+            self.surface_cache.mover_pool = self
+                .surface_cache
+                .mover_pool
+                .clamp(16, 1_048_576)
+                .next_power_of_two();
+        }
         if let Some(mode) = self.gi.world_mode {
             // Mode 2 pushed screen-probe irradiance into world patches.
             // That pass is removed, so the stored mode becomes the surface cache.
@@ -1322,6 +1340,11 @@ impl LightingSettings {
             "surface_cache.drain_sigma={}",
             num_text(self.surface_cache.drain_sigma)
         );
+        let _ = writeln!(
+            out,
+            "surface_cache.mover_pool={}",
+            self.surface_cache.mover_pool
+        );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
         }
@@ -1537,6 +1560,7 @@ impl LightingSettings {
                 }
                 self.surface_cache.drain_sigma = sigma;
             }
+            "surface_cache.mover_pool" => self.surface_cache.mover_pool = num_u32(value)?,
             "cache_async" => self.experiments.cache_async = on(value)?,
             "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
             "cache_picks" => self.experiments.cache_picks = on(value)?,

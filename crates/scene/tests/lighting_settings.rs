@@ -35,6 +35,43 @@ fn room() -> &'static str {
 }
 
 #[test]
+fn surface_cache_mover_pool_scales_with_preset() {
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::High)
+            .surface_cache
+            .mover_pool,
+        32_768
+    );
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Medium)
+            .surface_cache
+            .mover_pool,
+        16_384
+    );
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Low)
+            .surface_cache
+            .mover_pool,
+        4_096
+    );
+    assert_eq!(
+        LightingSettings::preset(LightingPreset::Potato)
+            .surface_cache
+            .mover_pool,
+        0
+    );
+    let mut settings = LightingSettings::default();
+    settings
+        .set_key("surface_cache.mover_pool", "2048")
+        .unwrap();
+    assert_eq!(settings.surface_cache.mover_pool, 2048);
+    settings.sanitize();
+    assert_eq!(settings.surface_cache.mover_pool, 2048);
+    let parsed = LightingSettings::parse(&settings.to_text()).unwrap();
+    assert_eq!(parsed.surface_cache.mover_pool, 2048);
+}
+
+#[test]
 fn surface_cache_attach_movers_round_trips() {
     let mut settings = LightingSettings::default();
     assert!(settings.surface_cache.attach_movers);

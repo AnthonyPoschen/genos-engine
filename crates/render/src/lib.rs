@@ -15,6 +15,7 @@ pub mod lighting_sh;
 mod material_stream;
 mod mesh;
 mod mesh_field;
+mod mover_cache;
 mod occ_grid;
 mod pack;
 mod particle_sim;
@@ -90,6 +91,11 @@ pub use hdr_output::{
 };
 pub use mesh::tone;
 pub use mesh_field::{field_words, instance_distance, FieldInstance, FIELD_STEPS};
+pub use mover_cache::{
+    mover_pool_for_preset, MoverCache, MoverEntry, MoverTexel, MoverTier, MOVER_POOL_HIGH,
+    MOVER_POOL_LOW, MOVER_POOL_MEDIUM, MOVER_TEXEL_BYTES, MOVER_TIER_FAR, MOVER_TIER_MID,
+    MOVER_TIER_NEAR,
+};
 pub use occ_grid::{analytic_hit, walk_grid, GridHit};
 pub use pack::{build_grid, lamp_range, pack_frame, Pack, PackedDraw, SceneGrid, LAMP_CUTOFF};
 pub use particle_sim::{
