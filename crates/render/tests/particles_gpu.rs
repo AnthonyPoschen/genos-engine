@@ -799,7 +799,7 @@ fn the_depth_image_keeps_a_particle_in_front_and_retires_one_behind() {
     // Straight down. This point sits between the eye and the floor.
     settings.origin = [0.0, 0.8, 2.0];
     let mut drawn = world(settings.clone());
-    drawn.scene.walls.push(Wall {
+    drawn.scene.push_wall(Wall {
         position: Vec3::new(0.0, 0.0, 1.2),
         half_x: 2.0,
         half_z: 0.2,
