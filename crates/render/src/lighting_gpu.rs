@@ -56,7 +56,7 @@ const LIGHTING_PC_BYTES: u32 = 48;
 const LIGHTING_WRC_COUNTS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 66;
 /// Off-screen fine-texel admission count (`LIGHTING_FINE_COUNT_AT`). Zeroed each round.
 const LIGHTING_FINE_COUNT_AT: u64 = LIGHTING_WRC_COUNTS_AT + 20;
-/// Create, drop, lookahead, budget share, screen boost, close boost. Not zeroed.
+/// Create, drop, lookahead. Not zeroed.
 const LIGHTING_FINE_WORD_AT: u64 = LIGHTING_WRC_COUNTS_AT + 24;
 /// ckeys word of the drain flag (lighting_cache.glsl LIGHTING_DRAIN_FLAG_AT).
 const LIGHTING_DRAIN_FLAG_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 82;
@@ -2409,16 +2409,13 @@ impl Gpu {
         self.lighting.pipes[3]
     }
 
-    /// The fine-band distances and the budget split, for the cache shaders.
+    /// The fine-band distances, for the cache shaders.
     fn write_fine_lod(&mut self, cmd: Handle) -> Result<(), String> {
         let cache = self.lighting.settings.surface_cache;
         let words = [
             cache.fine_lod_create.to_bits(),
             cache.fine_lod_drop.to_bits(),
             cache.fine_lod_lookahead.to_bits(),
-            cache.fine_budget_share.to_bits(),
-            cache.fine_screen_boost.to_bits(),
-            cache.fine_close_boost.to_bits(),
         ];
         self.write_device(
             cmd,

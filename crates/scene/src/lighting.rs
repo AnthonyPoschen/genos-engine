@@ -710,17 +710,6 @@ pub struct SurfaceCacheSettings {
     /// motion and turn. A still view does not stretch the band. `0` keeps
     /// the band centred on the player. Key `surface_cache.fine_lod_lookahead`.
     pub fine_lod_lookahead: f32,
-    /// Share of the fixed texel ray room reserved for fine texels inside the
-    /// drop distance that are not yet settled. The share is taken out of that
-    /// room. `0` reserves none. Clamped to `0.5`.
-    /// Key `surface_cache.fine_budget_share`.
-    pub fine_budget_share: f32,
-    /// Priority multiplier for a fine texel a pixel is showing. `1` is no boost.
-    /// Key `surface_cache.fine_screen_boost`.
-    pub fine_screen_boost: f32,
-    /// How strongly closeness raises priority. `0` leaves ranking to remaining
-    /// error and measured change. Key `surface_cache.fine_close_boost`.
-    pub fine_close_boost: f32,
     /// Stage F2 scheduler. World mode 3 spends `fill.budget` every cache round.
     pub fill: FillSettings,
 }
@@ -1036,9 +1025,6 @@ impl LightingSettings {
                 fine_lod_create: 6.0,
                 fine_lod_drop: 8.0,
                 fine_lod_lookahead: 2.0,
-                fine_budget_share: 0.10,
-                fine_screen_boost: 1.5,
-                fine_close_boost: 0.25,
                 fill: FillSettings::high(),
             },
             bounce: BounceSettings {
@@ -1123,12 +1109,6 @@ impl LightingSettings {
             .min(96.0);
         self.surface_cache.fine_lod_lookahead =
             finite_nonneg(self.surface_cache.fine_lod_lookahead, 2.0).min(32.0);
-        self.surface_cache.fine_budget_share =
-            finite_nonneg(self.surface_cache.fine_budget_share, 0.10).min(0.5);
-        self.surface_cache.fine_screen_boost =
-            finite_nonneg(self.surface_cache.fine_screen_boost, 1.5).clamp(1.0, 8.0);
-        self.surface_cache.fine_close_boost =
-            finite_nonneg(self.surface_cache.fine_close_boost, 0.25).min(8.0);
         let fill = &mut self.surface_cache.fill;
         fill.budget = fill.budget.min(FILL_BUDGET_MAX);
         fill.tile = fill.tile.clamp(1, 64);
@@ -1602,21 +1582,6 @@ impl LightingSettings {
             "surface_cache.fine_lod_lookahead={}",
             num_text(self.surface_cache.fine_lod_lookahead)
         );
-        let _ = writeln!(
-            out,
-            "surface_cache.fine_budget_share={}",
-            num_text(self.surface_cache.fine_budget_share)
-        );
-        let _ = writeln!(
-            out,
-            "surface_cache.fine_screen_boost={}",
-            num_text(self.surface_cache.fine_screen_boost)
-        );
-        let _ = writeln!(
-            out,
-            "surface_cache.fine_close_boost={}",
-            num_text(self.surface_cache.fine_close_boost)
-        );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
         }
@@ -1896,18 +1861,13 @@ impl LightingSettings {
                 self.surface_cache.fine_lod_lookahead =
                     nonneg_f32("surface_cache.fine_lod_lookahead", value)?;
             }
-            "surface_cache.fine_budget_share" => {
-                self.surface_cache.fine_budget_share =
-                    nonneg_f32("surface_cache.fine_budget_share", value)?;
-            }
-            "surface_cache.fine_screen_boost" => {
-                self.surface_cache.fine_screen_boost =
-                    nonneg_f32("surface_cache.fine_screen_boost", value)?;
-            }
-            "surface_cache.fine_close_boost" => {
-                self.surface_cache.fine_close_boost =
-                    nonneg_f32("surface_cache.fine_close_boost", value)?;
-            }
+            // The fill histogram does not read these. Kept so a saved file
+            // still parses. One warning, then the value is dropped.
+            "surface_cache.fine_budget_share"
+            | "surface_cache.fine_screen_boost"
+            | "surface_cache.fine_close_boost" => {
+                warn_fine_rank_removed(key);
+            },
             "cache_async" => self.experiments.cache_async = on(value)?,
             "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
             "cache_picks" => self.experiments.cache_picks = on(value)?,
@@ -2760,6 +2720,21 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI2_YOUNG_ONLY", "GENOS_LIGHTING_YOUNG_ONLY"),
     ("GENOS_GI_DEBUG", "GENOS_LIGHTING_DEBUG"),
 ];
+
+fn warn_fine_rank_removed(key: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(key.to_string()) {
+        eprintln!(
+            "warning: {key} is removed; the fill budget is not split and the rank is not scaled (alias kept for one release)"
+        );
+    }
+}
 
 fn warn_screen_probe_retired(key: &'static str) {
     use std::collections::HashSet;

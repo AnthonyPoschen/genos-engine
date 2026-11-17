@@ -816,9 +816,6 @@ fn yaw_once(window: &mut Window, renderer: &mut Renderer, stage: &Stage, fill: b
     if !fill {
         settings.surface_cache.fine_lod_create = 0.0;
         settings.surface_cache.fine_lod_drop = 0.0;
-        settings.surface_cache.fine_budget_share = 0.0;
-        settings.surface_cache.fine_screen_boost = 1.0;
-        settings.surface_cache.fine_close_boost = 0.0;
     }
     settings.sanitize();
     renderer.set_lighting_settings(settings);

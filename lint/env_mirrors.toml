@@ -470,17 +470,17 @@ detail = "LightingSettings surface_cache.fine_lod_lookahead; stress knob lightin
 [[var]]
 name = "GENOS_LIGHTING_FINE_BUDGET_SHARE"
 kind = "mirror"
-detail = "LightingSettings surface_cache.fine_budget_share; stress knob lighting_fine_budget_share; MCP set_key"
+detail = "Removed. set_key warns and drops the value. The fill budget is not split."
 
 [[var]]
 name = "GENOS_LIGHTING_FINE_SCREEN_BOOST"
 kind = "mirror"
-detail = "LightingSettings surface_cache.fine_screen_boost; stress knob lighting_fine_screen_boost; MCP set_key"
+detail = "Removed. set_key warns and drops the value. The rank is not scaled."
 
 [[var]]
 name = "GENOS_LIGHTING_FINE_CLOSE_BOOST"
 kind = "mirror"
-detail = "LightingSettings surface_cache.fine_close_boost; stress knob lighting_fine_close_boost; MCP set_key"
+detail = "Removed. set_key warns and drops the value. The rank is not scaled."
 
 [[var]]
 name = "GENOS_LIGHTING_FILL_BUDGET"
