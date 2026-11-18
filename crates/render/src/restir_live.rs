@@ -242,21 +242,24 @@ fn mark_changed(words: &mut [u32], changed_base: usize) {
 /// equal-length reorder stores the old slot order. That frame sets word 15
 /// and writes no changed-lamp bits, so the reach test returns on word 39
 /// before those balls are read.
+fn push_ball(words: &mut Vec<u32>, pos: [f32; 3], range: f32) {
+    push_f(words, pos[0]);
+    push_f(words, pos[1]);
+    push_f(words, pos[2]);
+    push_f(words, range);
+}
+
 fn push_prev_balls(words: &mut Vec<u32>, prev_lamps: &[GpuLamp], count: usize) -> usize {
     let base = words.len();
     let prev: Vec<&GpuLamp> = point_lamps(prev_lamps).map(|(_, lamp)| lamp).collect();
-    let aligned = prev.len() == count;
-    for slot in 0..count {
-        let (pos, range) = if aligned {
-            let lamp = prev[slot];
-            (lamp.pos, lamp.range)
-        } else {
-            ([0.0; 3], 0.0)
-        };
-        push_f(words, pos[0]);
-        push_f(words, pos[1]);
-        push_f(words, pos[2]);
-        push_f(words, range);
+    if prev.len() == count {
+        for lamp in &prev {
+            push_ball(words, lamp.pos, lamp.range);
+        }
+    } else {
+        for _ in 0..count {
+            push_ball(words, [0.0; 3], 0.0);
+        }
     }
     base
 }
@@ -353,28 +356,63 @@ pub fn prefix(
     if words.len() > usize::try_from(PREFIX_CAP_WORDS).unwrap_or(usize::MAX) {
         return None;
     }
-    let width = cost.width;
-    let height = cost.height;
-    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    let total = write_header(
+        &mut words,
+        &cost,
+        previous,
+        frame,
+        prev_slot,
+        &HeaderAt {
+            count: refs.len(),
+            lamp_base,
+            tree_nodes: tree.node_count(),
+            tree_base,
+            prev_base,
+            changed_base,
+            layout_changed,
+        },
+    )?;
+    Some(RestirPrefix {
+        words,
+        total_words: total,
+        layout_changed,
+    })
+}
+
+struct HeaderAt {
+    count: usize,
+    lamp_base: usize,
+    tree_nodes: usize,
+    tree_base: usize,
+    prev_base: usize,
+    changed_base: usize,
+    layout_changed: bool,
+}
+
+fn write_header(
+    words: &mut [u32],
+    cost: &RestirCost,
+    previous: &RestirCam,
+    frame: u32,
+    prev_slot: u32,
+    at: &HeaderAt,
+) -> Option<u64> {
+    let pixels = u64::from(cost.width).saturating_mul(u64::from(cost.height));
     let hist0 = u64::try_from(words.len()).unwrap_or(u64::MAX);
     let hist_words = pixels.saturating_mul(u64::from(HIST_STRIDE));
     let hist1 = hist0.saturating_add(hist_words);
     let scratch = hist1.saturating_add(hist_words);
     let total = scratch.saturating_add(pixels.saturating_mul(4));
-    let hist0_u = u32::try_from(hist0).ok()?;
-    let hist1_u = u32::try_from(hist1).ok()?;
-    let scratch_u = u32::try_from(scratch).ok()?;
-    let count = word_u32(refs.len());
-    words[0] = count;
-    words[1] = word_u32(lamp_base);
-    words[2] = word_u32(tree.node_count());
-    words[3] = word_u32(tree_base);
-    words[4] = hist0_u;
-    words[5] = hist1_u;
-    words[6] = scratch_u;
-    words[7] = width;
-    words[8] = height;
     let candidates = cost.candidates.clamp(1, 32);
+    words[0] = word_u32(at.count);
+    words[1] = word_u32(at.lamp_base);
+    words[2] = word_u32(at.tree_nodes);
+    words[3] = word_u32(at.tree_base);
+    words[4] = u32::try_from(hist0).ok()?;
+    words[5] = u32::try_from(hist1).ok()?;
+    words[6] = u32::try_from(scratch).ok()?;
+    words[7] = cost.width;
+    words[8] = cost.height;
     words[9] = candidates;
     words[10] = PROPOSAL_TREE;
     words[11] = DEFAULT_M_CLAMP;
@@ -386,7 +424,7 @@ pub fn prefix(
     words[SCREEN_W_WORD] = cost.screen_width;
     words[SCREEN_H_WORD] = cost.screen_height;
     words[SPLIT_WORD] = u32::from(cost.split_passes != 0);
-    words[15] = u32::from(layout_changed);
+    words[15] = u32::from(at.layout_changed);
     if reuse_off() {
         // Diagnostic: no temporal history (word 15 forces the temporal pass
         // to treat history as invalid) and no spatial neighbours (word 13).
@@ -399,20 +437,16 @@ pub fn prefix(
     words[19] = HIST_STRIDE;
     words[20] = prev_slot & 1;
     words[21] = u32::from(previous.valid);
-    words[PREV_AT_WORD] = word_u32(prev_base);
-    push_cam(&mut words, previous);
-    mark_changed(&mut words, changed_base);
+    words[PREV_AT_WORD] = word_u32(at.prev_base);
+    push_cam(words, previous);
+    mark_changed(words, at.changed_base);
     // Reorder frames set word 15 and leave the bitset clear. The previous
     // balls are not read: restir_changed_reach returns when word 39 is 0.
     debug_assert!(
-        !layout_changed || words[ANY_CHANGED_WORD] == 0,
+        !at.layout_changed || words[ANY_CHANGED_WORD] == 0,
         "a reorder must not publish changed-lamp bits"
     );
-    Some(RestirPrefix {
-        words,
-        total_words: total,
-        layout_changed,
-    })
+    Some(total)
 }
 
 /// Header word 15, the history-invalid flag the shaders read. `reset` is the
@@ -594,25 +628,32 @@ mod tests {
             1,
             "a position-only move sets word 39"
         );
-        let prev_at = usize::try_from(at(&packed.words, super::PREV_AT_WORD as u32)).unwrap_or(0);
-        let prev_x = f32::from_bits(
-            packed
-                .words
-                .get(prev_at + super::PREV_BALL_STRIDE)
-                .copied()
-                .unwrap_or(0),
-        );
-        let prev_range = f32::from_bits(
-            packed
-                .words
-                .get(prev_at + super::PREV_BALL_STRIDE + 3)
-                .copied()
-                .unwrap_or(0),
-        );
+        let (prev_x, prev_range) = prev_ball(&packed.words, 1);
         assert!(
             (prev_x - 1.0).abs() < 1.0e-5 && (prev_range - 8.0).abs() < 1.0e-5,
             "lamp 1's previous ball is {prev_x} range {prev_range}"
         );
+        assert_colour_off_keeps_the_old_ball(&lamp, &moved, cost);
+        assert_layout_changes_hide_the_balls(&lamp, &before, cost);
+    }
+
+    fn header_word(index: usize) -> u32 {
+        u32::try_from(index).unwrap_or(0)
+    }
+
+    fn prev_ball(words: &[u32], lamp: usize) -> (f32, f32) {
+        let base = usize::try_from(at(words, header_word(super::PREV_AT_WORD))).unwrap_or(0);
+        let slot = base + lamp * super::PREV_BALL_STRIDE;
+        let x = f32::from_bits(words.get(slot).copied().unwrap_or(0));
+        let range = f32::from_bits(words.get(slot + 3).copied().unwrap_or(0));
+        (x, range)
+    }
+
+    fn assert_colour_off_keeps_the_old_ball(
+        lamp: &dyn Fn(f32) -> GpuLamp,
+        moved: &[GpuLamp],
+        cost: super::RestirCost,
+    ) {
         let black = GpuLamp {
             pos: [1.5, 2.0, 0.0],
             color: [0.0, 0.0, 0.0],
@@ -620,16 +661,9 @@ mod tests {
             range: 0.0,
         };
         let off = [lamp(0.0), black, lamp(2.0)];
-        let packed = prefix(&off, &moved, &RestirCam::default(), 2, 0, cost)
+        let packed = prefix(&off, moved, &RestirCam::default(), 2, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));
-        let prev_at = usize::try_from(at(&packed.words, super::PREV_AT_WORD as u32)).unwrap_or(0);
-        let prev_range = f32::from_bits(
-            packed
-                .words
-                .get(prev_at + super::PREV_BALL_STRIDE + 3)
-                .copied()
-                .unwrap_or(0),
-        );
+        let (_, prev_range) = prev_ball(&packed.words, 1);
         let now_range = f32::from_bits(
             packed
                 .words
@@ -649,7 +683,14 @@ mod tests {
             Some(0b010),
             "colour-to-0 flags the lamp so the previous ball is tested"
         );
-        let still = prefix(&before, &before, &RestirCam::default(), 1, 0, cost)
+    }
+
+    fn assert_layout_changes_hide_the_balls(
+        lamp: &dyn Fn(f32) -> GpuLamp,
+        before: &[GpuLamp],
+        cost: super::RestirCost,
+    ) {
+        let still = prefix(before, before, &RestirCam::default(), 1, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));
         assert_eq!(
             at(&still.words, 39),
@@ -657,12 +698,7 @@ mod tests {
             "a still lamp leaves word 39 clear"
         );
         let fewer = [lamp(0.0), lamp(2.0)];
-        let cost = super::RestirCost {
-            width: 8,
-            height: 8,
-            ..super::RestirCost::default()
-        };
-        let packed = prefix(&fewer, &before, &RestirCam::default(), 1, 0, cost)
+        let packed = prefix(&fewer, before, &RestirCam::default(), 1, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(packed.layout_changed, "indices no longer match");
         let sun = GpuLamp {
@@ -672,17 +708,13 @@ mod tests {
             range: 0.0,
         };
         let shifted = [sun, lamp(0.0), lamp(1.0), lamp(2.0)];
-        let packed = prefix(&shifted, &before, &RestirCam::default(), 1, 0, cost)
+        let packed = prefix(&shifted, before, &RestirCam::default(), 1, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(
             packed.layout_changed,
             "an equal-length point list with new scene indices is a reorder"
         );
-        assert_eq!(
-            at(&packed.words, 15),
-            1,
-            "a reorder sets word 15"
-        );
+        assert_eq!(at(&packed.words, 15), 1, "a reorder sets word 15");
         assert_eq!(
             at(&packed.words, 39),
             0,

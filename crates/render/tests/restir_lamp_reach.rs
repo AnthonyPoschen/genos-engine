@@ -2,14 +2,6 @@
     test,
     expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
 )]
-#![cfg_attr(
-    test,
-    expect(
-        clippy::doc_markdown,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
-
 //! One lamp moves. Surfaces only the still lamps reach must keep direct-light
 //! history. Header word 39 used to drop that history for the whole screen.
 //!
@@ -129,13 +121,8 @@ fn direct_settings(restir: bool) -> LightingSettings {
 }
 
 fn as_f32(value: u32) -> f32 {
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "frame and pixel counts fit in f32"
-    )]
-    {
-        value as f32
-    }
+    // Frame and pixel counts in this gate fit in u16, so the widening is exact.
+    f32::from(u16::try_from(value).unwrap_or(0))
 }
 
 fn color_for_range(range: f32, tint: [f32; 3]) -> [f32; 3] {
@@ -162,8 +149,8 @@ fn reaches(pos: [f32; 3], color: [f32; 3], point: [f32; 3]) -> bool {
 
 fn lifted_points(x0: f32, x1: f32, y0: f32, y1: f32) -> [[f32; 3]; 9] {
     let z = WALL_Z + LIFT;
-    let xm = (x0 + x1) * 0.5;
-    let ym = (y0 + y1) * 0.5;
+    let xm = f32::midpoint(x0, x1);
+    let ym = f32::midpoint(y0, y1);
     [
         [x0, y0, z],
         [x0, ym, z],
@@ -351,13 +338,15 @@ fn screen_u(t: f32, span: u32) -> u32 {
     if !scaled.is_finite() || scaled <= 0.0 {
         return 0;
     }
-    let last = as_f32(span.saturating_sub(1));
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "clamped into the pixel span"
-    )]
-    #[expect(clippy::cast_sign_loss, reason = "clamped to a non-negative pixel")]
-    let px = scaled.min(last) as u32;
+    let last = span.saturating_sub(1);
+    let mut px = 0u32;
+    while px < last {
+        let next = f32::from(u16::try_from(px + 1).unwrap_or(u16::MAX));
+        if next > scaled {
+            break;
+        }
+        px += 1;
+    }
     px
 }
 
@@ -405,16 +394,15 @@ fn luma_image(rgb: &[f64]) -> Vec<f64> {
 }
 
 fn luma8(y: f64) -> i32 {
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "display luma is a finite f32"
-    )]
-    let shown = tone(y.clamp(0.0, 4.0) as f32);
+    let shown = tone(genos_math::f32_from_f64(y.clamp(0.0, 4.0)));
     let code = (f64::from(shown).clamp(0.0, 1.0) * 255.0).round();
-    #[expect(clippy::cast_possible_truncation, reason = "0..=255")]
-    {
-        code as i32
+    let mut step = 0i32;
+    let mut cursor = 0.0_f64;
+    while step < 255 && cursor + 0.5 < code {
+        step += 1;
+        cursor += 1.0;
     }
+    step
 }
 
 fn index_of(width: u32, x: u32, y: u32) -> usize {
@@ -783,19 +771,19 @@ fn a_lamp_that_leaves_a_patch_drops_its_stale_mean() {
     for kind in [Leave::Jump, Leave::Dim, Leave::Replace, Leave::Off] {
         let shot = leave_shot(kind, &left, &right);
         if shot.brute_right <= 1.0e-3 {
-            failed.push_str(&format!("{kind:?} left a dark patch {}\n", shot.brute_right));
+            failed = format!("{failed}{kind:?} left a dark patch {}\n", shot.brute_right);
         }
         if shot.left_grain >= 1.6 {
-            failed.push_str(&format!(
-                "{kind:?} salted the still patch grain {:.3}\n",
+            failed = format!(
+                "{failed}{kind:?} salted the still patch grain {:.3}\n",
                 shot.left_grain
-            ));
+            );
         }
         if shot.right_err > REF_ERR {
-            failed.push_str(&format!(
-                "{kind:?} stale light ref_err {:.4} (mean {:.4} vs brute {:.4})\n",
+            failed = format!(
+                "{failed}{kind:?} stale light ref_err {:.4} (mean {:.4} vs brute {:.4})\n",
                 shot.right_err, shot.right_mean, shot.brute_right
-            ));
+            );
         }
     }
     assert!(failed.is_empty(), "{failed}");
@@ -828,7 +816,7 @@ fn wake_span(frame: u32) -> (f32, f32) {
     let end = lamp_x(frame) + 1.0;
     while x < end {
         let mut wake = true;
-        for y in [TRAIL_Y0, (TRAIL_Y0 + TRAIL_Y1) * 0.5, TRAIL_Y1] {
+        for y in [TRAIL_Y0, f32::midpoint(TRAIL_Y0, TRAIL_Y1), TRAIL_Y1] {
             let point = [x, y, WALL_Z + LIFT];
             let was = ball_reaches([prev, 1.6, LAMP_Z], LAMP_RANGE, point);
             let now = ball_reaches([cur, 1.6, LAMP_Z], LAMP_RANGE, point);
