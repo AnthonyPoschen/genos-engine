@@ -6652,7 +6652,8 @@ const float LIGHTING_HISTORY_SHOWN = 0.5;
 // Variance below this is treated as the noise floor, and the same floor
 // keeps a zero mean from dividing the relative step.
 const float LIGHTING_HISTORY_NOISE = 1.0e-4;
-// A sample inside this many standard deviations agrees with the mean.
+// A sample inside this many standard errors of the mean agrees with it.
+// The divisor is the ray count, so a wide sample cloud does not hide a shift.
 const float LIGHTING_HISTORY_SIGMA = 2.0;
 // Agreement lowers the value by this fraction of the full range.
 const float LIGHTING_HISTORY_DROP = 1.0 / 3.0;
@@ -6675,7 +6676,10 @@ float lighting_history_value(uint slot, vec3 old_rgb, vec3 sample_rgb) {
         float mean_l = max(dot(max(old_rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
         float sample_l = max(dot(max(sample_rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
         float variance = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot].w, 0.0);
-        float noise = max(sqrt(variance), LIGHTING_HISTORY_NOISE);
+        // Standard error of the mean. The sample spread hid a shifted mean:
+        // every new ray looked like agreement, so the value stayed 0.
+        float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w, 1.0);
+        float noise = max(sqrt(variance / rays), LIGHTING_HISTORY_NOISE);
         if (abs(sample_l - mean_l) > LIGHTING_HISTORY_SIGMA * noise) {
             float denom = max(max(abs(sample_l), abs(mean_l)), LIGHTING_HISTORY_NOISE);
             value = min(1.0, value + abs(sample_l - mean_l) / denom);

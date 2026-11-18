@@ -109,13 +109,17 @@ pub fn trickle_due(id: u32, frame: u32, rate: u32) -> bool {
     hash_u32(id ^ hash_u32(frame)).is_multiple_of(rate)
 }
 
-/// True when a fresh sample is outside the noise the stored variance allows.
+/// True when a fresh sample is outside the noise of the mean.
+///
+/// The gate is `sigma * sqrt(variance / rays)`, the standard error, not the
+/// sample spread. A wide cloud must not count a shifted mean as agreement.
 #[must_use]
-pub fn trickle_disagrees(sample: f32, mean: f32, variance: f32) -> bool {
+pub fn trickle_disagrees(sample: f32, mean: f32, variance: f32, rays: u32) -> bool {
     if !sample.is_finite() || !mean.is_finite() {
         return false;
     }
-    let noise = variance.max(0.0).sqrt().max(1.0e-4);
+    let n = f32::from(u16::try_from(rays.clamp(1, 65_535)).unwrap_or(65_535));
+    let noise = (variance.max(0.0) / n).sqrt().max(1.0e-4);
     (sample - mean).abs() > DISAGREE_SIGMA * noise
 }
 
@@ -156,7 +160,7 @@ pub fn blend_with_confidence(mean: f32, confidence: f32, sample: f32) -> f32 {
 /// A sample outside it raises the value by the relative step. A non-finite
 /// sample or mean is not agreement and does not move the value.
 #[must_use]
-pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32) -> f32 {
+pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32, rays: u32) -> f32 {
     let value = if value.is_finite() {
         value.clamp(0.0, 1.0)
     } else {
@@ -165,7 +169,7 @@ pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32) -> f32
     if !sample.is_finite() || !mean.is_finite() {
         return value;
     }
-    if trickle_disagrees(sample, mean, variance) {
+    if trickle_disagrees(sample, mean, variance, rays) {
         (value + disagreement_raise(sample, mean)).min(1.0)
     } else {
         (value - 1.0 / 3.0).max(0.0)
@@ -455,7 +459,7 @@ mod tests {
         let variance = 1.0e-4_f32;
         let mut last_ranked = 0u32;
         for frame in 0..4 {
-            value = apply_agreement(value, mean, mean, variance);
+            value = apply_agreement(value, mean, mean, variance, 32);
             let mut cell = bid(1, 32, 2.0);
             cell.lambda = value;
             let grant = allocate(std::slice::from_ref(&cell), 8, &tun, frame)[0];
@@ -466,15 +470,31 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_cloud_does_not_count_a_shifted_mean_as_agreement() {
+        // |2 - 1| sits inside 2 standard deviations of variance 1, and outside
+        // the standard error once the mean has 64 rays. The value must rise.
+        let cloud = apply_agreement(0.0, 2.0, 1.0, 1.0, 1);
+        assert!(
+            cloud < 0.01,
+            "one sample of a wide cloud agrees, got {cloud}"
+        );
+        let shifted = apply_agreement(0.0, 2.0, 1.0, 1.0, 64);
+        assert!(
+            shifted >= 0.5,
+            "a shifted mean raises the value, got {shifted}"
+        );
+    }
+
+    #[test]
     fn a_non_finite_sample_does_not_agree_or_replace_the_mean() {
         let value = 0.9_f32;
         let mean = 1.25_f32;
         for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            assert_eq!(apply_agreement(value, sample, mean, 1.0e-4), value);
+            assert_eq!(apply_agreement(value, sample, mean, 1.0e-4, 1), value);
             assert_eq!(blend_with_confidence(mean, 0.25, sample), mean);
         }
         for stored in [f32::NAN, f32::INFINITY] {
-            assert_eq!(apply_agreement(value, mean, stored, 1.0e-4), value);
+            assert_eq!(apply_agreement(value, mean, stored, 1.0e-4, 1), value);
             assert_eq!(
                 blend_with_confidence(stored, 0.25, 4.0).to_bits(),
                 stored.to_bits(),
@@ -553,7 +573,7 @@ mod tests {
             if grant.rays == 0 {
                 continue;
             }
-            if grant.trickle && trickle_disagrees(truth, mean, variance) {
+            if grant.trickle && trickle_disagrees(truth, mean, variance, rays) {
                 lambda = disagreement_raise(truth, mean);
             }
             let (next, next_rays) = blend_mean(mean, rays, truth, grant.rays);
