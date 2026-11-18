@@ -2,7 +2,7 @@
 
 Status: **Proposed** (18 Nov 2026). Design only. Replaces `moving-lights-design.md`. Nothing here is accepted until Anthony Poschen reviews it.
 
-Measured on lavapipe, 18 Nov 2026, the frozen fill-knockout harness (frame 40, 320×180, High, hall pose). Spending `fill_budget` from one histogram of every live cell left the late path-reference error at 0.438 on this machine and 0.423 in CI. The same harness with the tile contest and the off-screen bins is 0.200. The gate is 0.213, so the device keeps that contest, those bins, and the screen pour of 64 with the off-screen pour of 16. The one-histogram spend below is not what `lighting_fill.glsl` runs.
+Measured on lavapipe, 18 Nov 2026, the frozen fill-knockout harness (frame 40, 320×180, High, hall pose). Spending `fill_budget` from one histogram of every live cell left the late path-reference error at 0.438 on this machine and 0.423 in CI. The same harness with the tile contest and the off-screen bins is 0.200. The gate is 0.213, so the device keeps that contest, those bins, and the screen pour of 64 with the off-screen pour of 16. The one-histogram spend below is not what `lighting_fill.glsl` runs. The confidence rule (history weight is one minus the value, and one agreement measure moves that value) is in `crates/fill-ref/src/alloc.rs`. The 14 device clears are not removed yet.
 
 World mode 3 (the product path) already has a score, then a lot of other code still chooses rays and, on a small change, throws the old samples away. One allocator spends `fill_budget` (High 100,000). Direct light stays per pixel.
 
