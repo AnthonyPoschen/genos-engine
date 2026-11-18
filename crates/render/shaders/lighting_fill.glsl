@@ -41,9 +41,11 @@ const float FILL_K_DEN = 256.0;
 const float FILL_VB_DEN = 32.0;
 const float FILL_SUN_DEN = 16.0;
 const float FILL_CHANGE_SCALE = 1.0e6;
-// water::bucket: (log2(priority) + 16) / 18, then 62 steps above the zero bucket.
-const float FILL_BUCKET_BIAS = 16.0;
-const float FILL_BUCKET_SPAN = 18.0;
+// (log2(priority) + 14) / 20, then 62 steps above the zero bucket. The old
+// span clipped every priority at or above 4 into bucket 63, so the burst
+// never reached the cells below that. The top bucket is priority 64.
+const float FILL_BUCKET_BIAS = 14.0;
+const float FILL_BUCKET_SPAN = 20.0;
 const float FILL_BUCKET_STEPS = 62.0;
 // Commits a world cell still takes before it can lose the tile to a neighbour.
 // One commit freezes the first direct-only sample; dark-fill needs the later
@@ -306,9 +308,13 @@ float lighting_fill_check_u(uint slot) {
     return lighting_unit(key ^ (seed * 0x85ebca6bu + 0x5bd1e995u));
 }
 
-// Off-screen cells stay in the same ranking, below an on-screen cell of the
-// same value and distance. Matches OFF_SCREEN_WEIGHT in crates/fill-ref.
+// Off-screen cells stay in the same ranking. The factor breaks a tie; it does
+// not scale the error. Matches OFF_SCREEN_WEIGHT in crates/fill-ref.
 const float LIGHTING_FILL_OFF_SCREEN = 0.25;
+// Smaller than one log bucket at priority 1 (the step is 2^(20/62) - 1).
+// A 40× closeness used to outrank a farther cell with a larger error, and
+// every priority at or above 4 then shared one bucket.
+const float FILL_RANK_TIE = 0.02;
 uint lighting_fill_q(uint slot, float d, bool on_screen) {
     vec4 shown_v = cache.v[3u * slot + 2u];
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
@@ -317,12 +323,17 @@ uint lighting_fill_q(uint slot, float d, bool on_screen) {
     float dev = sqrt(max(est.w, 0.0));
     float lam = lighting_fill_unit(cache.v[LIGHTING_SC_GRAD_AT + slot].x);
     float err = rays < FILL_HALF ? 1.0 : max(0.0, dev / mean - lighting_fill_f(9));
-    float close = 1.0 / max(d, lighting_fill_f(10));
-    float pri = close * (err + lighting_fill_f(11) * lam);
+    float pri = err + lighting_fill_f(11) * lam;
+    float near = max(lighting_fill_f(10), FILL_EPS);
+    float tie = FILL_RANK_TIE * near / max(d, near);
+    // Off screen is a quarter of the same error. It is not in the closeness
+    // term: closeness used to be 40× and a near off-screen cell outranked a
+    // farther on-screen cell.
     if (!on_screen) {
         pri *= LIGHTING_FILL_OFF_SCREEN;
+        tie *= LIGHTING_FILL_OFF_SCREEN;
     }
-    return lighting_fill_bucket(pri);
+    return lighting_fill_bucket(pri + tie);
 }
 
 void lighting_fill_decay(uint slot) {

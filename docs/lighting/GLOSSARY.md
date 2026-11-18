@@ -470,7 +470,7 @@ Role: SCHED · Literature: a per-cell sample floor · More detail: [../systems/l
 **Floor rate**: `fill_floor_rate`. `1` gives the floor ray to every live cell every frame, `2` to half of them, `4` to a quarter. A cell is due when its slot index mod N equals the frame mod N, so each cell is covered within N frames. High is 1. Medium is 2. Low is 4.
 Role: SCHED · Literature: a round-robin sample · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
-**Burst budget**: `fill_burst`. Extra rays spent highest-value first after the floor (value times closeness, and 0.25 off screen). `0` spends none. High is 25000, Medium 12500, Low 6250. The device ray count is the floor plus this. One cell takes at most `fill_max_picks` of the burst (High default 4, range 1 to 64).
+**Burst budget**: `fill_burst`. Extra rays spent highest remaining-error first after the floor. Closeness breaks a tie. Off screen is a quarter of the same error. `0` spends none. High is 25000, Medium 12500, Low 6250. The device ray count is the floor plus this. One cell takes at most `fill_max_picks` of the burst (High default 4, range 1 to 64).
 Role: SCHED · Literature: a priority budget on top of a floor · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
@@ -488,7 +488,7 @@ Role: VIS · Literature: ReSTIR spatial depth and normal test · More detail: [.
 **Virtual tile**: an off-screen direction. The clipmap holds the cell. Water-filling ranks it with the same priority as a screen cell.
 Role: SCHED · Literature: Lumen off-screen page update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.5
 
-**Need**: closeness times (remaining error + `fill_change_weight` × the change lambda). Closeness is `1 / max(distance, fill_prox_min)`. Remaining error is the standard error over the mean, past `fill_error_target`. A cell with no rays has remaining error 1.
+**Need**: remaining error plus `fill_change_weight` × the change lambda. Closeness is `fill_prox_min / max(distance, fill_prox_min)` and breaks a tie. Off screen is a quarter of that rank. Remaining error is the sample deviation over the mean, past `fill_error_target`. A cell with no rays has remaining error 1.
 Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
 
 **Change lambda**: a cell's 0–1 measured change. One same-seed check ray writes it. A skipped frame multiplies it by `fill_lambda_decay`. It is not a lamp hint and it does not reset the cell.

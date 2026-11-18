@@ -16,7 +16,9 @@ pub fn bucket(need: f32) -> usize {
     if !need.is_finite() || need <= 0.0 {
         return 0;
     }
-    let t = ((need.log2() + 16.0) / 18.0).clamp(0.0, 1.0);
+    // Top bucket is priority 64. The old span clipped every priority at or
+    // above 4 into one bucket.
+    let t = ((need.log2() + 14.0) / 20.0).clamp(0.0, 1.0);
     let scaled = t * 62.0;
     let idx = whole_small(scaled).saturating_add(1);
     usize::try_from(idx.min(63)).unwrap_or(BUCKETS - 1)

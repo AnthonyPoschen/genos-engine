@@ -8,7 +8,7 @@ World mode 3 (the product path) already has a score. The device ray count is the
 
 
 
-A new cell starts with a high value, meaning "rays requested". The value falls as the cell converges. A mover, a lamp change, or a newly seen bit of view raises that value. Each frame, rank cells by value times a few weights (closeness, on screen), and walk from the top until the budget is spent. A small reserved slice of that same budget is a random trickle, so a converged cell in range still gets a ray now and then.
+A new cell starts with a high value, meaning "rays requested". The value falls as the cell converges. A mover, a lamp change, or a newly seen bit of view raises that value. Each frame, rank cells by remaining error plus the change weight times lambda, and walk from the top until the budget is spent. Closeness breaks a tie. Off screen is a quarter of that rank. A small reserved slice of that same budget is a random trickle, so a converged cell in range still gets a ray now and then.
 
 A small change does not clear the cell. It lowers the weight of the samples already stored, in proportion to how big the change is, and raises the value by the same amount. New rays blend into what was kept. A full clear is only for data that is actually wrong: the surface is gone or occluded, the pixel is a different surface, or the change is nearly the whole light (lamp off, a colour flip, a jump across the lamp's range).
 
@@ -22,7 +22,7 @@ Screen probes are already gone. "History" below is the world-cache mean and the 
 
 Live on world mode 3 unless noted. One line: what it decides, where.
 
-1. `lighting_fill_q` ranks a cell: closeness times remaining error plus `change_weight` times lambda. `lighting_fill.glsl`
+1. `lighting_fill_q` ranks a cell by remaining error plus `change_weight` times lambda. Closeness breaks a tie. Off screen is a quarter of that rank. `lighting_fill.glsl`
 2. `lighting_fill_visit` keeps one winner per screen tile and one per off-screen bin, and drops a cell past the distance leash. An on-screen fine child is left out. `lighting_fill.glsl`
 3. `lighting_fine_spawn` creates four 12.5 cm children when the parent is inside the create distance. `lighting_cache.glsl`
 4. `lighting_compact_hold_texel_rays` gives a fine texel no rays when it matches its cell. `lighting_cache.glsl`

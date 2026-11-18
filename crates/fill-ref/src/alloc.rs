@@ -6,16 +6,22 @@
 //! Replicated state: none. The rank stays on the shading client.
 //! Authority: the client that shades.
 //! Prediction / rollback: none.
-//! Determinism: the rank is the value, the distance, and the on-screen weight.
+//! Determinism: the rank is the remaining error plus the change. Distance and
+//! the on-screen weight break ties.
 //! The trickle draw is a hash of the cell and the frame.
 //! Headless server: a server that does not shade does not run this.
 
-use crate::sched::{closeness, remaining_error, Tunables};
+use crate::sched::{remaining_error, Tunables};
 use crate::water::bucket;
 
-/// Off-screen cells stay in the same ranking, below an on-screen cell of the
-/// same value and distance.
+/// Off-screen cells stay in the same ranking. This factor breaks a tie. It
+/// does not scale the error.
 pub const OFF_SCREEN_WEIGHT: f32 = 0.25;
+
+/// Added to the rank, times closeness in (0, 1] and the off-screen factor.
+/// One log bucket at priority 1 is about 0.25 (`2^(20/62) - 1`), so this
+/// cannot reorder two cells whose errors differ by that much.
+pub const RANK_TIE: f32 = 0.02;
 
 /// A disagreement past this many standard deviations raises the cell.
 const DISAGREE_SIGMA: f32 = 2.0;
@@ -54,15 +60,19 @@ pub fn cell_value(cell: &CellBid, tun: &Tunables) -> f32 {
     (err + tun.change_weight * lam).max(0.0)
 }
 
-/// Value, weighted by closeness and by whether the cell is on screen.
+/// Remaining error plus the change. Closeness breaks a tie. Off screen is a
+/// quarter of that rank, not a closeness weight: closeness used to be about
+/// 40× from `prox_min` to 20 m, so a near cell with lambda at 1 outranked a
+/// farther cell with a larger error.
 #[must_use]
 pub fn cell_rank(cell: &CellBid, tun: &Tunables) -> f32 {
-    let screen = if cell.on_screen {
-        1.0
-    } else {
-        OFF_SCREEN_WEIGHT
-    };
-    screen * closeness(cell.distance, tun) * cell_value(cell, tun)
+    let near = tun.prox_min.max(1.0e-6);
+    let close = near / cell.distance.max(near);
+    let mut rank = cell_value(cell, tun) + RANK_TIE * close;
+    if !cell.on_screen {
+        rank *= OFF_SCREEN_WEIGHT;
+    }
+    rank
 }
 
 /// Rays reserved before the ranked spend. Zero when the floor is 0.
@@ -385,6 +395,41 @@ mod tests {
         let top = grants.iter().find(|g| g.id == 3).map(|g| g.rays);
         assert_eq!(top, Some(2));
         assert!(grants.iter().filter(|g| g.id != 3).all(|g| g.rays == 1));
+    }
+
+    #[test]
+    fn a_larger_error_outranks_a_nearer_saturated_cell() {
+        let tun = Tunables::high();
+        let mut far = bid(1, 32, 16.0);
+        far.deviation = 4.0;
+        far.lambda = 0.0;
+        let mut near = bid(2, 32, 0.5);
+        near.deviation = 1.0e-6;
+        near.lambda = 1.0;
+        assert!(cell_rank(&far, &tun) > cell_rank(&near, &tun));
+    }
+
+    #[test]
+    fn a_nearer_cell_wins_only_when_the_error_ties() {
+        let tun = Tunables::high();
+        let near = bid(1, 0, 0.5);
+        let far = bid(2, 0, 16.0);
+        assert!(cell_rank(&near, &tun) > cell_rank(&far, &tun));
+        assert!(cell_rank(&near, &tun) - cell_rank(&far, &tun) < 0.05);
+    }
+
+    #[test]
+    fn an_off_screen_cell_needs_four_times_the_error() {
+        let tun = Tunables::high();
+        let mut on = bid(1, 32, 8.0);
+        on.deviation = 1.0609;
+        on.on_screen = true;
+        let mut off = bid(2, 32, 1.0);
+        off.deviation = 4.1209;
+        off.on_screen = false;
+        assert!(cell_rank(&on, &tun) > cell_rank(&off, &tun));
+        off.deviation = 64.4809;
+        assert!(cell_rank(&off, &tun) > cell_rank(&on, &tun));
     }
 
     #[test]
