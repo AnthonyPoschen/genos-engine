@@ -705,7 +705,10 @@ void lighting_fill_dispatch() {
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((total + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 2u] = 1u;
-    ckeys.key[LIGHTING_ARGS_AT + 3u] = 1u;
+    // The resolve used to be one group of 64, striding the whole ray list.
+    // That is the cache-column cost. One thread per traced ray, same count
+    // as the trace. The six phases are separate dispatches.
+    ckeys.key[LIGHTING_ARGS_AT + 3u] = max((total + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 4u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 5u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 6u] = total;
@@ -1105,7 +1108,11 @@ void lighting_fill_share_pass(uint gid, uint phase) {
     uint placed = min(checks + on, budget);
     uint tile = max(lighting_fill_u(1), 1u);
     uint cap_n = min(lighting_fill_u(30), 8u);
-    for (uint r = gid; r < budget; r += 64u) {
+    uint stride = gl_WorkGroupSize.x * gl_NumWorkGroups.x;
+    if (stride == 0u) {
+        stride = 64u;
+    }
+    for (uint r = gid; r < budget; r += stride) {
         if (r < checks || r >= placed) {
             continue;
         }
@@ -1205,29 +1212,32 @@ void lighting_fill_share_pass(uint gid, uint phase) {
     }
 }
 
-// In-tile seeds. Off, or a frozen cache, writes nothing. Every thread takes the
-// same branch, so the barriers below stay inside the workgroup.
-void lighting_fill_share(uint gid) {
-    if (lighting_fill_u(22) != 1u) {
-        return;
-    }
-    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
-        return;
-    }
-    lighting_fill_share_pass(gid, 0u);
-    memoryBarrierBuffer();
-    barrier();
-    lighting_fill_share_pass(gid, 1u);
-    memoryBarrierBuffer();
-    barrier();
-    lighting_fill_share_pass(gid, 2u);
-}
-
 // One slot, one writer. Every ray that landed is on the list, then the head
 // folds them with weight n / (rays + n). The hit distance is the stash trace
 // wrote; direct has already overwritten the hit slot with radiance.
+//
+// pc.lamp.x is the phase. The host dispatches one thread per traced ray and
+// a buffer barrier between phases, which is the old single-workgroup barrier.
+// 0 clears locks, 1 links the rays, 2 commits, 3-5 are the in-tile share
+// passes. A phase past that writes nothing.
 void lighting_fill_resolve(uint gid) {
-    if (gid >= 64u) {
+    uint phase = pc.lamp.x;
+    if (phase == 0u && gid == 0u) {
+        gstats.live = ckeys.key[lighting_fill_header_at() + 7u];
+        lighting_wrc_note_lamps();
+        lighting_ls_note();
+    }
+    if (phase >= 3u) {
+        if (lighting_fill_u(22) != 1u) {
+            return;
+        }
+        if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
+            return;
+        }
+        if (phase > 5u) {
+            return;
+        }
+        lighting_fill_share_pass(gid, phase - 3u);
         return;
     }
     uint budget = lighting_fill_traced();
@@ -1235,16 +1245,22 @@ void lighting_fill_resolve(uint gid) {
     uint on = ckeys.key[lighting_fill_header_at()];
     uint ranked = ckeys.key[lighting_fill_header_at() + 1u];
     uint placed = min(checks + on + ranked, budget);
-    // The emit passes counted picks in the lock word. The chain starts empty.
-    for (uint r = gid; r < placed; r += 64u) {
-        uint slot = ckeys.key[lighting_fill_pick_at() + r];
-        if (slot < LIGHTING_CACHE_SLOTS) {
-            ckeys.key[lighting_fill_lock_at() + slot] = 0u;
-        }
+    uint stride = gl_WorkGroupSize.x * gl_NumWorkGroups.x;
+    if (stride == 0u) {
+        stride = 64u;
     }
-    memoryBarrierBuffer();
-    barrier();
-    for (uint r = gid; r < budget; r += 64u) {
+    if (phase == 0u) {
+        // The emit passes counted picks in the lock word. The chain starts empty.
+        for (uint r = gid; r < placed; r += stride) {
+            uint slot = ckeys.key[lighting_fill_pick_at() + r];
+            if (slot < LIGHTING_CACHE_SLOTS) {
+                ckeys.key[lighting_fill_lock_at() + slot] = 0u;
+            }
+        }
+        return;
+    }
+    if (phase == 1u) {
+    for (uint r = gid; r < budget; r += stride) {
         ckeys.key[lighting_fill_link_at() + r * 2u] = 0u;
         ckeys.key[lighting_fill_link_at() + r * 2u + 1u] = 0u;
         uint work_ray = lighting_probe_rays() + r;
@@ -1290,9 +1306,9 @@ void lighting_fill_resolve(uint gid) {
         ckeys.key[lighting_fill_link_at() + r * 2u] = prev;
         ckeys.key[lighting_fill_link_at() + r * 2u + 1u] = slot + 1u;
     }
-    memoryBarrierBuffer();
-    barrier();
-    for (uint r = gid; r < budget; r += 64u) {
+        return;
+    }
+    for (uint r = gid; r < budget; r += stride) {
         uint slot1 = ckeys.key[lighting_fill_link_at() + r * 2u + 1u];
         if (slot1 == 0u) {
             continue;
@@ -1357,9 +1373,6 @@ void lighting_fill_resolve(uint gid) {
         }
         lighting_fill_commit(slot, sum_e * inv, count, sum_lk * inv, sum_x * inv, sum_y * inv, sum_z * inv, saw_on, sum_sun * inv);
     }
-    memoryBarrierBuffer();
-    barrier();
-    lighting_fill_share(gid);
 }
 
 // The birth frame often runs before the parent cell has a sample. An empty

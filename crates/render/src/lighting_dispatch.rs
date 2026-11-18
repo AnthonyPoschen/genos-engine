@@ -417,6 +417,24 @@ fn push_fill_emit(out: &mut LightGroups, settings: &LightingSettings, _w: u32, _
     out.push(0, groups.max(1), LIGHTING_FILL_EMIT_ON, B_COMPACT);
 }
 
+/// Fill resolve is six dispatches, one thread per traced ray. The group
+/// count is the indirect word the plan writes (`(traced + 63) / 64`). `gx`
+/// is the phase the cache shader reads from the lamp push-constant word:
+/// clear, link, commit, then the three share passes. One group of 64 used
+/// to stride the whole ray list inside the cache timestamp.
+fn push_cache_resolve(out: &mut LightGroups, settings: &LightingSettings) {
+    if fill_parallel(settings) {
+        // Share is three more passes over the same rays. Off, those dispatches
+        // would be empty groups the size of the ray list.
+        let phases = if settings.surface_cache.fill.share == 1 { 6 } else { 3 };
+        for phase in 0..phases {
+            out.push(6, phase, LIGHTING_DENSE_ENTRIES, B_CACHE);
+        }
+    } else {
+        out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
+    }
+}
+
 fn push_picture(out: &mut LightGroups, settings: &LightingSettings, gx: u32, gy: u32) {
     if settings.world_mode() == 3 {
         out.push(SH_PREP_PASS, gx, gy, B_CACHE);
@@ -493,7 +511,7 @@ pub(crate) fn light_groups(
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
         out.push(3, pixels.div_ceil(64), LIGHTING_MODE1, B_DIRECT);
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
-        out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
+        push_cache_resolve(&mut out, settings);
         push_denoise(settings, w, h, slots, &mut out);
         push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else {
@@ -614,7 +632,7 @@ fn gated(
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
     }
     if round && buckets.cache {
-        out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
+        push_cache_resolve(out, settings);
     }
     if buckets.atrous {
         push_denoise(settings, w, h, slots, out);
@@ -785,6 +803,45 @@ mod probe_still_tests {
         let hist_at = moving.groups.iter().position(|g| g.2 == LIGHTING_FILL_HIST);
         let emit = moving.groups.iter().position(|g| g.2 == LIGHTING_FILL_EMIT_ON);
         assert!(visit < hist_at && hist_at < plan && plan < emit);
+    }
+
+    #[test]
+    fn a_fill_round_resolves_one_thread_per_ray() {
+        let high = LightingSettings::preset(LightingPreset::High);
+        let moving = groups(&high, false, true);
+        let resolve: Vec<_> = moving
+            .groups
+            .iter()
+            .copied()
+            .filter(|g| g.0 == 6 && g.2 == LIGHTING_DENSE_ENTRIES)
+            .collect();
+        assert!(
+            moving.groups.len() <= 31,
+            "pass stamps stop before the ReSTIR queries ({})",
+            moving.groups.len()
+        );
+        assert_eq!(resolve.len(), 3, "clear, link, commit; share is off");
+        for (phase, group) in resolve.iter().enumerate() {
+            assert_eq!(group.1, u32::try_from(phase).expect("phase"), "gx is the resolve phase");
+        }
+        let mut shared = high.clone();
+        shared.surface_cache.fill.share = 1;
+        let shared_groups = groups(&shared, false, true);
+        assert_eq!(
+            shared_groups
+                .groups
+                .iter()
+                .filter(|g| g.0 == 6 && g.2 == LIGHTING_DENSE_ENTRIES)
+                .count(),
+            6,
+            "sharing adds the three elect passes"
+        );
+        let idle = groups(&high, true, false);
+        assert_eq!(
+            idle.groups.iter().filter(|g| g.0 == 6).count(),
+            0,
+            "a settled frame does not resolve"
+        );
     }
 
     #[test]
