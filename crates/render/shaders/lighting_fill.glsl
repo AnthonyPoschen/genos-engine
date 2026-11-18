@@ -1015,18 +1015,10 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
             float ratio = sample_t / max(sample_t + sample_add, FILL_EPS);
             blend = 1.0 - ratio * ratio * ratio;
         }
-        bool urgent = ((pc.params.z >> 5u) & 1u) != 0u;
-        vec3 cp = lighting_sc_texel_pos(slot);
-        bool local = (urgent && lighting_near_change(cp)) || lighting_wrc_lamp_changed(cp, lighting_sc_updated(slot));
-        if (local) {
-            blend = max(blend, LIGHTING_WRC_LOCAL_ALPHA * sample_add);
-        } else if (!lighting_sc_light_quiet()) {
-            blend = max(blend, LIGHTING_WRC_CHANGE_ALPHA * sample_add);
-        }
-        if (lighting_lamp_noted()) {
-            blend = 1.0;
-        }
-        blend = min(blend, 1.0);
+        // A high value (the cell wants rays) raises the new sample's weight.
+        // A lamp note, a 1 mm move, and the 1/8 and 1/32 floors do not.
+        float value = lighting_history_value(slot, old.rgb, e);
+        blend = clamp(max(blend, value), 0.0, 1.0);
     }
     vec3 mean = old.rgb;
     if (!cell && (lighting_sc_flags() & 1048576u) != 0u && lighting_sc_msme() && rays0 >= float(warmup) && old.w > FILL_HALF) {

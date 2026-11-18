@@ -192,6 +192,55 @@ pub fn allocate(cells: &[CellBid], budget: u32, tun: &Tunables, frame: u32) -> V
     if budget == 0 || cells.is_empty() {
         return grants;
     }
+    if tun.floor_rays == 0 {
+        return allocate_fraction(cells, budget, tun, frame, grants);
+    }
+    let live = u32::try_from(cells.len()).unwrap_or(u32::MAX);
+    let (floor_budget, rest) = split_floor_and_burst(live, budget, tun.floor_rays);
+    let burst_budget = if tun.burst == 0 { rest } else { rest.min(tun.burst) };
+    let mut order: Vec<usize> = (0..cells.len()).collect();
+    order.sort_by(|&a, &b| {
+        cell_rank(&cells[b], tun)
+            .total_cmp(&cell_rank(&cells[a], tun))
+            .then_with(|| cells[a].id.cmp(&cells[b].id))
+    });
+    let per = tun.floor_rays.max(1);
+    let mut floor_left = floor_budget;
+    for &index in &order {
+        if floor_left == 0 {
+            break;
+        }
+        let give = per.min(floor_left);
+        grants[index].rays = give;
+        grants[index].trickle = cell_value(&cells[index], tun) <= 0.0;
+        floor_left -= give;
+    }
+    let max_per = tun.max_picks.max(1);
+    let mut burst_left = burst_budget;
+    for &index in &order {
+        if burst_left == 0 {
+            break;
+        }
+        if cell_value(&cells[index], tun) <= 0.0 {
+            continue;
+        }
+        let give = max_per.min(burst_left);
+        grants[index].rays = grants[index].rays.saturating_add(give);
+        grants[index].trickle = false;
+        burst_left -= give;
+    }
+    grants
+}
+
+/// The fraction floor. `floor_rays` 0 keeps this path so a zero per-cell
+/// floor still draws the reserved share.
+fn allocate_fraction(
+    cells: &[CellBid],
+    budget: u32,
+    tun: &Tunables,
+    frame: u32,
+    mut grants: Vec<Grant>,
+) -> Vec<Grant> {
     let floor_n = trickle_count(budget, tun.offscreen_floor);
     let mut left = budget.saturating_sub(floor_n);
     let max_per = tun.max_picks.max(1);
@@ -343,9 +392,8 @@ mod tests {
         let grants = allocate(&cells, tun.budget, &tun, 3);
         let total: u32 = grants.iter().map(|g| g.rays).sum();
         assert!(total <= tun.budget);
-        assert!(grants
-            .iter()
-            .all(|g| g.rays <= tun.max_picks.max(1) || g.trickle));
+        let cap = tun.max_picks.max(1).saturating_add(tun.floor_rays);
+        assert!(grants.iter().all(|g| g.rays <= cap || g.trickle));
     }
 
     #[test]
@@ -363,10 +411,22 @@ mod tests {
         );
         let mut mean = kept;
         let mut reset_mean = reset;
-        for _ in 0..8 {
+        let mut kept_frame = 8u32;
+        let mut reset_frame = 8u32;
+        for frame in 0..8 {
             mean = blend_with_confidence(mean, history_confidence(0.05), truth);
             reset_mean = blend_with_confidence(reset_mean, history_confidence(0.05), truth);
+            if kept_frame == 8 && (mean - truth).abs() <= 0.01 {
+                kept_frame = frame;
+            }
+            if reset_frame == 8 && (reset_mean - truth).abs() <= 0.01 {
+                reset_frame = frame;
+            }
         }
+        assert!(
+            kept_frame <= reset_frame,
+            "kept reached the floor at {kept_frame}, reset at {reset_frame}"
+        );
         assert!((mean - truth).abs() <= (reset_mean - truth).abs() + 1.0e-4);
     }
 
@@ -403,6 +463,7 @@ mod tests {
     #[test]
     fn a_converged_cell_still_draws_the_trickle_floor() {
         let mut tun = Tunables::high();
+        tun.floor_rays = 0;
         tun.check_rate = 1;
         tun.offscreen_floor = 0.25;
         let done = bid(7, 128, 3.0);
@@ -418,8 +479,8 @@ mod tests {
     #[test]
     fn an_unsignalled_change_recovers_when_the_floor_is_open() {
         let truth = 4.0_f32;
-        let with_floor = recover(0.25, truth);
-        let no_floor = recover(0.0, truth);
+        let with_floor = recover(0.0, 1, truth);
+        let no_floor = recover(0.0, 0, truth);
         assert!(
             with_floor < 0.5,
             "trickle plus the raised value should reach the new light, error {with_floor}"
@@ -431,8 +492,9 @@ mod tests {
         assert!(with_floor < no_floor);
     }
 
-    fn recover(floor: f32, truth: f32) -> f32 {
+    fn recover(floor: f32, floor_rays: u32, truth: f32) -> f32 {
         let mut tun = Tunables::high();
+        tun.floor_rays = floor_rays;
         tun.offscreen_floor = floor;
         tun.budget = 8;
         tun.max_picks = 4;

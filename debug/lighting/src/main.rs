@@ -368,6 +368,8 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_fill_share_conf",
     "lighting_fill_share_receivers",
     "lighting_fill_share_handover",
+    "lighting_fill_floor_rays",
+    "lighting_fill_burst",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",

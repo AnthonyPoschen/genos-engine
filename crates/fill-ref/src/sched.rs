@@ -104,6 +104,10 @@ pub struct Tunables {
     pub share_receivers: u32,
     /// Own rays after which a fill seed's display weight is 0. High matches warmup.
     pub share_handover: u32,
+    /// Rays each live cell takes before the ranked burst. High is 1.
+    pub floor_rays: u32,
+    /// Ranked rays after the floor. 0 means the rest of `budget`.
+    pub burst: u32,
 }
 
 impl Tunables {
@@ -142,6 +146,8 @@ impl Tunables {
             share_conf: 0.25,
             share_receivers: 3,
             share_handover: 16,
+            floor_rays: 1,
+            burst: 0,
         }
     }
 

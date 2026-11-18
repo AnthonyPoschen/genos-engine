@@ -692,15 +692,15 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
 fn shader_text_model_settling_stores_mean_and_harmonics_with_one_weight() {
     let relight = shader("lighting_cache.comp");
     let settle = relight
-        .find("if (lighting_lamp_noted())")
-        .expect("lamp settle");
+        .find("lighting_history_value(slot, old.rgb, e)")
+        .expect("confidence weight");
     let put = relight[settle..]
         .find("lighting_sh_put")
         .expect("harmonics store");
     let window = &relight[settle..settle + put];
     assert!(
-        window.contains("wa = 1.0;"),
-        "settling must replace the sample"
+        !window.contains("wa = 1.0;"),
+        "a lamp note must not replace the sample"
     );
     assert!(
         window.contains("lighting_tex_put"),

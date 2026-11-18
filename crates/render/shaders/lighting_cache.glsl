@@ -6276,6 +6276,33 @@ vec4 lighting_svgf_target(uint slot) {
     return vec4(outc, max(W, cw));
 }
 float lighting_sc_lambda(uint slot);
+const uint LIGHTING_SC_GRAD_AT = 11u * LIGHTING_CACHE_SLOTS;
+// History weight is one minus this value. A sample inside the stored noise
+// lowers the value by a third. A sample outside it raises the value by the
+// relative step. A cell with no mean yet stays at 1.
+float lighting_history_value(uint slot, vec3 old_rgb, vec3 sample_rgb) {
+    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+    vec4 shown = cache.v[3u * slot + 2u];
+    float value = 1.0;
+    if (shown.w >= 0.5) {
+        value = clamp(abs(cache.v[LIGHTING_SC_GRAD_AT + slot].x), 0.0, 1.0);
+        float mean_l = max(dot(max(old_rgb, vec3(0.0)), lw), 0.0);
+        float sample_l = max(dot(max(sample_rgb, vec3(0.0)), lw), 0.0);
+        float variance = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot].w, 0.0);
+        float noise = max(sqrt(variance), 1.0e-4);
+        if (abs(sample_l - mean_l) > 2.0 * noise) {
+            float denom = max(max(abs(sample_l), abs(mean_l)), 1.0e-4);
+            value = min(1.0, value + abs(sample_l - mean_l) / denom);
+        } else {
+            value = max(0.0, value - 1.0 / 3.0);
+        }
+    }
+    vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
+    g.x = value;
+    cache.v[LIGHTING_SC_GRAD_AT + slot] = g;
+    return value;
+}
+
 void lighting_svgf_push(uint slot) {
     if (lighting_fine_has_prior(slot)) {
         float child_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
@@ -6400,21 +6427,10 @@ void lighting_svgf_push(uint slot) {
             // λ of 0 keeps the sixteenth. A lamp that left
             // (lighting_lamp_keep is 0) takes the target on this push.
             float catch_up = LIGHTING_FIELD_CATCH;
-            float y_prev = dot(max(prev, vec3(0.0)), LIGHTING_SVGF_LW);
-            // A lamp that left, or a field the filter has left by the edge
-            // test, takes the target on this push. A quiet texel keeps the
-            // 1/16 step. The idle hash would otherwise show the old field
-            // for LIGHTING_PUSH_IDLE frames. The fill and a change take the
-            // target too: leaving the 1/16 step to pile up and then snap was
-            // the open-picture pop.
-            if (field_behind
-                || lighting_sh_lum_disagrees(max(y_target, y_prev), min(y_target, y_prev))
-                || lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
-                catch_up = 1.0;
-            } else {
-                float lam = clamp(lighting_sc_lambda(slot), 0.0, 1.0);
-                catch_up = (1.0 - lam) * catch_up + lam;
-            }
+            // The stored field moves by the cell value. A lamp keep of 0, a
+            // 1 mm move, and a luminance step do not take the target whole.
+            float value = lighting_history_value(slot, prev, outc);
+            catch_up = clamp((1.0 - value) * catch_up + value, 0.0, 1.0);
             outc = mix(prev, outc, catch_up);
         }
     }
@@ -6481,7 +6497,6 @@ void lighting_svgf_push(uint slot) {
 const bool LIGHTING_SC_ASVGF = true;
 bool lighting_sc_asvgf_on() { return LIGHTING_SC_ASVGF && lighting_sc_svgf(); }
 const bool LIGHTING_GRAD_CHECKS_ON = true;
-const uint LIGHTING_SC_GRAD_AT = 11u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_SC_GRAD2_AT = 12u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_GRAD_COUNT_AT = LIGHTING_SC_HIST_AT + 72u;
 const uint LIGHTING_EXT_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u;

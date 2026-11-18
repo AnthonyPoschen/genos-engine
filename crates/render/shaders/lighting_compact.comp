@@ -88,11 +88,7 @@ void main() {
     float t = cache.v[3u * slot + 2u].w;
     if (lighting_world_mode() == 3u) {
         lighting_sc_pool(slot);
-        // Flag 4096: near a change the point a texel is lit from may now be inside
-        // the object that moved there; the readers of this frame offer again.
-        if (near && (lighting_sc_flags() & 4096u) != 0u) {
-            cache.v[LIGHTING_WORLD_AT + slot].x = 1.0e30;
-        }
+        // A mover does not wipe the stored hit. The cell value does that work.
         if (lighting_ray_fill_on()) {
             atomicAdd(ckeys.key[lighting_fill_header_at() + 7u], 1u);
             lighting_fill_visit(slot);
