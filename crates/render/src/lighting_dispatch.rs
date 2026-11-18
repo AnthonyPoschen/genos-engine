@@ -394,7 +394,7 @@ fn fill_tiles(settings: &LightingSettings, w: u32, h: u32) -> u32 {
         .min(u32::try_from(FILL_TILE_CAP).unwrap_or(u32::MAX))
 }
 
-/// Histogram before the one-thread plan. The visit already counted it.
+/// Histogram before the one-thread plan. Emit after it. Neither covers the slot table.
 fn push_fill_hist(out: &mut LightGroups, settings: &LightingSettings, w: u32, h: u32) {
     if !fill_parallel(settings) {
         return;
@@ -407,14 +407,14 @@ fn push_fill_hist(out: &mut LightGroups, settings: &LightingSettings, w: u32, h:
     out.push(0, groups, LIGHTING_FILL_HIST, B_COMPACT);
 }
 
-fn push_fill_emit(out: &mut LightGroups, settings: &LightingSettings, _w: u32, _h: u32) {
+fn push_fill_emit(out: &mut LightGroups, settings: &LightingSettings, w: u32, h: u32) {
     if !fill_parallel(settings) {
         return;
     }
-    let slots = u32::try_from(LIGHTING_CACHE_SLOTS)
-        .unwrap_or(u32::MAX)
-        .div_ceil(64);
-    out.push(0, slots, LIGHTING_FILL_EMIT_ON, B_COMPACT);
+    let tiles = fill_tiles(settings, w, h);
+    out.push(0, tiles.div_ceil(64).max(1), LIGHTING_FILL_EMIT_ON, B_COMPACT);
+    let off_groups = u32::try_from(FILL_OFF_CAP).unwrap_or(u32::MAX).div_ceil(64);
+    out.push(0, off_groups, LIGHTING_FILL_EMIT_OFF, B_COMPACT);
 }
 
 fn push_picture(out: &mut LightGroups, settings: &LightingSettings, gx: u32, gy: u32) {
@@ -777,14 +777,7 @@ mod probe_still_tests {
         );
         assert_eq!(
             moving.groups.iter().filter(|g| g.2 == LIGHTING_FILL_EMIT_OFF).count(),
-            0,
-            "the off-screen bin grant is not dispatched"
-        );
-        let emit = moving.groups.iter().find(|g| g.2 == LIGHTING_FILL_EMIT_ON).unwrap();
-        assert_eq!(
-            emit.1.saturating_mul(64),
-            u32::try_from(LIGHTING_CACHE_SLOTS).unwrap_or(u32::MAX),
-            "the spend walks every cache slot"
+            1
         );
         let visit = moving.groups.iter().position(|g| g.2 == 1 && g.0 == 0);
         let plan = moving.groups.iter().position(|g| g.2 == LIGHTING_ARGS);

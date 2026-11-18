@@ -503,7 +503,7 @@ pub struct AmbientSettings {
 pub struct FillSettings {
     /// Rays traced in one cache round. High starts at 100_000. `0` traces none.
     pub budget: u32,
-    /// Screen tile, in pixels. The allocator does not pick one cell per tile.
+    /// Screen tile, in pixels. One pick per tile that has a surface.
     pub tile: u32,
     /// Metres. Level 0 is this size out to `lod_near`. The world cell is the source.
     pub lod_near: f32,
@@ -515,10 +515,9 @@ pub struct FillSettings {
     pub look_ahead: f32,
     /// Clipmap extent, metres. Cells past this are dropped.
     pub far: f32,
-    /// Kept so a saved config still parses. The allocator does not reserve a far bin.
+    /// Share of `budget` reserved as the far bin of the off-screen rays.
     pub far_share: f32,
-    /// Share of `budget` reserved first as the trickle floor. Every in-range
-    /// cell can draw one of those rays, including a cell whose value is 0.
+    /// Share of `budget` the screen cannot take. The rest of the round is off-screen too.
     pub offscreen_floor: f32,
     /// A cell is sufficient when its standard error over the mean is below this.
     pub error_target: f32,

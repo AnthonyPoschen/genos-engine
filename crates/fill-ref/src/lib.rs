@@ -6,10 +6,11 @@
 //! clipmap, and the single-ray fold the GPU scheduler mirrors. Stage F3 adds
 //! the check ray, the decaying lambda, and the water-fill of that budget.
 //! [`alloc`] spends one value per cell, highest rank first, with the trickle
-//! floor inside that budget. Stage F4a seeds the other cells of the same tile
-//! that pass the share gates. The seed is low confidence. It is not an own
-//! sample and it has no count field. The device no longer runs that seed.
-//! Ring sharing is not in this crate's live path.
+//! floor inside that budget. The device does not run that spend. The frozen
+//! fill gate stays on the tile contest and the off-screen bins in [`sched`].
+//! Stage F4a seeds the other cells of the same tile that pass the share gates.
+//! The seed is low confidence. It is not an own sample and it has no count
+//! field. Ring sharing is not in this crate's live path.
 //! Nothing here
 //! opens a window or a device. `--tile-fill` defaults off; that flag is the
 //! F1 checker, not the live F2 scheduler.

@@ -2,6 +2,8 @@
 
 Status: **Proposed** (18 Nov 2026). Design only. Replaces `moving-lights-design.md`. Nothing here is accepted until Anthony Poschen reviews it.
 
+Measured on lavapipe, 18 Nov 2026, the frozen fill-knockout harness (frame 40, 320×180, High, hall pose). Spending `fill_budget` from one histogram of every live cell left the late path-reference error at 0.438 on this machine and 0.423 in CI. The same harness with the tile contest and the off-screen bins is 0.200. The gate is 0.213, so the device keeps that contest, those bins, and the screen pour of 64 with the off-screen pour of 16. The one-histogram spend below is not what `lighting_fill.glsl` runs.
+
 World mode 3 (the product path) already has a score, then a lot of other code still chooses rays and, on a small change, throws the old samples away. One allocator spends `fill_budget` (High 100,000). Direct light stays per pixel.
 
 A new cell starts with a high value, meaning "rays requested". The value falls as the cell converges. A mover, a lamp change, or a newly seen bit of view raises that value. Each frame, rank cells by value times a few weights (closeness, on screen), and walk from the top until the budget is spent. A small reserved slice of that same budget is a random trickle, so a converged cell in range still gets a ray now and then.
