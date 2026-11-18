@@ -1363,6 +1363,9 @@ uint lighting_mover_texel_count(uint slot) {
 
 // Tiny length for normalize / weight divides on mover texels (also used by lookup).
 const float LIGHTING_MOVER_EPS = 1.0e-6;
+const float LIGHTING_MOVER_HALF = 0.5;
+const float LIGHTING_MOVER_UV_MAX = 0.9999;
+const float LIGHTING_MOVER_FACE_SPAN = 2.0;
 
 // Dense face-grid index for object_id at local_pos (matches host layout order:
 // faces +X,-X,+Y,-Y,+Z,-Z, then u, then v). Replaces hash%count, which mapped
@@ -1392,7 +1395,7 @@ uint lighting_mover_texel_lookup(uint object_id, vec3 local_pos, vec3 local_n) {
     vec3 an = abs(local_n);
     vec3 a = abs(local_pos);
     // Prefer normal when it clearly names a face; else fall back to position.
-    bool use_n = (an.x + an.y + an.z) > 0.5;
+    bool use_n = (an.x + an.y + an.z) > LIGHTING_MOVER_HALF;
     vec3 pick = use_n ? an : a;
     uint face;
     float u_ext;
@@ -1421,19 +1424,25 @@ uint lighting_mover_texel_lookup(uint object_id, vec3 local_pos, vec3 local_n) {
         u = local_pos.x;
         v = local_pos.y;
     }
-    uint u_steps = max(uint(floor((2.0 * u_ext) / LIGHTING_SC_TEXEL)), 1u);
-    uint v_steps = max(uint(floor((2.0 * v_ext) / LIGHTING_SC_TEXEL)), 1u);
+    uint u_steps = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * u_ext) / LIGHTING_SC_TEXEL)), 1u);
+    uint v_steps = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * v_ext) / LIGHTING_SC_TEXEL)), 1u);
     // Prefix sum of face strides (cube → face * u_steps * v_steps).
     uint off = 0u;
     for (uint f = 0u; f < face; f++) {
         float fu_ext = (f <= 1u) ? he.y : ((f <= 3u) ? he.x : he.x);
         float fv_ext = (f <= 1u) ? he.z : ((f <= 3u) ? he.z : he.y);
-        uint fu = max(uint(floor((2.0 * fu_ext) / LIGHTING_SC_TEXEL)), 1u);
-        uint fv = max(uint(floor((2.0 * fv_ext) / LIGHTING_SC_TEXEL)), 1u);
+        uint fu = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * fu_ext) / LIGHTING_SC_TEXEL)), 1u);
+        uint fv = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * fv_ext) / LIGHTING_SC_TEXEL)), 1u);
         off += fu * fv;
     }
-    float u01 = clamp(0.5 * (u / max(u_ext, LIGHTING_MOVER_EPS) + 1.0), 0.0, 0.9999);
-    float v01 = clamp(0.5 * (v / max(v_ext, LIGHTING_MOVER_EPS) + 1.0), 0.0, 0.9999);
+    float u01 = clamp(
+        LIGHTING_MOVER_HALF * (u / max(u_ext, LIGHTING_MOVER_EPS) + 1.0),
+        0.0,
+        LIGHTING_MOVER_UV_MAX);
+    float v01 = clamp(
+        LIGHTING_MOVER_HALF * (v / max(v_ext, LIGHTING_MOVER_EPS) + 1.0),
+        0.0,
+        LIGHTING_MOVER_UV_MAX);
     uint ui = min(uint(floor(u01 * float(u_steps))), u_steps - 1u);
     uint vi = min(uint(floor(v01 * float(v_steps))), v_steps - 1u);
     uint within = ui * v_steps + vi;
@@ -4998,7 +5007,7 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
                     // Empty texels: skip the pool read and take the prior only.
                     // Returning w=0 here let fallthrough hit the on-mover world
                     // drop and paint black rectangles on unfilled faces.
-                    if (mean.w < 0.5) {
+                    if (mean.w < LIGHTING_MOVER_HALF) {
                         vec3 nn = normalize(n + vec3(LIGHTING_MOVER_EPS));
                         vec3 outside = pos + nn * LIGHTING_SC_TEXEL;
                         uint saved_oid = lighting_px_object_id;
