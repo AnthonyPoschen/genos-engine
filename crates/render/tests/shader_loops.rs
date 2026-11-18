@@ -298,6 +298,10 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         emit_on.contains("prior >= max_picks"),
         "the burst cap is per cell"
     );
+    assert!(
+        emit_on.contains("clamp(lighting_fill_u(17), 1u, 64u)"),
+        "fill_max_picks accepts the 64-ray sweep; the store loop is 64"
+    );
     let emit_off = function_body(&fill, "void lighting_fill_emit_off(uint gid)");
     assert!(
         !emit_off.contains("lighting_fill_holds_tile"),

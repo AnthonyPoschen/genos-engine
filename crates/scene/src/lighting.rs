@@ -1160,7 +1160,7 @@ impl LightingSettings {
             1.0
         };
         fill.check_rate = fill.check_rate.max(1);
-        fill.max_picks = fill.max_picks.clamp(1, 8);
+        fill.max_picks = fill.max_picks.clamp(1, 64);
         fill.lambda_decay = if fill.lambda_decay.is_finite() {
             fill.lambda_decay.clamp(0.0, 1.0)
         } else {

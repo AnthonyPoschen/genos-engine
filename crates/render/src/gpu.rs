@@ -1576,6 +1576,18 @@ impl Renderer {
         self.gpu.lighting_fill_ray_split()
     }
 
+    /// Print `fillcell` for this frame: path-reference error against burst rank.
+    ///
+    /// `pixel_error` is `|live − reference|` per pixel. `keep` is false on sky.
+    pub fn log_fill_cell_error(
+        &mut self,
+        camera: &genos_scene::Camera,
+        pixel_error: &[f32],
+        keep: &[bool],
+    ) -> Result<(), String> {
+        self.gpu.log_fill_cell_error(camera, pixel_error, keep)
+    }
+
     /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`
     /// (0–4 neighbours). 2 is `restir-spatial-wide`. 0 before a spatial pass.
     pub fn restir_spatial_bound(&self) -> u8 {

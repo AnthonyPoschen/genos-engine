@@ -628,7 +628,7 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
             "lighting_fill_max_picks",
             "Fill max picks",
             f64::from(lighting.surface_cache.fill.max_picks),
-            (1.0, 8.0),
+            (1.0, 64.0),
             1.0,
             "",
         ),

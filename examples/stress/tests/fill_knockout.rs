@@ -190,6 +190,19 @@ fn the_presented_frame_moves_when_the_cache_fills() {
     assert!(!late.is_empty(), "late frame");
     let delta = mean_abs_codes(&early, &late);
     let reference = reference_plane(renderer.width() as usize, renderer.height() as usize);
+    if genos_scene::lighting_env_os("GENOS_LIGHTING_FILL_CELL_LOG").is_some() {
+        let mut pixel_error = vec![0.0f32; reference.0.len()];
+        for (i, px) in late.as_chunks::<4>().0.iter().enumerate() {
+            if !reference.1[i] {
+                continue;
+            }
+            let live = pixel_luminance(&[px[2], px[1], px[0]]);
+            pixel_error[i] = (live - reference.0[i]).abs();
+        }
+        if let Err(err) = renderer.log_fill_cell_error(&camera, &pixel_error, &reference.1) {
+            eprintln!("fillcell log failed: {err}");
+        }
+    }
     let early_error = error_vs_reference(&early, &reference);
     let late_error = error_vs_reference(&late, &reference);
     eprintln!(

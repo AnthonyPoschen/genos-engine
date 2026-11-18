@@ -470,7 +470,7 @@ Role: SCHED · Literature: a per-cell sample floor · More detail: [../systems/l
 **Floor rate**: `fill_floor_rate`. `1` gives the floor ray to every live cell every frame, `2` to half of them, `4` to a quarter. A cell is due when its slot index mod N equals the frame mod N, so each cell is covered within N frames. High is 1. Medium is 2. Low is 4.
 Role: SCHED · Literature: a round-robin sample · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
-**Burst budget**: `fill_burst`. Extra rays spent highest-value first after the floor (value times closeness, and 0.25 off screen). `0` spends none. High is 25000, Medium 12500, Low 6250. The device ray count is the floor plus this.
+**Burst budget**: `fill_burst`. Extra rays spent highest-value first after the floor (value times closeness, and 0.25 off screen). `0` spends none. High is 25000, Medium 12500, Low 6250. The device ray count is the floor plus this. One cell takes at most `fill_max_picks` of the burst (High default 4, range 1 to 64).
 Role: SCHED · Literature: a priority budget on top of a floor · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
@@ -494,7 +494,7 @@ Role: SCHED · Literature: Lumen update priority · More detail: [../systems/lig
 **Change lambda**: a cell's 0–1 measured change. One same-seed check ray writes it. A skipped frame multiplies it by `fill_lambda_decay`. It is not a lamp hint and it does not reset the cell.
 Role: TEMPORAL · Literature: A-SVGF eq. 6 (Schied, Peters and Dachsbacher, HPG 2018) · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
-**Water-filling**: spending `fill_budget` from the highest priority bucket down. The fair pass gives a cell at most `fill_max_picks` (4). Leftover rays are the fill pour. The total does not pass the budget. A converged screen does not stop the round.
+**Water-filling**: spending the burst from the highest priority bucket down. A cell takes at most `fill_max_picks` burst rays (High default 4, range 1 to 64). The old fill pour is gone. The total does not pass the burst. A converged screen does not stop the round.
 Role: SCHED · Literature: Lumen tile budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.3
 
 **Cold-start rank**: while a cell's shown count is under 48, a lower shown count outranks a higher one, so one slot id cannot pin the tile. At 48 and after, the rank is the priority bucket from the stored variance. It is not a second budget. The rank reads the shown count.

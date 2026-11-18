@@ -1885,6 +1885,279 @@ impl Gpu {
             .map_or([0; 6], |w| [w[16], w[17], w[19], w[22], w[1], w[2]])
     }
 
+    /// Where the frame's path-reference error sits, and where the burst went.
+    ///
+    /// `pixel_error` is `|live - reference|` per picture pixel, sky already
+    /// zeroed. `keep` is false on sky. Prints `fillcell` lines. The rank is
+    /// the priority bucket that spent this frame's burst (0 is not in that
+    /// histogram). Burst picks are the rays after the floor prefix.
+    pub(crate) fn log_fill_cell_error(
+        &mut self,
+        camera: &genos_scene::Camera,
+        pixel_error: &[f32],
+        keep: &[bool],
+    ) -> Result<(), String> {
+        self.idle_device();
+        let width = self.extent_w;
+        let height = self.extent_h;
+        let pixels = (width as usize).saturating_mul(height as usize);
+        if pixel_error.len() != pixels || keep.len() != pixels || pixels == 0 {
+            return Err("fill cell log picture size does not match the frame".to_string());
+        }
+        if self.lighting.cache.buffer.is_null() || self.lighting.cache_keys.buffer.is_null() {
+            return Err("fill cell log has no cache".to_string());
+        }
+        let key_bytes = LIGHTING_CACHE_SLOTS.saturating_mul(4);
+        if self.lighting.cache_keys.size < key_bytes {
+            return Err("cache key table is shorter than the slot count".to_string());
+        }
+        let keys = u32_words(&self.copy_device_range(self.lighting.cache_keys.buffer, 0, key_bytes)?);
+        let geom_bytes = LIGHTING_CACHE_SLOTS.saturating_mul(3).saturating_mul(16);
+        if self.lighting.cache.size < geom_bytes {
+            return Err("cache records are shorter than the slot table".to_string());
+        }
+        let geom = f32_vec4s(&self.copy_device_range(self.lighting.cache.buffer, 0, geom_bytes)?);
+        let view = FillView::from_camera(camera, width, height);
+        let mut by_slot: std::collections::HashMap<u32, FillPick> = std::collections::HashMap::new();
+        let mut total_error = 0.0f32;
+        for (i, error) in pixel_error.iter().copied().enumerate() {
+            if keep.get(i).copied().unwrap_or(false) && error > 0.0 {
+                total_error += error;
+            }
+        }
+        let mut on_screen_cells = 0u32;
+        let slot_count = usize::try_from(LIGHTING_CACHE_SLOTS).unwrap_or(0);
+        for slot in 0..slot_count {
+            if keys.get(slot).copied().unwrap_or(0) == 0 {
+                continue;
+            }
+            let at = slot.saturating_mul(3);
+            let pos = geom.get(at).copied().unwrap_or([0.0; 4]);
+            let Some((px, py)) = view.project([pos[0], pos[1], pos[2]], width, height) else {
+                continue;
+            };
+            on_screen_cells = on_screen_cells.saturating_add(1);
+            let i = (py as usize).saturating_mul(width as usize).saturating_add(px as usize);
+            let error = if keep.get(i).copied().unwrap_or(false) {
+                pixel_error.get(i).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            by_slot.insert(
+                u32::try_from(slot).unwrap_or(0),
+                FillPick {
+                    slot: u32::try_from(slot).unwrap_or(0),
+                    error,
+                    pixels: u32::from(error > 0.0),
+                    on_screen: true,
+                    rank: 0,
+                    floor: 0,
+                    burst: 0,
+                },
+            );
+        }
+        let pixels_u = u64::from(width).saturating_mul(u64::from(height));
+        let base = lighting_fill_param_words(pixels_u).saturating_add(FILL_PARAM_WORDS);
+        let (tile_off, pick_off, _) = fill_list_end(FILL_LOCK_WORDS);
+        let header_at = base.saturating_add(FILL_LOCK_WORDS);
+        let header = self.read_key_words(header_at, 8)?;
+        let floor = header.first().copied().unwrap_or(0);
+        let burst_word = header.get(1).copied().unwrap_or(0);
+        let candidates = header.get(4).copied().unwrap_or(0);
+        let planned = header.get(5).copied().unwrap_or(0);
+        let rays_max = u64::from(LIGHTING_CACHE_BATCH).saturating_mul(u64::from(LIGHTING_CACHE_RAYS));
+        let burst = if burst_word > 0 {
+            burst_word
+        } else {
+            planned.saturating_sub(floor)
+        };
+        let listed = u64::from(floor.saturating_add(burst)).min(rays_max);
+        let picks = self.read_key_words(base.saturating_add(pick_off), listed)?;
+        let cand_n = u64::from(candidates).min(FILL_TILE_CAP);
+        let cand = self.read_key_words(base.saturating_add(tile_off), cand_n)?;
+        let floor_n = (floor as usize).min(picks.len());
+        for (i, slot) in picks.iter().copied().enumerate() {
+            if slot >= crate::cache_probe::SLOTS {
+                continue;
+            }
+            let row = by_slot.entry(slot).or_insert(FillPick {
+                slot,
+                error: 0.0,
+                pixels: 0,
+                on_screen: false,
+                rank: 0,
+                floor: 0,
+                burst: 0,
+            });
+            if i < floor_n {
+                row.floor = row.floor.saturating_add(1);
+            } else {
+                row.burst = row.burst.saturating_add(1);
+            }
+        }
+        for word in cand {
+            if word == 0 {
+                continue;
+            }
+            let slot = (word & 2_097_151).saturating_sub(1);
+            if slot >= crate::cache_probe::SLOTS {
+                continue;
+            }
+            let rank = (word >> 21) & 63;
+            if let Some(row) = by_slot.get_mut(&slot) {
+                if rank > row.rank {
+                    row.rank = rank;
+                }
+            }
+        }
+        let rows: Vec<FillPick> = by_slot.into_values().collect();
+        let place = fill_burst_placement(&rows);
+        eprintln!(
+            "fillcell summary cells {} on_screen {} total_err {:.4} floor {} burst {} planned {} candidates {} top_share {:.4} off_share {:.4} top_rank {:.1} burst_rank {:.1}",
+            rows.len(),
+            on_screen_cells,
+            total_error,
+            floor,
+            burst,
+            planned,
+            candidates,
+            place.top_share,
+            place.off_share,
+            place.top_mean_rank,
+            place.burst_mean_rank
+        );
+        let mut erred: Vec<FillPick> = rows.iter().copied().filter(|row| row.on_screen && row.error > 0.0).collect();
+        erred.sort_by(|a, b| b.error.total_cmp(&a.error));
+        let mut spent: Vec<FillPick> = rows.iter().copied().filter(|row| row.burst > 0).collect();
+        spent.sort_by(|a, b| b.burst.cmp(&a.burst).then_with(|| b.error.total_cmp(&a.error)));
+        let target = self.lighting.settings.surface_cache.fill.error_target;
+        self.print_fill_cells("top", &erred[..erred.len().min(16)], &view, target, total_error)?;
+        self.print_fill_cells("burst", &spent[..spent.len().min(8)], &view, target, total_error)?;
+        Ok(())
+    }
+
+    fn read_key_words(&self, word: u64, count: u64) -> Result<Vec<u32>, String> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let bytes = count.saturating_mul(4);
+        let end = word.saturating_mul(4).saturating_add(bytes);
+        if end > self.lighting.cache_keys.size {
+            return Err(format!(
+                "fill list word {word} count {count} sits past the key buffer"
+            ));
+        }
+        Ok(u32_words(&self.copy_device_range(
+            self.lighting.cache_keys.buffer,
+            word.saturating_mul(4),
+            bytes,
+        )?))
+    }
+
+    fn print_fill_cells(
+        &mut self,
+        kind: &str,
+        rows: &[FillPick],
+        view: &FillView,
+        error_target: f32,
+        total_error: f32,
+    ) -> Result<(), String> {
+        for row in rows {
+            let fields = self.read_fill_rank(row.slot, view, error_target)?;
+            let share = if total_error > 0.0 {
+                row.error / total_error
+            } else {
+                0.0
+            };
+            eprintln!(
+                "fillcell {kind} slot {} size {:.3} screen {} px {} err_share {:.4} rank {} burst {} floor {} value {:.3} alloc_err {:.3} rays {:.0} dist {:.2}",
+                row.slot,
+                fields.size,
+                u32::from(row.on_screen),
+                row.pixels,
+                share,
+                row.rank,
+                row.burst,
+                row.floor,
+                fields.value,
+                fields.alloc_err,
+                fields.rays,
+                fields.dist
+            );
+        }
+        Ok(())
+    }
+
+    fn read_fill_sample(&self, slot: u32) -> Result<FillSample, String> {
+        let words = self.read_fill_words(slot)?;
+        let pos = words.first().copied().unwrap_or([0.0; 4]);
+        let normal = words.get(1).copied().unwrap_or([0.0; 4]);
+        let size = if normal[3].is_finite() && normal[3] > 1.0e-4 {
+            normal[3]
+        } else {
+            0.125
+        };
+        Ok(FillSample {
+            pos: [pos[0], pos[1], pos[2]],
+            size,
+            shown: words.get(2).copied().unwrap_or([0.0; 4]),
+            est: words.get(3).copied().unwrap_or([0.0; 4]),
+            rays: words.get(4).copied().unwrap_or([0.0; 4]),
+            grad: words.get(5).copied().unwrap_or([0.0; 4]),
+        })
+    }
+
+    fn read_fill_words(&self, slot: u32) -> Result<Vec<[f32; 4]>, String> {
+        let slot_u = u64::from(slot);
+        let slots = LIGHTING_CACHE_SLOTS;
+        let regions = [
+            (slot_u.saturating_mul(3).saturating_mul(16), 16),
+            (slot_u.saturating_mul(3).saturating_add(1).saturating_mul(16), 16),
+            (slot_u.saturating_mul(3).saturating_add(2).saturating_mul(16), 16),
+            (
+                slots
+                    .saturating_mul(4)
+                    .saturating_add(slot_u.saturating_mul(2))
+                    .saturating_mul(16),
+                32,
+            ),
+            (slots.saturating_mul(11).saturating_add(slot_u).saturating_mul(16), 16),
+        ];
+        for (offset, size) in regions {
+            if offset.saturating_add(size) > self.lighting.cache.size {
+                return Err("fill rank record sits past the cache buffer".to_string());
+            }
+        }
+        Ok(f32_vec4s(&self.copy_device_regions(self.lighting.cache.buffer, &regions)?))
+    }
+
+    fn read_fill_rank(&self, slot: u32, view: &FillView, error_target: f32) -> Result<FillRank, String> {
+        let sample = self.read_fill_sample(slot)?;
+        let at = genos_scene::Vec3::new(sample.pos[0], sample.pos[1], sample.pos[2]);
+        let dist = (at - view.eye).length();
+        let shown = sample.shown;
+        let mean = (0.2126 * shown[0] + 0.7152 * shown[1] + 0.0722 * shown[2]).max(1.0e-4);
+        let rays = sample.rays[3].max(0.0);
+        let dev = sample.est[3].max(0.0).sqrt();
+        let alloc_err = if rays < 0.5 {
+            1.0
+        } else {
+            (dev / mean - error_target.max(0.0)).max(0.0)
+        };
+        let value = if sample.grad[0].is_finite() {
+            sample.grad[0].clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Ok(FillRank {
+            size: sample.size,
+            value,
+            alloc_err,
+            rays,
+            dist,
+        })
+    }
+
     /// Product frames that missed the reservoir and shaded the labelled exact sum.
     pub(crate) fn lighting_restir_prepare_failures(&self) -> u32 {
         self.lighting.restir_prepare_failures
@@ -4676,7 +4949,7 @@ impl Gpu {
                     frame_dt.to_bits(),
                     self.lighting.settings.world_cache.cell_metres.to_bits(),
                     fill.check_rate.max(1),
-                    fill.max_picks.clamp(1, 8),
+                    fill.max_picks.clamp(1, 64),
                     fill.lambda_decay.to_bits(),
                     fill.window_floor.to_bits(),
                     fill.catchup_max.to_bits(),
@@ -7657,6 +7930,148 @@ fn f32_vec4s(bytes: &[u8]) -> Vec<[f32; 4]> {
     out
 }
 
+/// One cell in the frame-40 error log. Rank 0 is outside the burst histogram.
+#[derive(Clone, Copy)]
+struct FillPick {
+    slot: u32,
+    error: f32,
+    pixels: u32,
+    on_screen: bool,
+    rank: u32,
+    floor: u32,
+    burst: u32,
+}
+
+struct FillRank {
+    size: f32,
+    value: f32,
+    alloc_err: f32,
+    rays: f32,
+    dist: f32,
+}
+
+struct FillSample {
+    pos: [f32; 3],
+    size: f32,
+    shown: [f32; 4],
+    est: [f32; 4],
+    rays: [f32; 4],
+    grad: [f32; 4],
+}
+
+struct FillView {
+    forward: genos_scene::Vec3,
+    right: genos_scene::Vec3,
+    up: genos_scene::Vec3,
+    tan_half: f32,
+    aspect: f32,
+    eye: genos_scene::Vec3,
+}
+
+impl FillView {
+    fn from_camera(camera: &genos_scene::Camera, width: u32, height: u32) -> Self {
+        let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
+        let mut right = forward.cross(genos_scene::Vec3::Y);
+        let scale = right.length().max(1.0e-6);
+        right = right / scale;
+        Self {
+            up: right.cross(forward),
+            forward,
+            right,
+            tan_half: 30.0_f32.to_radians().tan(),
+            aspect: (width as f32) / (height.max(1) as f32),
+            eye: camera.position,
+        }
+    }
+
+    /// Screen pixel of a world point. Matches `lighting_fill_pixel`.
+    fn project(&self, pos: [f32; 3], width: u32, height: u32) -> Option<(u32, u32)> {
+        let rel = genos_scene::Vec3::new(pos[0], pos[1], pos[2]) - self.eye;
+        let z = rel.dot(self.forward);
+        if z <= 0.05 || self.tan_half < 1.0e-6 || self.aspect < 1.0e-6 || width == 0 || height == 0
+        {
+            return None;
+        }
+        let ndc_x = rel.dot(self.right) / (z * self.tan_half * self.aspect);
+        let ndc_y = rel.dot(self.up) / (z * self.tan_half);
+        if ndc_x.abs() > 1.0 || ndc_y.abs() > 1.0 {
+            return None;
+        }
+        let px = ((ndc_x * 0.5 + 0.5) * width as f32).floor().max(0.0);
+        let py = ((1.0 - (ndc_y * 0.5 + 0.5)) * height as f32)
+            .floor()
+            .max(0.0);
+        Some((pixel_u32(px, width), pixel_u32(py, height)))
+    }
+}
+
+fn pixel_u32(v: f32, limit: u32) -> u32 {
+    let n = floor_i32(v).max(0);
+    u32::try_from(n).unwrap_or(0).min(limit.saturating_sub(1))
+}
+
+struct FillBurstPlacement {
+    top_share: f32,
+    off_share: f32,
+    top_mean_rank: f32,
+    burst_mean_rank: f32,
+}
+
+/// Share of burst picks on the highest-error quarter of on-screen cells, and
+/// the share that missed the picture. Ranks are the buckets that spent the burst.
+fn fill_burst_placement(rows: &[FillPick]) -> FillBurstPlacement {
+    let burst_total: u32 = rows.iter().map(|row| row.burst).sum();
+    let off: u32 = rows
+        .iter()
+        .filter(|row| !row.on_screen)
+        .map(|row| row.burst)
+        .sum();
+    let mut erred: Vec<&FillPick> = rows
+        .iter()
+        .filter(|row| row.on_screen && row.error > 0.0)
+        .collect();
+    erred.sort_by(|a, b| b.error.total_cmp(&a.error));
+    let top_n = (erred.len() / 4).clamp(1, erred.len().max(1));
+    let top_n = if erred.is_empty() {
+        0
+    } else {
+        top_n.min(erred.len())
+    };
+    let top_burst: u32 = erred.iter().take(top_n).map(|row| row.burst).sum();
+    let top_rank: f32 = if top_n == 0 {
+        0.0
+    } else {
+        erred
+            .iter()
+            .take(top_n)
+            .map(|row| row.rank as f32)
+            .sum::<f32>()
+            / top_n as f32
+    };
+    let burst_rank_w: f32 = rows
+        .iter()
+        .map(|row| row.rank as f32 * row.burst as f32)
+        .sum();
+    let burst_rank = if burst_total == 0 {
+        0.0
+    } else {
+        burst_rank_w / burst_total as f32
+    };
+    let share = |part: u32| {
+        if burst_total == 0 {
+            0.0
+        } else {
+            part as f32 / burst_total as f32
+        }
+    };
+    FillBurstPlacement {
+        top_share: share(top_burst),
+        off_share: share(off),
+        top_mean_rank: top_rank,
+        burst_mean_rank: burst_rank,
+    }
+}
+
 fn seven_vec4s(words: &[[f32; 4]], at: usize) -> Option<[[f32; 4]; 7]> {
     let mut records = [[0.0f32; 4]; 7];
     for (i, record) in records.iter_mut().enumerate() {
@@ -7933,5 +8348,26 @@ mod fill_layout_tests {
             lighting_fill_keys_words(0) - lighting_fill_param_words(0),
             FILL_PARAM_WORDS + host_end
         );
+    }
+}
+
+#[cfg(test)]
+mod fill_cell_log_tests {
+    use super::{fill_burst_placement, FillPick};
+
+    #[test]
+    fn burst_on_low_error_cells_is_not_counted_as_covering_the_error() {
+        let rows = [
+            FillPick { slot: 1, error: 10.0, pixels: 4, on_screen: true, rank: 2, floor: 1, burst: 0 },
+            FillPick { slot: 2, error: 9.0, pixels: 4, on_screen: true, rank: 3, floor: 1, burst: 0 },
+            FillPick { slot: 3, error: 1.0, pixels: 4, on_screen: true, rank: 60, floor: 1, burst: 50 },
+            FillPick { slot: 4, error: 0.5, pixels: 4, on_screen: true, rank: 61, floor: 1, burst: 50 },
+            FillPick { slot: 5, error: 0.0, pixels: 0, on_screen: false, rank: 40, floor: 0, burst: 20 },
+        ];
+        let place = fill_burst_placement(&rows);
+        assert!(place.top_share < 0.01, "top error share {}", place.top_share);
+        assert!((place.off_share - 20.0 / 120.0).abs() < 1.0e-4, "{}", place.off_share);
+        assert!(place.top_mean_rank < 10.0, "{}", place.top_mean_rank);
+        assert!(place.burst_mean_rank > 40.0, "{}", place.burst_mean_rank);
     }
 }

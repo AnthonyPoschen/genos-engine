@@ -623,7 +623,7 @@ void lighting_fill_emit_on(uint gid) {
         uint w = ckeys.key[lighting_fill_tile_at() + gid];
         uint q = w >> 21u;
         slot = (w & 2097151u) - 1u;
-        uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
+        uint max_picks = clamp(lighting_fill_u(17), 1u, 64u);
         if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u) {
             uint base = ckeys.key[lighting_fill_plan_at() + q];
             uint extra = ckeys.key[lighting_fill_plan_at() + 64u + q];
@@ -665,7 +665,7 @@ void lighting_fill_emit_off(uint gid) {
 void lighting_fill_dispatch() {
     // One thread. The value histogram is already in memory. Emitting the burst
     // is a later parallel dispatch. This function does not walk tiles or slots.
-    uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
+    uint max_picks = clamp(lighting_fill_u(17), 1u, 64u);
     uint burst = lighting_fill_u(33);
     uint hist[64];
     uint serial = 0u;
