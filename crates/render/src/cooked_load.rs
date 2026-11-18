@@ -1,14 +1,16 @@
 //! Opt-in load of a `genos-cook` directory (ADR 0035).
 //!
 //! `--cooked DIR` / [`RenderSettings::cooked_dir`] selects it. Unset, the glTF
-//! path is unchanged. A bad hash logs `assets fallback <asset> <reason>` and
-//! that asset loads from source.
+//! path is unchanged. A bad `.gcook` or `.gtex` hash logs `assets fallback <asset> <reason>`
+//! and that asset loads from source. A bad `.gskin` logs the same line and the
+//! mesh stays the rigid `.gcook` geometry.
 
 use std::path::Path;
 use std::time::Instant;
 
 use genos_load::{
-    decode_geometry, decode_images, image_spaces, sha256, CookedImage, GltfScene, MipSpace, Package,
+    decode_geometry, decode_images, decode_skin, image_spaces, sha256, skin_path, CookedImage,
+    DecodedSkin, GltfScene, MipSpace, Package,
 };
 
 use crate::material_stream::MipLevel;
@@ -104,7 +106,7 @@ fn load_scene(
     let line = package
         .line_for(&id)
         .ok_or_else(|| "asset is not in the package".to_string())?;
-    if let Err(err) = package.verify(dir) {
+    if let Err(err) = package.verify_geometry(dir) {
         return Err(err.to_string());
     }
     let geom = decode_geometry(
@@ -117,6 +119,24 @@ fn load_scene(
     let mut scene = genos_load::load_gltf_file(source).map_err(|e| e.to_string())?;
     scene.meshes = geom.meshes;
     scene.instances = geom.instances;
+    scene.skins.clear();
+    scene.clips.clear();
+    scene.skin_notes.clear();
+    if let Some(expected) = line
+        .split(' ')
+        .find_map(|token| token.strip_prefix("skin="))
+    {
+        match read_skin(dir, &id, expected) {
+            Ok(record) => {
+                if let Err(reason) = attach_skin(&mut scene, record) {
+                    fallback.push(format!("assets fallback {} {reason}", source.display()));
+                }
+            }
+            Err(reason) => {
+                fallback.push(format!("assets fallback {} {reason}", source.display()));
+            }
+        }
+    }
     if !bc {
         fallback.push("assets fallback textures no-bc".to_string());
         return Ok(Loaded {
@@ -138,6 +158,48 @@ fn load_scene(
         scene,
         cooked: images.images,
     })
+}
+
+fn read_skin(dir: &Path, id: &[u8; 32], expected: &str) -> Result<DecodedSkin, String> {
+    let bytes = std::fs::read(skin_path(dir, id)).map_err(|_| "gskin missing".to_string())?;
+    if genos_load::hex(&sha256(&bytes)) != expected {
+        return Err("gskin hash".into());
+    }
+    decode_skin(&bytes).map_err(|err| err.to_string())
+}
+
+fn attach_skin(scene: &mut GltfScene, skin: DecodedSkin) -> Result<(), &'static str> {
+    let count: usize = scene.meshes.iter().map(|mesh| mesh.primitives.len()).sum();
+    if count != skin.primitives.len() || scene.instances.len() != skin.instance_skins.len() {
+        return Err("gskin shape");
+    }
+    let mut offset = 0;
+    for mesh in &scene.meshes {
+        for primitive in &mesh.primitives {
+            let cooked = skin.primitives.get(offset).ok_or("gskin shape")?;
+            offset += 1;
+            if cooked.joints.len() != cooked.weights.len()
+                || (!cooked.joints.is_empty() && cooked.joints.len() != primitive.positions.len())
+            {
+                return Err("gskin influences");
+            }
+        }
+    }
+    let mut cooked = skin.primitives.into_iter();
+    for mesh in &mut scene.meshes {
+        for primitive in &mut mesh.primitives {
+            let next = cooked.next().ok_or("gskin shape")?;
+            primitive.joints = next.joints;
+            primitive.weights = next.weights;
+        }
+    }
+    for (instance, index) in scene.instances.iter_mut().zip(skin.instance_skins) {
+        instance.skin = usize::try_from(index).ok();
+    }
+    scene.skins = skin.skins;
+    scene.clips = skin.clips;
+    scene.skin_notes = skin.notes;
+    Ok(())
 }
 
 fn hex_short(id: &[u8; 32]) -> String {
@@ -348,4 +410,154 @@ fn place_kind(
             .get_or_insert_with(|| BlockShelf::new(format))
             .place(image),
     )
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")]
+mod skin_fallback {
+    use std::path::PathBuf;
+
+    use genos_bake::{BakeMode, BakeSettings};
+    use genos_cook::{cook_asset, load_cooked, package_files, PackageFile, Threads};
+    use genos_load::sha256;
+
+    use super::load_scene;
+
+    fn temp() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("genos-skin-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn align(bin: &mut Vec<u8>) {
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+    }
+
+    fn put_f32(bin: &mut Vec<u8>, values: &[f32]) -> usize {
+        align(bin);
+        let offset = bin.len();
+        for value in values {
+            bin.extend(value.to_le_bytes());
+        }
+        offset
+    }
+
+    fn put_u16(bin: &mut Vec<u8>, values: &[u16]) -> usize {
+        align(bin);
+        let offset = bin.len();
+        for value in values {
+            bin.extend(value.to_le_bytes());
+        }
+        offset
+    }
+
+    fn glb() -> Vec<u8> {
+        let mut bin = Vec::new();
+        let positions = put_f32(&mut bin, &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let joints = put_u16(&mut bin, &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let weights = put_f32(
+            &mut bin,
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        );
+        let indices = put_u16(&mut bin, &[0, 1, 2]);
+        let byte_length = bin.len();
+        let acc = |offset: usize, count: usize, ctype: &str, kind: &str| {
+            format!(
+                r#"{{"bufferView":0,"byteOffset":{offset},"componentType":{ctype},"count":{count},"type":"{kind}"}}"#
+            )
+        };
+        let json = format!(
+            r#"{{
+                "asset": {{"version": "2.0"}},
+                "scene": 0,
+                "scenes": [{{"nodes": [0]}}],
+                "nodes": [{{"name": "hips", "mesh": 0, "skin": 0}}],
+                "skins": [{{"joints": [0]}}],
+                "meshes": [{{"primitives": [{{
+                    "attributes": {{"POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2}},
+                    "indices": 3
+                }}]}}],
+                "buffers": [{{"byteLength": {byte_length}}}],
+                "bufferViews": [{{"buffer": 0, "byteLength": {byte_length}}}],
+                "accessors": [{accessors}]
+            }}"#,
+            accessors = [
+                acc(positions, 3, "5126", "VEC3"),
+                acc(joints, 3, "5123", "VEC4"),
+                acc(weights, 3, "5126", "VEC4"),
+                acc(indices, 3, "5123", "SCALAR"),
+            ]
+            .join(","),
+        );
+        let mut json = json.into_bytes();
+        while !json.len().is_multiple_of(4) {
+            json.push(b' ');
+        }
+        while !bin.len().is_multiple_of(4) {
+            bin.push(0);
+        }
+        let total = u32::try_from(12 + 8 + json.len() + 8 + bin.len()).unwrap();
+        let mut out = Vec::new();
+        out.extend(0x4654_6C67u32.to_le_bytes());
+        out.extend(2u32.to_le_bytes());
+        out.extend(total.to_le_bytes());
+        out.extend(u32::try_from(json.len()).unwrap().to_le_bytes());
+        out.extend(0x4E4F_534Au32.to_le_bytes());
+        out.extend(json);
+        out.extend(u32::try_from(bin.len()).unwrap().to_le_bytes());
+        out.extend(0x004E_4942u32.to_le_bytes());
+        out.extend(bin);
+        out
+    }
+
+    #[test]
+    fn a_bad_gskin_keeps_the_rigid_mesh() {
+        let dir = temp();
+        let source = dir.join("src.glb");
+        std::fs::write(&source, glb()).unwrap();
+        let out = dir.join("out");
+        let settings = BakeSettings {
+            mode: BakeMode::OnLoad,
+            cache_dir: dir.join("bake"),
+            ..BakeSettings::default()
+        };
+        let cooked = cook_asset(&source, &out, &settings, false, Threads::ONE).unwrap();
+        let (_, skin_path) = cooked.skin.unwrap();
+        let record = load_cooked(&cooked.record.1).unwrap();
+        let bytes = std::fs::read(&skin_path).unwrap();
+        let text = package_files(&[PackageFile {
+            cooked: &record,
+            gtex: None,
+            skin: Some(sha256(&bytes)),
+        }])
+        .text();
+        std::fs::write(out.join("package.manifest"), text).unwrap();
+
+        let mut fallback = Vec::new();
+        let loaded = load_scene(&out, &source, false, &mut fallback).unwrap();
+        assert_eq!(loaded.scene.skins.len(), 1);
+        assert_eq!(loaded.scene.instances[0].skin, Some(0));
+        assert_eq!(loaded.scene.meshes[0].primitives[0].joints.len(), 3);
+        assert_eq!(loaded.scene.meshes[0].primitives[0].positions.len(), 3);
+        assert!(fallback.iter().all(|line| !line.contains("gskin")));
+
+        let mut broken = bytes;
+        let last = broken.len() - 1;
+        broken[last] ^= 0xff;
+        std::fs::write(&skin_path, broken).unwrap();
+        fallback.clear();
+        let rigid = load_scene(&out, &source, false, &mut fallback).unwrap();
+        assert_eq!(rigid.scene.skins.len(), 0);
+        assert_eq!(rigid.scene.clips.len(), 0);
+        assert_eq!(rigid.scene.instances[0].skin, None);
+        assert_eq!(rigid.scene.meshes[0].primitives[0].joints.len(), 0);
+        assert_eq!(rigid.scene.meshes[0].primitives[0].positions.len(), 3);
+        assert!(fallback
+            .iter()
+            .any(|line| { line.contains("assets fallback") && line.contains("gskin") }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

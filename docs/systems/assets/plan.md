@@ -138,7 +138,7 @@ The note is one line: the path in the file, the feature name, and `used` or `loa
 | `KHR_texture_transform` | Keep the transform | `loaded, unsupported`. `load_gltf` still refuses it when it is required. |
 | `KHR_lights_punctual` | Keep the light nodes | `loaded, unsupported`. Scene lamps stay the Rhai `light` call. |
 | `KHR_materials_emissive_strength` | `used` | `used` |
-| Skins (`JOINTS_0`, `WEIGHTS_0`, inverse bind) | `used` on `Primitive` and `GltfScene::skins` | Joints and weights load. The `.gskin` cook is ADR 0038 Addition A. GI design says a skinned mesh uses a proxy, not an exact SDF. |
+| Skins (`JOINTS_0`, `WEIGHTS_0`, inverse bind) | `used` on `Primitive` and in `.gskin` | The cook writes `GSK1`. A bad trailer keeps the rigid mesh. GI design says a skinned mesh uses a proxy, not an exact SDF. |
 | Morph targets and weights | Keep the deltas | `loaded, unsupported` |
 | Animation clips (translation, rotation, scale, weights) | Linear and step channels on a skin joint are `used` | Weight channels and cubic-spline samplers stay noted and omitted. The text `Animation` type still samples the one-node file. |
 | Cameras | Keep the camera JSON | `loaded, unsupported`. The game camera stays `genos-scene`. |
