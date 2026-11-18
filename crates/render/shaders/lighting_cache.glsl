@@ -1361,8 +1361,16 @@ uint lighting_mover_texel_count(uint slot) {
     return movers_gpu.header[at + 3u];
 }
 
-// O(1) texel index for object_id at local_pos: hash the local cell into the span.
-uint lighting_mover_texel_lookup(uint object_id, vec3 local_pos) {
+// Tiny length for normalize / weight divides on mover texels (also used by lookup).
+const float LIGHTING_MOVER_EPS = 1.0e-6;
+
+// Dense face-grid index for object_id at local_pos (matches host layout order:
+// faces +X,-X,+Y,-Y,+Z,-Z, then u, then v). Replaces hash%count, which mapped
+// many face cells onto one texel and painted dark crawling patches.
+//
+// Face pick prefers the shading normal (local) so edge/corner hits do not flip
+// onto a neighbouring face via abs(local) and paint a thin dark slit.
+uint lighting_mover_texel_lookup(uint object_id, vec3 local_pos, vec3 local_n) {
     uint slot = lighting_mover_find_slot(object_id);
     if (slot == ~0u) {
         return ~0u;
@@ -1375,9 +1383,64 @@ uint lighting_mover_texel_lookup(uint object_id, vec3 local_pos) {
     if (count == 0u || base == ~0u) {
         return ~0u;
     }
-    ivec3 cell = ivec3(floor(local_pos / LIGHTING_SC_TEXEL));
-    uint h = hash_cell3(cell, object_id);
-    uint tex = base + (h % count);
+    uint rt = lighting_mover_table_off() + slot * 16u;
+    vec3 he = abs(vec3(
+        uintBitsToFloat(movers_gpu.header[rt + 12u]),
+        uintBitsToFloat(movers_gpu.header[rt + 13u]),
+        uintBitsToFloat(movers_gpu.header[rt + 14u])));
+    he = max(he, vec3(LIGHTING_SC_TEXEL));
+    vec3 an = abs(local_n);
+    vec3 a = abs(local_pos);
+    // Prefer normal when it clearly names a face; else fall back to position.
+    bool use_n = (an.x + an.y + an.z) > 0.5;
+    vec3 pick = use_n ? an : a;
+    uint face;
+    float u_ext;
+    float v_ext;
+    float u;
+    float v;
+    if (pick.x >= pick.y && pick.x >= pick.z) {
+        float sgn = use_n ? local_n.x : local_pos.x;
+        face = sgn >= 0.0 ? 0u : 1u;
+        u_ext = he.y;
+        v_ext = he.z;
+        u = local_pos.y;
+        v = local_pos.z;
+    } else if (pick.y >= pick.z) {
+        float sgn = use_n ? local_n.y : local_pos.y;
+        face = sgn >= 0.0 ? 2u : 3u;
+        u_ext = he.x;
+        v_ext = he.z;
+        u = local_pos.x;
+        v = local_pos.z;
+    } else {
+        float sgn = use_n ? local_n.z : local_pos.z;
+        face = sgn >= 0.0 ? 4u : 5u;
+        u_ext = he.x;
+        v_ext = he.y;
+        u = local_pos.x;
+        v = local_pos.y;
+    }
+    uint u_steps = max(uint(floor((2.0 * u_ext) / LIGHTING_SC_TEXEL)), 1u);
+    uint v_steps = max(uint(floor((2.0 * v_ext) / LIGHTING_SC_TEXEL)), 1u);
+    // Prefix sum of face strides (cube → face * u_steps * v_steps).
+    uint off = 0u;
+    for (uint f = 0u; f < face; f++) {
+        float fu_ext = (f <= 1u) ? he.y : ((f <= 3u) ? he.x : he.x);
+        float fv_ext = (f <= 1u) ? he.z : ((f <= 3u) ? he.z : he.y);
+        uint fu = max(uint(floor((2.0 * fu_ext) / LIGHTING_SC_TEXEL)), 1u);
+        uint fv = max(uint(floor((2.0 * fv_ext) / LIGHTING_SC_TEXEL)), 1u);
+        off += fu * fv;
+    }
+    float u01 = clamp(0.5 * (u / max(u_ext, LIGHTING_MOVER_EPS) + 1.0), 0.0, 0.9999);
+    float v01 = clamp(0.5 * (v / max(v_ext, LIGHTING_MOVER_EPS) + 1.0), 0.0, 0.9999);
+    uint ui = min(uint(floor(u01 * float(u_steps))), u_steps - 1u);
+    uint vi = min(uint(floor(v01 * float(v_steps))), v_steps - 1u);
+    uint within = ui * v_steps + vi;
+    uint tex = base + off + within;
+    if (tex >= base + count) {
+        return ~0u;
+    }
     uint pool = lighting_mover_pool_off();
     uint at = pool + tex * 16u;
     if (movers_gpu.header[at + 3u] != object_id) {
@@ -1394,9 +1457,6 @@ vec4 lighting_mover_texel_mean(uint tex) {
         uintBitsToFloat(movers_gpu.header[at + 6u]),
         uintBitsToFloat(movers_gpu.header[at + 7u])); // samples in w
 }
-
-// Tiny length for normalize / weight divides on mover texels.
-const float LIGHTING_MOVER_EPS = 1.0e-6;
 
 // Object-local → world (yaw about Y). Inverse is lighting_mover_world_to_local.
 // Compose needs the inverse under GENOS_COMPOSE_NO_WALK; fill uses both.
@@ -4925,7 +4985,9 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
                 // Compose must use object-local coords (inverse yaw). A world
                 // offset here keyed rotating faces to the wrong hash buckets.
                 vec3 local = lighting_mover_world_to_local(pos - centre, yc, ys);
-                uint tex = lighting_mover_texel_lookup(lighting_px_object_id, local);
+                // Object-local shading normal (yaw only) picks the face.
+                vec3 local_n = lighting_mover_world_to_local(n, yc, ys);
+                uint tex = lighting_mover_texel_lookup(lighting_px_object_id, local, local_n);
                 if (tex != ~0u) {
                     vec4 mean = lighting_mover_texel_mean(tex);
                     // Trust follows sample sets. Eight sets → full trust.
@@ -4933,9 +4995,22 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
                     // surface along the shading normal (on-mover world cells
                     // are dropped, so hollow fallthrough stayed dark).
                     const float LIGHTING_MOVER_FULL_SETS = 8.0;
-                    if (mean.w >= LIGHTING_MOVER_FULL_SETS) {
+                    // Empty texels: skip the pool read and take the prior only.
+                    // Returning w=0 here let fallthrough hit the on-mover world
+                    // drop and paint black rectangles on unfilled faces.
+                    if (mean.w < 0.5) {
+                        vec3 nn = normalize(n + vec3(LIGHTING_MOVER_EPS));
+                        vec3 outside = pos + nn * LIGHTING_SC_TEXEL;
+                        uint saved_oid = lighting_px_object_id;
+                        lighting_px_object_id = 0u;
+                        vec4 prior = lighting_sh_compose_lattice(outside, n, false);
+                        lighting_px_object_id = saved_oid;
+                        if (prior.w > LIGHTING_CACHE_HAS_W) {
+                            return prior;
+                        }
+                    } else if (mean.w >= LIGHTING_MOVER_FULL_SETS) {
                         return vec4(mean.rgb, 1.0);
-                    }
+                    } else {
                     // Warm-up prior: SH lattice just outside the surface. Do not
                     // call lighting_world_irradiance_in here — that inlines the
                     // mode-3 body into compose and blows the 248k SPIR-V ceiling.
@@ -4949,6 +5024,7 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
                     if (mean.w > 0.0 || prior.w > LIGHTING_CACHE_HAS_W) {
                         float tw = prior.w > LIGHTING_CACHE_HAS_W ? prior.w : 0.0;
                         return vec4(mix(prior.rgb, mean.rgb, w), mix(tw, 1.0, w));
+                    }
                     }
                 }
             }

@@ -64,7 +64,7 @@ This stage is **yaw-only** and **boxes-first**. That is intentional and safe for
 
 - Slide: before max step **1.7008** at 250 mm; after **0** (pool fine `[7,3,1]`). world_hit 0, object_hit 1, drops 1.
 - Rays/frame at 10/100/1000 Near movers (budget 4096): **4096 / 4096 / 4096**.
-- Compose SPIR-V: **230656** B (ceiling 248000; after #285+#290 merge; hitch mesh/on out of compose, lattice warm-up).
+- Compose SPIR-V: **≤239044** B (ceiling 248000; dense face lookup + fill rotation; hitch mesh/on out of compose, lattice warm-up).
 - Warm-up locks: slide `warm_ok` = live gather; `compose_lattice_warm_up_prior_loads_stored_ids` = `GENOS_COMPOSE_NO_WALK` stored-id load.
 - ReSTIR `REF_ERR` 0.05 gate scenes: pass (merge oracle still fails on lighting-v3).
 - fill_knockout: early→late **0.5954 → 0.0828** (under frozen **0.213** ceiling). Gain gate `MIN_ERROR_GAIN=0.03` stays. The 0.5557 regression was stale-drop treating `last==0` as aged (wiped hall cells) + Stage H `prepare_fill` spending the batch on KEEP leftovers via closeness-only priority.
@@ -77,7 +77,9 @@ This stage is **yaw-only** and **boxes-first**. That is intentional and safe for
 
 3. **Red-box dark bands (mover faces):** Compose returned `w = 1` whenever mover texel `samples > 0.5`, so underfilled pool texels painted full-trust dark patches. Trust now requires ≥ 8 sample sets before full-trust; below that, blend with a world prior just outside the surface along the normal (on-mover world cells are dropped, so hollow fallthrough stayed dark).
 
-4. **Persistent blocky dark faces (orbit/spin @ 4070):** Root causes were (a) compose looked up `pos - centre` without inverse yaw, so rotating faces keyed the wrong hash buckets; (b) host layout was a volume grid with every normal = `+Y`, so side-face fill origins sat inside the mesh and self-shadowed; (c) fill ray origins had no outward bias. Fix: object-local lookup via inverse yaw, AABB-surface layout with outward normals hashed into compose buckets, and a **scale-aware** fill bias (`LIGHTING_MOVER_RAY_BIAS_FRAC` × max(`LIGHTING_SC_TEXEL`, min half-extent)) along the world normal.
+4. **Persistent blocky dark faces (orbit/spin @ 4070):** Root causes were (a) compose looked up `pos - centre` without inverse yaw, so rotating faces keyed the wrong hash buckets; (b) host layout was a volume grid with every normal = `+Y`, so side-face fill origins sat inside the mesh and self-shadowed; (c) fill ray origins had no outward bias. Fix: object-local lookup via inverse yaw, AABB-surface layout with outward normals, and a **scale-aware** fill bias (`LIGHTING_MOVER_RAY_BIAS_FRAC` × max(`LIGHTING_SC_TEXEL`, min half-extent)) along the world normal.
+
+5. **Thin dark slit / crawling rectangular patches on the red mover (hall eye @ 4070, frames 180→400):** Tip `lighting-v3` @ `525bf44e` has **no mover texel pool** (`lighting_mover_texel_lookup` absent); lavapipe tip still shows a *mild* top slit / soft blockiness (`dark_frac` ≈ 0.003, `block_min` ≈ 25) — treat that mild grain as pre-existing, not fixed here. Severe near-black face rectangles (`dark_frac` ≈ 0.366, `crop_y<25` ≈ 0.62) are #288 pool-path: (a) **hash%count + first-writer**; (b) fill tied every texel to the same priority so a 256-deposit budget locked onto the lowest pool indices; (c) empty pool reads fell through into the on-mover world-cell drop; (d) face pick from `abs(local)` flipped at edges. Fix: **dense face-grid** layout + normal-preferred lookup, underfill-boosted rotating fill order, empty-texel → lattice prior only (`dark_frac` ≈ 0.201 on lavapipe f400). Regression: `dense_face_index_*` + `fill_budget_rotates_across_underfilled_texels` in `mover_cache.rs` (4070 `--shot` remains the visual gate).
 
 ## Review follow-ups (#288)
 

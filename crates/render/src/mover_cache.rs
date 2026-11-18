@@ -324,6 +324,9 @@ pub struct MoverCache {
     fill_list: Vec<u32>,
     /// Equivalent rays claimed by the last [`Self::prepare_fill`] (`len × 16`).
     fill_rays: u32,
+    /// Rotates equal-priority underfilled texels so the 256-deposit budget does
+    /// not lock onto the lowest pool indices every frame (dark crawling patches).
+    fill_epoch: u32,
 }
 
 impl MoverCache {
@@ -349,6 +352,7 @@ impl MoverCache {
             dirty_texels: Vec::new(),
             fill_list: Vec::new(),
             fill_rays: 0,
+            fill_epoch: 0,
         }
     }
 
@@ -702,9 +706,10 @@ impl MoverCache {
             dst.texel_count = want;
             if want == 0 {
                 dst.texel_base = u32::MAX;
-            } else {
-                self.layout_local_positions(slot);
             }
+            // Span size unchanged: keep the surface layout and its irradiance.
+            // Re-layout every sync wiped samples once we cleared on assign, and
+            // the old first-writer path did not need a per-frame reshuffle.
             return Ok(());
         }
         if want < have {
@@ -748,10 +753,14 @@ impl MoverCache {
         Ok(())
     }
 
-    /// Places owned texels on the AABB surface with outward normals, hashed into
-    /// the same buckets compose uses (`hash_cell3(floor(local / texel)) % count`).
-    /// A volume grid with every normal = +Y left side faces dark and put ray
-    /// origins inside the mesh (self-shadow).
+    /// Places owned texels on the AABB surface with outward normals in a
+    /// **dense face-grid order** (face 0..6, then u, then v). Compose looks up
+    /// the same index from local position (see `lighting_mover_texel_lookup`).
+    ///
+    /// The old `hash % count` first-writer path mapped many face cells onto one
+    /// texel (wrong normal → dark self-shadowed patches that crawled as the
+    /// box moved). Dense packing gives each interior face cell its own texel
+    /// when the Near share is large enough (6 × steps² for a cube).
     fn layout_local_positions(&mut self, slot: u32) {
         let rec = self.table[usize_from_u32(slot)];
         if rec.texel_count == 0 || rec.texel_base == u32::MAX {
@@ -762,17 +771,6 @@ impl MoverCache {
         let hy = rec.half_extents[1].abs().max(MOVER_SURFACE_TEXEL_M);
         let hz = rec.half_extents[2].abs().max(MOVER_SURFACE_TEXEL_M);
         let extents = [hx, hy, hz];
-        // Clear so we can detect unfilled hash buckets after the face pass.
-        for i in 0..n {
-            let idx = rec.texel_base.saturating_add(i);
-            if let Some(t) = self.texels.get_mut(usize_from_u32(idx)) {
-                if t.object_id == rec.object_id {
-                    t.local_pos = [0.0; 3];
-                    t.local_n = [0.0; 3];
-                    self.mark_texel_dirty(idx);
-                }
-            }
-        }
         // Six faces: (outward normal axis, sign, vary-u axis, vary-v axis).
         let faces: [(usize, f32, usize, usize); 6] = [
             (0, 1.0, 1, 2),
@@ -782,7 +780,11 @@ impl MoverCache {
             (2, 1.0, 0, 1),
             (2, -1.0, 0, 1),
         ];
+        let mut cursor = 0u32;
         for &(axis, sign, u_ax, v_ax) in &faces {
+            if cursor >= n {
+                break;
+            }
             let mut normal = [0.0f32; 3];
             normal[axis] = sign;
             let u_ext = extents[u_ax];
@@ -791,36 +793,42 @@ impl MoverCache {
             let v_steps = surface_steps(v_ext);
             for ui in 0..u_steps {
                 for vi in 0..v_steps {
+                    if cursor >= n {
+                        break;
+                    }
                     let mut local = [0.0f32; 3];
                     local[axis] = sign * extents[axis];
                     local[u_ax] = surface_coord(ui, u_steps, u_ext);
                     local[v_ax] = surface_coord(vi, v_steps, v_ext);
-                    let cell = [
-                        crate::cache_probe::floor_i32(local[0] / MOVER_SURFACE_TEXEL_M),
-                        crate::cache_probe::floor_i32(local[1] / MOVER_SURFACE_TEXEL_M),
-                        crate::cache_probe::floor_i32(local[2] / MOVER_SURFACE_TEXEL_M),
-                    ];
-                    let bucket = mover_hash_cell3(cell, rec.object_id) % n;
-                    let idx = rec.texel_base.saturating_add(bucket);
+                    let idx = rec.texel_base.saturating_add(cursor);
+                    cursor = cursor.saturating_add(1);
                     let Some(t) = self.texels.get_mut(usize_from_u32(idx)) else {
                         continue;
                     };
                     if t.object_id != rec.object_id {
                         continue;
                     }
-                    // First writer wins; later faces keep the existing sample.
-                    if t.local_n[0] == 0.0 && t.local_n[1] == 0.0 && t.local_n[2] == 0.0 {
-                        t.local_pos = local;
-                        t.local_n = normal;
-                        self.mark_texel_dirty(idx);
+                    let same = (t.local_pos[0] - local[0]).abs() < 1.0e-4
+                        && (t.local_pos[1] - local[1]).abs() < 1.0e-4
+                        && (t.local_pos[2] - local[2]).abs() < 1.0e-4
+                        && (t.local_n[0] - normal[0]).abs() < 1.0e-4
+                        && (t.local_n[1] - normal[1]).abs() < 1.0e-4
+                        && (t.local_n[2] - normal[2]).abs() < 1.0e-4;
+                    t.local_pos = local;
+                    t.local_n = normal;
+                    if !same {
+                        t.mean = [0.0; 3];
+                        t.samples = 0.0;
+                        t.sh1 = [[0.0; 3]; 3];
                     }
+                    self.mark_texel_dirty(idx);
                 }
             }
         }
-        // Fill any hash bucket the face grid missed so compose never hits a
-        // zero-normal / never-filled slot for a live span index.
-        for i in 0..n {
-            let idx = rec.texel_base.saturating_add(i);
+        // Pad any leftover span slots so the pool has no zero-normal holes.
+        while cursor < n {
+            let idx = rec.texel_base.saturating_add(cursor);
+            cursor = cursor.saturating_add(1);
             let Some(t) = self.texels.get_mut(usize_from_u32(idx)) else {
                 continue;
             };
@@ -830,7 +838,7 @@ impl MoverCache {
             if t.local_n[0] != 0.0 || t.local_n[1] != 0.0 || t.local_n[2] != 0.0 {
                 continue;
             }
-            let (local, normal) = box_surface_from_index(i, n, extents);
+            let (local, normal) = box_surface_from_index(idx - rec.texel_base, n, extents);
             t.local_pos = local;
             t.local_n = normal;
             self.mark_texel_dirty(idx);
@@ -900,6 +908,7 @@ impl MoverCache {
         for c in cands.iter().take(max_deposits as usize) {
             self.fill_list.push(c.texel_index);
         }
+        self.fill_epoch = self.fill_epoch.wrapping_add(1);
         let deposited = u32_from_usize(self.fill_list.len());
         self.fill_rays = deposited.saturating_mul(per);
         // Header + fill list must reach the GPU even when no texel layout changed.
@@ -1044,15 +1053,30 @@ impl MoverCache {
         }
     }
 
-    /// Nearest live texel for `object_id` at object-local `pos`.
+    /// Live texel for `object_id` at object-local `pos`.
     ///
-    /// The CPU reference scans the pool by object id. The GPU path hashes
-    /// `(object_id, local cell)` into the same pool.
+    /// Matches the GPU dense face-grid index when a span is laid out. Falls
+    /// back to nearest-live for a hand-claimed single texel (unit tests).
     #[must_use]
     pub fn lookup_texel(&self, object_id: u32, local_pos: [f32; 3]) -> Option<(u32, &MoverTexel)> {
         if object_id == MOVER_ID_NONE {
             return None;
         }
+        if let Some(slot) = self.find_slot(object_id) {
+            let rec = self.table[usize_from_u32(slot)];
+            if rec.texel_count > 0 && rec.texel_base != u32::MAX {
+                let within = dense_face_index(local_pos, rec.half_extents);
+                if within < rec.texel_count {
+                    let idx = rec.texel_base.saturating_add(within);
+                    if let Some(t) = self.texel(idx) {
+                        if t.object_id == object_id {
+                            return Some((idx, t));
+                        }
+                    }
+                }
+            }
+        }
+        // Hand-claimed single texels (no layout): nearest live by local distance.
         let mut best: Option<(u32, f32)> = None;
         for (i, t) in self.texels.iter().enumerate() {
             if t.object_id != object_id {
@@ -1275,13 +1299,50 @@ fn floor_brick(v: f32, brick: f32) -> i32 {
     crate::cache_probe::floor_i32(v / brick)
 }
 
-/// Matches `LIGHTING_SC_TEXEL` — compose hashes `floor(local / this)`.
+/// Matches `LIGHTING_SC_TEXEL` — dense face grid step.
 const MOVER_SURFACE_TEXEL_M: f32 = 0.125;
 
 fn surface_steps(extent: f32) -> u32 {
     let span = (extent * 2.0) / MOVER_SURFACE_TEXEL_M;
     let n = crate::cache_probe::floor_i32(span);
     u32::try_from(n.max(1)).unwrap_or(1)
+}
+
+/// Dense face-grid linear index (face +X,-X,+Y,-Y,+Z,-Z then u then v).
+fn dense_face_index(local: [f32; 3], half_extents: [f32; 3]) -> u32 {
+    let hx = half_extents[0].abs().max(MOVER_SURFACE_TEXEL_M);
+    let hy = half_extents[1].abs().max(MOVER_SURFACE_TEXEL_M);
+    let hz = half_extents[2].abs().max(MOVER_SURFACE_TEXEL_M);
+    let a = [local[0].abs(), local[1].abs(), local[2].abs()];
+    let (face, u_ext, v_ext, u, v) = if a[0] >= a[1] && a[0] >= a[2] {
+        (u32::from(local[0] < 0.0), hy, hz, local[1], local[2])
+    } else if a[1] >= a[2] {
+        (2 + u32::from(local[1] < 0.0), hx, hz, local[0], local[2])
+    } else {
+        (4 + u32::from(local[2] < 0.0), hx, hy, local[0], local[1])
+    };
+    let u_steps = surface_steps(u_ext);
+    let v_steps = surface_steps(v_ext);
+    let mut off = 0u32;
+    for f in 0..face {
+        let (fu, fv) = match f {
+            0 | 1 => (hy, hz),
+            2 | 3 => (hx, hz),
+            _ => (hx, hy),
+        };
+        off = off.saturating_add(surface_steps(fu).saturating_mul(surface_steps(fv)));
+    }
+    let u_span = (2.0 * u_ext).max(1.0e-6);
+    let v_span = (2.0 * v_ext).max(1.0e-6);
+    let u01 = ((u + u_ext) / u_span).clamp(0.0, 0.9999);
+    let v01 = ((v + v_ext) / v_span).clamp(0.0, 0.9999);
+    let ui = floor_u32(u01 * f32_from_u32(u_steps)).min(u_steps.saturating_sub(1));
+    let vi = floor_u32(v01 * f32_from_u32(v_steps)).min(v_steps.saturating_sub(1));
+    off.saturating_add(ui.saturating_mul(v_steps).saturating_add(vi))
+}
+
+fn floor_u32(v: f32) -> u32 {
+    u32::try_from(crate::cache_probe::floor_i32(v).max(0)).unwrap_or(0)
 }
 
 fn surface_coord(i: u32, steps: u32, extent: f32) -> f32 {
@@ -1303,22 +1364,6 @@ fn f32_from_u32(v: u32) -> f32 {
         n >>= 1;
     }
     acc
-}
-
-fn mover_lighting_hash(mut v: u32) -> u32 {
-    v ^= v >> 16;
-    v = v.wrapping_mul(0x7feb_352d);
-    v ^= v >> 15;
-    v = v.wrapping_mul(0x846c_a68b);
-    v ^= v >> 16;
-    v
-}
-
-fn mover_hash_cell3(cell: [i32; 3], salt: u32) -> u32 {
-    let x = u32::from_le_bytes(cell[0].to_le_bytes());
-    let y = u32::from_le_bytes(cell[1].to_le_bytes());
-    let z = u32::from_le_bytes(cell[2].to_le_bytes());
-    mover_lighting_hash(x ^ mover_lighting_hash(y ^ mover_lighting_hash(z ^ mover_lighting_hash(salt))))
 }
 
 /// Deterministic box-surface point for a leftover hash bucket.
@@ -1350,7 +1395,9 @@ fn box_surface_from_index(i: u32, n: u32, extents: [f32; 3]) -> ([f32; 3], [f32;
 
 impl MoverCache {
     /// Builds fill candidates for every live mover texel. Far movers contribute
-    /// nothing. Priority comes from [`fill_priority`].
+    /// nothing. Priority comes from [`fill_priority`], boosted for underfilled
+    /// texels, with a rotating tie-break so a 256-deposit budget covers the
+    /// whole dense face grid instead of the same low pool indices forever.
     #[must_use]
     pub fn fill_candidates(
         &self,
@@ -1367,15 +1414,22 @@ impl MoverCache {
                 fillable.insert(rec.object_id);
             }
         }
+        let epoch = self.fill_epoch;
         let mut out = Vec::new();
         for (i, t) in self.texels.iter().enumerate() {
             if t.object_id == MOVER_ID_NONE || !fillable.contains(&t.object_id) {
                 continue;
             }
+            // Prefer texels that still need sample sets (warm-up / empty faces).
+            let underfill = 1.0 / (1.0 + t.samples.max(0.0));
+            let idx = u32_from_usize(i);
+            // Rotate among equal underfill so mover B/C and later faces get rays.
+            let spin = idx.wrapping_add(epoch).wrapping_mul(2654435761) >> 16;
+            let spin_f = f32_from_u32(spin & 0xffff) / 65536.0;
             out.push(MoverFillCandidate {
                 object_id: t.object_id,
-                texel_index: u32_from_usize(i),
-                priority: p,
+                texel_index: idx,
+                priority: p * (1.0 + 10.0 * underfill) + spin_f * 0.01,
             });
         }
         out.sort_by(|a, b| {
@@ -1850,6 +1904,154 @@ mod tests {
             Some(5)
         } else {
             None
+        }
+    }
+
+    /// Every AABB face-grid cell must resolve to a texel whose stored cell
+    /// matches — the hash%count first-writer path mapped many cells onto the
+    /// wrong face and painted dark crawling patches on the 4070.
+    #[test]
+    fn box_face_cells_dense_index_to_matching_surface_texels() {
+        let mut cache = MoverCache::new(512);
+        let mut rec = record(1);
+        rec.half_extents = [0.5, 0.5, 0.5];
+        cache.upsert(rec).expect("box");
+        cache
+            .update_tier_and_alloc(1, 2.0, 80.0)
+            .expect("near share");
+        let hx = 0.5f32;
+        let faces: [(usize, f32, usize, usize); 6] = [
+            (0, 1.0, 1, 2),
+            (0, -1.0, 1, 2),
+            (1, 1.0, 0, 2),
+            (1, -1.0, 0, 2),
+            (2, 1.0, 0, 1),
+            (2, -1.0, 0, 1),
+        ];
+        let mut matched = 0u32;
+        let mut missed = 0u32;
+        for &(axis, sign, u_ax, v_ax) in &faces {
+            let u_steps = surface_steps(hx);
+            let v_steps = surface_steps(hx);
+            for ui in 0..u_steps {
+                for vi in 0..v_steps {
+                    let mut local = [0.0f32; 3];
+                    local[axis] = sign * hx;
+                    local[u_ax] = surface_coord(ui, u_steps, hx);
+                    local[v_ax] = surface_coord(vi, v_steps, hx);
+                    // Edges/corners are shared by two or three faces; the first
+                    // face that claimed the cell keeps its normal.
+                    let on_edge = local[u_ax].abs() > hx - MOVER_SURFACE_TEXEL_M * 0.6
+                        || local[v_ax].abs() > hx - MOVER_SURFACE_TEXEL_M * 0.6;
+                    if on_edge {
+                        continue;
+                    }
+                    let want = [
+                        crate::cache_probe::floor_i32(local[0] / MOVER_SURFACE_TEXEL_M),
+                        crate::cache_probe::floor_i32(local[1] / MOVER_SURFACE_TEXEL_M),
+                        crate::cache_probe::floor_i32(local[2] / MOVER_SURFACE_TEXEL_M),
+                    ];
+                    match cache.lookup_texel(1, local) {
+                        Some((_, t)) => {
+                            let got = [
+                                crate::cache_probe::floor_i32(t.local_pos[0] / MOVER_SURFACE_TEXEL_M),
+                                crate::cache_probe::floor_i32(t.local_pos[1] / MOVER_SURFACE_TEXEL_M),
+                                crate::cache_probe::floor_i32(t.local_pos[2] / MOVER_SURFACE_TEXEL_M),
+                            ];
+                            assert_eq!(got, want, "cell {want:?} hit wrong texel cell {got:?}");
+                            let face_n = t.local_n[axis] * sign;
+                            assert!(
+                                face_n > 0.5,
+                                "cell {want:?} hit normal {:?} (wanted axis {axis} sign {sign})",
+                                t.local_n
+                            );
+                            matched = matched.saturating_add(1);
+                        }
+                        None => missed = missed.saturating_add(1),
+                    }
+                }
+            }
+        }
+        assert_eq!(missed, 0, "{missed} interior face cells missed after dense face-grid layout");
+        assert!(matched >= 24, "expected a surface share of lookups, got {matched}");
+    }
+
+    #[test]
+    fn fill_budget_rotates_across_underfilled_texels() {
+        // Three Near movers × 384 need a pool bigger than 512.
+        let mut cache = MoverCache::new(2048);
+        for id in 1..=3u32 {
+            let mut rec = record(id);
+            rec.half_extents = [0.5, 0.5, 0.5];
+            cache.upsert(rec).expect("box");
+            cache
+                .update_tier_and_alloc(id, 2.0, 80.0)
+                .expect("near");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        // 256 deposits/frame × 12 frames covers 3×384 with overlap once ranking
+        // prefers underfill and rotates ties.
+        for _ in 0..12 {
+            let stats = cache.prepare_fill(4096, 1.0, 1.0, false, 2.0);
+            assert!(stats.deposited > 0);
+            let listed: Vec<u32> = cache.fill_list().to_vec();
+            for idx in listed {
+                seen.insert(idx);
+                assert!(cache.deposit(idx, [1.0, 1.0, 1.0], 1.0));
+            }
+        }
+        let mut total = 0u32;
+        for id in 1..=3u32 {
+            let (base, count) = {
+                let r = cache.get(id).expect("live");
+                (r.texel_base, r.texel_count)
+            };
+            total = total.saturating_add(count);
+            let mut hit = 0u32;
+            for i in 0..count {
+                if seen.contains(&base.saturating_add(i)) {
+                    hit = hit.saturating_add(1);
+                }
+            }
+            assert!(
+                hit * 2 >= count,
+                "mover {id}: only {hit}/{count} texels entered the fill list in 12 rounds"
+            );
+        }
+        assert!(
+            u32_from_usize(seen.len()) * 2 >= total,
+            "fill list covered {}/{} texels",
+            seen.len(),
+            total
+        );
+    }
+
+    #[test]
+    fn dense_face_index_roundtrips_layout_positions() {
+        let extents = [0.5f32, 0.5, 0.5];
+        let mut cursor = 0u32;
+        let faces: [(usize, f32, usize, usize); 6] = [
+            (0, 1.0, 1, 2),
+            (0, -1.0, 1, 2),
+            (1, 1.0, 0, 2),
+            (1, -1.0, 0, 2),
+            (2, 1.0, 0, 1),
+            (2, -1.0, 0, 1),
+        ];
+        for &(axis, sign, u_ax, v_ax) in &faces {
+            let u_steps = surface_steps(extents[u_ax]);
+            let v_steps = surface_steps(extents[v_ax]);
+            for ui in 0..u_steps {
+                for vi in 0..v_steps {
+                    let mut local = [0.0f32; 3];
+                    local[axis] = sign * extents[axis];
+                    local[u_ax] = surface_coord(ui, u_steps, extents[u_ax]);
+                    local[v_ax] = surface_coord(vi, v_steps, extents[v_ax]);
+                    let got = dense_face_index(local, extents);
+                    assert_eq!(got, cursor, "layout cursor {cursor} at {local:?} → {got}");
+                    cursor = cursor.saturating_add(1);
+                }
+            }
         }
     }
 

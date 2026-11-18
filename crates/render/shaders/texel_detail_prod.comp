@@ -667,7 +667,7 @@ void prod_slide_note(uint rel, vec3 shown) {
         uint world_hit = lighting_cache_find_sized(hit_pos, n, false, LIGHTING_SH_CELL, hit_pos);
         uint world_fine = lighting_cache_find_sized(hit_pos, n, false, LIGHTING_SC_TEXEL, hit_pos);
         // Pool lookup needs attach_movers still on (prod_head would clear it).
-        uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0));
+        uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0));
         float object_hit = 0.0;
         float object_salt = 0.0;
         if (tex != ~0u) {
@@ -743,7 +743,7 @@ void prod_slide_note(uint rel, vec3 shown) {
                 cache.v[3u * on_slot + 1u] = vec4(0.0);
                 cache.v[3u * on_slot + 2u] = vec4(0.0);
             }
-            uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0));
+            uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0));
             if (tex != ~0u) {
                 uint pat = lighting_mover_pool_off() + tex * 16u;
                 movers_gpu.header[pat + 7u] = floatBitsToUint(PROD_MOVER_WARM_SETS);
@@ -916,7 +916,7 @@ void prod_compose_lattice_run() {
         if (distance(prior.rgb, PROD_BLUE) < PROD_SLIDE_EPS && prior.w > LIGHTING_CACHE_HAS_W) {
             lattice_ok = 1.0;
         }
-        uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0));
+        uint tex = lighting_mover_texel_lookup(PROD_MOVER_OID, vec3(0.0, 1.0, 0.0), vec3(0.0, 1.0, 0.0));
         if (tex != ~0u) {
             uint pat = lighting_mover_pool_off() + tex * 16u;
             movers_gpu.header[pat + 7u] = floatBitsToUint(PROD_MOVER_WARM_SETS);
