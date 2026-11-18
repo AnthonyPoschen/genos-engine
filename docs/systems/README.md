@@ -54,5 +54,6 @@ These are plans. They are not system records. A step edits the matching record w
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.
 - [Lamp layering](lamp-layering-design.md): optional baked GI layer for a static point lamp, and fast-blend settling for the shared live layer ([ADR 0017](../adr/0017-lamp-layering.md), proposed).
 - [Audio design](audio-design.md): one mix in `genos-audio`, device outputs that only write that mix, disk-fed clips, reverb zones, a later mix of propagation paths, and a bit-identical offline hash ([ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md), accepted).
+- [Navigation](navigation.md): tiled navigation meshes, a sparse volume graph, and several planners behind one trait ([ADR 0043](../adr/0043-navigation-planners.md)). Proposed. A* with a funnel is the first planner. There is no crate.
 
 The crate map and the frame loop are in [Architecture](../architecture.md). The words are in `CONTEXT.md`.
