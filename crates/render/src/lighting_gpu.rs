@@ -5309,6 +5309,7 @@ impl Gpu {
                 .filter(|t| !t.lighting_pool.is_null())
                 .map(|t| {
                     t.lighting_ids[slot] = groups.iter().map(|g| g.0).collect();
+                    t.lighting_geom[slot] = groups.iter().map(|g| (g.1, g.2)).collect();
                     t.lighting_pool
                 });
             if let Some(pool) = stamps {
@@ -5541,6 +5542,11 @@ impl Gpu {
                             k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
                         } else if kind == LIGHTING_DENSE_RAYS {
                             k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                        } else if kind == LIGHTING_DENSE_ENTRIES {
+                            // Fill resolve phase. The cache shader reads lamp.x.
+                            // A non-fill cache dispatch leaves the phase at 0
+                            // and does not enter the resolve.
+                            k_pc[8] = gx;
                         }
                     }
                     (self.fns.cmd_push)(

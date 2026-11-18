@@ -4435,6 +4435,7 @@ impl Gpu {
                 .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
         }
         let ids = std::mem::take(&mut times.lighting_ids[slot]);
+        let geom = std::mem::take(&mut times.lighting_geom[slot]);
         let tags = std::mem::take(&mut self.lighting.frame_tags[slot]);
         let shadow = self.lighting.frame_shadow[slot];
         let prefill = self.lighting.frame_prefill[slot];
@@ -4462,6 +4463,7 @@ impl Gpu {
             if got == 0 {
                 if times.print && times.lighting_disp.len() != ids.len() {
                     times.lighting_disp = ids.iter().map(|&p| (p, 0.0)).collect();
+                    times.lighting_shape = geom;
                 }
                 let mut shade_ms = 0.0;
                 let mut pass_id_ms = [0.0f64; 10];
@@ -4618,7 +4620,24 @@ impl Gpu {
                 .lighting_disp
                 .iter()
                 .enumerate()
-                .map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf))
+                .map(|(i, (p, ms))| {
+                    let (gx, gy) = times.lighting_shape.get(i).copied().unwrap_or((0, 0));
+                    let shape = if gy == LIGHTING_DENSE_ENTRIES {
+                        // gx is the resolve phase. The group count is the
+                        // indirect word, one group per 64 traced rays, and
+                        // each thread takes one ray.
+                        format!("phase={gx} groups=indirect local=64 trip=1")
+                    } else if gy == LIGHTING_DENSE_RAYS {
+                        "groups=indirect local=64".to_string()
+                    } else if gy >= 1u32 << 30 {
+                        format!("groups={gx}x1 local=64")
+                    } else if *p == 8 && gy > 1 {
+                        format!("groups={gx}x{gy} local=8x8")
+                    } else {
+                        format!("groups={gx}x{gy} local=64")
+                    };
+                    format!("{i}:p{p}={:.3} {shape}", ms / lf)
+                })
                 .collect();
             eprintln!("LIGHTING_DISPATCH {}", parts.join(" "));
             times.lighting_disp.clear();
@@ -10471,8 +10490,12 @@ struct GpuTimes {
     /// passes, and the per-pass sums over `lighting_frames`.
     lighting_pool: Handle,
     lighting_ids: [Vec<usize>; 2],
+    /// Dispatch width and height beside `lighting_ids`, same slots.
+    lighting_geom: [Vec<(u32, u32)>; 2],
     // GENOS_GPU_DISPATCH: per-dispatch ms (pass id, summed ms) in dispatch order.
     lighting_disp: Vec<(usize, f64)>,
+    /// gx, gy for each `lighting_disp` row. Indirect kinds use gy past 1<<30.
+    lighting_shape: Vec<(u32, u32)>,
     lighting_frames: u32,
     lighting: [f64; 9],
     /// Per-bucket sums, including cache rays and hit light. The shadows slot stays
@@ -10525,6 +10548,7 @@ fn roll_printed_times(times: &mut GpuTimes) {
     let pending_world_rays = times.pending_world_rays;
     let pending_world_relit = times.pending_world_relit;
     let lighting_ids = std::mem::take(&mut times.lighting_ids);
+    let lighting_geom = std::mem::take(&mut times.lighting_geom);
     *times = GpuTimes {
         pool,
         lighting_pool,
@@ -10538,6 +10562,7 @@ fn roll_printed_times(times: &mut GpuTimes) {
         pending_world_rays,
         pending_world_relit,
         lighting_ids,
+        lighting_geom,
         ..GpuTimes::default()
     };
 }
@@ -10580,7 +10605,9 @@ impl Default for GpuTimes {
             placed: false,
             lighting_pool: std::ptr::null_mut(),
             lighting_ids: [Vec::new(), Vec::new()],
+            lighting_geom: [Vec::new(), Vec::new()],
             lighting_disp: Vec::new(),
+            lighting_shape: Vec::new(),
             world_runs: 0,
             world_ms: 0.0,
             world_pass: [0.0; 4],
