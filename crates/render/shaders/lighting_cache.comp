@@ -35,6 +35,13 @@ void lighting_tex_put(uint slot, vec4 v) {
 void main() {
     uint gid = gl_GlobalInvocationID.x;
     if (lighting_ray_fill_on()) {
+        // Phase 0 only. The resolve is several dispatches, and these notes
+        // are once per frame. Occupied cells, not the empty due lists.
+        if (gid == 0u && pc.lamp.x == 0u) {
+            gstats.live = ckeys.key[lighting_fill_header_at() + 7u];
+            lighting_wrc_note_lamps();
+            lighting_ls_note();
+        }
         lighting_fill_resolve(gid);
         return;
     }

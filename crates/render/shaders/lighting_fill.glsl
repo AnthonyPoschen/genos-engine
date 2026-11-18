@@ -1212,6 +1212,18 @@ void lighting_fill_share_pass(uint gid, uint phase) {
     }
 }
 
+// In-tile seeds. Off, or a frozen cache, writes nothing. The host runs one
+// phase per dispatch, so this does not barrier inside the workgroup.
+void lighting_fill_share(uint gid, uint phase) {
+    if (lighting_fill_u(22) != 1u) {
+        return;
+    }
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
+        return;
+    }
+    lighting_fill_share_pass(gid, phase);
+}
+
 // One slot, one writer. Every ray that landed is on the list, then the head
 // folds them with weight n / (rays + n). The hit distance is the stash trace
 // wrote; direct has already overwritten the hit slot with radiance.
@@ -1222,11 +1234,6 @@ void lighting_fill_share_pass(uint gid, uint phase) {
 // passes. A phase past that writes nothing.
 void lighting_fill_resolve(uint gid) {
     uint phase = pc.lamp.x;
-    if (phase == 0u && gid == 0u) {
-        gstats.live = ckeys.key[lighting_fill_header_at() + 7u];
-        lighting_wrc_note_lamps();
-        lighting_ls_note();
-    }
     if (phase >= 3u) {
         if (lighting_fill_u(22) != 1u) {
             return;
@@ -1237,7 +1244,7 @@ void lighting_fill_resolve(uint gid) {
         if (phase > 5u) {
             return;
         }
-        lighting_fill_share_pass(gid, phase - 3u);
+        lighting_fill_share(gid, phase - 3u);
         return;
     }
     uint budget = lighting_fill_traced();

@@ -4628,7 +4628,7 @@ impl Gpu {
                         // each thread takes one ray.
                         format!("phase={gx} groups=indirect local=64 trip=1")
                     } else if gy == LIGHTING_DENSE_RAYS {
-                        format!("groups=indirect local=64")
+                        "groups=indirect local=64".to_string()
                     } else if gy >= 1u32 << 30 {
                         format!("groups={gx}x1 local=64")
                     } else if *p == 8 && gy > 1 {
