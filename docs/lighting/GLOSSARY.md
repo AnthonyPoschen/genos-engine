@@ -453,6 +453,9 @@ Role: SCHED · Literature: hysteresis band · More detail: [../systems/lighting/
 **Off-screen floor**: `fill_offscreen_floor` (0.25) is the share of `fill_budget` the screen cannot take. That share ranks resident clipmap cells by closeness times remaining error. `fill_far_share` of the budget is reserved for cells at `fill_cell_max`. Rays the resident set does not take discover surfaces.
 Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
 
+**Trickle floor**: a reserved share of `fill_budget` drawn one ray at a time by every cell in range, including a cell whose value has reached 0. Proposed in the one-ray note. The device does not do this. On the device, `fill_offscreen_floor` is the off-screen floor.
+Role: SCHED · Literature: a residual sample inside a fixed budget · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
+
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
 Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
 
