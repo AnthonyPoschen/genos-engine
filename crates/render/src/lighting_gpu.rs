@@ -1961,17 +1961,6 @@ impl Gpu {
         let (tile_off, pick_off, _) = fill_list_end(FILL_LOCK_WORDS);
         let header_at = base.saturating_add(FILL_LOCK_WORDS);
         let header = self.read_key_words(header_at, 8)?;
-        let hist_at = header_at.saturating_add(8).saturating_add(FILL_OFF_CAP);
-        if let Ok(hist) = self.read_key_words(hist_at, 64) {
-            let line = hist
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| **n > 0)
-                .map(|(i, n)| format!("{i}:{n}"))
-                .collect::<Vec<_>>()
-                .join(" ");
-            eprintln!("fillhist {line}");
-        }
         let floor = header.first().copied().unwrap_or(0);
         let burst_word = header.get(1).copied().unwrap_or(0);
         let candidates = header.get(4).copied().unwrap_or(0);
