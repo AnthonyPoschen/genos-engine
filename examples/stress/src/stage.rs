@@ -1,11 +1,35 @@
-#![expect(clippy::as_conversions, reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md")]
-#![expect(clippy::cast_lossless, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_possible_truncation, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::cast_precision_loss, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![allow(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![allow(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::single_match_else, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::struct_excessive_bools, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
+#![expect(
+    clippy::as_conversions,
+    reason = "TODO(lint-2026-10-14): pre-existing cast. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_lossless,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_possible_truncation,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::cast_precision_loss,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![allow(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![allow(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::single_match_else,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::struct_excessive_bools,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
 
 //! The running stress scene: the building at one scale, the lamp mix, the clocks, and
 //! the [`World`] the renderer draws.
@@ -209,27 +233,27 @@ impl Stage {
         let hours = ((self.day.rem_euclid(1.0) as f64) * 24.0 + 6.0) % 24.0;
         self.world.scene.lighting.time_of_day = hours as f32;
         if let Some(room) = &self.room {
-            self.world.scene.lights = room.lights.clone();
+            self.world.scene.set_lights(room.lights_cloned());
             self.world.scene.sky = room.sky.clone();
             if self.lamp_stop {
                 let shift = lamp_stop_shift(self.lamp_stop_frame);
-                if let Some(lamp) = self
-                    .world
-                    .scene
-                    .lights
-                    .iter_mut()
-                    .find(|lamp| lamp.direction == genos_scene::Vec3::ZERO)
-                {
-                    lamp.position.x += shift;
+                let count = self.world.scene.light_len();
+                for index in 0..count {
+                    let lamp = self.world.scene.light_mut(index);
+                    if lamp.direction == genos_scene::Vec3::ZERO {
+                        lamp.position.x += shift;
+                        break;
+                    }
                 }
             }
             return;
         }
-        self.building
-            .place_movers(&mut self.world.scene.solids, self.box_clock);
+        let mut solids = self.world.scene.solids_cloned();
+        self.building.place_movers(&mut solids, self.box_clock);
+        self.world.scene.set_solids(solids);
         let mut lights = self.building.lamps(self.mix, self.lamp_clock, self.power);
         lights.extend(building::sun(self.day));
-        self.world.scene.lights = lights;
+        self.world.scene.set_lights(lights);
         self.world.scene.sky = if self.sky_on {
             building::sky(self.day)
         } else {
@@ -243,7 +267,7 @@ impl Stage {
     }
 
     pub fn occluders(&self) -> usize {
-        self.world.scene.walls.len() + self.world.scene.solids.len()
+        self.world.scene.wall_len() + self.world.scene.solid_len()
     }
 }
 

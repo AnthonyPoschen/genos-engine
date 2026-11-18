@@ -40,27 +40,30 @@ fn open() -> (u32, u32, Lifecycle<Renderer>) {
 }
 
 fn world(particles: ParticleSettings) -> World {
-    World::from_scene(Scene {
-        floor: Floor {
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
             position: Vec3::new(0.0, 0.0, 0.0),
             half_x: 4.0,
             half_z: 4.0,
             color: [0.2, 0.2, 0.2],
         },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::preset(LightingPreset::Fallback),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
-        particles,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = None;
+        __scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
+        __scene.debug = genos_scene::DebugSettings::default();
+        __scene.fps_counter = genos_scene::FpsCounterSettings::default();
+        __scene.event_loop = genos_scene::EventLoopSettings::default();
+        __scene.reflections = genos_scene::ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = genos_scene::FogSettings::default();
+        __scene.menu = genos_scene::MenuSettings::default();
+        __scene.particles = particles;
+        __scene
     })
 }
 
@@ -796,7 +799,7 @@ fn the_depth_image_keeps_a_particle_in_front_and_retires_one_behind() {
     // Straight down. This point sits between the eye and the floor.
     settings.origin = [0.0, 0.8, 2.0];
     let mut drawn = world(settings.clone());
-    drawn.scene.walls.push(Wall {
+    drawn.scene.push_wall(Wall {
         position: Vec3::new(0.0, 0.0, 1.2),
         half_x: 2.0,
         half_z: 0.2,

@@ -455,6 +455,26 @@ impl World {
         })
     }
 
+    /// Exclusive access that records a tick immediately.
+    ///
+    /// [`Self::get_mut`] waits until [`DerefMut`] runs. This borrows the cell
+    /// directly, so the tick is stored before the caller writes. A draw-list
+    /// index uses it. A stale handle increments [`Stats::stale_rejects`].
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Stale`] when the handle is not live.
+    /// [`StoreError::Missing`] when the object has no `T`.
+    pub fn borrow_mut<T: Component>(&mut self, handle: SceneHandle) -> Result<&mut T, StoreError> {
+        let (archetype, row) = self.place(handle)?;
+        let tick = self.take_tick();
+        let typed = self.column_mut::<T>(archetype).ok_or(StoreError::Missing)?;
+        if let Some(stored) = typed.ticks.get_mut(row) {
+            *stored = tick;
+        }
+        typed.values.get_mut(row).ok_or(StoreError::Missing)
+    }
+
     /// The tick stored on `T`, if the object has that component.
     #[must_use]
     pub fn tick_of<T: Component>(&self, handle: SceneHandle) -> Option<u32> {

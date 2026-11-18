@@ -1,102 +1,191 @@
-//! Placed objects as archetype rows.
+//! Placed objects are rows in the scene store.
 //!
-//! The draw lists on [`Scene`] stay. [`publish`] copies the floor, each wall,
-//! each solid, and each light into a [`World`] in that order. A second publish
-//! of the same lists returns the same handles. A menu or lighting setting is
-//! not a row, so editing one emits no component delta.
+//! [`crate::Scene`] owns the walls, solids, and lights. [`publish`] copies
+//! that geometry into a new store, floor then walls then solids then lights,
+//! so two publishes of the same lists return the same handles. A menu or
+//! lighting setting is not a row.
 //!
-//! `FixedPart::Wall(usize)` still indexes the draw list. ADR 0032 keeps that
-//! index until a later change. This module is the store those indices do not
-//! own yet.
+//! `FixedPart` ordinals are positions in that handle order. The renderer
+//! rebuilds them from the lists. The ordinal is not a second copy of the row.
 
 use genos_ecs::{
     push_f32, push_u32, read_f32, read_u32, Component, DecodeError, SceneHandle, StoreError, World,
 };
+use genos_math::Vec3;
 
-use crate::types::{Light, Scene, Solid, Wall};
+use crate::types::{Floor, Light, Scene, Shape, Solid, Wall};
 
-const KIND_FLOOR: u32 = 1;
-const KIND_WALL: u32 = 2;
-const KIND_SOLID: u32 = 3;
-const KIND_LIGHT: u32 = 4;
-
-/// One placed object in the store: a kind, its place in that kind's draw list,
-/// and the position the draw list had at publish.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Placed {
-    /// [`KIND_FLOOR`], [`KIND_WALL`], [`KIND_SOLID`], or [`KIND_LIGHT`].
-    pub kind: u32,
-    /// Index in that kind's draw list. The floor is 0.
-    pub ordinal: u32,
-    /// World X, meters.
-    pub x: f32,
-    /// World Y, meters.
-    pub y: f32,
-    /// World Z, meters.
-    pub z: f32,
-}
-
-impl Component for Placed {
+impl Component for Floor {
     fn component_name() -> &'static str {
-        "placed"
+        "floor"
     }
 
     fn encode(&self, out: &mut Vec<u8>) {
-        push_u32(out, self.kind);
-        push_u32(out, self.ordinal);
-        push_f32(out, self.x);
-        push_f32(out, self.y);
-        push_f32(out, self.z);
+        push_vec3(out, self.position);
+        push_f32(out, self.half_x);
+        push_f32(out, self.half_z);
+        push_color(out, self.color);
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
         let mut input = bytes;
-        let kind = read_u32(&mut input)?;
-        let ordinal = read_u32(&mut input)?;
-        let x = read_f32(&mut input)?;
-        let y = read_f32(&mut input)?;
-        let z = read_f32(&mut input)?;
-        if !input.is_empty() {
-            return Err(DecodeError::Trailing);
-        }
-        Ok(Self {
-            kind,
-            ordinal,
-            x,
-            y,
-            z,
-        })
+        let position = read_vec3(&mut input)?;
+        let half_x = read_f32(&mut input)?;
+        let half_z = read_f32(&mut input)?;
+        let color = read_color(&mut input)?;
+        finish(
+            input,
+            Self {
+                position,
+                half_x,
+                half_z,
+                color,
+            },
+        )
     }
 }
 
-/// Copy the draw lists into a new store. Handles follow spawn order: floor,
-/// walls, solids, lights. The same lists produce the same handles.
+impl Component for Wall {
+    fn component_name() -> &'static str {
+        "wall"
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        push_vec3(out, self.position);
+        push_f32(out, self.half_x);
+        push_f32(out, self.half_z);
+        push_f32(out, self.height);
+        push_f32(out, self.base);
+        push_color(out, self.color);
+        push_f32(out, self.absorption);
+        push_f32(out, self.reflectance);
+        push_f32(out, self.color_mix);
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut input = bytes;
+        let position = read_vec3(&mut input)?;
+        let half_x = read_f32(&mut input)?;
+        let half_z = read_f32(&mut input)?;
+        let height = read_f32(&mut input)?;
+        let base = read_f32(&mut input)?;
+        let color = read_color(&mut input)?;
+        let absorption = read_f32(&mut input)?;
+        let reflectance = read_f32(&mut input)?;
+        let color_mix = read_f32(&mut input)?;
+        finish(
+            input,
+            Self {
+                position,
+                half_x,
+                half_z,
+                height,
+                base,
+                color,
+                absorption,
+                reflectance,
+                color_mix,
+            },
+        )
+    }
+}
+
+impl Component for Solid {
+    fn component_name() -> &'static str {
+        "solid"
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        push_u32(out, shape_code(self.shape));
+        push_vec3(out, self.position);
+        push_f32(out, self.size);
+        push_f32(out, self.height);
+        push_f32(out, self.yaw);
+        push_color(out, self.color);
+        push_f32(out, self.absorption);
+        push_f32(out, self.reflectance);
+        push_f32(out, self.color_mix);
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut input = bytes;
+        let shape = read_shape(&mut input)?;
+        let position = read_vec3(&mut input)?;
+        let size = read_f32(&mut input)?;
+        let height = read_f32(&mut input)?;
+        let yaw = read_f32(&mut input)?;
+        let color = read_color(&mut input)?;
+        let absorption = read_f32(&mut input)?;
+        let reflectance = read_f32(&mut input)?;
+        let color_mix = read_f32(&mut input)?;
+        finish(
+            input,
+            Self {
+                shape,
+                position,
+                size,
+                height,
+                yaw,
+                color,
+                absorption,
+                reflectance,
+                color_mix,
+            },
+        )
+    }
+}
+
+impl Component for Light {
+    fn component_name() -> &'static str {
+        "light"
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        push_vec3(out, self.position);
+        push_color(out, self.color);
+        push_vec3(out, self.direction);
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut input = bytes;
+        let position = read_vec3(&mut input)?;
+        let color = read_color(&mut input)?;
+        let direction = read_vec3(&mut input)?;
+        finish(
+            input,
+            Self {
+                position,
+                color,
+                direction,
+            },
+        )
+    }
+}
+
+/// Copy the draw lists into a new store.
+///
+/// Handles follow spawn order: floor, walls, solids, lights. The same lists
+/// produce the same handles.
 ///
 /// # Errors
 ///
-/// The store cannot take another object, or a list is longer than `u32::MAX`.
+/// The store cannot take another object.
 pub fn publish(scene: &Scene) -> Result<World, StoreError> {
     let mut world = World::new();
-    world.spawn_with(Placed {
-        kind: KIND_FLOOR,
-        ordinal: 0,
-        x: scene.floor.position.x,
-        y: scene.floor.position.y,
-        z: scene.floor.position.z,
-    })?;
-    for (ordinal, wall) in scene.walls.iter().enumerate() {
-        world.spawn_with(wall_row(ordinal, wall)?)?;
+    world.spawn_with(scene.floor.clone())?;
+    for wall in scene.walls() {
+        world.spawn_with(wall.clone())?;
     }
-    for (ordinal, solid) in scene.solids.iter().enumerate() {
-        world.spawn_with(solid_row(ordinal, solid)?)?;
+    for solid in scene.solids() {
+        world.spawn_with(solid.clone())?;
     }
-    for (ordinal, light) in scene.lights.iter().enumerate() {
-        world.spawn_with(light_row(ordinal, light)?)?;
+    for light in scene.lights() {
+        world.spawn_with(light.clone())?;
     }
     Ok(world)
 }
 
-/// A scene and the store published from its draw lists.
+/// A scene and a store published from its draw lists.
 pub struct Published {
     /// The scene the store was copied from.
     pub scene: Scene,
@@ -132,15 +221,14 @@ impl Published {
 
 /// Write a new position on the store row.
 ///
-/// This is the store copy only. `scene.walls`, `scene.solids`, and
-/// `scene.lights` stay as they were at [`publish`]. An unchanged position
-/// does not write, so it emits no delta. A stale handle increments
-/// [`genos_ecs::Stats::stale_rejects`] and writes nothing.
+/// This is the published copy. The scene the copy was made from stays as it
+/// was. An unchanged position does not write, so it emits no delta. A stale
+/// handle increments [`genos_ecs::Stats::stale_rejects`] and writes nothing.
 ///
 /// # Errors
 ///
 /// [`StoreError::Stale`] when `handle` is not live. [`StoreError::Missing`]
-/// when the row has no [`Placed`] component.
+/// when the row is not a floor, wall, solid, or light.
 pub fn move_placed(
     world: &mut World,
     handle: SceneHandle,
@@ -148,59 +236,131 @@ pub fn move_placed(
     y: f32,
     z: f32,
 ) -> Result<(), StoreError> {
-    let current = match world.get::<Placed>(handle) {
-        Some(row) => row.clone(),
-        None => {
-            return match world.get_mut::<Placed>(handle) {
-                Err(err) => Err(err),
-                Ok(_row) => Err(StoreError::Missing),
-            };
-        }
-    };
-    if same_bits(current.x, x) && same_bits(current.y, y) && same_bits(current.z, z) {
-        return Ok(());
+    if try_move::<Floor>(world, handle, x, y, z)?
+        || try_move::<Wall>(world, handle, x, y, z)?
+        || try_move::<Solid>(world, handle, x, y, z)?
+        || try_move::<Light>(world, handle, x, y, z)?
+    {
+        Ok(())
+    } else {
+        Err(StoreError::Missing)
     }
-    let mut next = current;
-    next.x = x;
-    next.y = y;
-    next.z = z;
-    world.insert(handle, next)
 }
 
-fn same_bits(left: f32, right: f32) -> bool {
-    left.to_bits() == right.to_bits()
+fn try_move<T>(
+    world: &mut World,
+    handle: SceneHandle,
+    x: f32,
+    y: f32,
+    z: f32,
+) -> Result<bool, StoreError>
+where
+    T: Component + Positioned,
+{
+    match world.get_mut::<T>(handle) {
+        Err(StoreError::Missing) => Ok(false),
+        Err(err) => Err(err),
+        Ok(mut value) => {
+            let next = Vec3::new(x, y, z);
+            if same_vec(value.position(), next) {
+                return Ok(true);
+            }
+            value.set_position(next);
+            Ok(true)
+        }
+    }
 }
 
-fn wall_row(ordinal: usize, wall: &Wall) -> Result<Placed, StoreError> {
-    Ok(Placed {
-        kind: KIND_WALL,
-        ordinal: fit(ordinal)?,
-        x: wall.position.x,
-        y: wall.position.y,
-        z: wall.position.z,
-    })
+trait Positioned {
+    fn position(&self) -> Vec3;
+    fn set_position(&mut self, position: Vec3);
 }
 
-fn solid_row(ordinal: usize, solid: &Solid) -> Result<Placed, StoreError> {
-    Ok(Placed {
-        kind: KIND_SOLID,
-        ordinal: fit(ordinal)?,
-        x: solid.position.x,
-        y: solid.position.y,
-        z: solid.position.z,
-    })
+impl Positioned for Floor {
+    fn position(&self) -> Vec3 {
+        self.position
+    }
+    fn set_position(&mut self, position: Vec3) {
+        self.position = position;
+    }
 }
 
-fn light_row(ordinal: usize, light: &Light) -> Result<Placed, StoreError> {
-    Ok(Placed {
-        kind: KIND_LIGHT,
-        ordinal: fit(ordinal)?,
-        x: light.position.x,
-        y: light.position.y,
-        z: light.position.z,
-    })
+impl Positioned for Wall {
+    fn position(&self) -> Vec3 {
+        self.position
+    }
+    fn set_position(&mut self, position: Vec3) {
+        self.position = position;
+    }
 }
 
-fn fit(ordinal: usize) -> Result<u32, StoreError> {
-    u32::try_from(ordinal).map_err(|_| StoreError::Full)
+impl Positioned for Solid {
+    fn position(&self) -> Vec3 {
+        self.position
+    }
+    fn set_position(&mut self, position: Vec3) {
+        self.position = position;
+    }
+}
+
+impl Positioned for Light {
+    fn position(&self) -> Vec3 {
+        self.position
+    }
+    fn set_position(&mut self, position: Vec3) {
+        self.position = position;
+    }
+}
+
+fn same_vec(left: Vec3, right: Vec3) -> bool {
+    left.x.to_bits() == right.x.to_bits()
+        && left.y.to_bits() == right.y.to_bits()
+        && left.z.to_bits() == right.z.to_bits()
+}
+
+fn push_vec3(out: &mut Vec<u8>, value: Vec3) {
+    push_f32(out, value.x);
+    push_f32(out, value.y);
+    push_f32(out, value.z);
+}
+
+fn push_color(out: &mut Vec<u8>, color: [f32; 3]) {
+    push_f32(out, color[0]);
+    push_f32(out, color[1]);
+    push_f32(out, color[2]);
+}
+
+fn read_vec3(input: &mut &[u8]) -> Result<Vec3, DecodeError> {
+    Ok(Vec3::new(
+        read_f32(input)?,
+        read_f32(input)?,
+        read_f32(input)?,
+    ))
+}
+
+fn read_color(input: &mut &[u8]) -> Result<[f32; 3], DecodeError> {
+    Ok([read_f32(input)?, read_f32(input)?, read_f32(input)?])
+}
+
+fn shape_code(shape: Shape) -> u32 {
+    match shape {
+        Shape::Square => 1,
+        Shape::Circle => 2,
+    }
+}
+
+fn read_shape(input: &mut &[u8]) -> Result<Shape, DecodeError> {
+    match read_u32(input)? {
+        1 => Ok(Shape::Square),
+        2 => Ok(Shape::Circle),
+        _ => Err(DecodeError::Truncated),
+    }
+}
+
+fn finish<T>(input: &[u8], value: T) -> Result<T, DecodeError> {
+    if input.is_empty() {
+        Ok(value)
+    } else {
+        Err(DecodeError::Trailing)
+    }
 }

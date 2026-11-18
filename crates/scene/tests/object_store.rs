@@ -20,13 +20,9 @@ light(0, 2, 0, 1, 1, 1);
 
 fn first_solid(world: &genos_ecs::World) -> genos_ecs::SceneHandle {
     world
-        .handles_with::<genos_scene::Placed>()
+        .handles_with::<genos_scene::Solid>()
         .into_iter()
-        .find(|handle| {
-            world
-                .get::<genos_scene::Placed>(*handle)
-                .is_some_and(|row| row.kind == 3)
-        })
+        .next()
         .expect("solid")
 }
 
@@ -34,8 +30,16 @@ fn first_solid(world: &genos_ecs::World) -> genos_ecs::SceneHandle {
 fn publish_repeats_the_same_handles() {
     let first = publish(&load_str(ROOM).expect("script")).expect("publish");
     let second = publish(&load_str(ROOM).expect("script")).expect("publish");
-    let left = first.handles_with::<genos_scene::Placed>();
-    let right = second.handles_with::<genos_scene::Placed>();
+    let mut left = first.handles_with::<genos_scene::Floor>();
+    left.extend(first.handles_with::<genos_scene::Wall>());
+    left.extend(first.handles_with::<genos_scene::Solid>());
+    left.extend(first.handles_with::<genos_scene::Light>());
+    left.sort_by_key(|handle| handle.index());
+    let mut right = second.handles_with::<genos_scene::Floor>();
+    right.extend(second.handles_with::<genos_scene::Wall>());
+    right.extend(second.handles_with::<genos_scene::Solid>());
+    right.extend(second.handles_with::<genos_scene::Light>());
+    right.sort_by_key(|handle| handle.index());
     assert_eq!(left, right);
     assert_eq!(left.len(), 7);
 }
@@ -49,7 +53,7 @@ fn moving_one_placed_solid_emits_one_delta() {
     move_placed(&mut world, solid, 3.0, 0.0, 1.0).expect("move");
     let deltas = world.changes_since(cursor);
     assert_eq!(deltas.len(), 1);
-    assert_eq!(deltas[0].component, "placed");
+    assert_eq!(deltas[0].component, "solid");
     assert_eq!(deltas[0].handle, solid);
     assert_eq!(world.changes_since(world.clock()).len(), 0);
 }
@@ -57,26 +61,31 @@ fn moving_one_placed_solid_emits_one_delta() {
 #[test]
 fn an_unchanged_move_emits_nothing_and_the_draw_list_stays() {
     let scene = load_str(ROOM).expect("script");
-    let solids = scene.solids.clone();
+    let solids = scene.solids_cloned();
     let mut world = publish(&scene).expect("publish");
     let solid = first_solid(&world);
-    let row = world
-        .get::<genos_scene::Placed>(solid)
-        .expect("row")
-        .clone();
+    let row = world.get::<genos_scene::Solid>(solid).expect("row").clone();
     let cursor = world.clock();
-    move_placed(&mut world, solid, row.x, row.y, row.z).expect("same");
+    move_placed(
+        &mut world,
+        solid,
+        row.position.x,
+        row.position.y,
+        row.position.z,
+    )
+    .expect("same");
     assert_eq!(world.changes_since(cursor).len(), 0);
     move_placed(&mut world, solid, 3.0, 0.0, 1.0).expect("move");
     assert_eq!(
         world
-            .get::<genos_scene::Placed>(solid)
+            .get::<genos_scene::Solid>(solid)
             .expect("row")
+            .position
             .x
             .to_bits(),
         3.0_f32.to_bits()
     );
-    assert_eq!(scene.solids, solids);
+    assert_eq!(scene.solids_cloned(), solids);
 }
 
 #[test]
@@ -94,7 +103,7 @@ fn a_stale_move_is_counted_and_writes_nothing() {
     let scene = load_str(ROOM).expect("script");
     let mut world = publish(&scene).expect("publish");
     let handle = world
-        .handles_with::<genos_scene::Placed>()
+        .handles_with::<genos_scene::Floor>()
         .first()
         .copied()
         .expect("floor");
@@ -103,5 +112,5 @@ fn a_stale_move_is_counted_and_writes_nothing() {
     let err = move_placed(&mut world, handle, 0.0, 0.0, 0.0);
     assert_eq!(err, Err(StoreError::Stale));
     assert_eq!(world.stats().stale_rejects, before + 1);
-    assert!(world.get::<genos_scene::Placed>(handle).is_none());
+    assert!(world.get::<genos_scene::Floor>(handle).is_none());
 }

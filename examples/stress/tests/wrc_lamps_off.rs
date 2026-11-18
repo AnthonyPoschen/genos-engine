@@ -279,8 +279,9 @@ fn lamps_double_power_settles() {
 #[test]
 fn lamps_moved_away_drain_without_a_reset() {
     lamps_off_run("moved", |stage| {
-        for light in &mut stage.world.scene.lights {
-            light.position.y -= 1000.0;
+        let count = stage.world.scene.light_len();
+        for index in 0..count {
+            stage.world.scene.light_mut(index).position.y -= 1000.0;
         }
     });
 }

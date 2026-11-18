@@ -1,5 +1,11 @@
-#![expect(clippy::match_same_arms, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![expect(
+    clippy::match_same_arms,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Fixed cameras for the reference scenes. Coordinates match the stress building.
 
@@ -119,7 +125,7 @@ fn aim(eye: [f32; 3], at: [f32; 3]) -> (f32, f32) {
 /// those knobs. Live capture uses them only when the candidate asks for it.
 pub fn scene_and_camera(shot: &Shot, full_effort: bool) -> (Scene, Camera) {
     let building = Building::new(1, 1, 1);
-    let mut solids = building.scene.solids.clone();
+    let mut solids = building.scene.solids_cloned();
     building.place_movers(&mut solids, shot.box_time);
     let mix = LightMix {
         count: shot.lights,
@@ -129,8 +135,8 @@ pub fn scene_and_camera(shot: &Shot, full_effort: bool) -> (Scene, Camera) {
     let mut lights = building.lamps(mix, shot.lamp_time, 1.0);
     lights.extend(building::sun(shot.day));
     let mut scene = building.scene;
-    scene.solids = solids;
-    scene.lights = lights;
+    scene.set_solids(solids);
+    scene.set_lights(lights);
     scene.sky = building::sky(shot.day);
     if full_effort {
         scene.lighting.apply_full_effort();
