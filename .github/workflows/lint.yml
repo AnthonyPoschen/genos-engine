@@ -177,7 +177,8 @@ jobs:
 
   gpu-integrity:
     runs-on: ${{ vars.GE_RUNNER == 'house' && fromJSON('["self-hosted","house","genos-engine"]') || 'ubuntu-latest' }}
-    timeout-minutes: 60
+    # Job budget; the integrity step has its own tighter timeout below.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -185,6 +186,9 @@ jobs:
         run: |
           bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev vulkan-validationlayers pkg-config glslc glslang-tools spirv-tools build-essential python3
       - name: instance stride, geometry coverage (poison), vk validation
+        # Caps (LP_NUM_THREADS=2, CARGO_BUILD_JOBS=2, --release) live in
+        # scripts/ci-gpu-integrity.sh so a 16 GiB house pod is not OOMKilled.
+        timeout-minutes: 40
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"
           mkdir -p "$runtime"
