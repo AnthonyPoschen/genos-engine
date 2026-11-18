@@ -6619,24 +6619,32 @@ vec4 lighting_svgf_target(uint slot) {
 }
 float lighting_sc_lambda(uint slot);
 const uint LIGHTING_SC_GRAD_AT = 11u * LIGHTING_CACHE_SLOTS;
+// A shown weight at or above this has a mean the agreement test can read.
+const float LIGHTING_HISTORY_SHOWN = 0.5;
+// Variance below this is treated as the noise floor, and the same floor
+// keeps a zero mean from dividing the relative step.
+const float LIGHTING_HISTORY_NOISE = 1.0e-4;
+// A sample inside this many standard deviations agrees with the mean.
+const float LIGHTING_HISTORY_SIGMA = 2.0;
+// Agreement lowers the value by this fraction of the full range.
+const float LIGHTING_HISTORY_DROP = 1.0 / 3.0;
 // History weight is one minus this value. A sample inside the stored noise
 // lowers the value by a third. A sample outside it raises the value by the
 // relative step. A cell with no mean yet stays at 1.
 float lighting_history_value(uint slot, vec3 old_rgb, vec3 sample_rgb) {
-    const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
     vec4 shown = cache.v[3u * slot + 2u];
     float value = 1.0;
-    if (shown.w >= 0.5) {
+    if (shown.w >= LIGHTING_HISTORY_SHOWN) {
         value = clamp(abs(cache.v[LIGHTING_SC_GRAD_AT + slot].x), 0.0, 1.0);
-        float mean_l = max(dot(max(old_rgb, vec3(0.0)), lw), 0.0);
-        float sample_l = max(dot(max(sample_rgb, vec3(0.0)), lw), 0.0);
+        float mean_l = max(dot(max(old_rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
+        float sample_l = max(dot(max(sample_rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
         float variance = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot].w, 0.0);
-        float noise = max(sqrt(variance), 1.0e-4);
-        if (abs(sample_l - mean_l) > 2.0 * noise) {
-            float denom = max(max(abs(sample_l), abs(mean_l)), 1.0e-4);
+        float noise = max(sqrt(variance), LIGHTING_HISTORY_NOISE);
+        if (abs(sample_l - mean_l) > LIGHTING_HISTORY_SIGMA * noise) {
+            float denom = max(max(abs(sample_l), abs(mean_l)), LIGHTING_HISTORY_NOISE);
             value = min(1.0, value + abs(sample_l - mean_l) / denom);
         } else {
-            value = max(0.0, value - 1.0 / 3.0);
+            value = max(0.0, value - LIGHTING_HISTORY_DROP);
         }
     }
     vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
