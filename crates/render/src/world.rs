@@ -15,7 +15,7 @@
 //! A shader is either a mesh-space grid, optionally displaced by a height map,
 //! or a screen-space pass.
 
-use genos_scene::{Scene, Shape, Solid};
+use genos_scene::{Scene, Shape, Solid, Vec3};
 
 /// Axis-aligned box in world space. Y is up.
 #[derive(Clone, Copy, Debug)]
@@ -221,33 +221,75 @@ impl Object {
 /// solid covers its turned corners.
 pub fn fixed_bounds(scene: &Scene, part: &FixedPart) -> Option<Bounds> {
     match part {
-        FixedPart::Floor => Some(Bounds {
-            center: [scene.floor.position.x, 0.0, scene.floor.position.z],
-            half: [scene.floor.half_x, 0.5, scene.floor.half_z],
-        }),
-        FixedPart::Ceiling => scene.ceiling.as_ref().map(|ceiling| Bounds {
-            center: [
-                scene.floor.position.x,
-                ceiling.height,
-                scene.floor.position.z,
-            ],
-            half: [scene.floor.half_x, 0.05, scene.floor.half_z],
-        }),
-        FixedPart::Wall(index) => scene.wall_at(*index).map(|wall| Bounds {
-            center: [
-                wall.position.x,
-                wall.base + wall.height * 0.5,
-                wall.position.z,
-            ],
-            half: [wall.half_x, wall.height * 0.5, wall.half_z],
-        }),
-        FixedPart::Solid(index) => scene.solid_at(*index).map(|solid| {
-            let reach = solid_reach(solid);
-            Bounds {
-                center: [solid.position.x, solid.height * 0.5, solid.position.z],
+        FixedPart::Floor => {
+            let half_x = scene.floor.half_x;
+            let half_z = scene.floor.half_z;
+            let place = scene.floor_translation();
+            Some(Bounds {
+                center: [place.x, place.y, place.z],
+                half: [half_x, 0.5, half_z],
+            })
+        }
+        FixedPart::Ceiling => {
+            let half_x = scene.floor.half_x;
+            let half_z = scene.floor.half_z;
+            let height = scene.ceiling.as_ref()?.height;
+            let place = scene.floor_translation();
+            Some(Bounds {
+                center: [place.x, height, place.z],
+                half: [half_x, 0.05, half_z],
+            })
+        }
+        FixedPart::Wall(index) => {
+            let wall = scene.wall_at(*index).cloned()?;
+            let place = scene.wall_point(
+                *index,
+                Vec3::new(
+                    wall.position.x,
+                    wall.position.y + wall.base + wall.height * 0.5,
+                    wall.position.z,
+                ),
+            );
+            let yaw = scene.wall_yaw(*index);
+            let (half_x, half_z) = if yaw == 0.0 {
+                (wall.half_x, wall.half_z)
+            } else {
+                let (sin, cos) = yaw.sin_cos();
+                (
+                    wall.half_x * cos.abs() + wall.half_z * sin.abs(),
+                    wall.half_x * sin.abs() + wall.half_z * cos.abs(),
+                )
+            };
+            Some(Bounds {
+                center: [place.x, place.y, place.z],
+                half: [half_x, wall.height * 0.5, half_z],
+            })
+        }
+        FixedPart::Solid(index) => {
+            let solid = scene.solid_at(*index).cloned()?;
+            let place = scene.solid_point(
+                *index,
+                Vec3::new(
+                    solid.position.x,
+                    solid.position.y + solid.height * 0.5,
+                    solid.position.z,
+                ),
+            );
+            let yaw = scene.solid_yaw(*index);
+            let reach = if yaw.to_bits() == solid.yaw.to_bits() {
+                solid_reach(&solid)
+            } else {
+                let half = solid.size * 0.5;
+                match solid.shape {
+                    Shape::Circle => half,
+                    Shape::Square => half * (yaw.cos().abs() + yaw.sin().abs()),
+                }
+            };
+            Some(Bounds {
+                center: [place.x, place.y, place.z],
                 half: [reach, solid.height * 0.5, reach],
-            }
-        }),
+            })
+        }
     }
 }
 

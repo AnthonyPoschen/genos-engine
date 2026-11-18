@@ -39,6 +39,8 @@ impl Scene {
             wall_order: Vec::new(),
             solid_order: Vec::new(),
             light_order: Vec::new(),
+            cycle_rejects: 0,
+            poses: crate::types::PoseCache::new(),
             ceiling: None,
             sky: None,
             lighting: LightingSettings::default(),
@@ -278,6 +280,12 @@ impl Scene {
         self.solid_order.get(index).copied()
     }
 
+    /// Draw-list index of a solid handle.
+    #[must_use]
+    pub fn solid_index(&self, handle: SceneHandle) -> Option<usize> {
+        self.solid_order.iter().position(|item| *item == handle)
+    }
+
     #[must_use]
     pub fn light_handle(&self, index: usize) -> Option<SceneHandle> {
         self.light_order.get(index).copied()
@@ -338,19 +346,22 @@ impl Scene {
     }
 
     pub fn clear_walls(&mut self) {
-        for handle in self.wall_order.drain(..) {
+        while let Some(handle) = self.wall_order.pop() {
+            crate::hierarchy::detach_orphans(self, handle);
             let _ = self.objects.despawn(handle);
         }
     }
 
     pub fn clear_solids(&mut self) {
-        for handle in self.solid_order.drain(..) {
+        while let Some(handle) = self.solid_order.pop() {
+            crate::hierarchy::detach_orphans(self, handle);
             let _ = self.objects.despawn(handle);
         }
     }
 
     pub fn clear_lights(&mut self) {
-        for handle in self.light_order.drain(..) {
+        while let Some(handle) = self.light_order.pop() {
+            crate::hierarchy::detach_orphans(self, handle);
             let _ = self.objects.despawn(handle);
         }
     }
@@ -359,6 +370,8 @@ impl Scene {
     ///
     /// `index` is past the last wall, or the row is missing.
     pub fn remove_wall(&mut self, index: usize) -> Wall {
+        let handle = self.wall_order[index];
+        crate::hierarchy::detach_orphans(self, handle);
         remove_at::<Wall>(&mut self.objects, &mut self.wall_order, index)
     }
 
@@ -366,6 +379,8 @@ impl Scene {
     ///
     /// `index` is past the last solid, or the row is missing.
     pub fn remove_solid(&mut self, index: usize) -> Solid {
+        let handle = self.solid_order[index];
+        crate::hierarchy::detach_orphans(self, handle);
         remove_at::<Solid>(&mut self.objects, &mut self.solid_order, index)
     }
 
@@ -373,6 +388,8 @@ impl Scene {
     ///
     /// `index` is past the last light, or the row is missing.
     pub fn remove_light(&mut self, index: usize) -> Light {
+        let handle = self.light_order[index];
+        crate::hierarchy::detach_orphans(self, handle);
         remove_at::<Light>(&mut self.objects, &mut self.light_order, index)
     }
 }

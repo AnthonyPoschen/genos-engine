@@ -150,8 +150,9 @@ pub fn direct_light_in(
         return [0.0; 3];
     }
     let mut sum = [0.0; 3];
-    for light in scene.lights() {
-        let (toward, dist2, target) = lamp_toward(light, origin);
+    for index in 0..scene.light_len() {
+        let color = scene.light(index).color;
+        let (toward, dist2, target) = lamp_toward(scene, index, origin);
         let nd = dot(toward, normal);
         if nd <= 0.0 {
             continue;
@@ -160,7 +161,7 @@ pub fn direct_light_in(
             continue;
         }
         let scale_l = nd * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS);
-        sum = add(sum, scale(light.color, scale_l));
+        sum = add(sum, scale(color, scale_l));
     }
     sum
 }
@@ -179,33 +180,69 @@ pub fn lamps_in(
         return Vec::new();
     }
     let mut out = Vec::new();
-    for light in scene.lights() {
-        let (toward, dist2, target) = lamp_toward(light, origin);
+    for index in 0..scene.light_len() {
+        let color = scene.light(index).color;
+        let (toward, dist2, target) = lamp_toward(scene, index, origin);
         let nd = dot(toward, normal);
         if nd <= 0.0 || surfaces.blocked(origin, target) {
             continue;
         }
         let scale_l = nd * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS);
-        out.push((toward, scale(light.color, scale_l)));
+        out.push((toward, scale(color, scale_l)));
     }
     out
 }
 
 /// True when `p` is strictly inside `solid` (the test [`Surfaces::inside`] uses).
 pub fn solid_contains(solid: &Solid, p: [f32; 3]) -> bool {
-    inside_solid(p, solid)
+    inside_solid_local(p, solid)
 }
 
-fn lamp_toward(light: &genos_scene::Light, origin: [f32; 3]) -> ([f32; 3], f32, [f32; 3]) {
-    let span = light.direction.length_squared();
+/// `solid_contains` after moving `p` into solid `index`'s world frame.
+pub fn solid_contains_at(scene: &Scene, index: usize, p: [f32; 3]) -> bool {
+    inside_solid(scene, index, p)
+}
+
+pub(crate) fn lamp_toward(
+    scene: &Scene,
+    index: usize,
+    origin: [f32; 3],
+) -> ([f32; 3], f32, [f32; 3]) {
+    let direction = spin_light(scene.light(index).direction, scene.light_yaw(index));
+    let span = direction.length_squared();
     if span > 1.0e-8 {
-        let toward = scale(xyz(light.direction), -1.0 / span.sqrt());
+        let toward = scale(xyz(direction), -1.0 / span.sqrt());
         return (toward, 49.0, add(origin, scale(toward, 80.0)));
     }
-    let toward = sub(xyz(light.position), origin);
+    let position = scene.light(index).position;
+    let place = scene.light_translation(index);
+    let at = if same_point(place, position) {
+        position
+    } else {
+        place
+    };
+    let toward = sub(xyz(at), origin);
     let dist = length(toward).max(1.0e-4);
     let dir = scale(toward, 1.0 / dist);
-    (dir, dist * dist, xyz(light.position))
+    (dir, dist * dist, xyz(at))
+}
+
+fn spin_light(direction: genos_scene::Vec3, yaw: f32) -> genos_scene::Vec3 {
+    if yaw == 0.0 {
+        return direction;
+    }
+    let (sin, cos) = yaw.sin_cos();
+    genos_scene::Vec3::new(
+        direction.x * cos + direction.z * sin,
+        direction.y,
+        -direction.x * sin + direction.z * cos,
+    )
+}
+
+fn same_point(world: genos_scene::Vec3, local: genos_scene::Vec3) -> bool {
+    world.x.to_bits() == local.x.to_bits()
+        && world.y.to_bits() == local.y.to_bits()
+        && world.z.to_bits() == local.z.to_bits()
 }
 
 /// Mean incoming radiance over a cosine hemisphere.
@@ -360,14 +397,14 @@ pub fn trace(scene: &Scene, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Opti
             }
         }
     }
-    for wall in scene.walls() {
-        if let Some((t, n)) = hit_wall(origin, dir, wall, best_t) {
-            consider(t, n, wall.color, &mut best_t, &mut best);
+    for index in 0..scene.wall_len() {
+        if let Some((t, n)) = hit_wall(scene, index, origin, dir, best_t) {
+            consider(t, n, scene.wall(index).color, &mut best_t, &mut best);
         }
     }
-    for solid in scene.solids() {
-        if let Some((t, n)) = hit_solid(origin, dir, solid, best_t) {
-            consider(t, n, solid.color, &mut best_t, &mut best);
+    for index in 0..scene.solid_len() {
+        if let Some((t, n)) = hit_solid(scene, index, origin, dir, best_t) {
+            consider(t, n, scene.solid(index).color, &mut best_t, &mut best);
         }
     }
     best
@@ -414,28 +451,55 @@ fn occluded(scene: &Scene, from: [f32; 3], to: [f32; 3]) -> bool {
 }
 
 fn on_floor(scene: &Scene, x: f32, z: f32) -> bool {
-    (x - scene.floor.position.x).abs() <= scene.floor.half_x + 0.05
-        && (z - scene.floor.position.z).abs() <= scene.floor.half_z + 0.05
+    let half_x = scene.floor.half_x;
+    let half_z = scene.floor.half_z;
+    let position = scene.floor.position;
+    let place = scene.floor_translation();
+    let (fx, fz) = if same_point(place, position) {
+        (position.x, position.z)
+    } else {
+        (place.x, place.z)
+    };
+    (x - fx).abs() <= half_x + 0.05 && (z - fz).abs() <= half_z + 0.05
 }
 
 fn point_inside(scene: &Scene, p: [f32; 3]) -> bool {
     if p[1] < -0.02 {
         return false;
     }
-    for wall in scene.walls() {
-        if inside_wall(p, wall) {
+    for index in 0..scene.wall_len() {
+        if inside_wall(scene, index, p) {
             return true;
         }
     }
-    for solid in scene.solids() {
-        if inside_solid(p, solid) {
+    for index in 0..scene.solid_len() {
+        if inside_solid(scene, index, p) {
             return true;
         }
     }
     false
 }
 
-fn inside_wall(p: [f32; 3], wall: &Wall) -> bool {
+fn inside_wall(scene: &Scene, index: usize, p: [f32; 3]) -> bool {
+    let anchor = scene.wall_translation(index);
+    let yaw = scene.wall_yaw(index);
+    let wall = scene.wall(index);
+    if yaw == 0.0 && same_point(anchor, wall.position) {
+        return inside_wall_local(p, wall);
+    }
+    let y_shift = anchor.y - wall.position.y;
+    let (sin, cos) = yaw.sin_cos();
+    let dx = p[0] - anchor.x;
+    let dz = p[2] - anchor.z;
+    let local = [
+        wall.position.x + dx * cos - dz * sin,
+        p[1] - y_shift,
+        wall.position.z + dx * sin + dz * cos,
+    ];
+    inside_wall_local(local, wall)
+}
+
+fn inside_wall_local(p: [f32; 3], wall: &Wall) -> bool {
     // Strictly inside. A sample lifted 0.02 m off a face must stay outside, or the
     // underside of a roof reads as inside the slab and loses its lamp.
     p[1] > wall.base + 1.0e-4
@@ -444,7 +508,22 @@ fn inside_wall(p: [f32; 3], wall: &Wall) -> bool {
         && (p[2] - wall.position.z).abs() < wall.half_z - 1.0e-4
 }
 
-fn inside_solid(p: [f32; 3], solid: &Solid) -> bool {
+fn inside_solid(scene: &Scene, index: usize, p: [f32; 3]) -> bool {
+    let anchor = scene.solid_translation(index);
+    let yaw = trace_yaw(scene, index);
+    let solid = scene.solid(index);
+    if yaw.to_bits() == solid.yaw.to_bits() && same_point(anchor, solid.position) {
+        return inside_solid_local(p, solid);
+    }
+    let y_shift = anchor.y - solid.position.y;
+    let moved = [p[0], p[1] - y_shift, p[2]];
+    let mut posed = solid.clone();
+    posed.position = anchor;
+    posed.yaw = yaw;
+    inside_solid_local(moved, &posed)
+}
+
+fn inside_solid_local(p: [f32; 3], solid: &Solid) -> bool {
     if p[1] <= 1.0e-4 || p[1] >= solid.height - 1.0e-4 {
         return false;
     }
@@ -456,7 +535,55 @@ fn inside_solid(p: [f32; 3], solid: &Solid) -> bool {
     }
 }
 
-fn hit_wall(origin: [f32; 3], dir: [f32; 3], wall: &Wall, t_max: f32) -> Option<(f32, [f32; 3])> {
+fn hit_wall(
+    scene: &Scene,
+    index: usize,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    t_max: f32,
+) -> Option<(f32, [f32; 3])> {
+    let anchor = scene.wall_translation(index);
+    let yaw = scene.wall_yaw(index);
+    let wall = scene.wall(index);
+    if yaw == 0.0 && same_point(anchor, wall.position) {
+        return hit_wall_local(origin, dir, wall, t_max);
+    }
+    let y_shift = anchor.y - wall.position.y;
+    let (sin, cos) = yaw.sin_cos();
+    let dx = origin[0] - anchor.x;
+    let dz = origin[2] - anchor.z;
+    let local_o = [
+        wall.position.x + dx * cos - dz * sin,
+        origin[1] - y_shift,
+        wall.position.z + dx * sin + dz * cos,
+    ];
+    let local_d = [
+        dir[0] * cos - dir[2] * sin,
+        dir[1],
+        dir[0] * sin + dir[2] * cos,
+    ];
+    let (t, normal) = hit_wall_local(local_o, local_d, wall, t_max)?;
+    Some((t, spin_normal(yaw, normal)))
+}
+
+fn spin_normal(yaw: f32, normal: [f32; 3]) -> [f32; 3] {
+    if yaw == 0.0 {
+        return normal;
+    }
+    let (sin, cos) = yaw.sin_cos();
+    [
+        normal[0] * cos + normal[2] * sin,
+        normal[1],
+        -normal[0] * sin + normal[2] * cos,
+    ]
+}
+
+fn hit_wall_local(
+    origin: [f32; 3],
+    dir: [f32; 3],
+    wall: &Wall,
+    t_max: f32,
+) -> Option<(f32, [f32; 3])> {
     let min = [
         wall.position.x - wall.half_x,
         wall.base,
@@ -470,7 +597,38 @@ fn hit_wall(origin: [f32; 3], dir: [f32; 3], wall: &Wall, t_max: f32) -> Option<
     hit_box(origin, dir, min, max, t_max)
 }
 
+fn trace_yaw(scene: &Scene, index: usize) -> f32 {
+    let stored = scene.solid(index).yaw;
+    let shape = scene.solid(index).shape;
+    let world = scene.solid_yaw(index);
+    match shape {
+        Shape::Square => world,
+        Shape::Circle => world + stored,
+    }
+}
+
 fn hit_solid(
+    scene: &Scene,
+    index: usize,
+    origin: [f32; 3],
+    dir: [f32; 3],
+    t_max: f32,
+) -> Option<(f32, [f32; 3])> {
+    let anchor = scene.solid_translation(index);
+    let yaw = trace_yaw(scene, index);
+    let solid = scene.solid(index);
+    if yaw.to_bits() == solid.yaw.to_bits() && same_point(anchor, solid.position) {
+        return hit_solid_local(origin, dir, solid, t_max);
+    }
+    let y_shift = anchor.y - solid.position.y;
+    let moved = [origin[0], origin[1] - y_shift, origin[2]];
+    let mut posed = solid.clone();
+    posed.position = anchor;
+    posed.yaw = yaw;
+    hit_solid_local(moved, dir, &posed, t_max)
+}
+
+fn hit_solid_local(
     origin: [f32; 3],
     dir: [f32; 3],
     solid: &Solid,

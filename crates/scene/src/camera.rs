@@ -23,6 +23,7 @@
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
 
+use genos_ecs::SceneHandle;
 use genos_math::{Mat4, Quat, Vec3};
 use genos_physics::{step, Body, World, GRAVITY};
 use std::f32::consts::{FRAC_PI_2, TAU};
@@ -135,6 +136,21 @@ impl Camera {
         true
     }
 
+    /// Bind a looping path to the solid named by `handle`.
+    ///
+    /// Returns false when the handle is not a live solid.
+    pub fn codimate_handle(
+        &mut self,
+        scene: &Scene,
+        handle: SceneHandle,
+        motion: Codimation,
+    ) -> bool {
+        let Some(index) = scene.solid_index(handle) else {
+            return false;
+        };
+        self.codimate(scene, index, motion)
+    }
+
     /// Hold or resume the path on `solid`. A hold leaves the solid where it is.
     pub fn set_codimation_running(&mut self, solid: usize, running: bool) -> bool {
         let Some(slot) = self.codimations.iter_mut().find(|slot| slot.solid == solid) else {
@@ -151,24 +167,49 @@ impl Camera {
     pub fn attach_scene(&mut self, scene: &Scene) {
         let mut physics = World::new(GRAVITY);
         let floor = &scene.floor;
+        let place = scene.floor_translation();
+        let floor_center = if same_point(place, floor.position) {
+            Vec3::new(floor.position.x, -FLOOR_HALF_Y, floor.position.z)
+        } else {
+            Vec3::new(
+                place.x,
+                -FLOOR_HALF_Y + (place.y - floor.position.y),
+                place.z,
+            )
+        };
         physics.insert(Body::cuboid(
-            Vec3::new(floor.position.x, -FLOOR_HALF_Y, floor.position.z),
+            floor_center,
             0.0,
             Vec3::new(floor.half_x, FLOOR_HALF_Y, floor.half_z),
         ));
-        for wall in scene.walls() {
-            physics.insert(Body::cuboid(
+        for index in 0..scene.wall_len() {
+            let wall = scene.wall(index);
+            let center = scene.wall_point(
+                index,
                 Vec3::new(
                     wall.position.x,
-                    wall.base + wall.height * 0.5,
+                    wall.position.y + wall.base + wall.height * 0.5,
                     wall.position.z,
                 ),
+            );
+            let mut body = Body::cuboid(
+                center,
                 0.0,
                 Vec3::new(wall.half_x, wall.height * 0.5, wall.half_z),
-            ));
+            );
+            let yaw = scene.wall_yaw(index);
+            if yaw != 0.0 {
+                body.orientation = Quat::from_axis_angle(Vec3::Y, yaw);
+            }
+            physics.insert(body);
         }
-        for solid in scene.solids() {
-            physics.insert(solid_collider(solid));
+        for index in 0..scene.solid_len() {
+            let solid = scene.solid(index);
+            physics.insert(solid_collider_at(
+                solid,
+                scene.solid_point(index, solid.position),
+                scene.solid_yaw(index),
+            ));
         }
         self.view = physics.insert(view_capsule(self.position));
         self.solid_origin = Some(1 + scene.wall_len());
@@ -235,21 +276,21 @@ fn view_capsule(eye: Vec3) -> Body {
     body
 }
 
-fn solid_collider(solid: &Solid) -> Body {
+fn solid_collider_at(solid: &Solid, origin: Vec3, yaw: f32) -> Body {
     match solid.shape {
         Shape::Square => {
             let half = solid.size * 0.5;
             let mut body = Body::cuboid(
-                solid.position + Vec3::Y * center_lift(solid),
+                origin + Vec3::Y * center_lift(solid),
                 0.0,
                 Vec3::new(half, solid.height * 0.5, half),
             );
-            body.orientation = Quat::from_axis_angle(Vec3::Y, solid.yaw);
+            body.orientation = Quat::from_axis_angle(Vec3::Y, yaw);
             body
         }
         Shape::Circle => {
             let radius = solid.size * 0.5;
-            Body::mesh(solid.position, 0.0, &cylinder(radius, solid.height, 16))
+            Body::mesh(origin, 0.0, &cylinder(radius, solid.height, 16))
         }
     }
 }
@@ -294,6 +335,33 @@ pub fn listener_state(camera: &Camera) -> (Vec3, Vec3, Vec3) {
         look_direction(camera.yaw, camera.pitch),
         velocity,
     )
+}
+
+fn same_point(world: Vec3, local: Vec3) -> bool {
+    world.x.to_bits() == local.x.to_bits()
+        && world.y.to_bits() == local.y.to_bits()
+        && world.z.to_bits() == local.z.to_bits()
+}
+
+/// A path sample is parent-local. A root's sample is already the body position.
+fn path_world(scene: &Scene, solid_index: usize, local: Vec3) -> Vec3 {
+    let Some(handle) = scene.solid_handle(solid_index) else {
+        return local;
+    };
+    let Some((origin, yaw)) = crate::hierarchy::parent_basis(scene, handle) else {
+        return local;
+    };
+    origin + Quat::from_axis_angle(Vec3::Y, yaw).rotate(local)
+}
+
+fn path_local(scene: &Scene, solid_index: usize, world: Vec3) -> Vec3 {
+    let Some(handle) = scene.solid_handle(solid_index) else {
+        return world;
+    };
+    let Some((origin, yaw)) = crate::hierarchy::parent_basis(scene, handle) else {
+        return world;
+    };
+    Quat::from_axis_angle(Vec3::Y, -yaw).rotate(world - origin)
 }
 
 /// Vertical distance from a solid's scene position to its collider center.
@@ -343,7 +411,8 @@ fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
         }
         let before = camera.codimations[index].motion.sample();
         camera.codimations[index].motion.advance(dt);
-        let after = camera.codimations[index].motion.sample();
+        let after_local = camera.codimations[index].motion.sample();
+        let after = path_world(scene, solid_index, after_local);
         let woke = {
             let body = &mut camera.physics.bodies[body_index];
             let woke = body.inverse_mass == 0.0;
@@ -359,7 +428,7 @@ fn drive_codimations(camera: &mut Camera, scene: &Scene, dt: f32) {
         let body = &mut camera.physics.bodies[body_index];
         let current = body.position - Vec3::Y * lift;
         let mut delta = after - current;
-        let path_step = (after - before).length();
+        let path_step = (after_local - before).length();
         let distance = delta.length();
         if distance > path_step && distance > 1.0e-8 {
             delta = delta * (path_step / distance);
@@ -384,10 +453,14 @@ fn write_codimations(camera: &Camera, scene: &mut Scene) {
             continue;
         };
         let position = body.position;
+        let Some(lift) = scene.solid_at(slot.solid).map(center_lift) else {
+            continue;
+        };
+        let local = path_local(scene, slot.solid, position - Vec3::Y * lift);
         let Some(solid) = scene.solid_at_mut(slot.solid) else {
             continue;
         };
-        solid.position = position - Vec3::Y * center_lift(solid);
+        solid.position = local;
     }
 }
 
