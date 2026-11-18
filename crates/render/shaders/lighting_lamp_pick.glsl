@@ -347,13 +347,13 @@ float lamp_pick_u(uint idx, uint pixels, uint kept, bool fill_hit, bool reuse_pi
     if (idx >= pixels + kept && !fill_hit) {
         if (lighting_ray_fill_on()) {
             uint r = ray - lighting_probe_rays();
-            uint checks = ckeys.key[lighting_fill_header_at() + 2u];
-            uint on = ckeys.key[lighting_fill_header_at()];
-            if (r < checks) {
-                return lighting_fill_check_u(ckeys.key[lighting_fill_pick_at() + r]);
-            }
-            if (r < checks + on) {
-                uint slot = ckeys.key[lighting_fill_pick_at() + r];
+            uint placed = ckeys.key[lighting_fill_header_at()];
+            if (r < placed) {
+                uint word = ckeys.key[lighting_fill_pick_at() + r];
+                uint slot = word & 1048575u;
+                if ((word & 0x80000000u) != 0u) {
+                    return lighting_fill_check_u(slot);
+                }
                 uint key = slot < LIGHTING_CACHE_SLOTS ? ckeys.key[slot] : 0u;
                 return lighting_unit(key ^ (r * 0x85ebca6bu + 0x5bd1e995u));
             }

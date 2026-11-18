@@ -1,0 +1,329 @@
+//! One GI ray allocator. Every cell has one value. A cell with no rays starts
+//! at 1, and the value falls as the mean converges. The fixed budget is spent
+//! highest rank first. A trickle floor is reserved inside that budget and is
+//! drawn by cells in range, including cells whose value has reached 0.
+//!
+//! Replicated state: none. The rank stays on the shading client.
+//! Authority: the client that shades.
+//! Prediction / rollback: none.
+//! Determinism: the rank is the value, the distance, and the on-screen weight.
+//! The trickle draw is a hash of the cell and the frame.
+//! Headless server: a server that does not shade does not run this.
+
+use crate::sched::{closeness, remaining_error, Tunables};
+use crate::water::bucket;
+
+/// Off-screen cells stay in the same ranking, below an on-screen cell of the
+/// same value and distance.
+pub const OFF_SCREEN_WEIGHT: f32 = 0.25;
+
+/// A disagreement past this many standard deviations raises the cell.
+const DISAGREE_SIGMA: f32 = 2.0;
+
+#[derive(Clone, Copy, Debug)]
+pub struct CellBid {
+    pub id: u32,
+    pub mean: f32,
+    pub deviation: f32,
+    pub rays: u32,
+    pub lambda: f32,
+    pub distance: f32,
+    pub on_screen: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Grant {
+    pub id: u32,
+    pub rays: u32,
+    pub trickle: bool,
+}
+
+/// A new cell asks for rays. A cell that already has rays keeps the remaining
+/// error, raised by the measured change.
+#[must_use]
+pub fn cell_value(cell: &CellBid, tun: &Tunables) -> f32 {
+    if cell.rays == 0 {
+        return 1.0;
+    }
+    let err = remaining_error(cell.mean, cell.deviation, cell.rays, tun);
+    let lam = if cell.lambda.is_finite() {
+        cell.lambda.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (err + tun.change_weight * lam).max(0.0)
+}
+
+/// Value, weighted by closeness and by whether the cell is on screen.
+#[must_use]
+pub fn cell_rank(cell: &CellBid, tun: &Tunables) -> f32 {
+    let screen = if cell.on_screen {
+        1.0
+    } else {
+        OFF_SCREEN_WEIGHT
+    };
+    screen * closeness(cell.distance, tun) * cell_value(cell, tun)
+}
+
+/// Rays reserved before the ranked spend. Zero when the floor is 0.
+#[must_use]
+pub fn trickle_count(budget: u32, fraction: f32) -> u32 {
+    if budget == 0 || !(fraction > 0.0) || !fraction.is_finite() {
+        return 0;
+    }
+    let n = (f64::from(budget) * f64::from(fraction.clamp(0.0, 1.0))).ceil();
+    u32::try_from(n as u64).unwrap_or(budget).min(budget)
+}
+
+fn hash_u32(mut v: u32) -> u32 {
+    v ^= v >> 16;
+    v = v.wrapping_mul(0x7feb_352d);
+    v ^= v >> 15;
+    v = v.wrapping_mul(0x846c_a68b);
+    v ^= v >> 16;
+    v
+}
+
+/// The rotating draw. `frame` chooses the turn. It does not change the seed
+/// of the ray itself.
+#[must_use]
+pub fn trickle_due(id: u32, frame: u32, rate: u32) -> bool {
+    let rate = rate.max(1);
+    hash_u32(id ^ hash_u32(frame)) % rate == 0
+}
+
+/// True when a fresh sample is outside the noise the stored variance allows.
+#[must_use]
+pub fn trickle_disagrees(sample: f32, mean: f32, variance: f32) -> bool {
+    if !sample.is_finite() || !mean.is_finite() {
+        return false;
+    }
+    let noise = variance.max(0.0).sqrt().max(1.0e-4);
+    (sample - mean).abs() > DISAGREE_SIGMA * noise
+}
+
+/// The relative step that disagreement writes into the cell's value.
+#[must_use]
+pub fn disagreement_raise(sample: f32, mean: f32) -> f32 {
+    let denom = sample.abs().max(mean.abs()).max(1.0e-4);
+    ((sample - mean).abs() / denom).clamp(0.0, 1.0)
+}
+
+/// Spend `budget` once. Ranked rays go to the highest rank. Trickle rays are
+/// the reserved floor, one each, on cells the ranked spend did not take.
+#[must_use]
+pub fn allocate(cells: &[CellBid], budget: u32, tun: &Tunables, frame: u32) -> Vec<Grant> {
+    let mut grants = cells
+        .iter()
+        .map(|cell| Grant {
+            id: cell.id,
+            rays: 0,
+            trickle: false,
+        })
+        .collect::<Vec<_>>();
+    if budget == 0 || cells.is_empty() {
+        return grants;
+    }
+    let floor_n = trickle_count(budget, tun.offscreen_floor);
+    let mut left = budget.saturating_sub(floor_n);
+    let max_per = tun.max_picks.max(1);
+    let mut groups: Vec<Vec<usize>> = (0..64).map(|_| Vec::new()).collect();
+    for (index, cell) in cells.iter().enumerate() {
+        let value = cell_value(cell, tun);
+        if value <= 0.0 {
+            continue;
+        }
+        let level = bucket(cell_rank(cell, tun));
+        if level > 0 {
+            groups[level].push(index);
+        }
+    }
+    for level in (1..64).rev() {
+        if left == 0 {
+            break;
+        }
+        let group = &groups[level];
+        if group.is_empty() {
+            continue;
+        }
+        let count = u32::try_from(group.len()).unwrap_or(u32::MAX).max(1);
+        let base = (left / count).min(max_per);
+        let mut extra = left.saturating_sub(base.saturating_mul(count));
+        let mut order = group.clone();
+        order.sort_by_key(|&index| cells[index].id);
+        for index in order {
+            if left == 0 {
+                break;
+            }
+            let mut m = base.min(left);
+            if extra > 0 && m < max_per {
+                m += 1;
+                extra -= 1;
+            }
+            m = m.min(max_per).min(left);
+            grants[index].rays = m;
+            left -= m;
+        }
+    }
+    let mut due: Vec<usize> = (0..cells.len())
+        .filter(|&index| grants[index].rays == 0)
+        .filter(|&index| trickle_due(cells[index].id, frame, tun.check_rate))
+        .collect();
+    due.sort_by_key(|&index| cells[index].id);
+    let mut trickle_left = floor_n;
+    for index in due {
+        if trickle_left == 0 {
+            break;
+        }
+        grants[index].rays = 1;
+        grants[index].trickle = true;
+        trickle_left -= 1;
+    }
+    grants
+}
+
+/// Fold `n` samples of `sample` into the mean. Returns the new mean and count.
+#[must_use]
+pub fn blend_mean(mean: f32, rays: u32, sample: f32, n: u32) -> (f32, u32) {
+    if n == 0 {
+        return (mean, rays);
+    }
+    let rays_n = f64::from(rays);
+    let n_n = f64::from(n);
+    let mixed = (rays_n * f64::from(mean) + n_n * f64::from(sample)) / (rays_n + n_n);
+    (mixed as f32, rays.saturating_add(n))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bid(id: u32, rays: u32, distance: f32) -> CellBid {
+        CellBid {
+            id,
+            mean: 1.0,
+            deviation: 1.0e-6,
+            rays,
+            lambda: 0.0,
+            distance,
+            on_screen: true,
+        }
+    }
+
+    #[test]
+    fn a_new_cell_starts_at_one_and_takes_the_budget() {
+        let tun = Tunables::high();
+        let fresh = bid(1, 0, 2.0);
+        let done = bid(2, 64, 2.0);
+        assert_eq!(cell_value(&fresh, &tun), 1.0);
+        assert!(cell_value(&done, &tun) < cell_value(&fresh, &tun));
+        let grants = allocate(&[done, fresh], 4, &tun, 0);
+        let fresh_rays = grants.iter().find(|g| g.id == 1).unwrap().rays;
+        let done_rays = grants.iter().find(|g| g.id == 2).unwrap().rays;
+        assert!(fresh_rays > done_rays);
+        assert!(fresh_rays > 0);
+    }
+
+    #[test]
+    fn the_highest_value_is_spent_first() {
+        let mut tun = Tunables::high();
+        tun.offscreen_floor = 0.0;
+        tun.max_picks = 1;
+        let mut low = bid(1, 32, 2.0);
+        low.lambda = 0.05;
+        let mut mid = bid(2, 32, 2.0);
+        mid.lambda = 0.4;
+        let mut high = bid(3, 0, 2.0);
+        high.lambda = 0.0;
+        let grants = allocate(&[low, mid, high], 1, &tun, 0);
+        assert_eq!(grants.iter().find(|g| g.id == 3).unwrap().rays, 1);
+        assert_eq!(grants.iter().filter(|g| g.rays > 0).count(), 1);
+    }
+
+    #[test]
+    fn an_on_screen_cell_outranks_the_same_cell_off_screen() {
+        let tun = Tunables::high();
+        let mut on = bid(1, 0, 4.0);
+        on.on_screen = true;
+        let mut off = bid(2, 0, 4.0);
+        off.on_screen = false;
+        assert!(cell_rank(&on, &tun) > cell_rank(&off, &tun));
+    }
+
+    #[test]
+    fn the_grant_never_passes_the_budget() {
+        let tun = Tunables::high();
+        let cells: Vec<_> = (0..40).map(|id| bid(id, id % 5, 1.0 + id as f32)).collect();
+        let grants = allocate(&cells, tun.budget, &tun, 3);
+        let total: u32 = grants.iter().map(|g| g.rays).sum();
+        assert!(total <= tun.budget);
+        assert!(grants
+            .iter()
+            .all(|g| g.rays <= tun.max_picks.max(1) || g.trickle));
+    }
+
+    #[test]
+    fn a_converged_cell_still_draws_the_trickle_floor() {
+        let mut tun = Tunables::high();
+        tun.check_rate = 1;
+        tun.offscreen_floor = 0.25;
+        let done = bid(7, 128, 3.0);
+        assert_eq!(cell_value(&done, &tun), 0.0);
+        let grants = allocate(&[done], 8, &tun, 0);
+        assert_eq!(grants[0].rays, 1);
+        assert!(grants[0].trickle);
+        tun.offscreen_floor = 0.0;
+        let none = allocate(&[done], 8, &tun, 0);
+        assert_eq!(none[0].rays, 0);
+    }
+
+    #[test]
+    fn an_unsignalled_change_recovers_when_the_floor_is_open() {
+        let truth = 4.0_f32;
+        let with_floor = recover(0.25, truth);
+        let no_floor = recover(0.0, truth);
+        assert!(
+            with_floor < 0.5,
+            "trickle plus the raised value should reach the new light, error {with_floor}"
+        );
+        assert!(
+            no_floor > 2.0,
+            "a zero floor never sees the change, error {no_floor}"
+        );
+        assert!(with_floor < no_floor);
+    }
+
+    fn recover(floor: f32, truth: f32) -> f32 {
+        let mut tun = Tunables::high();
+        tun.offscreen_floor = floor;
+        tun.budget = 8;
+        tun.max_picks = 4;
+        tun.check_rate = 1;
+        let mut mean = 1.0_f32;
+        let variance = 1.0e-4_f32;
+        let mut rays = 64_u32;
+        let mut lambda = 0.0_f32;
+        for frame in 0..120_u32 {
+            let cell = CellBid {
+                id: 1,
+                mean,
+                deviation: variance,
+                rays,
+                lambda,
+                distance: 2.0,
+                on_screen: true,
+            };
+            let grant = allocate(std::slice::from_ref(&cell), tun.budget, &tun, frame)[0];
+            if grant.rays == 0 {
+                continue;
+            }
+            if grant.trickle && trickle_disagrees(truth, mean, variance) {
+                lambda = disagreement_raise(truth, mean);
+            }
+            let (next, next_rays) = blend_mean(mean, rays, truth, grant.rays);
+            mean = next;
+            rays = next_rays;
+        }
+        (mean - truth).abs()
+    }
+}

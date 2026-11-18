@@ -1,13 +1,15 @@
-// Stages F2, F3, and F4a. The world cache is the only store. A cache round spends
-// fill_budget single rays. F3 water-fills them by priority and spends part of
-// the budget on one same-seed check ray per fill_check_rate block. F4a writes a
-// low-confidence seed into other cells of the same screen tile. The seed is not
-// an own sample and it does not add a ray. Ring sharing is not this stage.
-// The radii, the weight, the fold, and the share gates match crates/fill-ref.
+// One allocator. The world cache is the only store. A cache round spends
+// fill_budget single rays on one value per cell, highest rank first. A cell
+// with no rays starts at 1. The value falls as the mean converges. Word 8 is
+// the trickle floor: that fraction is reserved first and drawn by every cell
+// in range, including a converged cell. A disagreeing trickle ray raises the
+// value through the same-seed check. There is no tile winner, no off-screen
+// bin, no far/near split, and no in-tile seed.
+// The radii, the weight, and the fold match crates/fill-ref.
 //
 // Param words, after the per-pixel seed payload:
 // 0 budget, 1 tile, 2 lod_near, 3 leash, 4 look_ahead, 5 cell_max, 6 far,
-// 7 far_share, 8 offscreen_floor, 9 error_target, 10 prox_min, 11 change_weight,
+// 7 far_share (not a second budget), 8 trickle floor, 9 error_target, 10 prox_min, 11 change_weight,
 // 12 warmup rays, 13 ray cap, 14 frame_dt, 15 base cell, 16 check_rate,
 // 17 max_picks, 18 lambda_decay, 19 window_floor, 20 catchup_max, 21 check_sigma,
 // 22 share (0 off, 1 tile), 23 min hit, 24 own cap, 25 plane, 26 normal,
@@ -63,8 +65,8 @@ uint lighting_fill_lock_at() {
 // histograms, then the water-fill plan (six 64-word rows), then three extra
 // cursors (64 words each), then two hit words per cache ray and two link
 // words per ray. The host sizes the same tail.
-// Header: 0 on count, 1 ranked count, 2 check count, 3 check cursor,
-// 4 far count, 5 planned far budget, 6 planned near budget,
+// Header: 0 placed count, 1 unused, 2 unused (trickle is a bit on the pick),
+// 3 trickle cursor, 4 unused, 5 trickle floor, 6 ranked rays planned,
 // 7 occupied-cell count.
 const uint LIGHTING_FILL_OFF_CAP = 16384u;
 const uint LIGHTING_FILL_HIST_WORDS = 192u;
@@ -123,18 +125,6 @@ uint lighting_fill_check_cap() {
         check_cap = 1u;
     }
     return min(check_cap, min(budget, pick_cap));
-}
-// Append a check ray. The cursor starts at 0 (the host clears the header).
-// Past the cap the ray is dropped. The set under the cap does not depend on
-// which thread arrives first.
-void lighting_fill_push_check(uint slot) {
-    if (slot >= LIGHTING_CACHE_SLOTS) {
-        return;
-    }
-    uint i = atomicAdd(ckeys.key[lighting_fill_header_at() + 3u], 1u);
-    if (i < lighting_fill_check_cap()) {
-        ckeys.key[lighting_fill_pick_at() + i] = slot;
-    }
 }
 uint lighting_fill_lod_max() {
     float ratio = lighting_fill_f(5) / max(lighting_fill_f(15), FILL_EPS);
@@ -240,23 +230,6 @@ bool lighting_fill_pixel(vec3 p, out uint px, out uint py) {
     return true;
 }
 
-// While a cell's shown count is under FILL_OPEN_SETS, a lower shown count
-// outranks a higher one, so one slot id cannot pin the tile. After that the rank is the
-// priority bucket. That bucket is the stored variance, so the cell does not
-// drop to bucket 0 when the countdown ends.
-const float FILL_OPEN_SETS = 48.0;
-uint lighting_fill_pack(uint slot, uint q) {
-    float shown = cache.v[3u * slot + 2u].w;
-    uint open = shown < FILL_OPEN_SETS ? 1u : 0u;
-    uint behind = shown >= FILL_OPEN_SETS ? 0u : min(uint(FILL_OPEN_SETS - shown), 63u);
-    uint rank = open == 1u ? behind : (q & 63u);
-    return (open << 27u) | (rank << 21u) | (slot + 1u);
-}
-
-uint lighting_fill_packed_q(uint w) {
-    return (w >> 21u) & 63u;
-}
-
 uint lighting_fill_bucket(float pri) {
     if (!(pri > 0.0)) {
         return 0u;
@@ -285,16 +258,20 @@ float lighting_fill_check_u(uint slot) {
     return lighting_unit(key ^ (seed * 0x85ebca6bu + 0x5bd1e995u));
 }
 
-uint lighting_fill_q(uint slot, float d) {
+// A new cell (no rays) is value 1. After that the value is the remaining
+// error plus the measured change. `screen` is 1 on screen and 0.25 off it,
+// so both sit in this one ranking.
+uint lighting_fill_q(uint slot, float d, float screen) {
     vec4 shown_v = cache.v[3u * slot + 2u];
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
     float rays = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w;
     float mean = max(dot(shown_v.rgb, FILL_LUMA), FILL_TINY);
     float dev = sqrt(max(est.w, 0.0));
     float lam = lighting_fill_unit(cache.v[LIGHTING_SC_GRAD_AT + slot].x);
-    float err = rays < FILL_HALF ? 1.0 : max(0.0, dev / mean - lighting_fill_f(9));
+    float err = max(0.0, dev / mean - lighting_fill_f(9));
+    float value = rays < FILL_HALF ? 1.0 : max(0.0, err + lighting_fill_f(11) * lam);
     float close = 1.0 / max(d, lighting_fill_f(10));
-    return lighting_fill_bucket(close * (err + lighting_fill_f(11) * lam));
+    return lighting_fill_bucket(screen * close * value);
 }
 
 void lighting_fill_decay(uint slot) {
@@ -316,6 +293,9 @@ void lighting_fill_decay(uint slot) {
 // A slot finer than the base world cell does not take a ray: the visit claims
 // that cell and returns. Compose reads the cell while the screen texel is empty.
 void lighting_fill_visit(uint slot) {
+    if (slot < LIGHTING_CACHE_SLOTS) {
+        ckeys.key[lighting_fill_lock_at() + slot] = 0u;
+    }
     vec3 p;
     vec3 n;
     if (!lighting_sc_texel_world(slot, p, n)) {
@@ -375,51 +355,17 @@ void lighting_fill_visit(uint slot) {
     if (size <= LIGHTING_WRC_CELL_SIZE && lighting_compact_hold_texel_rays(slot)) {
         return;
     }
+    // One histogram. The lock's low 6 bits are the bucket. Bit 6 marks a cell
+    // inside the allocator's range, including a converged cell (bucket 0),
+    // so the trickle floor can still draw it.
     uint px;
     uint py;
-    uint q = lighting_fill_q(slot, d);
-    if (!lighting_fill_pixel(p, px, py)) {
-        // One bin per hash, highest priority kept. The scheduler walks the
-        // bins, not the slot table. The round is in the hash so a collision
-        // does not pin the same cell.
-        // The lock starts empty. A stale chain head from last resolve is not a grant.
-        ckeys.key[lighting_fill_lock_at() + slot] = 0u;
-        uint cap = lighting_fill_off_cap();
-        uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
-        uint packed = lighting_fill_pack(slot, q);
-        // A band child does not take the cold-start rank, and it only
-        // contends for one bin in eight. An empty child in every bin
-        // outranks the cells the presented frame is still filling.
-        if (size < base) {
-            if ((bin & 7u) != 0u) {
-                return;
-            }
-            packed = ((q & 63u) << 21u) | (slot + 1u);
-        }
-        atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
-        uint rate = max(lighting_fill_u(16), 1u);
-        uint block = slot / rate;
-        uint local = slot - block * rate;
-        if (local == lighting_hash(block ^ lighting_hash(lighting_round())) % rate) {
-            lighting_fill_push_check(slot);
-        }
-        return;
+    float screen = lighting_fill_pixel(p, px, py) ? 1.0 : 0.25;
+    uint q = lighting_fill_q(slot, d, screen);
+    ckeys.key[lighting_fill_lock_at() + slot] = (q & 63u) | 64u;
+    if (q > 0u) {
+        atomicAdd(ckeys.key[lighting_fill_hist_at() + q], 1u);
     }
-    uint tile = max(lighting_fill_u(1), 1u);
-    uint tiles_x = (pc.dims.x + tile - 1u) / tile;
-    uint ti = px / tile + (py / tile) * tiles_x;
-    if (ti >= LIGHTING_FILL_TILE_CAP) {
-        return;
-    }
-    // The tile keeps one cell. A cell that loses that slot stays a ranked
-    // candidate. The winner's one grant is the on-screen emit; the lock stops
-    // the off-screen emit from granting it again.
-    ckeys.key[lighting_fill_lock_at() + slot] = 0u;
-    uint packed = lighting_fill_pack(slot, q);
-    atomicMax(ckeys.key[lighting_fill_tile_at() + ti], packed);
-    uint cap = lighting_fill_off_cap();
-    uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
-    atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
 }
 
 void lighting_fill_plan(uint hist[64], uint share, uint max_picks, inout uint base_m[64], inout uint extra_m[64], out uint take) {
@@ -576,31 +522,24 @@ uint lighting_fill_wg_place(uint m, uint cursor) {
     return lighting_fill_wg_start + lighting_fill_scan[local] - m;
 }
 
-// True when this slot won its screen tile. That emit is its grant for the
-// round, so the off-screen histogram must not plan a second one.
-bool lighting_fill_holds_tile(uint slot) {
-    vec3 p;
-    vec3 n;
-    if (!lighting_sc_texel_world(slot, p, n)) {
-        return false;
-    }
-    uint px;
-    uint py;
-    if (!lighting_fill_pixel(p, px, py)) {
-        return false;
-    }
-    uint tile = max(lighting_fill_u(1), 1u);
-    uint tiles_x = (pc.dims.x + tile - 1u) / tile;
-    uint ti = px / tile + (py / tile) * tiles_x;
-    if (ti >= LIGHTING_FILL_TILE_CAP) {
-        return false;
-    }
-    uint w = ckeys.key[lighting_fill_tile_at() + ti];
-    return w != 0u && (w & 2097151u) == slot + 1u;
+uint lighting_fill_pick_slot(uint word) {
+    return word & 1048575u;
 }
 
-// One thread per tile and per off-screen bin. Counts the winners. Does not
-// walk the slot table. pad3 is this dispatch's group count.
+bool lighting_fill_pick_trickle(uint word) {
+    return (word & 0x80000000u) != 0u;
+}
+
+void lighting_fill_store_picks(uint m, uint slot, uint dest, uint flag) {
+    for (uint k = 0u; k < 64u; k++) {
+        if (k >= m) {
+            break;
+        }
+        ckeys.key[lighting_fill_pick_at() + dest + k] = flag | slot;
+    }
+}
+
+// The visit already counted one histogram. This dispatch places nothing.
 void lighting_fill_hist(uint gid) {
     if (!lighting_ray_fill_on()) {
         return;
@@ -608,120 +547,44 @@ void lighting_fill_hist(uint gid) {
     if (gid == 0u) {
         gstats.pad3 = gl_NumWorkGroups.x;
     }
-    uint tiles;
-    uint tiles_x;
-    lighting_fill_tile_grid(tiles, tiles_x);
-    if (gid < tiles) {
-        uint w = ckeys.key[lighting_fill_tile_at() + gid];
-        if (w != 0u) {
-            uint q = lighting_fill_packed_q(w);
-            if (q > 0u) {
-                atomicAdd(ckeys.key[lighting_fill_hist_at() + q], 1u);
-            }
-            uint rate = max(lighting_fill_u(16), 1u);
-            uint side = 1u;
-            while (side < 8u && side * side < rate) {
-                side++;
-            }
-            uint area = max(side * side, 1u);
-            uint tx = gid % max(tiles_x, 1u);
-            uint ty = gid / max(tiles_x, 1u);
-            uint bx = tx / side;
-            uint by = ty / side;
-            uint ox = tx - bx * side;
-            uint oy = ty - by * side;
-            uint phase = tiles == 0u ? 0u : lighting_round() % tiles;
-            uint h = lighting_hash(bx ^ lighting_hash(by ^ lighting_hash(lighting_round())));
-            if (oy * side + ox == (h + phase) % area) {
-                lighting_fill_push_check((w & 2097151u) - 1u);
-            }
-        }
-    }
-    uint cap = lighting_fill_off_cap();
-    if (gid < cap) {
-        uint w = ckeys.key[lighting_fill_off_at() + gid];
-        if (w != 0u) {
-            uint q = lighting_fill_packed_q(w);
-            uint slot = (w & 2097151u) - 1u;
-            if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u
-                && !lighting_fill_holds_tile(slot)) {
-                uint level = lighting_fill_level_of_size(cache.v[3u * slot + 1u].w);
-                uint at = lighting_fill_hist_at() + 64u + q;
-                if (level != lighting_fill_lod_max()) {
-                    at += 64u;
-                }
-                atomicAdd(ckeys.key[at], 1u);
-            }
-        }
-    }
 }
 
-void lighting_fill_store_picks(uint m, uint slot, uint dest) {
-    for (uint k = 0u; k < 64u; k++) {
-        if (k >= m) {
-            break;
-        }
-        ckeys.key[lighting_fill_pick_at() + dest + k] = slot;
-    }
-}
-
-// One thread per tile. The lock word holds this frame's pick count until
-// resolve clears it. prior >= max_picks drops a tile once the cell is full.
-void lighting_fill_emit_on(uint gid) {
-    if (!lighting_ray_fill_on()) {
-        return;
-    }
-    uint tiles;
-    uint tiles_x;
-    lighting_fill_tile_grid(tiles, tiles_x);
+// One thread per cell. Ranked rays come from the cell's bucket. A cell the
+// ranked spend missed, including a converged cell, may take one trickle ray.
+// Bit 31 of the pick word marks that ray so resolve can raise the value.
+void lighting_fill_emit_on(uint slot) {
     uint m = 0u;
-    uint slot = 0u;
-    if (gid < tiles) {
-        uint w = ckeys.key[lighting_fill_tile_at() + gid];
-        ckeys.key[lighting_fill_tile_at() + gid] = 0u;
-        if (w != 0u) {
-            uint q = lighting_fill_packed_q(w);
-            slot = (w & 2097151u) - 1u;
-            uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
-            if (q > 0u && slot < LIGHTING_CACHE_SLOTS) {
+    uint flag = 0u;
+    if (lighting_ray_fill_on() && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u) {
+        uint mark = ckeys.key[lighting_fill_lock_at() + slot];
+        if ((mark & 64u) != 0u) {
+            uint q = mark & 63u;
+            if (q > 0u) {
                 uint base = ckeys.key[lighting_fill_plan_at() + q];
                 uint extra = ckeys.key[lighting_fill_plan_at() + 64u + q];
-                uint want = base;
-                uint cap_picks = max(base, max_picks);
-                if (extra > 0u && want < cap_picks) {
+                m = base;
+                if (extra > 0u) {
                     uint ticket = atomicAdd(ckeys.key[lighting_fill_extra_at() + q], 1u);
                     if (ticket < extra) {
-                        want += 1u;
-                        cap_picks = max(cap_picks, want);
+                        m += 1u;
                     }
-                }
-                // The lock is this frame's pick count. A failed swap retries.
-                // prior >= max_picks drops a tile once the fair cap is full
-                // and this bucket was not poured extra rays.
-                uint prior = atomicAdd(ckeys.key[lighting_fill_lock_at() + slot], 0u);
-                for (uint attempt = 0u; attempt < 8u; attempt++) {
-                    uint room = prior >= cap_picks ? 0u : cap_picks - prior;
-                    if (prior >= max_picks && base <= max_picks) {
-                        room = 0u;
-                    }
-                    uint take = min(want, room);
-                    uint got = atomicCompSwap(
-                        ckeys.key[lighting_fill_lock_at() + slot], prior, prior + take);
-                    if (got == prior) {
-                        m = take;
-                        break;
-                    }
-                    prior = got;
                 }
             }
-            // A zero take leaves the lock at 0. The off-screen emit then
-            // reads a tile word this pass already cleared, so holds_tile is
-            // false and that winner takes a grant the histogram did not
-            // count. Every tile winner writes a non-zero lock.
-            if (slot < LIGHTING_CACHE_SLOTS) {
-                uint held = atomicAdd(ckeys.key[lighting_fill_lock_at() + slot], 0u);
-                if (held == 0u) {
-                    atomicCompSwap(ckeys.key[lighting_fill_lock_at() + slot], 0u, 1u);
+            if (m == 0u) {
+                uint budget = lighting_fill_u(0);
+                float floor_f = lighting_fill_f(8);
+                if (!(floor_f > 0.0)) {
+                    floor_f = 0.0;
+                }
+                uint floor_n = min(uint(ceil(float(budget) * floor_f)), budget);
+                uint rate = max(lighting_fill_u(16), 1u);
+                uint turn = lighting_hash(slot ^ lighting_hash(lighting_round())) % rate;
+                if (turn == 0u && floor_n > 0u) {
+                    uint ticket = atomicAdd(ckeys.key[lighting_fill_header_at() + 3u], 1u);
+                    if (ticket < floor_n) {
+                        m = 1u;
+                        flag = 0x80000000u;
+                    }
                 }
             }
         }
@@ -730,134 +593,51 @@ void lighting_fill_emit_on(uint gid) {
     if (m == 0u) {
         return;
     }
-    lighting_fill_store_picks(m, slot, ckeys.key[lighting_fill_header_at() + 2u] + place);
+    lighting_fill_store_picks(m, slot, place, flag);
 }
 
-// One thread per off-screen bin. Far and near share the ranked range. The
-// far count is separate so discovery can keep the far reserve.
+// The off-screen bin grant is gone. The slot walk above is the only spend.
 void lighting_fill_emit_off(uint gid) {
-    if (!lighting_ray_fill_on()) {
+    if (gid == ~0u) {
         return;
     }
-    uint cap = lighting_fill_off_cap();
-    uint m = 0u;
-    uint m_far = 0u;
-    uint slot = 0u;
-    if (gid < cap) {
-        uint w = ckeys.key[lighting_fill_off_at() + gid];
-        if (w != 0u) {
-            uint q = lighting_fill_packed_q(w);
-            slot = (w & 2097151u) - 1u;
-            // The on-screen emit clears the tile word before this dispatch,
-            // so holds_tile is false for a winner. The histogram skipped
-            // that winner while the word was still set. A non-zero lock is
-            // the grant it counted, including a zero-take winner.
-            if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u
-                && !lighting_fill_holds_tile(slot)) {
-                // The on-screen emit already ran. A non-zero lock is that
-                // grant, so this cell does not take a second one.
-                uint prior = atomicAdd(ckeys.key[lighting_fill_lock_at() + slot], 0u);
-                if (prior == 0u) {
-                    bool far = lighting_fill_level_of_size(cache.v[3u * slot + 1u].w) == lighting_fill_lod_max();
-                    uint row = far ? 128u : 256u;
-                    uint extra_row = far ? 64u : 128u;
-                    uint base = ckeys.key[lighting_fill_plan_at() + row + q];
-                    uint extra = ckeys.key[lighting_fill_plan_at() + row + 64u + q];
-                    m = base;
-                    if (extra > 0u) {
-                        uint ticket = atomicAdd(ckeys.key[lighting_fill_extra_at() + extra_row + q], 1u);
-                        if (ticket < extra) {
-                            m += 1u;
-                        }
-                    }
-                    uint got = atomicCompSwap(ckeys.key[lighting_fill_lock_at() + slot], 0u, max(m, 1u));
-                    if (got != 0u) {
-                        m = 0u;
-                    } else if (far) {
-                        m_far = m;
-                    }
-                }
-            }
-        }
-    }
-    uint place = lighting_fill_wg_place(m, lighting_fill_header_at() + 1u);
-    lighting_fill_wg_place(m_far, lighting_fill_header_at() + 4u);
-    if (gid == 0u) {
-        uint on = ckeys.key[lighting_fill_header_at()];
-        uint checks = ckeys.key[lighting_fill_header_at() + 2u];
-        gstats.due = on;
-        gstats.scouts = lighting_fill_u(0) - on - checks;
-    }
-    if (m == 0u) {
-        return;
-    }
-    uint dest = ckeys.key[lighting_fill_header_at() + 2u] + ckeys.key[lighting_fill_header_at()] + place;
-    lighting_fill_store_picks(m, slot, dest);
 }
 
 void lighting_fill_dispatch() {
-    // One thread. The histograms are already in memory. Emitting the rays is
+    // One thread. The histogram is already in memory. Emitting the rays is
     // a later parallel dispatch. This function does not walk tiles or slots.
     uint budget = lighting_fill_u(0);
     uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
     uint hist[64];
-    uint hist_far[64];
-    uint hist_near[64];
     uint serial = 0u;
     uint hist_at = lighting_fill_hist_at();
     for (uint i = 0u; i < 64u; i++) {
         hist[i] = ckeys.key[hist_at + i];
-        hist_far[i] = ckeys.key[hist_at + 64u + i];
-        hist_near[i] = ckeys.key[hist_at + 128u + i];
-        serial += 3u;
+        serial += 1u;
     }
-    uint check_n = min(ckeys.key[lighting_fill_header_at() + 3u], lighting_fill_check_cap());
-    uint spend = budget - check_n;
-    uint floor_n = min(uint(ceil(float(spend) * lighting_fill_f(8))), spend);
-    uint on_cap = spend - floor_n;
+    float floor_f = lighting_fill_f(8);
+    if (!(floor_f > 0.0)) {
+        floor_f = 0.0;
+    }
+    uint floor_n = min(uint(ceil(float(budget) * floor_f)), budget);
+    uint ranked_budget = budget - floor_n;
     uint base_m[64];
     uint extra_m[64];
-    uint on_take = 0u;
-    lighting_fill_plan(hist, on_cap, max_picks, base_m, extra_m, on_take);
+    uint take = 0u;
+    lighting_fill_plan(hist, ranked_budget, max_picks, base_m, extra_m, take);
     uint plan = lighting_fill_plan_at();
     for (uint i = 0u; i < 64u; i++) {
         ckeys.key[plan + i] = base_m[i];
         ckeys.key[plan + 64u + i] = extra_m[i];
         serial += 2u;
     }
-    uint off = spend - on_take;
-    uint far_n = min(uint(ceil(float(off) * lighting_fill_f(7))), off);
-    uint near_n = off - far_n;
-    uint far_take = 0u;
-    lighting_fill_plan(hist_far, far_n, max_picks, base_m, extra_m, far_take);
-    for (uint i = 0u; i < 64u; i++) {
-        ckeys.key[plan + 128u + i] = base_m[i];
-        ckeys.key[plan + 192u + i] = extra_m[i];
-        serial += 2u;
-    }
-    uint near_budget = min(near_n, off - far_take);
-    uint near_take = 0u;
-    lighting_fill_plan(hist_near, near_budget, max_picks, base_m, extra_m, near_take);
-    for (uint i = 0u; i < 64u; i++) {
-        ckeys.key[plan + 256u + i] = base_m[i];
-        ckeys.key[plan + 320u + i] = extra_m[i];
-        serial += 2u;
-    }
-    // Leftover rays stay on the cells already chosen, and they stop at the
-    // same per-cell cap as the fair pass.
-    uint used = check_n + on_take + far_take + near_take;
-    uint left = used >= budget ? 0u : budget - used;
-    // The fair pass stops at fill_max_picks. Rays still in the budget are more
-    // samples on those cells: one screen bucket up to 64, and 16 rays off screen.
-    // A set is 64 rays, so the off-screen cap is not one set.
+    uint left = ranked_budget - take;
     lighting_fill_pour_row(hist, plan, 64u, left);
-    lighting_fill_pour_row(hist_far, plan + 128u, LIGHTING_CACHE_RAYS, left);
-    lighting_fill_pour_row(hist_near, plan + 256u, LIGHTING_CACHE_RAYS, left);
-    serial += 192u;
-    // Emit passes fill the cursors. They start at zero from the host clear.
-    ckeys.key[lighting_fill_header_at() + 2u] = check_n;
-    ckeys.key[lighting_fill_header_at() + 5u] = far_n;
-    ckeys.key[lighting_fill_header_at() + 6u] = near_take;
+    serial += 64u;
+    ckeys.key[lighting_fill_header_at() + 1u] = 0u;
+    ckeys.key[lighting_fill_header_at() + 2u] = 0u;
+    ckeys.key[lighting_fill_header_at() + 5u] = floor_n;
+    ckeys.key[lighting_fill_header_at() + 6u] = take;
     ckeys.key[LIGHTING_ARGS_AT + 0u] = max((budget + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 2u] = 1u;
@@ -870,7 +650,7 @@ void lighting_fill_dispatch() {
     ckeys.key[LIGHTING_ARGS_AT + 9u] = budget;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = budget;
     gstats.rays = 0u;
-    gstats.pad4 = check_n;
+    gstats.pad4 = floor_n;
     gstats.pad2 = serial;
     gstats.round_entries = (budget + 15u) / 16u;
 }
@@ -887,12 +667,10 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     if (r >= budget) {
         return false;
     }
-    uint checks = ckeys.key[lighting_fill_header_at() + 2u];
-    uint on = ckeys.key[lighting_fill_header_at()];
-    uint ranked = ckeys.key[lighting_fill_header_at() + 1u];
-    uint placed = min(checks + on + ranked, budget);
+    uint placed = min(ckeys.key[lighting_fill_header_at()], budget);
     if (r < placed) {
-        uint slot = ckeys.key[lighting_fill_pick_at() + r];
+        uint word = ckeys.key[lighting_fill_pick_at() + r];
+        uint slot = lighting_fill_pick_slot(word);
         if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
             return false;
         }
@@ -901,7 +679,7 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
             return false;
         }
         origin = p + n * FILL_RAY_BIAS;
-        if (r < checks) {
+        if (lighting_fill_pick_trickle(word)) {
             // Same seed every frame. The round is not part of the direction.
             uint seed = floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + slot].z);
             if (seed == 0u) {
@@ -1146,259 +924,15 @@ uint lighting_fill_stamp(vec3 p, uint updated) {
     return stamp;
 }
 
-float lighting_fill_view_depth(vec3 p) {
-    return max(dot(p - scene.eye.xyz, scene.view_forward.xyz), FILL_T_EPS);
-}
-
-float lighting_fill_share_cos(float v) {
-    float floor_c = lighting_fill_f(28);
-    if (!(floor_c > 0.0)) {
-        floor_c = FILL_SHARE_COS0;
-    }
-    return v <= floor_c ? floor_c : v;
-}
-
-// Reconnection weight, crates/fill-ref/src/share.rs jacobian. 0 rejects it.
-float lighting_fill_share_jacobian(vec3 origin, vec3 n_o, vec3 hit, vec3 n_h, float t, vec3 recv, vec3 n_j) {
-    vec3 to_o = hit - origin;
-    vec3 to_j = hit - recv;
-    float len_o = length(to_o);
-    float len_j = length(to_j);
-    if (len_o <= FILL_EPS || len_j <= FILL_EPS) {
-        return 0.0;
-    }
-    vec3 dir_o = to_o / len_o;
-    vec3 dir_j = to_j / len_j;
-    float cos_theta_o = lighting_fill_share_cos(dot(n_o, dir_o));
-    float cos_theta_j = lighting_fill_share_cos(dot(n_j, dir_j));
-    float cos_phi_o = lighting_fill_share_cos(dot(n_h, -dir_o));
-    float cos_phi_j = lighting_fill_share_cos(dot(n_h, -dir_j));
-    float t_hit = max(t, FILL_T_EPS);
-    float t2 = t_hit * t_hit;
-    float d2 = len_j * len_j;
-    return (cos_theta_j / cos_theta_o) * ((cos_phi_j / d2) / (cos_phi_o / t2));
-}
-
-// Own-count expiry. 0 means the cell takes no more seeds. The scale is trust,
-// not a darkening of the stored light.
-float lighting_fill_share_scale(uint recv) {
-    float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u].w, 0.0);
-    float own_cap = float(max(lighting_fill_u(24), 1u));
-    return max(0.0, 1.0 - rays / own_cap);
-}
-
-// All five gates. A miss returns 0. The value is the clamped reconnection,
-// before the own-count scale. That scale multiplies the seed confidence.
-float lighting_fill_share_accept(uint origin_slot, uint recv, vec3 origin_p, vec3 n_o, vec3 hit, vec3 n_h, float t, vec3 recv_p, vec3 n_j) {
-    if (recv == ~0u || recv == origin_slot || recv >= LIGHTING_CACHE_SLOTS || ckeys.key[recv] == 0u) {
-        return 0.0;
-    }
-    float gap = abs(dot(n_o, recv_p - origin_p));
-    float depth = max(lighting_fill_view_depth(origin_p), lighting_fill_view_depth(recv_p));
-    if (gap >= lighting_fill_f(25) * depth) {
-        return 0.0;
-    }
-    if (dot(n_o, n_j) < lighting_fill_f(26)) {
-        return 0.0;
-    }
-    if (lighting_axis(n_o) != lighting_axis(n_j)) {
-        return 0.0;
-    }
-    if (t < lighting_fill_f(23)) {
-        return 0.0;
-    }
-    if (!(lighting_fill_share_scale(recv) > 0.0)) {
-        return 0.0;
-    }
-    if (lighting_fill_seed_due(recv)) {
-        return 0.0;
-    }
-    uint updated = lighting_sc_updated(recv);
-    uint stamp = lighting_fill_stamp(recv_p, updated);
-    if (stamp != 0u && lighting_frame() <= stamp) {
-        return 0.0;
-    }
-    float w = lighting_fill_share_jacobian(origin_p, n_o, hit, n_h, t, recv_p, n_j);
-    w = min(w, lighting_fill_f(27));
-    if (!(w > 0.0) || w > FILL_REAL_CAP) {
-        return 0.0;
-    }
-    return w;
-}
-
-// Higher weight wins. The same weight keeps the lower ray. Matches share_claim.
-uint lighting_fill_share_claim(float w, uint ray) {
-    float cap = lighting_fill_f(27);
-    if (!(cap > 0.0)) {
-        cap = 1.0;
-    }
-    uint q = uint(clamp(w / cap, 0.0, 1.0) * FILL_Q10);
-    uint pack = (q << 22u) | ((~ray) & 0x3FFFFFu);
-    return pack == 0u ? 1u : pack;
-}
-
-vec3 lighting_fill_share_rgb(uint recv, vec3 contrib) {
-    vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * recv + 1u];
-    float shown = cache.v[3u * recv + 2u].w;
-    contrib = max(contrib, vec3(0.0));
-    // A claim-zero estimator (b.x == 0) is not a bound of 0.1. The own fold
-    // clamps only after warmup rays, a started short mean, and a shown value.
-    if (!(b.x > 0.0 && b.w >= float(max(lighting_fill_u(12), 1u)) && shown > FILL_HALF)) {
-        return contrib;
-    }
-    vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * recv];
-    float mean_l = dot(max(a.rgb, vec3(0.0)), FILL_MSME);
-    float dev = sqrt(max(a.w, 0.0));
-    float cap = FILL_FIRE_FLOOR + mean_l + lighting_sc_firefly_sigma() * dev;
-    float luma = dot(contrib, FILL_MSME);
-    if (luma > cap && luma > 0.0) {
-        contrib *= cap / luma;
-    }
-    return contrib;
-}
-
-// phase 0 clears the receiver lock, phase 1 elects, phase 2 writes the seed.
-// The three passes recompute the same tile, so the winner does not need a store.
-void lighting_fill_share_pass(uint gid, uint phase) {
-    uint budget = lighting_fill_u(0);
-    uint checks = ckeys.key[lighting_fill_header_at() + 2u];
-    uint on = ckeys.key[lighting_fill_header_at()];
-    uint placed = min(checks + on, budget);
-    uint tile = max(lighting_fill_u(1), 1u);
-    uint cap_n = min(lighting_fill_u(30), 8u);
-    for (uint r = gid; r < budget; r += 64u) {
-        if (r < checks || r >= placed) {
-            continue;
-        }
-        uint slot = ckeys.key[lighting_fill_pick_at() + r];
-        if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
-            continue;
-        }
-        vec3 origin_p;
-        vec3 n_o;
-        if (!lighting_sc_texel_world(slot, origin_p, n_o)) {
-            continue;
-        }
-        uint px;
-        uint py;
-        if (!lighting_fill_pixel(origin_p, px, py)) {
-            continue;
-        }
-        uint work_ray = lighting_probe_rays() + r;
-        vec4 rad = work.v[lighting_rad_at(work_ray)];
-        if (lighting_ray_none(rad)) {
-            continue;
-        }
-        float t = uintBitsToFloat(ckeys.key[lighting_fill_hit_at() + r * 2u]);
-        if (!(t > 0.0)) {
-            continue;
-        }
-        vec3 dir = vec3(0.0, 1.0, 0.0);
-        vec3 ray_o;
-        vec3 ray_n;
-        if (!lighting_fill_ray(work_ray, ray_o, dir, ray_n)) {
-            continue;
-        }
-        vec3 n_h = lighting_unpack_normal(ckeys.key[lighting_fill_hit_at() + r * 2u + 1u]);
-        vec3 hit = ray_o + dir * t;
-        vec3 lk = lighting_ray_light(rad);
-        vec3 irr = lk * max(dot(dir, n_o), 0.0) * LIGHTING_TAU;
-        float size = cache.v[3u * slot + 1u].w;
-        uint x0 = (px / tile) * tile;
-        uint y0 = (py / tile) * tile;
-        uint x1 = min(x0 + tile, pc.dims.x);
-        uint y1 = min(y0 + tile, pc.dims.y);
-        uint nfound = 0u;
-        uint found[8];
-        float found_w[8];
-        for (uint s = 0u; s < 8u; s++) {
-            found[s] = 0u;
-            found_w[s] = 0.0;
-        }
-        bool stop = false;
-        [[dont_unroll]] for (uint y = y0; y < y1 && !stop; y++) {
-            [[dont_unroll]] for (uint x = x0; x < x1 && !stop; x++) {
-                vec3 recv_p;
-                vec3 n_j;
-                vec3 albedo;
-                bool two_sided;
-                if (!lighting_surface(uvec2(x, y), recv_p, n_j, albedo, two_sided)) {
-                    continue;
-                }
-                uint recv = lighting_cache_find_sized(recv_p, n_j, false, size, recv_p);
-                float w = lighting_fill_share_accept(slot, recv, origin_p, n_o, hit, n_h, t, recv_p, n_j);
-                if (!(w > 0.0)) {
-                    continue;
-                }
-                bool seen = false;
-                for (uint s = 0u; s < 8u; s++) {
-                    if (s < nfound && found[s] == recv) {
-                        seen = true;
-                    }
-                }
-                if (seen || nfound >= cap_n) {
-                    stop = nfound >= cap_n;
-                    continue;
-                }
-                found[nfound] = recv;
-                found_w[nfound] = w;
-                nfound++;
-            }
-        }
-        for (uint s = 0u; s < 8u; s++) {
-            if (s >= nfound) {
-                break;
-            }
-            uint lock = lighting_fill_lock_at() + found[s];
-            uint word = lighting_fill_share_claim(found_w[s] * lighting_fill_share_scale(found[s]), r);
-            if (phase == 0u) {
-                atomicExchange(ckeys.key[lock], 0u);
-            } else if (phase == 1u) {
-                atomicMax(ckeys.key[lock], word);
-            } else if (ckeys.key[lock] == word) {
-                float scale = lighting_fill_share_scale(found[s]);
-                vec3 rgb = lighting_fill_share_rgb(found[s], irr * found_w[s]);
-                if (scale > 0.0 && dot(rgb, FILL_MSME) > 0.0) {
-                    lighting_sc_set_fill_seed(found[s], rgb, lighting_fill_f(29) * scale, clamp(rad.w, 0.0, 1.0));
-                }
-            }
-        }
-    }
-}
-
-// In-tile seeds. Off, or a frozen cache, writes nothing. Every thread takes the
-// same branch, so the barriers below stay inside the workgroup.
-void lighting_fill_share(uint gid) {
-    if (lighting_fill_u(22) != 1u) {
-        return;
-    }
-    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
-        return;
-    }
-    lighting_fill_share_pass(gid, 0u);
-    memoryBarrierBuffer();
-    barrier();
-    lighting_fill_share_pass(gid, 1u);
-    memoryBarrierBuffer();
-    barrier();
-    lighting_fill_share_pass(gid, 2u);
-}
-
-// One slot, one writer. Every ray that landed is on the list, then the head
-// folds them with weight n / (rays + n). The hit distance is the stash trace
-// wrote; direct has already overwritten the hit slot with radiance.
 void lighting_fill_resolve(uint gid) {
     if (gid >= 64u) {
         return;
     }
     uint budget = lighting_fill_u(0);
-    uint checks = ckeys.key[lighting_fill_header_at() + 2u];
-    uint on = ckeys.key[lighting_fill_header_at()];
-    uint ranked = ckeys.key[lighting_fill_header_at() + 1u];
-    uint placed = min(checks + on + ranked, budget);
-    // The emit passes counted picks in the lock word. The chain starts empty.
+    uint placed = min(ckeys.key[lighting_fill_header_at()], budget);
+    // The emit pass counted picks in header word 0. The chain starts empty.
     for (uint r = gid; r < placed; r += 64u) {
-        uint slot = ckeys.key[lighting_fill_pick_at() + r];
+        uint slot = lighting_fill_pick_slot(ckeys.key[lighting_fill_pick_at() + r]);
         if (slot < LIGHTING_CACHE_SLOTS) {
             ckeys.key[lighting_fill_lock_at() + slot] = 0u;
         }
@@ -1415,7 +949,8 @@ void lighting_fill_resolve(uint gid) {
         }
         uint slot = ~0u;
         if (r < placed) {
-            slot = ckeys.key[lighting_fill_pick_at() + r];
+            uint word = ckeys.key[lighting_fill_pick_at() + r];
+            slot = lighting_fill_pick_slot(word);
         } else {
             float t = uintBitsToFloat(ckeys.key[lighting_fill_hit_at() + r * 2u]);
             if (t < 0.0) {
@@ -1498,10 +1033,10 @@ void lighting_fill_resolve(uint gid) {
                 sum_z += lk * dir.z;
                 sum_sun += rad.w;
                 count += 1.0;
-                if (cur < checks) {
+                if (lighting_fill_pick_trickle(ckeys.key[lighting_fill_pick_at() + cur])) {
                     saw_check = true;
                     check_luma = dot(lk, FILL_LUMA);
-                } else if (cur < checks + on) {
+                } else if (cur < placed) {
                     saw_on = true;
                 }
             }
@@ -1520,7 +1055,6 @@ void lighting_fill_resolve(uint gid) {
     }
     memoryBarrierBuffer();
     barrier();
-    lighting_fill_share(gid);
 }
 
 // The birth frame often runs before the parent cell has a sample. Until the

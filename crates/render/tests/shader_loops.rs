@@ -118,8 +118,8 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         "the claimer must finish the slot before another ray folds it"
     );
     assert!(
-        fill.contains("lighting_fill_f(7)"),
-        "fill_far_share must be read"
+        fill.contains("lighting_fill_f(8)"),
+        "the trickle floor must be read"
     );
     assert!(
         !fill.contains("if (prev == mark)"),
@@ -135,16 +135,12 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         "a reused slot must not keep a seed from another key"
     );
     assert!(
-        fill.contains("prior >= max_picks"),
-        "fill_max_picks is per cell, including a cell that wins several tiles"
+        fill.contains("rays < FILL_HALF ? 1.0"),
+        "a cell with no rays starts at value 1"
     );
     assert!(
-        fill.contains("lighting_round() % tiles"),
-        "screen check rays must rotate with the round, not rescan the same prefix"
-    );
-    assert!(
-        fill.contains("lighting_hash(block ^ lighting_hash(lighting_round()))"),
-        "off-screen checks are one hash per block, not a scan of the slot table"
+        fill.contains("lighting_hash(slot ^ lighting_hash(lighting_round()))"),
+        "the trickle draw rotates with the round"
     );
     let plan = function_body(&fill, "void lighting_fill_dispatch()");
     assert!(
@@ -184,8 +180,8 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
     );
 }
 
-/// The share pass writes a seed. These strings are the gates that a behavioural
-/// CPU test cannot see: the stamp source, the confidence scale, and the clamp.
+/// The in-tile seed writer is gone. The resolve still folds one cell, and the
+/// allocator is one histogram plus one slot walk.
 #[test]
 fn the_fill_share_writes_a_seed_under_the_five_gates() {
     let fill = source("lighting_fill.glsl");
@@ -203,13 +199,17 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         "the variance note must not sit in the branch a world cell skips"
     );
     assert!(
-        fill.contains("lighting_fill_share("),
-        "an in-tile sample must reach the share pass"
+        !fill.contains("lighting_fill_share("),
+        "the in-tile seed pass is not a second writer"
+    );
+    assert!(
+        !fill.contains("lighting_fill_share_accept"),
+        "the share gates are not a placement path"
     );
     let cache = source("lighting_cache.glsl");
     assert!(
-        fill.contains("lighting_sc_set_fill_seed"),
-        "a shared sample must enter as a fill seed"
+        !fill.contains("lighting_sc_set_fill_seed"),
+        "a shared sample must not enter as a fill seed"
     );
     assert!(
         cache.contains("lighting_sc_set_seed(slot, rgb, conf, sunfrac)"),
@@ -220,34 +220,8 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         "F4 must not add a shared_count field"
     );
     assert!(
-        fill.contains("lighting_fill_u(22)"),
-        "fill_share must be read"
-    );
-    assert!(
-        fill.contains("lighting_fill_f(23)"),
-        "a near hit must read fill_share_min_hit"
-    );
-    let accept = function_body(&fill, "float lighting_fill_share_accept");
-    assert!(
-        accept.contains("lighting_sc_updated(recv)"),
-        "the stamp reads the commit frame, not the visit word"
-    );
-    assert!(
-        !accept.contains("cache.v[3u * recv].w"),
-        "a bounce read updates the visit word and is not the mean"
-    );
-    let rgb = function_body(&fill, "vec3 lighting_fill_share_rgb");
-    assert!(
-        rgb.contains("b.x > 0.0"),
-        "a zeroed estimator is not a firefly bound"
-    );
-    assert!(
-        fill.contains("lighting_fill_f(29) * scale"),
-        "own-count expiry scales the seed confidence"
-    );
-    assert!(
-        fill.contains("lighting_fill_share_claim(found_w[s] * lighting_fill_share_scale(found[s]), r)"),
-        "a fresher cell's scale stays in the claim"
+        !fill.contains("lighting_fill_u(22)"),
+        "fill_share must not select a writer"
     );
     assert!(
         fill.contains("lighting_fill_tile_at"),
@@ -278,12 +252,12 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         "the fill reports occupied cells, not the empty due lists"
     );
     assert!(
-        fill.contains("FILL_OPEN_SETS"),
-        "young cells take turns until the variance bucket is the rank"
+        fill.contains("rays < FILL_HALF ? 1.0"),
+        "a cell with no rays starts at value 1"
     );
     assert!(
         fill.contains("lighting_fill_pour_row(hist, plan, 64u, left)"),
-        "leftover on-screen rays pour onto the chosen cells"
+        "leftover ranked rays pour onto the chosen cells"
     );
     assert!(
         !fill.contains("lighting_fill_give"),
@@ -293,19 +267,28 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         !fill.contains("lighting_fill_shown"),
         "the unused shown-count helper is gone"
     );
-    let emit_on = function_body(&fill, "void lighting_fill_emit_on(uint gid)");
+    let emit_on = function_body(&fill, "void lighting_fill_emit_on(uint slot)");
     assert!(
-        emit_on.contains("Every tile winner writes a non-zero lock"),
-        "a zero-take tile winner still marks the lock the histogram counted"
+        emit_on.contains("lighting_fill_header_at()"),
+        "the slot walk spends the one budget"
+    );
+    assert!(
+        emit_on.contains("0x80000000u"),
+        "a trickle ray is marked on the pick word"
     );
     let emit_off = function_body(&fill, "void lighting_fill_emit_off(uint gid)");
     assert!(
-        emit_off.contains("prior == 0u"),
-        "an off-screen emit takes nothing once the cell already has a grant"
+        !emit_off.contains("atomicAdd"),
+        "the off-screen bin grant does not place a ray"
     );
     assert!(
-        emit_off.contains("lighting_fill_holds_tile"),
-        "a tile winner does not take the off-screen grant"
+        !emit_off.contains("lighting_fill_holds_tile"),
+        "a tile winner is not a second grant"
+    );
+    let plan = function_body(&fill, "void lighting_fill_dispatch()");
+    assert!(
+        !plan.contains("hist_far"),
+        "far and near are not separate budgets"
     );
     assert!(
         fill.contains("7 occupied-cell count"),
@@ -364,46 +347,37 @@ fn the_scene_ray_loops_are_kept_rolled() {
     }
 }
 
-/// The tile fill rays the world cell. A finer screen texel claims that cell
-/// and returns, so it cannot win the tile.
+/// The visit records every in-range cell in one histogram. A finer screen
+/// texel claims the world cell and does not take a ray of its own.
 #[test]
 fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
     let fill = source("lighting_fill.glsl");
     let visit = function_body(&fill, "void lighting_fill_visit(uint slot)");
-    let claim = visit.find("lighting_cache_find_sized(p, n, true, base, p)");
-    let tile = visit.find("lighting_fill_tile_at()");
-    match (claim, tile) {
-        (Some(claim_at), Some(tile_at)) => {
-            assert!(
-                claim_at < tile_at,
-                "the screen texel must return before the tile pick"
-            );
-            assert!(
-                visit[tile_at..].contains("lighting_fill_off_at()"),
-                "an on-screen cell also stays in its off-screen bin"
-            );
-        }
-        (None, _) => panic!("a screen texel must claim the world cell under it"),
-        (Some(_), None) => panic!("a world cell must still enter the tile"),
-    }
+    let claim = visit
+        .find("lighting_cache_find_sized(p, n, true, base, p)")
+        .expect("a screen texel must claim the world cell under it");
+    let hist = visit
+        .find("lighting_fill_hist_at()")
+        .expect("a world cell must enter the one histogram");
+    assert!(claim < hist, "the screen texel must return before the histogram");
+    assert!(
+        !visit.contains("lighting_fill_tile_at()"),
+        "a tile winner is not a placement path"
+    );
+    assert!(
+        !visit.contains("lighting_fill_off_at()"),
+        "an off-screen bin is not a placement path"
+    );
     assert!(
         visit.contains("if (size < base)"),
         "only a slot finer than the base world cell skips the ray"
     );
     assert!(
-        visit.contains("lighting_fill_pack(slot, q)"),
-        "the tile rank is the priority bucket"
-    );
-    let pack = function_body(&fill, "uint lighting_fill_pack(uint slot, uint q)");
-    assert!(
-        pack.contains("open << 27u"),
-        "a cell under the open-set count outranks one that has them"
-    );
-    assert!(
-        pack.contains("(q & 63u)"),
-        "after the open count the stored-variance bucket is the rank"
+        fill.contains("rays < FILL_HALF ? 1.0"),
+        "a cell with no rays starts at value 1"
     );
 }
+
 
 /// The picture compose used to compile `scene_candidates_skip` (the occluder
 /// grid, `dont_unroll`) into the pass that shades every pixel. The NVIDIA

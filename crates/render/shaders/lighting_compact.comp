@@ -17,9 +17,9 @@ void main() {
     }
     barrier();
     uint slot = gl_GlobalInvocationID.x;
-    // Bits 1 and 2, with bit 4 clear: the parallel fill schedule. Bit 2 alone
-    // is the histogram, bit 1 alone emits screen rays, both emit off-screen
-    // rays. None of them walks the slot table.
+    // Bit 2 is the histogram. Bit 1 walks every cache slot and spends the
+    // budget. Both bits are the old off-screen grant; that function returns
+    // without placing a ray.
     uint fill_sched = pc.params.z & 6u;
     if ((pc.params.z & 16u) == 0u && fill_sched != 0u) {
         if (fill_sched == 6u) {

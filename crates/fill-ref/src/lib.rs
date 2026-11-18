@@ -5,9 +5,11 @@
 //! reconnection weight. Stage F2 is [`sched`]: the always-on budget, the
 //! clipmap, and the single-ray fold the GPU scheduler mirrors. Stage F3 adds
 //! the check ray, the decaying lambda, and the water-fill of that budget.
-//! Stage F4a seeds the other cells of the same tile that pass the share gates.
-//! The seed is low confidence. It is not an own sample and it has no count
-//! field. Ring sharing is not in this crate's live path.
+//! [`alloc`] spends one value per cell, highest rank first, with the trickle
+//! floor inside that budget. Stage F4a seeds the other cells of the same tile
+//! that pass the share gates. The seed is low confidence. It is not an own
+//! sample and it has no count field. The device no longer runs that seed.
+//! Ring sharing is not in this crate's live path.
 //! Nothing here
 //! opens a window or a device. `--tile-fill` defaults off; that flag is the
 //! F1 checker, not the live F2 scheduler.
@@ -37,6 +39,7 @@
 //! Determinism: hashes of tile, frame and cell, and integer deposit sums.
 //! Headless server: this crate is headless. A game server does not run it.
 
+mod alloc;
 mod commit;
 mod deposit;
 mod pick;
@@ -50,8 +53,8 @@ pub use pick::{far_is_fed, need, prox, under, PixelPick};
 pub use share::{
     axis_id, near_hit_stays_home, pillar, plane_rel_error, share_claim, share_elect, share_in_tile,
     share_weight, thin_wall, tile_share_holds, unclamped_exceeds_cap, wall_base, Leak, Plane,
-    Reject, ShareCell, ShareHit, ShareLimits, ShareSeed, T_MIN, TileNeighbour, TileSample, TileShare,
-    W_CAP,
+    Reject, ShareCell, ShareHit, ShareLimits, ShareSeed, TileNeighbour, TileSample, TileShare,
+    T_MIN, W_CAP,
 };
 pub use water::{assign, bucket, uniform_assign, TileNeed, BUCKETS};
 
@@ -171,7 +174,11 @@ mod tests {
         };
         let grade = grade(&config);
         assert!(grade.ran);
-        assert!(grade.pass, "plane {} leak {}", grade.plane_rel, grade.leak_other);
+        assert!(
+            grade.pass,
+            "plane {} leak {}",
+            grade.plane_rel, grade.leak_other
+        );
         assert!(grade.plane_rel < 0.01);
     }
 }
