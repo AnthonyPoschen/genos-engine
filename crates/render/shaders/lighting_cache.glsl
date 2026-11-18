@@ -1087,24 +1087,20 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     if (!claim || !LIGHTING_SC_WRITES) {
         return ~0u;
     }
-    // A new cell is born inside its create distance. The loads stay outside
-    // the size test: lavapipe faults when a wave skips a descriptor load
-    // (the bounce presented-frame gate). Screen and occlusion do not decide.
-    // Mode 3 looks up a texel at every distance, so a texel claim uses the
-    // fill's far distance. fine_create is only who spawns off a parent; using
-    // it as the claim edge left the rest of the hall with no cell.
+    // The leash load stays outside the screen test: lavapipe faults when a
+    // wave skips a descriptor load (the bounce presented-frame gate).
+    // On screen, compose reads a texel at any distance, so the claim stands.
+    // Off screen, past the level-0 leash, the visit coarsens that cell.
+    // Claiming it out to far filled the pool, and the ranked burst then
+    // missed the back of the hall.
     float claim_dist = length(pos - scene.eye.xyz);
-    float fine_create = lighting_fine_word(LIGHTING_FINE_CREATE_AT);
-    float base_create = lighting_fill_create(0u);
-    float far = lighting_fill_f(6);
-    float claim_limit = base_create;
-    if (size <= LIGHTING_SC_TEXEL && fine_create > 0.0) {
-        claim_limit = far;
-    }
-    // create 0 means the fill radii were not uploaded. A fixture that plants
-    // cells still claims. A live fill writes a positive radius and refuses past it.
-    if (size <= LIGHTING_SC_HIT && claim_limit > 0.0 && claim_dist > claim_limit) {
-        return ~0u;
+    float leash0 = lighting_fill_leash(0u);
+    if (size <= LIGHTING_SC_HIT && leash0 > 0.0) {
+        uint keep_x;
+        uint keep_y;
+        if (!lighting_fill_pixel(pos, keep_x, keep_y) && claim_dist > leash0) {
+            return ~0u;
+        }
     }
 #ifndef GENOS_COMPOSE_NO_WALK
     // #286 → pool: a hit on a mover never writes a world cell.
@@ -4070,6 +4066,12 @@ const float LIGHTING_FINE_PRIOR_SIGMA = 0.3;
 // How far an unsettled texel jumps ahead of one that has yielded.
 const float LIGHTING_FINE_FRESH = 8.0;
 const float LIGHTING_FINE_SCORE_MIN = 1.0e-4;
+// A new child starts from the parent's radiance at this many sets. One set
+// is a mean the next ray blends with. It is not a settled count, and it is
+// not an empty slot whose first ray replaces the prior.
+const float LIGHTING_FINE_INHERIT_SETS = 1.0;
+// Allocator value of that child. The rank still decays when samples agree.
+const float LIGHTING_FINE_INHERIT_VALUE = 1.0;
 bool lighting_fine_has_prior(uint slot) {
     return cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID
         && cache.v[LIGHTING_SC_SHOWN_AT + slot].z > LIGHTING_SC_SET_HALF;
@@ -4362,35 +4364,40 @@ void lighting_fine_spawn(uint slot) {
         } else {
             vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + born];
             // A later retry must not touch a child that already has samples.
-            bool fresh = !(mark.y > LIGHTING_FINE_VALID);
+            bool fresh = !(mark.y > LIGHTING_FINE_VALID)
+                && !(cache.v[3u * born + 2u].w > LIGHTING_SC_SET_HALF);
             mark.y = 1.0;
 #ifndef GENOS_COMPOSE_NO_WALK
             if (fresh) {
-                // The displayed radiance is the parent's prior, unscaled. The
-                // child's own mean stays empty so its rays replace the prior
-                // once it has a ready set. Writing the parent into the mean
-                // scaled the field and the later rays sampled that copy.
+                // The child's mean is the parent's radiance, unscaled, at one
+                // set. The next ray blends with that mean. An empty mean made
+                // the first ray replace the prior, and the cell converged from
+                // that one sample. The area ratio is not a scale on the colour.
                 vec4 parent_mean = cache.v[3u * slot + 2u];
-                float parent_size = max(cache.v[3u * slot + 1u].w, LIGHTING_SC_TEXEL);
-                float area = clamp((LIGHTING_SC_TEXEL * LIGHTING_SC_TEXEL) / (parent_size * parent_size), 0.0, 1.0);
                 vec3 pr;
                 float pn;
                 float pv;
                 float ps;
                 lighting_fine_prior(q, n, pr, pn, pv, ps);
+                vec3 pre = pr;
+                float gain = lighting_sc_sun_gain(slot);
+                if (gain > LIGHTING_FINE_SCORE_MIN) {
+                    pre = pr / gain;
+                }
                 if (!(pn > LIGHTING_SC_SET_HALF) && parent_mean.w > LIGHTING_SC_SET_HALF) {
-                    pr = parent_mean.rgb;
+                    pre = parent_mean.rgb;
                     pn = parent_mean.w;
                     pv = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot].w, 0.0);
                     ps = lighting_sc_sunfrac_now(slot);
                 }
                 if (pn > LIGHTING_SC_SET_HALF) {
-                    // The seed weight stays 1. A lower weight scaled the displayed
-                    // field down, and the rays then sampled that darker copy.
-                    lighting_sc_set_seed(born, pr, 1.0, ps);
+                    // Seed stores the pre-gain colour. The read applies sun gain.
+                    lighting_sc_set_seed(born, pre, LIGHTING_FINE_INHERIT_VALUE, ps);
+                    cache.v[3u * born + 2u] = vec4(pre, LIGHTING_FINE_INHERIT_SETS);
+                    cache.v[LIGHTING_SC_EST_AT + 2u * born + 1u].w = LIGHTING_FINE_INHERIT_SETS;
                     mark.z = pn;
                     mark.w = pv;
-                    lighting_fine_raise_value(born, 1.0 - area);
+                    lighting_fine_raise_value(born, LIGHTING_FINE_INHERIT_VALUE);
                     atomicAdd(gstats.diag[LIGHTING_RESET_ADOPT], 1u);
                 }
             }

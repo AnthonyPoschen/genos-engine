@@ -141,6 +141,42 @@ fn reference_plane(width: usize, height: usize) -> (Vec<f32>, Vec<bool>) {
 
 /// Relative luminance error of a presented BGRA picture against the reference,
 /// sum |live - ref| / sum ref over the pixels that are not sky.
+/// Mean sRGB luma of the top, middle, and bottom thirds, then the left and right halves.
+fn band_luma(bgra: &[u8], width: usize, height: usize) -> [f64; 5] {
+    let mut sum = [0.0f64; 5];
+    let mut count = [0u64; 5];
+    let third = height / 3;
+    for y in 0..height {
+        for x in 0..width {
+            let p = (y * width + x) * 4;
+            if p + 2 >= bgra.len() {
+                continue;
+            }
+            let luma = pixel_luminance(&[bgra[p + 2], bgra[p + 1], bgra[p]]);
+            let v = f64::from(luma);
+            let row = if y < third {
+                0
+            } else if y < third * 2 {
+                1
+            } else {
+                2
+            };
+            sum[row] += v;
+            count[row] += 1;
+            let side = if x < width / 2 { 3 } else { 4 };
+            sum[side] += v;
+            count[side] += 1;
+        }
+    }
+    let mut out = [0.0f64; 5];
+    for i in 0..5 {
+        if count[i] > 0 {
+            out[i] = sum[i] / count[i] as f64;
+        }
+    }
+    out
+}
+
 fn error_vs_reference(bgra: &[u8], reference: &(Vec<f32>, Vec<bool>)) -> f64 {
     let (lum, keep) = reference;
     assert_eq!(bgra.len(), lum.len() * 4, "picture and reference sizes differ");
@@ -205,8 +241,10 @@ fn the_presented_frame_moves_when_the_cache_fills() {
     }
     let early_error = error_vs_reference(&early, &reference);
     let late_error = error_vs_reference(&late, &reference);
+    let bands = band_luma(&late, renderer.width() as usize, renderer.height() as usize);
     eprintln!(
-        "fill knockout: early-to-late mean abs {delta:.3} codes, error vs path reference early {early_error:.4} late {late_error:.4}"
+        "fill knockout: early-to-late mean abs {delta:.3} codes, error vs path reference early {early_error:.4} late {late_error:.4} bands top {:.2} mid {:.2} bottom {:.2} left {:.2} right {:.2}",
+        bands[0], bands[1], bands[2], bands[3], bands[4]
     );
     assert!(
         delta >= MIN_DELTA_CODES,

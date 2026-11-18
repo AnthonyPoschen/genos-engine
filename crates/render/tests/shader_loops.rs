@@ -426,3 +426,45 @@ fn picture_compose_does_not_walk_occluders() {
         assert_eq!(calls, 0, "{name} calls scene_candidates");
     }
 }
+
+/// A refine child starts from the parent's radiance at one set. An empty mean
+/// made the first ray throw that prior away.
+#[test]
+fn a_refine_child_inherits_the_parent_mean_at_one_set() {
+    let cache = source("lighting_cache.glsl");
+    let spawn = function_body(&cache, "void lighting_fine_spawn(");
+    assert!(
+        spawn.contains("cache.v[3u * born + 2u] = vec4(pre, LIGHTING_FINE_INHERIT_SETS)"),
+        "the child mean is the parent radiance at the inherit count"
+    );
+    assert!(
+        spawn.contains("LIGHTING_FINE_INHERIT_VALUE"),
+        "the child value starts high"
+    );
+    assert!(
+        !spawn.contains("1.0 - area"),
+        "the area step must not scale the inherited radiance"
+    );
+    let fill = source("lighting_fill.glsl");
+    let visit = function_body(&fill, "void lighting_fill_visit(");
+    assert!(
+        visit.contains("if (!lighting_fill_pixel(p, px_keep, py_keep))"),
+        "an on-screen cell past the leash stays"
+    );
+    assert!(
+        fill.contains("pri *= LIGHTING_FILL_OFF_SCREEN"),
+        "an off-screen cell ranks below the same on-screen cell"
+    );
+    assert!(
+        fill.contains("LIGHTING_FILL_Q_GROUPS"),
+        "the burst is split across the screen quarters"
+    );
+    assert!(
+        visit.contains("size >= base && !seen"),
+        "on-screen parents do not spawn a second near-field set"
+    );
+    assert!(
+        fill.contains("w == 1u || w == 2u || w == 4u"),
+        "the uniform floor uses the preset divisor"
+    );
+}

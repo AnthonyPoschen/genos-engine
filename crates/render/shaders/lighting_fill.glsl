@@ -1,7 +1,11 @@
 // Stages F2, F3, and F4a. The world cache is the only store. A cache round traces
-// one floor ray for each live cell every LIGHTING_FILL_FLOOR_PERIOD frames,
-// plus one ray every frame for a cell a mover is changing, plus fill_burst rays
-// on the highest value cells. The mover rays come out of that same budget.
+// one floor ray for each live cell at the preset's uniform rate (High every
+// frame, Medium every second, Low every fourth), plus fill_burst rays on the
+// highest value cells. That burst is split equally across the four screen
+// quarters, plus an off-screen share, so the near floor cannot take the back
+// wall's rays. A cell a mover is changing is due every frame. Those
+// mover rays come out of the burst only when the uniform rate is slower than
+// every frame.
 // Word 0 stays a positive enable; the plan writes the traced count. F4a writes a
 // low-confidence seed into other cells of the same screen tile. The seed is not
 // an own sample and it does not add a ray. Ring sharing is not this stage.
@@ -118,13 +122,18 @@ float lighting_fill_f(uint i) {
 bool lighting_ray_fill_on() {
     return lighting_world_mode() == 3u && lighting_fill_u(0) > 0u;
 }
-// One floor ray per live cell every this many frames. A cell a mover is
-// changing is the exception: it is due every frame, and that ray is counted
-// out of the burst. 0 in the param word leaves the floor off.
+// Word 32 is the uniform floor divisor: 1, 2, or 4. 0 leaves the floor off.
+// Any other non-zero word is the 1-in-10 minimum. Ranking the rays a 1-in-10
+// floor no longer spent put them on the near field and left the back of the
+// hall dark, so the retired floor is uniform again.
 const uint LIGHTING_FILL_FLOOR_PERIOD = 10u;
 uint lighting_fill_rate() {
-    if (lighting_fill_u(32) == 0u) {
+    uint w = lighting_fill_u(32);
+    if (w == 0u) {
         return 0u;
+    }
+    if (w == 1u || w == 2u || w == 4u) {
+        return w;
     }
     return LIGHTING_FILL_FLOOR_PERIOD;
 }
@@ -350,9 +359,15 @@ float lighting_fill_check_u(uint slot) {
     return lighting_unit(key ^ (seed * 0x85ebca6bu + 0x5bd1e995u));
 }
 
-// Rank is closeness times remaining error. On screen, off screen, and
-// occluded share that rank. The floor ray covers every live cell.
-uint lighting_fill_q(uint slot, float d) {
+// Off-screen cells stay in the same ranking, below an on-screen cell of the
+// same value and distance. The uniform floor still reaches both. The burst
+// itself is split: four screen quarters share the on-screen part equally, and
+// the off-screen part is offscreen_floor of the burst. Closeness inside one
+// quarter was spending the whole burst on the near floor.
+const float LIGHTING_FILL_OFF_SCREEN = 0.25;
+const uint LIGHTING_FILL_Q_BINS = 32u;
+const uint LIGHTING_FILL_Q_GROUPS = 5u;
+uint lighting_fill_q(uint slot, float d, bool on_screen) {
     vec4 shown_v = cache.v[3u * slot + 2u];
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
     float rays = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w;
@@ -362,7 +377,34 @@ uint lighting_fill_q(uint slot, float d) {
     float err = rays < FILL_HALF ? 1.0 : max(0.0, dev / mean - lighting_fill_f(9));
     float close = 1.0 / max(d, lighting_fill_f(10));
     float pri = close * (err + lighting_fill_f(11) * lam);
+    if (!on_screen) {
+        pri *= LIGHTING_FILL_OFF_SCREEN;
+    }
     return lighting_fill_bucket(pri);
+}
+
+// 64 priority buckets folded into the 32 bins of one quarter. Bucket 0 is
+// "not ranked" and stays out of the histogram.
+uint lighting_fill_bin(uint q) {
+    uint bin = (q + 1u) >> 1u;
+    if (bin < 1u) {
+        return 0u;
+    }
+    if (bin > 31u) {
+        bin = 31u;
+    }
+    return bin;
+}
+
+// 0..3 are the screen quarters (x bit, then y bit), matching the host log.
+// 4 is off screen and has its own burst share.
+uint lighting_fill_group(bool on_screen, uint px, uint py) {
+    if (!on_screen) {
+        return 4u;
+    }
+    uint right = px >= pc.dims.x / 2u ? 1u : 0u;
+    uint bottom = py >= pc.dims.y / 2u ? 1u : 0u;
+    return bottom * 2u + right;
 }
 
 void lighting_fill_decay(uint slot) {
@@ -400,18 +442,25 @@ void lighting_fill_visit(uint slot) {
         uint level = lighting_fill_level_of_size(size);
         float keep = lighting_fill_leash(level);
         if (d > keep) {
-            uint target = level;
-            uint cap = lighting_fill_lod_max();
-            while (target < cap && d > lighting_fill_leash(target)) {
-                target++;
+            // On screen the cell is what the picture is still reading. Coarsen
+            // and evict only the off-screen copy. Dropping the on-screen parent
+            // left the back of the hall on a one-ray texel.
+            uint px_keep;
+            uint py_keep;
+            if (!lighting_fill_pixel(p, px_keep, py_keep)) {
+                uint target = level;
+                uint cap = lighting_fill_lod_max();
+                while (target < cap && d > lighting_fill_leash(target)) {
+                    target++;
+                }
+                if (target > level && d <= lighting_fill_leash(target)) {
+                    lighting_fill_coarsen(slot, p, n, target);
+                } else if (d > lighting_fill_leash(target)) {
+                    atomicAdd(gstats.diag[LIGHTING_RESET_LEASH], 1u);
+                    lighting_fill_free(slot);
+                }
+                return;
             }
-            if (target > level && d <= lighting_fill_leash(target)) {
-                lighting_fill_coarsen(slot, p, n, target);
-            } else if (d > lighting_fill_leash(target)) {
-                atomicAdd(gstats.diag[LIGHTING_RESET_LEASH], 1u);
-                lighting_fill_free(slot);
-            }
-            return;
         }
     }
     // A 12.5 cm texel is the only cell compose reads in world mode 3, at every
@@ -421,7 +470,13 @@ void lighting_fill_visit(uint slot) {
     // The 25 cm parent is the SH prior, so the texel still claims it. The
     // texel takes its own floor ray: compose shows that texel, and a per-cell
     // floor does not steal the parent's ray.
-    if (size >= base) {
+    uint seen_x;
+    uint seen_y;
+    bool seen = lighting_fill_pixel(p, seen_x, seen_y);
+    // Children of an off-screen parent only. On-screen texels are the ones
+    // compose claims; spawning them here filled the near field and the burst
+    // never reached the back of the hall.
+    if (size >= base && !seen) {
         lighting_fine_spawn(slot);
     }
     // The 12.5 cm texel does not claim the 25 cm parent. That claim recreated
@@ -430,11 +485,14 @@ void lighting_fill_visit(uint slot) {
     if (size <= LIGHTING_WRC_CELL_SIZE && lighting_compact_hold_texel_rays(slot)) {
         return;
     }
-    uint q = lighting_fill_q(slot, d);
+    uint q = lighting_fill_q(slot, d, seen);
     uint rate = lighting_fill_rate();
-    if (q > 0u) {
-        atomicAdd(ckeys.key[lighting_fill_hist_at() + q], 1u);
-        uint packed = ((q & 63u) << 21u) | (slot + 1u);
+    uint bin = lighting_fill_bin(q);
+    uint group = lighting_fill_group(seen, seen_x, seen_y);
+    if (bin > 0u) {
+        atomicAdd(ckeys.key[lighting_fill_hist_at() + group * LIGHTING_FILL_Q_BINS + bin], 1u);
+        uint packed_q = (group << 5u) | bin;
+        uint packed = (packed_q << 21u) | (slot + 1u);
         uint c = atomicAdd(ckeys.key[lighting_fill_header_at() + 4u], 1u);
         if (c < LIGHTING_FILL_TILE_CAP) {
             ckeys.key[lighting_fill_tile_at() + c] = packed;
@@ -661,18 +719,21 @@ void lighting_fill_emit_on(uint gid) {
     uint slot = 0u;
     if (gid < n && gid < LIGHTING_FILL_TILE_CAP) {
         uint w = ckeys.key[lighting_fill_tile_at() + gid];
-        uint q = w >> 21u;
+        uint packed_q = w >> 21u;
+        uint group = packed_q >> 5u;
+        uint bin = packed_q & 31u;
         slot = (w & 2097151u) - 1u;
         uint max_picks = clamp(lighting_fill_u(17), 1u, 64u);
-        if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u) {
-            uint base = ckeys.key[lighting_fill_plan_at() + q];
-            uint extra = ckeys.key[lighting_fill_plan_at() + 64u + q];
+        if (bin > 0u && group < LIGHTING_FILL_Q_GROUPS && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u) {
+            uint at = group * LIGHTING_FILL_Q_BINS + bin;
+            uint base = ckeys.key[lighting_fill_plan_at() + at];
+            uint extra = ckeys.key[lighting_fill_plan_at() + LIGHTING_FILL_Q_GROUPS * LIGHTING_FILL_Q_BINS + at];
             uint want = base;
             if (want > max_picks) {
                 want = max_picks;
             }
             if (extra > 0u && want < max_picks) {
-                uint ticket = atomicAdd(ckeys.key[lighting_fill_extra_at() + q], 1u);
+                uint ticket = atomicAdd(ckeys.key[lighting_fill_extra_at() + at], 1u);
                 if (ticket < extra) {
                     want += 1u;
                 }
@@ -710,29 +771,55 @@ void lighting_fill_dispatch() {
     // Mover rays are already in the floor count. The part past the 1/10 share
     // comes out of the burst, so the round stays inside the device budget.
     uint mover_rays = ckeys.key[lighting_fill_header_at() + 6u];
-    uint mover_extra = mover_rays - mover_rays / LIGHTING_FILL_FLOOR_PERIOD;
+    // Every cell already has the uniform floor. Mover rays are extra only
+    // when that floor is slower than every frame.
+    uint period = max(lighting_fill_rate(), 1u);
+    uint mover_extra = period > 1u ? mover_rays - mover_rays / period : 0u;
     if (burst > mover_extra) {
         burst -= mover_extra;
     } else {
         burst = 0u;
     }
     gstats.diag[LIGHTING_DIAG_MOVER_RAYS] = mover_rays;
-    uint hist[64];
-    uint serial = 0u;
-    uint hist_at = lighting_fill_hist_at();
-    for (uint i = 0u; i < 64u; i++) {
-        hist[i] = ckeys.key[hist_at + i];
-        serial += 1u;
+    // Off-screen takes its own share. The rest is split across the four
+    // screen quarters, so the near floor cannot spend the back wall's rays.
+    uint off_share = uint(float(burst) * lighting_fill_f(8));
+    if (off_share > burst) {
+        off_share = burst;
     }
+    uint on_left = burst - off_share;
+    uint q_share = on_left / 4u;
+    uint q_rem = on_left - q_share * 4u;
+    uint hist[64];
     uint base_m[64];
     uint extra_m[64];
-    uint burst_take = 0u;
-    lighting_fill_plan(hist, burst, max_picks, base_m, extra_m, burst_take);
+    uint serial = 0u;
+    uint hist_at = lighting_fill_hist_at();
     uint plan = lighting_fill_plan_at();
-    for (uint i = 0u; i < 64u; i++) {
-        ckeys.key[plan + i] = base_m[i];
-        ckeys.key[plan + 64u + i] = extra_m[i];
-        serial += 2u;
+    uint extra_base = LIGHTING_FILL_Q_GROUPS * LIGHTING_FILL_Q_BINS;
+    uint burst_take = 0u;
+    for (uint group = 0u; group < LIGHTING_FILL_Q_GROUPS; group++) {
+        uint share = group == 4u ? off_share : q_share;
+        if (group < q_rem) {
+            share += 1u;
+        }
+        for (uint i = 0u; i < 64u; i++) {
+            hist[i] = 0u;
+            serial += 1u;
+        }
+        for (uint i = 0u; i < LIGHTING_FILL_Q_BINS; i++) {
+            hist[i] = ckeys.key[hist_at + group * LIGHTING_FILL_Q_BINS + i];
+            serial += 1u;
+        }
+        uint take = 0u;
+        lighting_fill_plan(hist, share, max_picks, base_m, extra_m, take);
+        for (uint i = 0u; i < LIGHTING_FILL_Q_BINS; i++) {
+            uint at = group * LIGHTING_FILL_Q_BINS + i;
+            ckeys.key[plan + at] = base_m[i];
+            ckeys.key[plan + extra_base + at] = extra_m[i];
+            serial += 2u;
+        }
+        burst_take += take;
     }
     uint floor_n = ckeys.key[lighting_fill_header_at()];
     uint cap = lighting_fill_rays_max();
@@ -890,6 +977,13 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     float calm = n / (rays0 + n);
     float k = lighting_fill_pace(slot, calm, calm, rays0, n);
     bool cell = cache.v[3u * slot + 1u].w > LIGHTING_WRC_CELL_SIZE;
+    // World cells already refresh this in their branch. A texel compose is
+    // reading used to decay its value to 0, so the burst went to the 25 cm
+    // parent and the texel kept only the floor ray. The same agreement test
+    // keeps a texel that still disagrees in the ranking.
+    if (!cell && old.w >= FILL_HALF) {
+        lighting_history_value(slot, old.rgb, e);
+    }
     // A world cell's deposit is one cache sample, the same unit a due-list
     // relight adds (one 16-ray entry). The blend is that pass's dark-fill
     // weight. rays/64 never reached a trusted set count, so the picture stayed
@@ -948,6 +1042,12 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
             lighting_fill_note_var(slot, e);
         }
     } else {
+        // Before the texel MSME warmup, the variance word is what the next
+        // frame's agreement test reads. A zero word treats every sample as a
+        // shift and the value never falls.
+        if (!cell && old.w >= FILL_HALF) {
+            lighting_fill_note_var(slot, e);
+        }
         mean = old.w < FILL_HALF ? e : mix(old.rgb, e, clamp(k, 0.0, 1.0));
     }
     float cap = float(lighting_fill_u(13));
