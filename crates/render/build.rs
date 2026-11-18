@@ -111,6 +111,15 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
             &out.join("texel_ray_cut_prod.comp.spv"),
         ),
     };
+    // Not embedded. The two modules above are the lavapipe fixture and keep
+    // the neighbour walk. Picture compose defines GENOS_COMPOSE_NO_WALK, and
+    // this file calls the same helpers, so that define has to compile too.
+    let _ = compile_texel_detail(
+        "shaders/texel_detail_prod.comp",
+        &out.join("texel_detail_prod_no_walk.comp.spv"),
+        &["-DGENOS_COMPOSE_NO_WALK=1"],
+        false,
+    );
     // Not embedded: catches errors in a piece no pass includes yet.
     let reflections_check = "shaders/reflections_check.comp";
     println!("cargo:rerun-if-changed={reflections_check}");
@@ -497,11 +506,13 @@ fn compile_glslc_define(src: &str, dest: &std::path::Path, define: &str) -> Path
     compile_args(src, dest, &[&flag])
 }
 
-/// The lavapipe fixture only. Inlining the compose function at every mover
+/// The lavapipe fixture, and the compile check that passes
+/// `GENOS_COMPOSE_NO_WALK`. Inlining the compose function at every mover
 /// shade makes the compiler heap exceed a 16 GB software-test budget.
-/// `DontInline` does not change the GLSL those functions run. The fixture
-/// keeps the neighbour walk. Every compose compile defines
-/// `GENOS_COMPOSE_NO_WALK` and does not.
+/// `DontInline` does not change the GLSL those functions run. The embedded
+/// fixture keeps the neighbour walk. Every compose compile defines
+/// `GENOS_COMPOSE_NO_WALK`. `tests/shader_defines.rs` compiles each production
+/// define combination, including that one on this file.
 fn compile_texel_detail(
     src: &str,
     dest: &std::path::Path,
