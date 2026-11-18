@@ -170,7 +170,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          floor ray per live cell whose slot mod fill_floor_rate
                          equals the frame mod that rate, plus fill_burst.
                          fill_floor_rate is 1, 2, or 4 (High 1, Medium 2, Low 4).
-                         fill_burst 0 spends no extra rays. fill_budget 0 traces none.
+                         fill_burst 0 spends no extra rays. High defaults to 25000,
+                         Medium to 12500, Low to 6250. fill_budget 0 traces none.
                          The other fill knobs are surface_cache.fill_* and
                          GENOS_LIGHTING_FILL_TILE, FILL_LOD_NEAR, FILL_CELL_MAX,
                          FILL_LEASH, FILL_LOOK_AHEAD, FILL_FAR, FILL_FAR_SHARE,

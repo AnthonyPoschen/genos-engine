@@ -150,7 +150,7 @@ impl Tunables {
             share_handover: 16,
             floor_rays: 1,
             floor_rate: 1,
-            burst: 0,
+            burst: 25_000,
         }
     }
 

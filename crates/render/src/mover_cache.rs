@@ -327,6 +327,8 @@ pub struct MoverCache {
     /// Rotates equal-priority underfilled texels so the 256-deposit budget does
     /// not lock onto the lowest pool indices every frame (dark crawling patches).
     fill_epoch: u32,
+    /// Texels returned to the free stack that still held samples.
+    history_drops: u32,
 }
 
 impl MoverCache {
@@ -353,6 +355,7 @@ impl MoverCache {
             fill_list: Vec::new(),
             fill_rays: 0,
             fill_epoch: 0,
+            history_drops: 0,
         }
     }
 
@@ -365,6 +368,12 @@ impl MoverCache {
     #[must_use]
     pub fn pool_cap(&self) -> u32 {
         self.pool_cap
+    }
+
+    /// Texels freed while they still held samples. Cumulative.
+    #[must_use]
+    pub fn history_drops(&self) -> u32 {
+        self.history_drops
     }
 
     #[must_use]
@@ -1099,6 +1108,10 @@ impl MoverCache {
             let i = base.saturating_add(off);
             if usize_from_u32(i) >= self.texels.len() {
                 break;
+            }
+            let prev = self.texels[usize_from_u32(i)];
+            if prev.is_live() && prev.samples > 0.0 {
+                self.history_drops = self.history_drops.saturating_add(1);
             }
             self.texels[usize_from_u32(i)] = MoverTexel {
                 next_free: self.free_top,

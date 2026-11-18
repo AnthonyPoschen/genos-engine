@@ -360,27 +360,25 @@ fn the_scene_ray_loops_are_kept_rolled() {
     }
 }
 
-/// The tile fill rays the world cell. A finer screen texel claims that cell
-/// and returns, so it cannot win the tile.
+/// Compose reads the 12.5 cm texel, so the visit gives it a floor ray. It does
+/// not claim the 25 cm parent: that claim recreated cells the leash drops.
 #[test]
-fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
+fn the_fill_visit_rays_the_screen_texel_and_claims_its_parent() {
     let fill = source("lighting_fill.glsl");
     let visit = function_body(&fill, "void lighting_fill_visit(uint slot)");
-    let claim = visit.find("lighting_cache_find_sized(p, n, true, base, p)");
-    let floor = visit.find("(slot % rate)");
-    match (claim, floor) {
-        (Some(claim_at), Some(floor_at)) => {
-            assert!(
-                claim_at < floor_at,
-                "the screen texel must return before the floor ray"
-            );
-        }
-        (None, _) => panic!("a screen texel must claim the world cell under it"),
-        (Some(_), None) => panic!("a world cell must still take the floor ray"),
-    }
     assert!(
-        visit.contains("if (size < base)"),
-        "only a slot finer than the base world cell skips the ray"
+        visit.contains("(slot % rate)"),
+        "a world cell must still take the floor ray"
+    );
+    assert!(
+        !visit.contains("lighting_cache_find_sized(p, n, true, base, p)"),
+        "a fine texel must not claim the parent it would coarsen"
+    );
+    let cache = source("lighting_cache.glsl");
+    let find = function_body(&cache, "uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at)");
+    assert!(
+        find.contains("lighting_fill_leash(0u)"),
+        "an off-screen claim past the level-0 leash is refused"
     );
     assert!(
         !visit.contains("atomicMax"),

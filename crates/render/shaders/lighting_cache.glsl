@@ -279,6 +279,21 @@ const uint LIGHTING_DIAG_FILTER_HEAVY = 60u;
 // next 12 are tiles kept because the bounce still moved, and the top 4 are
 // the picture's corner tiles (bit set means that corner was unheld).
 const uint LIGHTING_DIAG_REACH = 8u;
+// History resets, always on. The index is a diag word (stats word 24 + index).
+// lightingreset prints them. A settled still scene leaves these at zero:
+// a steady count is a wipe of a surface that is still there.
+const uint LIGHTING_RESET_LEASH = 42u;
+const uint LIGHTING_RESET_COARSEN = 43u;
+const uint LIGHTING_RESET_AGE = 44u;
+const uint LIGHTING_RESET_EVICT = 45u;
+const uint LIGHTING_RESET_ADOPT = 46u;
+const uint LIGHTING_RESET_DECAY = 47u;
+const uint LIGHTING_RESET_REPROJECT = 4u;
+const uint LIGHTING_RESET_MEAN = 49u;
+const uint LIGHTING_RESET_FADE = 50u;
+const uint LIGHTING_RESET_RESTIR = 7u;
+const uint LIGHTING_RESET_MOVER = 9u;
+const uint LIGHTING_RESET_DIRECT_MISS = 10u;
 // Tile mask, one bit per 32 px tile, then one change word per tile, then one
 // bit per cache slot. lighting_gpu.rs sizes the key buffer with the same counts.
 // A measured change notes a tile by storing 1 in its change word. The reach
@@ -1046,6 +1061,8 @@ void lighting_sc_seed_apply(uint slot);
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz);
 uint lighting_mover_on(vec3 pos, vec3 n);
 bool lighting_sc_local_on();
+bool lighting_fill_pixel(vec3 p, out uint px, out uint py);
+float lighting_fill_leash(uint level);
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
@@ -1063,6 +1080,16 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     }
     if (!claim || !LIGHTING_SC_WRITES) {
         return ~0u;
+    }
+    // A cell this size past the level-0 leash, and off screen, is coarsened
+    // on the next visit. Claiming it again is a steady wipe. On screen, and
+    // inside the leash, the claim stands.
+    if (size <= LIGHTING_SC_HIT) {
+        uint keep_x;
+        uint keep_y;
+        if (!lighting_fill_pixel(pos, keep_x, keep_y) && length(pos - scene.eye.xyz) > lighting_fill_leash(0u)) {
+            return ~0u;
+        }
     }
 #ifndef GENOS_COMPOSE_NO_WALK
     // #286 → pool: a hit on a mover never writes a world cell.
@@ -4171,6 +4198,7 @@ bool lighting_fine_evict(vec3 pos, vec3 n) {
     if (atomicCompSwap(ckeys.key[best], best_key, 0u) != best_key) {
         return false;
     }
+    atomicAdd(gstats.diag[LIGHTING_RESET_EVICT], 1u);
     atomicAdd(gstats.freed, 1u);
     lighting_sc_forget(best);
     cache.v[3u * best + 1u] = vec4(0.0);
@@ -7343,6 +7371,7 @@ bool lighting_sc_drop_stale_mover_world(uint slot) {
     if (!on && !aged) {
         return false;
     }
+    atomicAdd(gstats.diag[LIGHTING_RESET_MOVER], 1u);
     ckeys.key[slot] = 0u;
     lighting_sc_forget(slot);
     cache.v[3u * slot + 1u] = vec4(0.0);

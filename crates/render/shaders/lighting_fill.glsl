@@ -221,6 +221,7 @@ void lighting_fill_coarsen(uint slot, vec3 p, vec3 n, uint target) {
     if (parent == ~0u || parent == slot) {
         return;
     }
+    atomicAdd(gstats.diag[LIGHTING_RESET_COARSEN], 1u);
     if (cache.v[3u * parent + 2u].w < FILL_HALF) {
         cache.v[3u * parent + 2u] = cache.v[3u * slot + 2u];
         cache.v[LIGHTING_SC_EST_AT + 2u * parent] = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
@@ -300,7 +301,10 @@ float lighting_fill_check_u(uint slot) {
     return lighting_unit(key ^ (seed * 0x85ebca6bu + 0x5bd1e995u));
 }
 
-uint lighting_fill_q(uint slot, float d) {
+// Off-screen cells stay in the same ranking, below an on-screen cell of the
+// same value and distance. Matches OFF_SCREEN_WEIGHT in crates/fill-ref.
+const float LIGHTING_FILL_OFF_SCREEN = 0.25;
+uint lighting_fill_q(uint slot, float d, bool on_screen) {
     vec4 shown_v = cache.v[3u * slot + 2u];
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
     float rays = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w;
@@ -309,7 +313,11 @@ uint lighting_fill_q(uint slot, float d) {
     float lam = lighting_fill_unit(cache.v[LIGHTING_SC_GRAD_AT + slot].x);
     float err = rays < FILL_HALF ? 1.0 : max(0.0, dev / mean - lighting_fill_f(9));
     float close = 1.0 / max(d, lighting_fill_f(10));
-    return lighting_fill_bucket(close * (err + lighting_fill_f(11) * lam));
+    float pri = close * (err + lighting_fill_f(11) * lam);
+    if (!on_screen) {
+        pri *= LIGHTING_FILL_OFF_SCREEN;
+    }
+    return lighting_fill_bucket(pri);
 }
 
 void lighting_fill_decay(uint slot) {
@@ -318,6 +326,7 @@ void lighting_fill_decay(uint slot) {
     // A reused slot still holds the previous occupant's seed. Drop it before
     // priority, so the new surface starts with no lambda and no stored luma.
     if (floatBitsToUint(g.z) != want) {
+        atomicAdd(gstats.diag[LIGHTING_RESET_DECAY], 1u);
         g = vec4(0.0);
         g.z = uintBitsToFloat(want);
         cache.v[LIGHTING_SC_GRAD2_AT + slot].z = 0.0;
@@ -328,8 +337,7 @@ void lighting_fill_decay(uint slot) {
 
 // Drop a clipmap cell past its leash. A stored cell inside the leash is kept,
 // so the create edge does not thrash. Past the leash, coarsen, then evict.
-// A slot finer than the base world cell does not take a ray: the visit claims
-// that cell and returns. Compose reads the cell while the screen texel is empty.
+// A 12.5 cm texel claims the 25 cm parent and still takes its own floor ray.
 void lighting_fill_visit(uint slot) {
     vec3 p;
     vec3 n;
@@ -360,37 +368,34 @@ void lighting_fill_visit(uint slot) {
                 if (target > level && d <= lighting_fill_leash(target) + extra) {
                     lighting_fill_coarsen(slot, p, n, target);
                 } else if (d > lighting_fill_leash(target) + extra) {
+                    atomicAdd(gstats.diag[LIGHTING_RESET_LEASH], 1u);
                     lighting_fill_free(slot);
                 }
                 return;
             }
         }
     } else if (lighting_sc_expired(last, shown)) {
+        atomicAdd(gstats.diag[LIGHTING_RESET_AGE], 1u);
         lighting_fill_free(slot);
         return;
     }
-    // The world cell is the store for a screen texel. A 12.5 cm screen texel
-    // outranks its parent while it is young, so the parent stays empty and
-    // compose shows a direct-only mean. Claim the parent; its own visit
-    // schedules the rays. An off-screen band child is a candidate in this
-    // same histogram. A child the frustum can see is not: it would take the
-    // parent's rays and the presented frame would stop filling.
+    // Compose reads the 12.5 cm texel (world mode 3's lighting_cell_size).
+    // The 25 cm parent is the SH prior, so the texel still claims it. The
+    // texel takes its own floor ray: compose shows that texel, and a per-cell
+    // floor does not steal the parent's ray.
     uint seen_x;
     uint seen_y;
     bool seen = lighting_fill_pixel(p, seen_x, seen_y);
     if (size >= base && !seen) {
         lighting_fine_spawn(slot);
     }
-    if (size < base) {
-        lighting_cache_find_sized(p, n, true, base, p);
-        if (!(cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID) || seen) {
-            return;
-        }
-    }
+    // The 12.5 cm texel does not claim the 25 cm parent. That claim recreated
+    // cells the leash had just coarsened, so the same surfaces were wiped
+    // every frame. Compose reads the texel, which takes its own floor ray.
     if (size <= LIGHTING_WRC_CELL_SIZE && lighting_compact_hold_texel_rays(slot)) {
         return;
     }
-    uint q = lighting_fill_q(slot, d);
+    uint q = lighting_fill_q(slot, d, seen);
     uint rate = lighting_fill_rate();
     if (q > 0u) {
         atomicAdd(ckeys.key[lighting_fill_hist_at() + q], 1u);
@@ -1352,11 +1357,10 @@ void lighting_fill_resolve(uint gid) {
     lighting_fill_share(gid);
 }
 
-// The birth frame often runs before the parent cell has a sample. Until the
-// child has its own sets, replace the stored prior when the parent has more
-// samples than the one already kept. A child the frustum can see is left as
-// it was: the screen push publishes that snapshot, and it does not track the
-// parent after it becomes visible.
+// The birth frame often runs before the parent cell has a sample. An empty
+// child takes that prior once. A child that already has its own samples keeps
+// them: replacing the prior every frame was a wipe of a surface that is still
+// there. A child the frustum can see is left as it was.
 #ifndef GENOS_COMPOSE_NO_WALK
 void lighting_fine_adopt(uint slot) {
     if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
@@ -1365,7 +1369,7 @@ void lighting_fine_adopt(uint slot) {
     if (!(cache.v[LIGHTING_SC_SHOWN_AT + slot].y > LIGHTING_FINE_VALID)) {
         return;
     }
-    if (floor(max(cache.v[3u * slot + 2u].w, 0.0)) >= LIGHTING_FINE_READY_SETS) {
+    if (cache.v[3u * slot + 2u].w > 0.0) {
         return;
     }
     vec3 p;
@@ -1382,6 +1386,7 @@ void lighting_fine_adopt(uint slot) {
     if (!(pn > have + LIGHTING_SC_SET_HALF)) {
         return;
     }
+    atomicAdd(gstats.diag[LIGHTING_RESET_ADOPT], 1u);
     lighting_sc_set_seed(slot, pr, 1.0, ps);
     vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + slot];
     mark.y = 1.0;

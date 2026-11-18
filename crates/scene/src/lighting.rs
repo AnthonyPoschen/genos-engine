@@ -573,7 +573,8 @@ pub struct FillSettings {
     /// mod this value equals the frame mod this value.
     pub floor_rate: u32,
     /// Rays spent highest-value first after the floor. `0` spends none.
-    /// The traced count is the floor plus this, not `budget`.
+    /// High is 25000, Medium half of that, Low a quarter. The traced count
+    /// is the floor plus this, not `budget`.
     pub burst: u32,
 }
 
@@ -614,7 +615,7 @@ impl FillSettings {
             share_handover: 16,
             floor_rays: 1,
             floor_rate: 1,
-            burst: 0,
+            burst: 25_000,
         }
     }
 }
@@ -985,6 +986,7 @@ impl LightingSettings {
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
                 s.surface_cache.fill.budget = 25_000;
                 s.surface_cache.fill.floor_rate = 4;
+                s.surface_cache.fill.burst = 6_250;
                 s.surface_cache.fill.tile = 32;
             }
             LightingPreset::Medium => {
@@ -1005,6 +1007,7 @@ impl LightingSettings {
                 );
                 s.surface_cache.fill.budget = 50_000;
                 s.surface_cache.fill.floor_rate = 2;
+                s.surface_cache.fill.burst = 12_500;
                 s.surface_cache.fill.tile = 16;
             }
         }
