@@ -539,16 +539,17 @@ void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float targ
         // Validation: the history sample is re-scored at this frame's point
         // with this frame's lamp (tq_h below), so a lamp that dimmed, moved
         // out of reach, or switched off drops out (tq_h = 0). Where a changed
-        // lamp can reach this pixel, history keeps about 12 frames of the
-        // current sample instead of one: a slow move still answers, and the
-        // rest of the average stays. Scaling w_sum with M keeps the
-        // reservoir's W, so the estimate stays unbiased.
+        // lamp's previous or current ball reaches this shaded point, history
+        // keeps about 12 frames of the current sample instead of one. The
+        // trailing side of a move is in that ball, so it starts the same cap.
+        // Scaling w_sum with M keeps the reservoir's W, so the estimate stays
+        // unbiased.
         // The clamp must not depend on which lamp the history holds: a
         // weight keyed to the sample (only a changed lamp loses M) breaks
         // the M-weight partition of unity and darkened a wall by a moving
         // lamp ~20 %. The reach test is the pixel, not the sample. Header
         // word 39 is only the any-bit early-out.
-        bool changed_here = surfaced && restir_changed_reaches(pos);
+        bool changed_here = surfaced && restir_changed_reaches(pos + nrm * RESTIR_ORIGIN_LIFT);
         uint fade_m = m_now * RESTIR_CHANGE_FADE;
         if (m_now != 0u && changed_here && hist_m > fade_m) {
             hist_w *= m_as_f(fade_m) / m_as_f(hist_m);

@@ -55,6 +55,12 @@ pub const SPLIT_WORD: usize = 50;
 /// Absolute history M cap: 20 frames of `CANDIDATES` initial samples. The
 /// per-frame clamp (20x the current M) still applies first.
 pub const M_CAP: u32 = 20 * CANDIDATES;
+/// Header word: base of the previous ball of each point lamp (xyz + range).
+/// Words 22–36 are the previous camera, so this sits in the free word before
+/// the changed-lamp bitset.
+pub const PREV_AT_WORD: usize = 37;
+/// Four words: previous position xyz and previous range.
+pub const PREV_BALL_STRIDE: usize = 4;
 /// Header word: base of the changed-lamp bitset (one bit per point lamp).
 pub const CHANGED_AT_WORD: usize = 38;
 /// 1 when any point lamp changed since the history frame (bitset non-zero).
@@ -161,8 +167,8 @@ pub fn log_cost(reservoir_w: u32, reservoir_h: u32, cost: &RestirCost) {
     );
 }
 /// Worst prefix: header, 4096 lamps, a full binary tree (two nodes per lamp),
-/// and the changed-lamp bitset.
-pub const PREFIX_CAP_WORDS: u64 = 64 + 4096 * 8 + 8192 * 12 + 4096 / 32;
+/// one previous ball per lamp, and the changed-lamp bitset.
+pub const PREFIX_CAP_WORDS: u64 = 64 + 4096 * 8 + 8192 * 12 + 4096 * 4 + 4096 / 32;
 
 /// Previous camera, in the same basis the scene block stores.
 #[derive(Clone, Copy, Debug, Default)]
@@ -229,6 +235,28 @@ fn mark_changed(words: &mut [u32], changed_base: usize) {
         .get(changed_base..)
         .is_some_and(|bits| bits.iter().any(|w| *w != 0));
     words[ANY_CHANGED_WORD] = u32::from(any);
+}
+
+/// Previous ball of each current point lamp, in that same order. A layout
+/// change stores zeros: the bitset is clear on that frame, and a range of 0
+/// is an empty ball rather than the flame's infinite one.
+fn push_prev_balls(words: &mut Vec<u32>, prev_lamps: &[GpuLamp], count: usize) -> usize {
+    let base = words.len();
+    let prev: Vec<&GpuLamp> = point_lamps(prev_lamps).map(|(_, lamp)| lamp).collect();
+    let aligned = prev.len() == count;
+    for slot in 0..count {
+        let (pos, range) = if aligned {
+            let lamp = prev[slot];
+            (lamp.pos, lamp.range)
+        } else {
+            ([0.0; 3], 0.0)
+        };
+        push_f(words, pos[0]);
+        push_f(words, pos[1]);
+        push_f(words, pos[2]);
+        push_f(words, range);
+    }
+    base
 }
 
 /// Appends the changed-lamp bitset. Returns the bitset base and whether the
@@ -315,6 +343,10 @@ pub fn prefix(
         return None;
     }
     words.extend(nodes);
+    let prev_base = push_prev_balls(&mut words, prev_lamps, refs.len());
+    if words.len().saturating_sub(prev_base) != refs.len().saturating_mul(PREV_BALL_STRIDE) {
+        return None;
+    }
     let (changed_base, layout_changed) = push_changes(&mut words, lamps, prev_lamps, refs.len());
     if words.len() > usize::try_from(PREFIX_CAP_WORDS).unwrap_or(usize::MAX) {
         return None;
@@ -365,6 +397,7 @@ pub fn prefix(
     words[19] = HIST_STRIDE;
     words[20] = prev_slot & 1;
     words[21] = u32::from(previous.valid);
+    words[PREV_AT_WORD] = word_u32(prev_base);
     push_cam(&mut words, previous);
     mark_changed(&mut words, changed_base);
     Some(RestirPrefix {
@@ -552,6 +585,61 @@ mod tests {
             at(&packed.words, 39),
             1,
             "a position-only move sets word 39"
+        );
+        let prev_at = usize::try_from(at(&packed.words, super::PREV_AT_WORD as u32)).unwrap_or(0);
+        let prev_x = f32::from_bits(
+            packed
+                .words
+                .get(prev_at + super::PREV_BALL_STRIDE)
+                .copied()
+                .unwrap_or(0),
+        );
+        let prev_range = f32::from_bits(
+            packed
+                .words
+                .get(prev_at + super::PREV_BALL_STRIDE + 3)
+                .copied()
+                .unwrap_or(0),
+        );
+        assert!(
+            (prev_x - 1.0).abs() < 1.0e-5 && (prev_range - 8.0).abs() < 1.0e-5,
+            "lamp 1's previous ball is {prev_x} range {prev_range}"
+        );
+        let black = GpuLamp {
+            pos: [1.5, 2.0, 0.0],
+            color: [0.0, 0.0, 0.0],
+            directional: false,
+            range: 0.0,
+        };
+        let off = [lamp(0.0), black, lamp(2.0)];
+        let packed = prefix(&off, &moved, &RestirCam::default(), 2, 0, cost)
+            .unwrap_or_else(|| panic!("prefix"));
+        let prev_at = usize::try_from(at(&packed.words, super::PREV_AT_WORD as u32)).unwrap_or(0);
+        let prev_range = f32::from_bits(
+            packed
+                .words
+                .get(prev_at + super::PREV_BALL_STRIDE + 3)
+                .copied()
+                .unwrap_or(0),
+        );
+        let now_range = f32::from_bits(
+            packed
+                .words
+                .get(usize::try_from(at(&packed.words, 1)).unwrap_or(0) + super::LAMP_STRIDE + 3)
+                .copied()
+                .unwrap_or(1),
+        );
+        assert!(
+            (prev_range - 8.0).abs() < 1.0e-5 && now_range == 0.0,
+            "colour-to-0 keeps the previous range {prev_range} and a zero current range {now_range}"
+        );
+        assert_eq!(
+            packed
+                .words
+                .get(usize::try_from(at(&packed.words, 38)).unwrap_or(0))
+                .copied(),
+            Some(0b010),
+            "colour-to-0 flags the lamp so the previous ball is tested"
         );
         let still = prefix(&before, &before, &RestirCam::default(), 1, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));

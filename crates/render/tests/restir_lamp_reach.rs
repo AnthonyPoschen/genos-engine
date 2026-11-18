@@ -36,6 +36,19 @@ const WALL_Z: f32 = 0.15;
 /// Step per frame. Large enough to change the position bits, small enough
 /// that a 12-frame fade stays near the current integral.
 const MOVE_STEP: f32 = 0.012;
+/// The shade tests `pos + n * 0.02`. The wall faces +Z.
+const LIFT: f32 = 0.02;
+/// Frames after a lamp leaves. The leave caps the mean at two samples, so the
+/// old light's weight is gone well before this. The patch is dim (two lamps),
+/// and `REF_ERR` is relative, so the new samples need this long to sit under
+/// 0.05. A frozen mean does not get there: at 40 frames it was still 0.26.
+const FADE_FRAMES: u32 = 128;
+const LEFT_X0: f32 = LEFT_X - 1.3;
+const LEFT_X1: f32 = LEFT_X + 1.3;
+const RIGHT_X0: f32 = RIGHT_X - 1.0;
+const RIGHT_X1: f32 = RIGHT_X + 1.0;
+const PATCH_Y0: f32 = 0.7;
+const PATCH_Y1: f32 = 2.5;
 
 struct Rect {
     x0: u32,
@@ -121,15 +134,35 @@ fn color_for_range(range: f32, tint: [f32; 3]) -> [f32; 3] {
     tint.map(|channel| channel * scale)
 }
 
-fn reaches(pos: [f32; 3], color: [f32; 3], point: [f32; 3]) -> bool {
-    let range = lamp_range(color);
+fn ball_reaches(pos: [f32; 3], range: f32, point: [f32; 3]) -> bool {
     if range <= 0.0 {
-        return true;
+        return false;
     }
     let dx = pos[0] - point[0];
     let dy = pos[1] - point[1];
     let dz = pos[2] - point[2];
     dx * dx + dy * dy + dz * dz <= range * range
+}
+
+fn reaches(pos: [f32; 3], color: [f32; 3], point: [f32; 3]) -> bool {
+    ball_reaches(pos, lamp_range(color), point)
+}
+
+fn lifted_points(x0: f32, x1: f32, y0: f32, y1: f32) -> [[f32; 3]; 9] {
+    let z = WALL_Z + LIFT;
+    let xm = (x0 + x1) * 0.5;
+    let ym = (y0 + y1) * 0.5;
+    [
+        [x0, y0, z],
+        [x0, ym, z],
+        [x0, y1, z],
+        [xm, y0, z],
+        [xm, ym, z],
+        [xm, y1, z],
+        [x1, y0, z],
+        [x1, ym, z],
+        [x1, y1, z],
+    ]
 }
 
 fn world_and_mover() -> (World, usize) {
@@ -229,8 +262,8 @@ fn place_mover(world: &mut World, mover: usize, frame: u32, moving: bool) {
 }
 
 fn assert_ranges(world: &World, mover: usize) {
-    let left = [LEFT_X, 1.55, WALL_Z];
-    let right = [RIGHT_X, 1.55, WALL_Z];
+    let left_pts = lifted_points(LEFT_X0, LEFT_X1, PATCH_Y0, PATCH_Y1);
+    let right_pts = lifted_points(RIGHT_X0, RIGHT_X1, PATCH_Y0, PATCH_Y1);
     let mover_lamp = world.scene.lights.get(mover).expect("mover");
     let start = [
         mover_lamp.position.x,
@@ -242,46 +275,63 @@ fn assert_ranges(world: &World, mover: usize) {
         mover_lamp.position.y,
         mover_lamp.position.z,
     ];
-    assert!(
-        !reaches(start, mover_lamp.color, left),
-        "the mover starts inside the still patch"
-    );
-    assert!(
-        !reaches(end, mover_lamp.color, left),
-        "the mover walks into the still patch"
-    );
-    assert!(
-        reaches(start, mover_lamp.color, right),
-        "the mover misses its own patch"
-    );
-    assert!(
-        reaches(end, mover_lamp.color, right),
-        "the mover leaves its own patch"
-    );
-    let mut left_hit = false;
-    let mut right_hit = false;
-    for (index, lamp) in world.scene.lights.iter().enumerate() {
-        if index == mover {
-            continue;
-        }
-        let pos = [lamp.position.x, lamp.position.y, lamp.position.z];
-        if reaches(pos, lamp.color, left) {
-            left_hit = true;
-            assert!(
-                !reaches(pos, lamp.color, right),
-                "a still lamp reaches both patches"
-            );
-        }
-        if reaches(pos, lamp.color, right) {
-            right_hit = true;
-            assert!(
-                !reaches(pos, lamp.color, left),
-                "a right lamp reaches the still patch"
-            );
-        }
+    for point in left_pts {
+        assert!(
+            !reaches(start, mover_lamp.color, point),
+            "the mover starts inside the still patch {point:?}"
+        );
+        assert!(
+            !reaches(end, mover_lamp.color, point),
+            "the mover walks into the still patch {point:?}"
+        );
     }
-    assert!(left_hit, "no still lamp reaches the left patch");
-    assert!(right_hit, "no still lamp reaches the right patch");
+    for point in right_pts {
+        assert!(
+            reaches(start, mover_lamp.color, point),
+            "the mover misses its own patch {point:?}"
+        );
+        assert!(
+            reaches(end, mover_lamp.color, point),
+            "the mover leaves its own patch {point:?}"
+        );
+    }
+    for point in left_pts {
+        assert!(
+            world.scene.lights.iter().enumerate().any(|(index, lamp)| {
+                index != mover
+                    && reaches(
+                        [lamp.position.x, lamp.position.y, lamp.position.z],
+                        lamp.color,
+                        point,
+                    )
+            }),
+            "no still lamp reaches the still patch {point:?}"
+        );
+    }
+    for point in right_pts {
+        assert!(
+            world.scene.lights.iter().enumerate().any(|(index, lamp)| {
+                index != mover
+                    && reaches(
+                        [lamp.position.x, lamp.position.y, lamp.position.z],
+                        lamp.color,
+                        point,
+                    )
+            }),
+            "no still lamp reaches the moved patch {point:?}"
+        );
+    }
+    for lamp in &world.scene.lights {
+        let pos = [lamp.position.x, lamp.position.y, lamp.position.z];
+        let hits_left = left_pts.iter().any(|point| reaches(pos, lamp.color, *point));
+        let hits_right = right_pts
+            .iter()
+            .any(|point| reaches(pos, lamp.color, *point));
+        assert!(
+            !(hits_left && hits_right),
+            "one lamp reaches both patches"
+        );
+    }
 }
 
 fn screen_u(t: f32, span: u32) -> u32 {
@@ -504,8 +554,8 @@ fn a_moving_lamp_does_not_salt_pixels_only_still_lamps_reach() {
     let (world, mover) = world_and_mover();
     assert_ranges(&world, mover);
     let cam = camera();
-    let left = patch(&cam, LEFT_X - 1.3, LEFT_X + 1.3, 0.7, 2.5);
-    let right = patch(&cam, RIGHT_X - 1.0, RIGHT_X + 1.0, 0.7, 2.5);
+    let left = patch(&cam, LEFT_X0, LEFT_X1, PATCH_Y0, PATCH_Y1);
+    let right = patch(&cam, RIGHT_X0, RIGHT_X1, PATCH_Y0, PATCH_Y1);
     let still = measure("all_still", false, &left, &right);
     let moving = measure("one_moves", true, &left, &right);
     assert!(
@@ -561,4 +611,180 @@ fn a_moving_lamp_does_not_salt_pixels_only_still_lamps_reach() {
         still.right_grain,
         moving.right_grain
     );
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leave {
+    Jump,
+    Dim,
+    Replace,
+    Off,
+}
+
+fn leave_world() -> (World, usize) {
+    let (mut world, _) = world_and_mover();
+    world.scene.lights.retain(|lamp| lamp.position.x < 10.0);
+    world.scene.lights.push(genos_scene::Light {
+        position: genos_scene::Vec3::new(RIGHT_X - 0.45, 1.25, LAMP_Z),
+        color: color_for_range(LAMP_RANGE, [1.0, 0.45, 0.15]),
+        direction: genos_scene::Vec3::ZERO,
+    });
+    world.scene.lights.push(genos_scene::Light {
+        position: genos_scene::Vec3::new(RIGHT_X + 0.45, 2.05, LAMP_Z),
+        color: color_for_range(LAMP_RANGE, [0.25, 0.85, 0.35]),
+        direction: genos_scene::Vec3::ZERO,
+    });
+    let mover = world.scene.lights.len();
+    world.scene.lights.push(genos_scene::Light {
+        position: genos_scene::Vec3::new(RIGHT_X, 1.6, LAMP_Z),
+        color: color_for_range(LAMP_RANGE, [1.0, 0.85, 0.55]),
+        direction: genos_scene::Vec3::ZERO,
+    });
+    (world, mover)
+}
+
+fn apply_leave(lamp: &mut genos_scene::Light, kind: Leave) {
+    match kind {
+        Leave::Jump => lamp.position.x = 40.0,
+        Leave::Dim => lamp.color = color_for_range(0.4, [1.0, 0.85, 0.55]),
+        Leave::Replace => lamp.color = color_for_range(0.4, [0.15, 0.35, 1.0]),
+        Leave::Off => lamp.color = [0.0, 0.0, 0.0],
+    }
+}
+
+fn assert_leave_geometry(kind: Leave) {
+    let (mut world, mover) = leave_world();
+    let left = lifted_points(LEFT_X0, LEFT_X1, PATCH_Y0, PATCH_Y1);
+    let right = lifted_points(RIGHT_X0, RIGHT_X1, PATCH_Y0, PATCH_Y1);
+    let lamp = world.scene.lights.get(mover).expect("mover").clone();
+    let home = [lamp.position.x, lamp.position.y, lamp.position.z];
+    for point in left {
+        assert!(
+            !reaches(home, lamp.color, point),
+            "{kind:?} home reaches the still patch {point:?}"
+        );
+    }
+    for point in right {
+        assert!(
+            reaches(home, lamp.color, point),
+            "{kind:?} home misses the patch it must leave {point:?}"
+        );
+        assert!(
+            world.scene.lights.iter().enumerate().any(|(index, other)| {
+                index != mover
+                    && reaches(
+                        [other.position.x, other.position.y, other.position.z],
+                        other.color,
+                        point,
+                    )
+            }),
+            "the patch a lamp leaves has no other lamp {point:?}"
+        );
+    }
+    apply_leave(world.scene.lights.get_mut(mover).expect("mover"), kind);
+    let gone = world.scene.lights.get(mover).expect("mover");
+    let at = [gone.position.x, gone.position.y, gone.position.z];
+    for point in left.into_iter().chain(right) {
+        assert!(
+            !reaches(at, gone.color, point),
+            "{kind:?} still reaches {point:?} after it leaves"
+        );
+    }
+    if kind != Leave::Jump {
+        for point in left {
+            assert!(
+                !ball_reaches(home, lamp_range(lamp.color), point),
+                "the previous ball reaches a pixel the lamp never lit"
+            );
+        }
+    }
+}
+
+fn leave_shot(kind: Leave, left: &Rect, right: &Rect) -> Shot {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let (mut world, mover) = leave_world();
+    let camera = camera();
+    renderer.set_lighting_settings(direct_settings(true));
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        lamp: 0,
+    });
+    let mut last = genos_render::SceneRead {
+        width: WIDTH,
+        height: HEIGHT,
+        rgb: Vec::new(),
+        distance_m: Vec::new(),
+    };
+    for _ in 0..FRAMES {
+        last = grab(window, renderer, &world, &camera);
+    }
+    if let Some(lamp) = world.scene.lights.get_mut(mover) {
+        apply_leave(lamp, kind);
+    }
+    for _ in 0..FADE_FRAMES {
+        last = grab(window, renderer, &world, &camera);
+    }
+    let live = luma_image(&last.rgb);
+    let distance = last.distance_m.clone();
+    renderer.set_lighting_settings(direct_settings(false));
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        lamp: 0,
+    });
+    let brute_read = grab(window, renderer, &world, &camera);
+    let brute = luma_image(&brute_read.rgb);
+    let shot = Shot {
+        left_grain: grain(&live, WIDTH, left),
+        right_grain: grain(&live, WIDTH, right),
+        left_err: ref_err(&live, &brute, &distance, WIDTH, left),
+        right_err: ref_err(&live, &brute, &distance, WIDTH, right),
+        left_mean: patch_mean(&live, WIDTH, left),
+        right_mean: patch_mean(&live, WIDTH, right),
+        brute_left: patch_mean(&brute, WIDTH, left),
+        brute_right: patch_mean(&brute, WIDTH, right),
+    };
+    eprintln!(
+        "leave {kind:?}: left_grain {:.3} right_grain {:.3} left_err {:.4} right_err {:.4} left_mean {:.4} brute_left {:.4} right_mean {:.4} brute_right {:.4}",
+        shot.left_grain,
+        shot.right_grain,
+        shot.left_err,
+        shot.right_err,
+        shot.left_mean,
+        shot.brute_left,
+        shot.right_mean,
+        shot.brute_right
+    );
+    shot
+}
+
+#[test]
+fn a_lamp_that_leaves_a_patch_drops_its_stale_mean() {
+    for kind in [Leave::Jump, Leave::Dim, Leave::Replace, Leave::Off] {
+        assert_leave_geometry(kind);
+    }
+    let cam = camera();
+    let left = patch(&cam, LEFT_X0, LEFT_X1, PATCH_Y0, PATCH_Y1);
+    let right = patch(&cam, RIGHT_X0, RIGHT_X1, PATCH_Y0, PATCH_Y1);
+    let mut failed = String::new();
+    for kind in [Leave::Jump, Leave::Dim, Leave::Replace, Leave::Off] {
+        let shot = leave_shot(kind, &left, &right);
+        if shot.brute_right <= 1.0e-3 {
+            failed.push_str(&format!("{kind:?} left a dark patch {}\n", shot.brute_right));
+        }
+        if shot.left_grain >= 1.6 {
+            failed.push_str(&format!(
+                "{kind:?} salted the still patch grain {:.3}\n",
+                shot.left_grain
+            ));
+        }
+        if shot.right_err > REF_ERR {
+            failed.push_str(&format!(
+                "{kind:?} stale light ref_err {:.4} (mean {:.4} vs brute {:.4})\n",
+                shot.right_err, shot.right_mean, shot.brute_right
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{failed}");
 }

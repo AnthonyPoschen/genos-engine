@@ -772,11 +772,12 @@ void main() {
     // buffer. The shadow ray above re-traces the stored sample when the
     // reservoir kept that lamp. A different lamp traces the stored one once.
     // History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9), one pixel, and
-    // drops when the reservoir resets (word 15). A changed lamp drops it only
-    // where that lamp's range reaches the pixel, and then only down to
-    // RESTIR_CHANGE_FADE samples, not to one. The re-traced sample's visibility
-    // flip still clears it. The 12-bit unshadowed-target clear runs only where
-    // no changed lamp reaches, so a slow move does not defeat the fade.
+    // drops when the reservoir resets (word 15). A changed lamp shortens it
+    // where that lamp's previous or current ball reaches the shaded origin,
+    // down to RESTIR_CHANGE_FADE, or to RESTIR_CHANGE_LEAVE on the side the
+    // lamp left. The re-traced sample's visibility flip still clears it. The
+    // 12-bit unshadowed-target clear runs only where neither ball reaches, so
+    // a slow move does not defeat the fade.
     // That check runs before the cap, so a frozen mean still drops. At
     // RESTIR_MEAN_CAP the colour otherwise stays, so a still surface stops
     // moving. The mean of one fixed integrand stays unbiased: temporal
@@ -797,7 +798,11 @@ void main() {
         // pixel only, and the geo load stops before a neighbour. Two slots
         // leave the previous frame alone, so a reprojected neighbour is safe.
         uint mean_only = lamp_res_one_slot() ? idx : ~0u;
-        bool changed_here = restir_changed_reaches(pos);
+        // origin is pos + n * 0.02, the point the shade just lit. Reach is
+        // the union of the changed lamp's previous and current balls, not
+        // the lamp id stored in the mean.
+        uint reach = restir_changed_reach(origin);
+        bool changed_here = reach != 0u;
         if (restir_words[15u] == 0u && lamp_pick_reproject_at(pos, n, mean_only, mean_px, z_ignore)) {
             uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR_MEAN) {
@@ -858,7 +863,12 @@ void main() {
         }
         if (changed_here && mean_prev > 0u) {
             uint cap = RESTIR_CHANGE_FADE;
-            if (luma_steps > 1u) {
+            if ((reach & RESTIR_REACH_BEFORE) != 0u && (reach & RESTIR_REACH_NOW) == 0u) {
+                // The lamp left this pixel. Two samples, not one: the new
+                // integral takes the mean over without a frozen tail, and
+                // the drop does not depend on which lamp the slot holds.
+                cap = RESTIR_CHANGE_LEAVE;
+            } else if (luma_steps > 1u) {
                 cap = max(RESTIR_CHANGE_FADE / luma_steps, 1u);
             }
             if (mean_prev > cap) {
