@@ -1,14 +1,15 @@
 #ifndef RESTIR_REACH_GLSL
 #define RESTIR_REACH_GLSL
 
-// Samples kept where a changed lamp still reaches the shaded point. The new
-// sample then weighs 1/13. A pixel the lamp used to reach, and no longer
-// does, keeps two samples so that light leaves inside the same fade instead
-// of sitting in a frozen mean. Eight 12-bit log steps (about 9%) of the
-// stored sample still drop the mean. Header word 39 is the any-bit early-out.
+// Samples kept where a changed lamp reaches the shaded point, previous ball
+// or current. The new sample then weighs 1/13 on both sides. The side the
+// lamp just left uses this same cap: a shorter one salts that wake. Eight
+// 12-bit log steps (about 9%) of the stored sample still drop the mean.
+// Header word 39 is the any-bit early-out. A reorder sets word 15 and writes
+// no bits, so this returns before the previous balls are read; those balls
+// stay in the old slot order when the point-lamp count did not change.
 // Word 38 is the bitset. Word 37 is the previous-ball base (xyz + range).
 const uint RESTIR_CHANGE_FADE = 12u;
-const uint RESTIR_CHANGE_LEAVE = 2u;
 const uint RESTIR_CHANGE_DROP_STEPS = 8u;
 // Bit 0: the lamp's ball this frame. Bit 1: its ball last frame.
 const uint RESTIR_REACH_NOW = 1u;

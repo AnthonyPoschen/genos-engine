@@ -237,9 +237,11 @@ fn mark_changed(words: &mut [u32], changed_base: usize) {
     words[ANY_CHANGED_WORD] = u32::from(any);
 }
 
-/// Previous ball of each current point lamp, in that same order. A layout
-/// change stores zeros: the bitset is clear on that frame, and a range of 0
-/// is an empty ball rather than the flame's infinite one.
+/// Previous ball of each current point lamp, in that same order. A count
+/// mismatch stores zeros (an empty ball, not the flame's infinite one). An
+/// equal-length reorder stores the old slot order. That frame sets word 15
+/// and writes no changed-lamp bits, so the reach test returns on word 39
+/// before those balls are read.
 fn push_prev_balls(words: &mut Vec<u32>, prev_lamps: &[GpuLamp], count: usize) -> usize {
     let base = words.len();
     let prev: Vec<&GpuLamp> = point_lamps(prev_lamps).map(|(_, lamp)| lamp).collect();
@@ -400,6 +402,12 @@ pub fn prefix(
     words[PREV_AT_WORD] = word_u32(prev_base);
     push_cam(&mut words, previous);
     mark_changed(&mut words, changed_base);
+    // Reorder frames set word 15 and leave the bitset clear. The previous
+    // balls are not read: restir_changed_reach returns when word 39 is 0.
+    debug_assert!(
+        !layout_changed || words[ANY_CHANGED_WORD] == 0,
+        "a reorder must not publish changed-lamp bits"
+    );
     Some(RestirPrefix {
         words,
         total_words: total,
@@ -657,6 +665,29 @@ mod tests {
         let packed = prefix(&fewer, &before, &RestirCam::default(), 1, 0, cost)
             .unwrap_or_else(|| panic!("prefix"));
         assert!(packed.layout_changed, "indices no longer match");
+        let sun = GpuLamp {
+            pos: [0.0, 10.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            directional: true,
+            range: 0.0,
+        };
+        let shifted = [sun, lamp(0.0), lamp(1.0), lamp(2.0)];
+        let packed = prefix(&shifted, &before, &RestirCam::default(), 1, 0, cost)
+            .unwrap_or_else(|| panic!("prefix"));
+        assert!(
+            packed.layout_changed,
+            "an equal-length point list with new scene indices is a reorder"
+        );
+        assert_eq!(
+            at(&packed.words, 15),
+            1,
+            "a reorder sets word 15"
+        );
+        assert_eq!(
+            at(&packed.words, 39),
+            0,
+            "a reorder writes no bits, so the previous balls are not read"
+        );
     }
     #[test]
     fn history_reset_keeps_prefix_reasons() {

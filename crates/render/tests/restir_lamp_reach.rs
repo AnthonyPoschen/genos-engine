@@ -38,11 +38,23 @@ const WALL_Z: f32 = 0.15;
 const MOVE_STEP: f32 = 0.012;
 /// The shade tests `pos + n * 0.02`. The wall faces +Z.
 const LIFT: f32 = 0.02;
-/// Frames after a lamp leaves. The leave caps the mean at two samples, so the
-/// old light's weight is gone well before this. The patch is dim (two lamps),
-/// and `REF_ERR` is relative, so the new samples need this long to sit under
-/// 0.05. A frozen mean does not get there: at 40 frames it was still 0.26.
-const FADE_FRAMES: u32 = 128;
+/// Frames after a one-shot leave. The patch is dim, and `REF_ERR` is relative.
+/// A 12-sample fade is still 0.054 at 128 frames (the old light weighs
+/// 12/140); 160 frames brings it under 0.05. A frozen mean does not get
+/// there: at 40 frames it was still 0.26.
+const FADE_FRAMES: u32 = 160;
+/// Metres per frame. The wake is the strip the previous ball still covers and
+/// the current ball does not. This step keeps that strip on the lit wall at
+/// frames 4 and 8, and wide enough to grade.
+const TRAIL_STEP: f32 = 0.9;
+/// Where the crossing lamp sits before it moves. The left lamps cover it.
+const TRAIL_START: f32 = 3.42;
+const TRAIL_Y0: f32 = 1.2;
+const TRAIL_Y1: f32 = 2.0;
+/// Wake grain at frames 4 and 8. Settled grain on this strip is about 0.85.
+/// The 12-sample fade stays on that number. A 2-sample cap on the same strip
+/// at frame 4 was 1.31.
+const TRAIL_GRAIN: f64 = 1.2;
 const LEFT_X0: f32 = LEFT_X - 1.3;
 const LEFT_X1: f32 = LEFT_X + 1.3;
 const RIGHT_X0: f32 = RIGHT_X - 1.0;
@@ -787,4 +799,153 @@ fn a_lamp_that_leaves_a_patch_drops_its_stale_mean() {
         }
     }
     assert!(failed.is_empty(), "{failed}");
+}
+
+fn trail_world() -> (World, usize) {
+    let (mut world, _right_mover) = world_and_mover();
+    world.scene.lights.retain(|lamp| lamp.position.x < 10.0);
+    let mover = world.scene.lights.len();
+    world.scene.lights.push(genos_scene::Light {
+        position: genos_scene::Vec3::new(TRAIL_START, 1.6, LAMP_Z),
+        color: color_for_range(LAMP_RANGE, [1.0, 0.85, 0.55]),
+        direction: genos_scene::Vec3::ZERO,
+    });
+    (world, mover)
+}
+
+fn lamp_x(frame: u32) -> f32 {
+    TRAIL_START + TRAIL_STEP * as_f32(frame)
+}
+
+/// World-x span the previous ball covers and the current ball misses, for
+/// every y in the graded strip. That is the wake this frame.
+fn wake_span(frame: u32) -> (f32, f32) {
+    let cur = lamp_x(frame);
+    let prev = lamp_x(frame.saturating_sub(1));
+    let mut lo = f32::MAX;
+    let mut hi = f32::MIN;
+    let mut x = TRAIL_START - LAMP_RANGE - 1.0;
+    let end = lamp_x(frame) + 1.0;
+    while x < end {
+        let mut wake = true;
+        for y in [TRAIL_Y0, (TRAIL_Y0 + TRAIL_Y1) * 0.5, TRAIL_Y1] {
+            let point = [x, y, WALL_Z + LIFT];
+            let was = ball_reaches([prev, 1.6, LAMP_Z], LAMP_RANGE, point);
+            let now = ball_reaches([cur, 1.6, LAMP_Z], LAMP_RANGE, point);
+            if !was || now {
+                wake = false;
+            }
+        }
+        if wake {
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        x += 0.05;
+    }
+    assert!(
+        hi - lo > 0.6,
+        "frame {frame} wake is too thin {lo}..{hi}"
+    );
+    (lo, hi)
+}
+
+fn assert_trail_geometry() {
+    let (world, mover) = trail_world();
+    let home = [lamp_x(0), 1.6, LAMP_Z];
+    let lamp = world.scene.lights.get(mover).expect("mover");
+    for frame in [4u32, 8] {
+        let (x0, x1) = wake_span(frame);
+        for point in lifted_points(x0, x1, TRAIL_Y0, TRAIL_Y1) {
+            assert!(
+                !reaches([lamp_x(frame), 1.6, LAMP_Z], lamp.color, point),
+                "frame {frame} still covers its wake {point:?}"
+            );
+            assert!(
+                reaches([lamp_x(frame - 1), 1.6, LAMP_Z], lamp.color, point),
+                "frame {frame} previous ball misses its wake {point:?}"
+            );
+            assert!(
+                world.scene.lights.iter().enumerate().any(|(index, other)| {
+                    index != mover
+                        && reaches(
+                            [other.position.x, other.position.y, other.position.z],
+                            other.color,
+                            point,
+                        )
+                }),
+                "frame {frame} wake has no still lamp {point:?}"
+            );
+        }
+    }
+    let covered = lifted_points(LEFT_X0, LEFT_X1, PATCH_Y0, PATCH_Y1);
+    for point in covered {
+        assert!(
+            reaches(home, lamp.color, point),
+            "the crossing lamp misses the patch it starts on {point:?}"
+        );
+    }
+}
+
+fn trail_grain() -> (f64, f64, f64) {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let (mut world, mover) = trail_world();
+    let camera = camera();
+    renderer.set_lighting_settings(direct_settings(true));
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        lamp: 0,
+    });
+    let mut last = genos_render::SceneRead {
+        width: WIDTH,
+        height: HEIGHT,
+        rgb: Vec::new(),
+        distance_m: Vec::new(),
+    };
+    for _ in 0..FRAMES {
+        last = grab(window, renderer, &world, &camera);
+    }
+    let warm = luma_image(&last.rgb);
+    let (x0, x1) = wake_span(4);
+    let settled = grain(
+        &warm,
+        WIDTH,
+        &patch(&camera, x0, x1, TRAIL_Y0, TRAIL_Y1),
+    );
+    let mut at_4 = 0.0;
+    let mut at_8 = 0.0;
+    for frame in 1..=8 {
+        if let Some(lamp) = world.scene.lights.get_mut(mover) {
+            lamp.position.x = lamp_x(frame);
+        }
+        last = grab(window, renderer, &world, &camera);
+        let live = luma_image(&last.rgb);
+        let span = wake_span(frame);
+        let band = patch(&camera, span.0, span.1, TRAIL_Y0, TRAIL_Y1);
+        if frame != 4 && frame != 8 {
+            continue;
+        }
+        let g = grain(&live, WIDTH, &band);
+        eprintln!(
+            "trail frame {frame}: wake grain {g:.3} x {:.2}..{:.2} settled {settled:.3}",
+            span.0, span.1
+        );
+        if frame == 4 {
+            at_4 = g;
+        } else {
+            at_8 = g;
+        }
+    }
+    (settled, at_4, at_8)
+}
+
+#[test]
+fn a_lamp_crossing_a_patch_does_not_salt_the_wake() {
+    assert_trail_geometry();
+    let (settled, at_4, at_8) = trail_grain();
+    assert!(
+        at_4 < TRAIL_GRAIN && at_8 < TRAIL_GRAIN,
+        "wake grain frame4 {at_4:.3} frame8 {at_8:.3} settled {settled:.3} bound {TRAIL_GRAIN}"
+    );
 }
