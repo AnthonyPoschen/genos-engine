@@ -2505,8 +2505,10 @@ struct LightingShField {
 // LIGHTING_SC_FULL_SETS. 0 when nothing was accepted. A black mean with
 // sets still counts; radiance is not the populated test.
 float lighting_sh_blend_trust = 0.0;
-// Compose compiles define GENOS_COMPOSE_NO_WALK and do not contain this walk.
-#ifndef GENOS_COMPOSE_NO_WALK
+// The neighbour walk. Picture compose defines GENOS_COMPOSE_NO_WALK and does
+// not call this, so the function is not in that module. The relight and the
+// lavapipe fixture do call it. The read and store helpers below are not the
+// walk: they stay defined for every compile, including NO_WALK.
 LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
     const float cs = LIGHTING_SH_CELL;
     const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
@@ -2592,15 +2594,11 @@ LightingShField lighting_sh_gather(vec3 p, vec3 n, bool claim) {
     built.accepted = accepted;
     return built;
 }
-#endif
 // The screen and seed read is the gather's value, including an empty read.
-// Every compose compile defines GENOS_COMPOSE_NO_WALK and does not contain
-// this function. The cache relight stores the value; compose loads it.
-#ifndef GENOS_COMPOSE_NO_WALK
+// Picture compose does not call this. It loads the lattice the relight stored.
 vec4 lighting_sh_read(vec3 p, vec3 n, bool claim) {
     return lighting_sh_gather(p, n, claim).value;
 }
-#endif
 bool lighting_sh_detail_owner_lit(uint slot);
 // The corner gather runs once per texel or lattice, before compose, not once
 // per pixel. Compose loads. Sun word w is the cells-accept bit. Sun word z
@@ -2725,11 +2723,9 @@ bool lighting_sh_lattice_load(vec3 p, vec3 n, out uint ids[8]) {
     }
     return true;
 }
-// Picture compose does not write the table. Maintenance and the live compiles do.
 // A second key that shares the home probes the next free slot. A nearer key
 // may replace a farther one in that window. It does not clear a different key
 // by taking its only slot.
-#if !defined(GENOS_COMPOSE_NO_WALK) || defined(GENOS_COMPOSE_MAINT)
 uint lighting_sh_lattice_bind(uint key, uint bin) {
     if (!LIGHTING_SC_WRITES || key == 0u) {
         return ~0u;
@@ -2774,6 +2770,8 @@ uint lighting_sh_lattice_bind(uint key, uint bin) {
     }
     return ~0u;
 }
+// Picture compose does not write the table. Maintenance and the live compiles do.
+#if !defined(GENOS_COMPOSE_NO_WALK) || defined(GENOS_COMPOSE_MAINT)
 void lighting_sh_lattice_request(vec3 p, vec3 n, bool claim) {
     if (!LIGHTING_SC_WRITES) {
         return;
@@ -2801,7 +2799,6 @@ void lighting_sh_lattice_request(vec3 p, vec3 n, bool claim) {
 void lighting_sh_lattice_request(vec3 p, vec3 n, bool claim) {
 }
 #endif
-#ifndef GENOS_COMPOSE_NO_WALK
 void lighting_sh_lattice_fill_word(uint word) {
     uint key = ckeys.key[word];
     if (key == 0u) {
@@ -2845,7 +2842,6 @@ void lighting_sh_lattice_commit(vec3 p, vec3 n, bool claim) {
         lighting_sh_lattice_fill_word(LIGHTING_SH_LATTICE_AT + slot * LIGHTING_SH_LATTICE_STRIDE);
     }
 }
-#endif
 void lighting_sh_enqueue_texel(uint slot, vec3 at) {
     if (!LIGHTING_SC_WRITES || slot >= LIGHTING_CACHE_SLOTS) {
         return;
@@ -2878,7 +2874,6 @@ uint lighting_sh_store_pick(uint gid) {
 bool lighting_sh_detail_accepts(uint slot) {
     return slot < LIGHTING_CACHE_SLOTS && cache.v[LIGHTING_SC_SUN_AT + slot].w > LIGHTING_CACHE_HAS_W;
 }
-#ifndef GENOS_COMPOSE_NO_WALK
 // The handover seed of an empty fine texel, gathered at the texel centre, and
 // whether that gather still had a corner. The picture is the lattice blend at
 // the pixel corner, not this rgb9e5 seed. An empty gather clears the confidence.
@@ -2919,7 +2914,6 @@ void lighting_sh_store_drain(uint gid) {
         }
     }
 }
-#endif
 // Compose loads this. The cache relight is what calls the neighbour walk.
 vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
 #ifdef GENOS_COMPOSE_NO_WALK
