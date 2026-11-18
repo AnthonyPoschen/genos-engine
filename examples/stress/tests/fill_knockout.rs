@@ -333,8 +333,9 @@ fn code_luma(bgra: &[u8], width: usize, height: usize) -> (f64, f64) {
 #[test]
 fn the_long_run_keeps_the_hall_energy() {
     // Knockout freezes the cache writes. This check is the fill accumulating.
-    // The presented-frame test is the red gate.
-    if std::env::var_os("GENOS_KNOCKOUT").is_some() {
+    // The presented-frame test is the red gate. `gate_guard` is the read of
+    // GENOS_KNOCKOUT; a shipping build keeps the guard on.
+    if !genos_render::gate_guard(genos_render::CACHE_FILL) {
         return;
     }
     let (_gpu, mut owner) = open();
