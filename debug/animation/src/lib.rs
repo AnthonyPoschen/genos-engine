@@ -52,6 +52,7 @@ pub fn replay_root_x() -> f32 {
         name: "move".into(),
         duration: 1.0,
         skin: 0,
+        animation: 0,
         channels: vec![Channel {
             joint: 0,
             path: ChannelPath::Translation,
