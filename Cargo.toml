@@ -31,6 +31,7 @@ members = [
     "debug/lighting",
     "debug/particles",
     "debug/physics",
+    "debug/animation",
     "debug/ecs",
     "debug/input",
     "debug/jobs",

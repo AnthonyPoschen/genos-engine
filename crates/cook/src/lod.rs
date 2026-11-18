@@ -1202,6 +1202,8 @@ fn compact(src: &Primitive, indices: &[u32]) -> Option<Primitive> {
     let copy_normals = present(&src.normals, verts)?;
     let copy_uv = present(&src.texcoords, verts)?;
     let copy_tangents = present(&src.tangents, verts)?;
+    let copy_joints = present(&src.joints, verts)?;
+    let copy_weights = present(&src.weights, verts)?;
     for set in &src.texcoord_sets {
         present(set, verts)?;
     }
@@ -1210,6 +1212,8 @@ fn compact(src: &Primitive, indices: &[u32]) -> Option<Primitive> {
     let mut normals = Vec::new();
     let mut texcoords = Vec::new();
     let mut tangents = Vec::new();
+    let mut joints = Vec::new();
+    let mut weights = Vec::new();
     let mut texcoord_sets: Vec<Vec<[f32; 2]>> = src
         .texcoord_sets
         .iter()
@@ -1232,6 +1236,12 @@ fn compact(src: &Primitive, indices: &[u32]) -> Option<Primitive> {
             if copy_tangents {
                 tangents.push(*src.tangents.get(source)?);
             }
+            if copy_joints {
+                joints.push(*src.joints.get(source)?);
+            }
+            if copy_weights {
+                weights.push(*src.weights.get(source)?);
+            }
             for (out, set) in texcoord_sets.iter_mut().zip(&src.texcoord_sets) {
                 if !set.is_empty() {
                     out.push(*set.get(source)?);
@@ -1250,6 +1260,8 @@ fn compact(src: &Primitive, indices: &[u32]) -> Option<Primitive> {
         tangents,
         indices: out_indices,
         material: src.material,
+        joints,
+        weights,
     })
 }
 

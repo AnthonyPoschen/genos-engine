@@ -114,11 +114,7 @@ pub fn import_bytes(
             unsupported(format!("extensionsRequired[{i}]"), name, ext);
         }
     }
-    for (key, feature) in [
-        ("skins", "skin"),
-        ("animations", "animation"),
-        ("cameras", "camera"),
-    ] {
+    for (key, feature) in [("cameras", "camera")] {
         for (i, v) in list(&doc, key).iter().enumerate() {
             unsupported(format!("{key}[{i}]"), feature, v);
         }
@@ -147,6 +143,23 @@ pub fn import_bytes(
                     feature: feature.to_string(),
                     support: Support::Used,
                 }));
+            }
+            notes.extend(scene.skins.iter().enumerate().map(|(i, _)| Note {
+                path: format!("skins[{i}]"),
+                feature: "skin".to_string(),
+                support: Support::Used,
+            }));
+            let mut seen_animation = Vec::new();
+            for clip in &scene.clips {
+                if seen_animation.contains(&clip.animation) {
+                    continue;
+                }
+                seen_animation.push(clip.animation);
+                notes.push(Note {
+                    path: format!("animations[{}]", clip.animation),
+                    feature: "animation".to_string(),
+                    support: Support::Used,
+                });
             }
             Some(scene)
         }

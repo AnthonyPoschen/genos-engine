@@ -230,6 +230,7 @@ pub fn decode_geometry(bytes: &[u8]) -> Result<CookedGeometry, CookedError> {
             mesh,
             node_name,
             transform,
+            skin: None,
         });
     }
     let notes = r.len()?;
@@ -436,6 +437,8 @@ impl<'a> R<'a> {
             material: (material != NONE)
                 .then(|| usize::try_from(material).ok())
                 .flatten(),
+            joints: Vec::new(),
+            weights: Vec::new(),
         })
     }
     fn vecs<const N: usize>(&mut self) -> Result<Vec<[f32; N]>, CookedError> {

@@ -154,6 +154,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-animation-debug"
+version = "0.1.0"
+dependencies = [
+ "genos-json",
+ "genos-load",
+]
+
+[[package]]
 name = "genos-audio"
 version = "0.1.0"
 dependencies = [
