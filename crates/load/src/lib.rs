@@ -13,6 +13,7 @@ mod animation;
 mod bin;
 mod cache;
 mod cooked;
+mod cooked_material;
 mod emitters;
 mod error;
 mod gltf;
@@ -27,6 +28,7 @@ mod pages;
 mod png;
 mod sha256;
 mod shade;
+mod shade_mean;
 mod source;
 mod stream;
 mod texture;
@@ -40,14 +42,19 @@ pub use cooked::{
     cooked_path, decode_geometry, decode_images, textures_path, CookedError, CookedGeometry,
     CookedImage, CookedImages, Package, GCOOK_VERSION,
 };
+pub use cooked_material::{
+    decode_materials, encode_materials, load_covered, load_covered_or_source, materials_path,
+    CookedMaterials, CoveredAsset, CoveredFallback, PrimitiveShade, MATERIAL_MAGIC,
+    MATERIAL_VERSION,
+};
 pub use emitters::{
     double_count, furnace_wall, material_flag_needs_value, settled_wall, should_promote, Enclosure,
     MaterialSettings, PromoteBudget, PromotePreset, SettingEnv, TextureQuality, CELL_EDGE_M,
 };
 pub use error::LoadError;
 pub use gltf::{
-    image_spaces, transform_point, AlphaMode, GltfMesh, GltfScene, LoadPhases, MeshInstance,
-    PbrMaterial, Primitive, Sampler, TextureSlot,
+    image_spaces, importer_entries, reset_importer_entries, transform_point, AlphaMode, GltfMesh,
+    GltfScene, LoadPhases, MeshInstance, PbrMaterial, Primitive, Sampler, TextureSlot,
 };
 pub use import::{import_bytes, import_file, ImportDoc, Note, Support};
 pub use lod::{
@@ -62,6 +69,7 @@ pub use pages::{mib_f32, miss_colour, HotReload, MaterialWatch};
 pub use png::Image;
 pub use sha256::{hex, sha256, AssetId, Sha256};
 pub use shade::{shade_sets, shade_uv, ShadeSample};
+pub use shade_mean::primitive_shades;
 pub use source::{ByteSource, FileSource, MemorySource};
 pub use stream::{
     gate_rows, texel_rho, wanted_mip, BusMeter, Derivatives, GateRows, PendingCopy, Sampled,

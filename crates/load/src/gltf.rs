@@ -25,12 +25,34 @@
 //! requires any other extension (Draco, meshopt, KHR_texture_basisu, ...) is
 //! refused rather than drawn wrong.
 
+use std::cell::Cell;
+
 use genos_json::Value;
 
 use crate::error::LoadError;
 use crate::mips::{mip_chain, Mip, MipSpace};
 use crate::pages::miss_colour;
 use crate::png::Image;
+
+thread_local! {
+    static IMPORTER_ENTRIES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many times this thread has entered the glTF decoder since
+/// [`reset_importer_entries`].
+#[must_use]
+pub fn importer_entries() -> u64 {
+    IMPORTER_ENTRIES.with(Cell::get)
+}
+
+/// Zero this thread's glTF decoder count.
+pub fn reset_importer_entries() {
+    IMPORTER_ENTRIES.with(|entries| entries.set(0));
+}
+
+fn note_importer() {
+    IMPORTER_ENTRIES.with(|entries| entries.set(entries.get().saturating_add(1)));
+}
 
 /// glTF allows `TEXCOORD_0` through `TEXCOORD_7`.
 const TEXCOORD_KEYS: [&str; 8] = [
@@ -275,6 +297,7 @@ pub(crate) fn decode_gltf_phased(
     resolve: &dyn Fn(&str) -> Result<Vec<u8>, LoadError>,
     phases: &mut LoadPhases,
 ) -> Result<GltfScene, LoadError> {
+    note_importer();
     let mut clock = std::time::Instant::now();
     let mut lap = |slot: &mut std::time::Duration| {
         let now = std::time::Instant::now();
