@@ -32,6 +32,7 @@ fn clip(values: &[f32], path: ChannelPath, interpolation: Interpolation, joint: 
         name: "clip".into(),
         duration: 1.0,
         skin: 0,
+        animation: 0,
         channels: vec![Channel {
             joint,
             path,
@@ -370,6 +371,7 @@ fn past_25m_the_drawn_pose_holds_and_the_root_still_moves() {
         name: "move".into(),
         duration: 1.0,
         skin: 0,
+        animation: 0,
         channels: vec![
             Channel {
                 joint: 0,
