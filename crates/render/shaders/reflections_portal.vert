@@ -33,13 +33,7 @@ layout(std430, set = 0, binding = 0) readonly buffer Links {
     Link link;
 } links;
 
-struct Instance {
-    mat4 model;
-    vec4 color;
-    vec4 atlas;
-    vec4 normal_atlas;
-    vec4 extra;
-};
+#include "instance_ssbo.glsl"
 
 layout(std430, set = 0, binding = 1) readonly buffer Instances {
     Instance items[];

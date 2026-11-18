@@ -3,7 +3,8 @@
 // any tile whose direct shade stepped, and any tile a world cell's bounce
 // noted. It runs after direct and the cache in the same frame, so those notes
 // are in the mask the wavelet and compose read. The bounds are this frame's
-// change-list spheres. #288's mover table replaces that read; the mark stays.
+// change-list spheres (before and after). #288's mover table has the current
+// sphere only; replacing this read waits on swept/before–after in the table.
 // A clipped, off-screen, or screen-filling mover footprint is not marked as
 // local: the host unholds the picture. A hot cell whose bounds are behind
 // the camera, on it, or half the picture sets the same unhold from the last

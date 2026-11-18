@@ -1,4 +1,6 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#include "instance_ssbo.glsl"
 layout(location = 0) in vec3 in_pos;
 layout(location = 1) in vec3 in_albedo;
 layout(location = 2) in vec3 in_normal;
@@ -18,13 +20,6 @@ invariant gl_Position;
 layout(push_constant) uniform Push {
     mat4 view_proj;
 } pc;
-struct Instance {
-    mat4 model;
-    vec4 color;
-    vec4 atlas;
-    vec4 normal_atlas;
-    vec4 extra;
-};
 layout(std430, set = 0, binding = 3) readonly buffer Instances {
     Instance items[];
 } instances;

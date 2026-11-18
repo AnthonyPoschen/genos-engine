@@ -65,6 +65,8 @@ struct MediaModules {
     integrate: PathBuf,
     texel_detail: PathBuf,
     texel_detail_ro: PathBuf,
+    texel_detail_slide: PathBuf,
+    texel_detail_compose_lattice: PathBuf,
     texel_ray_cut: PathBuf,
 }
 
@@ -103,6 +105,22 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
             "shaders/texel_detail_prod.comp",
             &out.join("texel_detail_prod_ro.comp.spv"),
             &["-DLIGHTING_SC_WRITES=false", "-DPROD_READONLY=1"],
+            true,
+        ),
+        // Lean slide measurement: no screen-probe include, no 37-row fixture.
+        texel_detail_slide: compile_texel_detail(
+            "shaders/texel_detail_prod.comp",
+            &out.join("texel_detail_prod_slide.comp.spv"),
+            &["-DPROD_SLIDE_ONLY=1"],
+            true,
+        ),
+        // Compose stored-id lattice load (GENOS_COMPOSE_NO_WALK). Locks the
+        // warm-up prior path lighting_compose.comp actually runs; slide's
+        // warm_ok is the live gather only.
+        texel_detail_compose_lattice: compile_texel_detail(
+            "shaders/texel_detail_prod.comp",
+            &out.join("texel_detail_prod_compose_lattice.comp.spv"),
+            &["-DPROD_COMPOSE_LATTICE=1", "-DGENOS_COMPOSE_NO_WALK=1"],
             true,
         ),
         // One specialization. No screen-probe include and no DontInline edit.
@@ -219,7 +237,7 @@ fn write_shader_glue(
     std::fs::write(
         &glue,
         format!(
-            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_RO_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_RAY_CUT_SPV: &[u8] = include_bytes!(\"{}\");\n",
+            "pub static VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static DEPTH_MASK_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_VERT_SPV: &[u8] = include_bytes!(\"{}\");\npub static WIRE_FRAG_SPV: &[u8] = include_bytes!(\"{}\");\npub static AUDIO_SPV: &[u8] = include_bytes!(\"{}\");\npub static FXAA_SPV: &[u8] = include_bytes!(\"{}\");\npub static MEDIA_CHECK_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INJECT_SPV: &[u8] = include_bytes!(\"{}\");\npub static FROXEL_INTEGRATE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_RO_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_SLIDE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_DETAIL_PROD_COMPOSE_LATTICE_SPV: &[u8] = include_bytes!(\"{}\");\npub static TEXEL_RAY_CUT_SPV: &[u8] = include_bytes!(\"{}\");\n",
             raster.vert.display(),
             raster.frag.display(),
             raster.depth_mask.display(),
@@ -232,6 +250,8 @@ fn write_shader_glue(
             media.integrate.display(),
             media.texel_detail.display(),
             media.texel_detail_ro.display(),
+            media.texel_detail_slide.display(),
+            media.texel_detail_compose_lattice.display(),
             media.texel_ray_cut.display()
         ),
     )
@@ -417,6 +437,8 @@ fn rerun_shader_pieces() {
         "lighting_check.comp",
         "lighting_sh_drain.comp",
         "scene.vert",
+        "gbuffer.vert",
+        "instance_ssbo.glsl",
         "overlay.frag",
         "depth_mask.frag",
         "material_atlas.glsl",
@@ -547,7 +569,7 @@ fn compile_texel_detail(
             // Only the large functions. Marking every helper DontInline keeps a
             // separate copy of each and the compiler heap does not fit.
             if let Some(ctrl_i) = fn_ctrl {
-                if i - fn_start > 1000 {
+                if i - fn_start > 200 {
                     let at = ctrl_i * 4;
                     let ctrl =
                         u32::from_le_bytes(bytes[at..at + 4].try_into().expect("spirv control"));

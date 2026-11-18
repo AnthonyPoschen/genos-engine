@@ -132,6 +132,12 @@ Role: TOOL · Literature: —
 **Object-local entry**: an entry stored in a moving object's local space, so its light moves with the object.
 Role: STORE · Literature: GIBS transform/bone-attached surfel (§1.5); Lumen moving cards · More detail: `GENOS_LIGHTING_SC_LOCAL`; branch gibs-mover-attach-msme
 
+**Mover texel**: a small (~64 B) lighting record in the fixed mover side pool, keyed by object id and object-local position, with lighting stored in world directions. Not a fat world-hash slot.
+Role: STORE · Literature: GIBS transform/bone-attached surfel (§1.5) · More detail: [mover-attached-cache.md](../systems/lighting/mover-attached-cache.md)
+
+**Mover table**: open-address table mapping object id to a mover record and its texel span. Replaces the old 16-mover change-block hitch list.
+Role: STORE · Literature: GIBS transform id (§1.5) · More detail: [mover-attached-cache.md](../systems/lighting/mover-attached-cache.md)
+
 **World radiance cache (WRC)**: a coarse world-space cache of incoming light, used for far rays and as a fallback.
 Role: STORE · Literature: Lumen WRC; DDGI volume; GIBS — (GIBS uses its grid for lookup only) · More detail: [../systems/gi-design.md#world-probes-radiance-cache](../systems/gi-design.md#world-probes-radiance-cache)
 

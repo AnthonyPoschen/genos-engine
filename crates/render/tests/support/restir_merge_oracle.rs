@@ -470,7 +470,7 @@ fn build(header_neighbors: u32) -> Built {
     put_f(&mut scene, 33, world.forward[1]);
     put_f(&mut scene, 34, world.forward[2]);
     put_f(&mut scene, 35, world.aspect);
-    let mut gbuf = vec![0u32; 4 + pixels * 5];
+    let mut gbuf = vec![0u32; 4 + pixels * 6];
     for pixel in 0..pixels {
         let dir = eye_dir(&world, u32::try_from(pixel % 8).unwrap_or(0), u32::try_from(pixel / 8).unwrap_or(0));
         let along = dot(dir, world.forward);

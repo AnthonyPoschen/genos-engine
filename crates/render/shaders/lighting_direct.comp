@@ -166,7 +166,7 @@ void main() {
                 uint prev = outc.px[pixels + idx];
                 // Emitted stays out of the picture buffer; compose reads it here.
                 outc.px[pixels + idx] = glow;
-                gbuf.words[idx * 5u + 3u] = floatBitsToUint(pv[c + 1u]);
+                gbuf.words[idx * GBUF_STRIDE + 3u] = floatBitsToUint(pv[c + 1u]);
                 if (glow != prev) {
                     lighting_compose_mark_px(idx);
                 }
@@ -1017,7 +1017,7 @@ void main() {
             prev_d = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c + 1u]);
         }
         outc.px[pixels + idx] = glow;
-        gbuf.words[idx * 5u + 3u] = packed;
+        gbuf.words[idx * GBUF_STRIDE + 3u] = packed;
         if (tracked) {
             uint c = (idx & 1u) * 2u;
             // Packed direct moved because the sun did. The sun compose writes
