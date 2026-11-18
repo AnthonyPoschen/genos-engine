@@ -53,8 +53,7 @@ fn scene() -> genos_scene::Scene {
 
 fn red_box(scene: &genos_scene::Scene) -> Vec3 {
     scene
-        .solids
-        .iter()
+        .solids()
         .find(|solid| {
             solid.shape == Shape::Square
                 && solid.color[0] > 0.8
@@ -75,7 +74,7 @@ fn orbit(center: Vec3, angle: f32) -> Camera {
 }
 
 fn place_lamp(world: &mut World, angle: f32) {
-    let Some(light) = world.scene.lights.first_mut() else {
+    let Some(light) = world.scene.light_at_mut(0) else {
         return;
     };
     light.position.x = 3.5 * angle.cos();

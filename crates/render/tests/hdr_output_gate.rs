@@ -1245,7 +1245,7 @@ fn capture_levels(
     world.scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
     world.scene.hdr = gpu_settings(levels);
     draw_once(window, renderer, &world, camera)?;
-    if let Some(light) = world.scene.lights.first_mut() {
+    if let Some(light) = world.scene.light_at_mut(0) {
         light.color = [6.0, 0.3, 0.1];
     }
     let pixels = draw_once(window, renderer, &world, camera)?;
@@ -1311,7 +1311,7 @@ fn hot_bloom(
     world: &mut World,
     camera: &Camera,
 ) -> Result<f64, String> {
-    if let Some(light) = world.scene.lights.first_mut() {
+    if let Some(light) = world.scene.light_at_mut(0) {
         light.color = [1.0e6, 1.0e6, 1.0e6];
     }
     let _ = draw_once(window, renderer, world, camera)?;

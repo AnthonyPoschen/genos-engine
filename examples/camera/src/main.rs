@@ -154,8 +154,7 @@ struct PendingProfile {
 /// The red square in `scene.rhai`.
 fn red_box_index(scene: &Scene) -> Option<usize> {
     scene
-        .solids
-        .iter()
+        .solids()
         .position(|solid| solid.color[0] > 0.9 && solid.color[1] < 0.05 && solid.color[2] < 0.05)
 }
 
@@ -432,12 +431,12 @@ fn run() -> Result<i32, String> {
     }
     if let Some((x, y, z)) = lamp {
         host.with_frame(|scene, _| {
-            scene.lights = vec![genos_scene::Light {
+            scene.set_lights(vec![genos_scene::Light {
                 position: genos_scene::Vec3::new(x, y, z),
                 color: [1.0, 1.0, 1.0],
 
                 direction: genos_scene::Vec3::ZERO,
-            }];
+            }]);
         });
     }
     let server = genos_mcp::Server::start_on(host.clone(), genos_mcp::listen_port())?;
@@ -576,8 +575,7 @@ fn run() -> Result<i32, String> {
         wireframe = toggle_wireframe(wireframe, &input, view.captured);
         let lamp = world
             .scene
-            .lights
-            .first()
+            .light_at(0)
             .map(|light| [light.position.x, light.position.y, light.position.z]);
         let mut scene_cpu = scene_at.elapsed();
         // ui
@@ -899,30 +897,33 @@ impl SceneLoad {
 }
 
 fn loading_world() -> World {
-    World::from_scene(Scene {
-        floor: Floor {
-            position: Vec3::new(0.0, 0.0, 0.0),
-            half_x: 2.0,
-            half_z: 2.0,
-            color: [0.15, 0.15, 0.16],
-        },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: Some(Sky {
+    World::from_scene({
+        let mut __scene = Scene::from_lists(
+            Floor {
+                position: Vec3::new(0.0, 0.0, 0.0),
+                half_x: 2.0,
+                half_z: 2.0,
+                color: [0.15, 0.15, 0.16],
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        __scene.ceiling = None;
+        __scene.sky = Some(Sky {
             color: [0.02, 0.02, 0.025],
-        }),
-        lighting: LightingSettings::preset(LightingPreset::Fallback),
-        debug: DebugSettings::default(),
-        fps_counter: FpsCounterSettings::default(),
-        event_loop: EventLoopSettings::default(),
-        reflections: ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: FogSettings::default(),
-        particles: ParticleSettings::default(),
-        menu: MenuSettings::default(),
-    })
+        });
+        __scene.lighting = LightingSettings::preset(LightingPreset::Fallback);
+        __scene.debug = DebugSettings::default();
+        __scene.fps_counter = FpsCounterSettings::default();
+        __scene.event_loop = EventLoopSettings::default();
+        __scene.reflections = ReflectionSettings::default();
+        __scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+        __scene.fog = FogSettings::default();
+        __scene.menu = MenuSettings::default();
+        __scene.particles = ParticleSettings::default();
+        __scene
+        })
 }
 
 /// Decode the scene on a worker while the mapped window keeps pumping.
@@ -1229,7 +1230,7 @@ impl Bench {
         let seconds: f32 = value
             .parse()
             .map_err(|_| format!("GENOS_BENCH={value} is not seconds"))?;
-        if scene.lights.is_empty() {
+        if scene.light_len() == 0 {
             return Err("GENOS_BENCH needs a lamp in the scene".into());
         }
         let now = Instant::now();
@@ -1240,14 +1241,14 @@ impl Bench {
             Err(_) => BENCH_FLICKER_FRAMES,
         };
         let drag = red_box_index(scene)
-            .or((!scene.solids.is_empty()).then_some(0))
-            .map(|i| (i, scene.solids[i].position));
+            .or((scene.solid_len() != 0).then_some(0))
+            .map(|i| (i, scene.solid(i).position));
         Ok(Some(Self {
             camera,
             phase: BenchPhase::Warmup,
             phase_start: now,
             span: Duration::from_secs_f32((seconds / 3.0).max(1.0)),
-            home: scene.lights[0].position,
+            home: scene.light(0).position,
             last: None,
             frames: Vec::new(),
             lines: Vec::new(),
@@ -1263,7 +1264,7 @@ impl Bench {
                 frames: flicker_frames,
                 ..Flicker::default()
             },
-            solids: scene.solids.iter().map(|s| s.position).collect(),
+            solids: scene.solids().map(|s| s.position).collect(),
             converge: Converge::default(),
         }))
     }
@@ -1340,8 +1341,7 @@ impl Bench {
                 self.shot = Some(format!("{:?}_{ms:05}ms.png", self.phase).to_lowercase());
             }
         }
-        let lamp = &mut scene.lights[0].position;
-        *lamp = match self.phase {
+        scene.light_mut(0).position = match self.phase {
             BenchPhase::Warmup | BenchPhase::Still | BenchPhase::Up => self.home,
             // About one turn every six seconds, around the boxes.
             BenchPhase::Moving => Vec3::new(1.0 + 2.5 * t.cos(), 2.5, -1.0 + 2.5 * t.sin()),
@@ -1363,12 +1363,13 @@ impl Bench {
                 BenchPhase::DragFlicker => out - self.drag_flicker.drawn as f32 * BENCH_DRAG_STEP,
                 _ => 0.0,
             };
-            scene.solids[index].position = start + Vec3::new(x, 0.0, 0.0);
+            scene.solid_mut(index).position = start + Vec3::new(x, 0.0, 0.0);
         }
         if self.phase == BenchPhase::Switch {
             let shift = Vec3::new(BENCH_SWITCH_SHIFT, 0.0, BENCH_SWITCH_SHIFT);
-            for (solid, start) in scene.solids.iter_mut().zip(&self.solids) {
-                solid.position = *start + shift;
+            let count = scene.solid_len().min(self.solids.len());
+            for (index, solid) in self.solids.iter().take(count).enumerate() {
+                scene.solid_mut(index).position = *solid + shift;
             }
         }
         false

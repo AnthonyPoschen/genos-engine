@@ -7,28 +7,29 @@ use genos_scene::{
 };
 
 fn room() -> Scene {
-    Scene {
-        floor: Floor {
+    let mut scene = Scene::from_lists(
+        Floor {
             position: Vec3::ZERO,
             half_x: 20.0,
             half_z: 20.0,
             color: [1.0, 1.0, 1.0],
         },
-        walls: Vec::new(),
-        solids: Vec::new(),
-        lights: Vec::new(),
-        ceiling: None,
-        sky: None,
-        lighting: LightingSettings::default(),
-        debug: genos_scene::DebugSettings::default(),
-        fps_counter: genos_scene::FpsCounterSettings::default(),
-        event_loop: genos_scene::EventLoopSettings::default(),
-        reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::legacy_bytes(),
-        fog: genos_scene::FogSettings::default(),
-        particles: genos_scene::ParticleSettings::default(),
-        menu: genos_scene::MenuSettings::default(),
-    }
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    scene.ceiling = None;
+    scene.sky = None;
+    scene.lighting = LightingSettings::default();
+    scene.debug = genos_scene::DebugSettings::default();
+    scene.fps_counter = genos_scene::FpsCounterSettings::default();
+    scene.event_loop = genos_scene::EventLoopSettings::default();
+    scene.reflections = genos_scene::ReflectionSettings::default();
+    scene.hdr = genos_scene::HdrSettings::legacy_bytes();
+    scene.fog = genos_scene::FogSettings::default();
+    scene.particles = genos_scene::ParticleSettings::default();
+    scene.menu = genos_scene::MenuSettings::default();
+    scene
 }
 
 fn tick(camera: &mut Camera, actions: &Actions, dt: f32) {

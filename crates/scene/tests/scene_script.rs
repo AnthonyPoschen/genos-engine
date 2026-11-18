@@ -8,13 +8,6 @@
 #![cfg_attr(
     test,
     expect(
-        clippy::assert_is_empty,
-        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-    )
-)]
-#![cfg_attr(
-    test,
-    expect(
         clippy::cast_possible_truncation,
         reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
     )
@@ -70,8 +63,8 @@ fn shipped_script_places_the_mvp_scene() {
     assert!(matches!(red.shape, Shape::Square | Shape::Circle));
     assert!(matches!(blue.shape, Shape::Square | Shape::Circle));
     assert!(matches!(green.shape, Shape::Square | Shape::Circle));
-    assert!(!scene.lights.is_empty());
-    let light = &scene.lights[0];
+    assert!(scene.light_len() != 0);
+    let light = &scene.light(0);
     assert!((light.position.y - 7.0).abs() < 1.0e-4, "light height is Y");
     assert!((light.position.z - 0.0).abs() < 1.0e-4, "light depth is Z");
     assert!(
@@ -79,20 +72,17 @@ fn shipped_script_places_the_mvp_scene() {
         "the lamp is white"
     );
     let long = scene
-        .walls
-        .iter()
+        .walls()
         .find(|wall| wall.half_x > 3.0 && (wall.position.z - 5.0).abs() < 0.2)
         .expect("long wall");
     assert!(
         scene
-            .walls
-            .iter()
+            .walls()
             .any(|wall| wall.position.z > long.position.z + 1.0),
         "the corridor is on the +Z side of the long wall"
     );
     let north = scene
-        .walls
-        .iter()
+        .walls()
         .map(|wall| wall.position.z + wall.half_z)
         .fold(long.position.z, f32::max);
     assert!(
