@@ -500,7 +500,7 @@ detail = "surface_cache.fill_burst (stress knob lighting_fill_burst); MCP set_li
 [[var]]
 name = "GENOS_LIGHTING_FILL_CELL_LOG"
 kind = "test"
-detail = "harness only: fill_knockout prints fillcell at frame 40"
+detail = "harness only: the fill picture test prints fillcell at frame 40"
 
 [[var]]
 name = "GENOS_LIGHTING_FILL_CATCHUP_MAX"
