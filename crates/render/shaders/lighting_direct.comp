@@ -17,6 +17,7 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 19) buffer RestirWords {
     uint restir_words[];
 };
+#include "restir_reach.glsl"
 // Near point lamps actually added on a ReSTIR pixel. Header word, same slot
 // the history counts use. Compact keeps gstats.diag[13] for an on-screen
 // surface-cache entry when LIGHTING_DIAG is on.
@@ -771,8 +772,12 @@ void main() {
     // buffer. The shadow ray above re-traces the stored sample when the
     // reservoir kept that lamp. A different lamp traces the stored one once.
     // History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9), one pixel, and
-    // drops when the reservoir resets (word 15), any lamp changed (word 39),
-    // or the re-traced sample's visibility or unshadowed target changed.
+    // drops when the reservoir resets (word 15). A changed lamp shortens it
+    // to RESTIR_CHANGE_FADE where that lamp's previous or current ball reaches
+    // the shaded origin, the same cap on the side it left and the side it
+    // still covers. The re-traced sample's visibility flip still clears it,
+    // and 8 log codes still clear it. The 12-bit unshadowed-target clear runs
+    // only where neither ball reaches, so a slow move does not defeat the fade.
     // That check runs before the cap, so a frozen mean still drops. At
     // RESTIR_MEAN_CAP the colour otherwise stays, so a still surface stops
     // moving. The mean of one fixed integrand stays unbiased: temporal
@@ -793,7 +798,11 @@ void main() {
         // pixel only, and the geo load stops before a neighbour. Two slots
         // leave the previous frame alone, so a reprojected neighbour is safe.
         uint mean_only = lamp_res_one_slot() ? idx : ~0u;
-        if (restir_words[15u] == 0u && restir_words[39u] == 0u && lamp_pick_reproject_at(pos, n, mean_only, mean_px, z_ignore)) {
+        // origin is pos + n * 0.02, the point the shade just lit. Reach is
+        // the union of the changed lamp's previous and current balls, not
+        // the lamp id stored in the mean.
+        bool changed_here = restir_changed_reaches(origin);
+        if (restir_words[15u] == 0u && lamp_pick_reproject_at(pos, n, mean_only, mean_px, z_ignore)) {
             uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR_MEAN) {
                 LampReservoir pr = lamp_res_load(mean_px, lamp_res_slot_prev());
@@ -806,6 +815,7 @@ void main() {
         // reprojection and changes no lamp, and a frozen mean would keep the
         // old shadow. The shade ray is reused when the lamp matches.
         bool mean_dropped = false;
+        uint luma_steps = 0u;
         if (mean_prev > 0u) {
             uint old_lamp = prev_pack & 0xffffu;
             bool old_vis = (prev_pack & 0x10000u) != 0u;
@@ -837,11 +847,29 @@ void main() {
                         }
                     }
                 }
-                if (vis_now != old_vis || restir_mean_target_moved(old_q, luma_now)) {
+                uint q_now = restir_mean_quant(luma_now);
+                luma_steps = q_now > old_q ? q_now - old_q : old_q - q_now;
+                // A slow move is one or two codes and keeps the fade. A jump
+                // of RESTIR_CHANGE_DROP_STEPS (about 9%) is a different
+                // integrand, the same bar as a visibility flip.
+                bool big_move = changed_here && luma_steps >= RESTIR_CHANGE_DROP_STEPS;
+                if (vis_now != old_vis || (!changed_here && restir_mean_target_moved(old_q, luma_now)) || big_move) {
                     mean_dropped = true;
                     mean_prev = 0u;
                     mean_e = drawn;
                 }
+            }
+        }
+        if (changed_here && mean_prev > 0u) {
+            // Same 12 on the side the lamp left and the side it still covers.
+            // A 2-sample cap there drops the other lamps' converged mean and
+            // salts the wake. The 8-code clear above is the hard drop.
+            uint cap = RESTIR_CHANGE_FADE;
+            if (luma_steps > 1u) {
+                cap = max(RESTIR_CHANGE_FADE / luma_steps, 1u);
+            }
+            if (mean_prev > cap) {
+                mean_prev = cap;
             }
         }
         vec3 e_mean = drawn;

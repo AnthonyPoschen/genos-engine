@@ -294,6 +294,7 @@ fn append_restir(glue_text: &mut String, out: &std::path::Path) {
 
 fn compile_restir_live(out: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
     println!("cargo:rerun-if-changed=shaders/restir_live.comp");
+    println!("cargo:rerun-if-changed=shaders/restir_reach.glsl");
     for piece in [
         "../restir-gpu/shaders/restir_tree.glsl",
         "../restir-gpu/shaders/restir_sample.glsl",
@@ -423,6 +424,7 @@ fn rerun_shader_pieces() {
         "wire.vert",
         "wire.frag",
         "scene_rays.glsl",
+        "restir_reach.glsl",
         "mesh_field.glsl",
         "reflections.glsl",
         "reflections_frame.comp",
