@@ -320,9 +320,8 @@ mod tests {
     use super::*;
 
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
-    /// `LIGHTING_WRC_CAP` and the quiet-light floor `LIGHTING_WRC_CHANGE_ALPHA`.
+    /// `LIGHTING_WRC_CAP`. The 1/32 quiet floor is gone.
     const WRC_CAP: f32 = 128.0;
-    const CHANGE_ALPHA: f32 = 1.0 / 32.0;
 
     fn tilted(deg: f32) -> [f32; 3] {
         let a = deg.to_radians();
@@ -440,33 +439,39 @@ mod tests {
 
     /// Model of the default-flag world-cell weight in `lighting_cache.comp`.
     ///
-    /// Dark fill while the cell is under half the cap, the change floor while
-    /// the light is not quiet, and a whole replacement while a lamp change is
-    /// settling. The mean and the harmonics take that one weight. A sun/sky
-    /// rescale hits both before the blend. A mover's local alpha is not this
-    /// path. This is a transcription of that weight. It is not the ADR 0039
-    /// picture gate and it does not grade the production cache.
+    /// Dark fill while the cell is under half the cap. A lamp note does not
+    /// replace the mean. The new sample's weight is at least the cell value,
+    /// and one agreement step moves that value. The mean and the harmonics
+    /// take that one weight. A sun/sky rescale hits both before the blend.
+    /// This is a transcription of that weight. It is not the ADR 0039 picture
+    /// gate and it does not grade the production cache.
     fn model_wrc_weight(
         cell: &Held,
         sample: [f32; 3],
         sample_sh: &ShL1,
-        settling: bool,
-        quiet: bool,
         sun_gain: f32,
     ) -> Held {
         let fresh = cell.sets < 0.5;
+        if !sample.iter().all(|v| v.is_finite()) || !cell.mean.iter().all(|v| v.is_finite()) {
+            return *cell;
+        }
         let t = if fresh { 0.0 } else { cell.sets };
         let add = 1.0;
         let mut wa = add / (t + add);
         if t < 0.5 * WRC_CAP {
             wa = 1.0 - (t / (t + add)).powi(3);
         }
-        if !settling && !quiet {
-            wa = wa.max(CHANGE_ALPHA * add);
+        let mut value = if fresh { 1.0 } else { cell.value };
+        let mean_l = luma(cell.mean);
+        let sample_l = luma(sample);
+        let noise = 1.0e-4;
+        if (sample_l - mean_l).abs() > 2.0 * noise {
+            let denom = sample_l.abs().max(mean_l.abs()).max(1.0e-4);
+            value = (value + (sample_l - mean_l).abs() / denom).min(1.0);
+        } else {
+            value = (value - 1.0 / 3.0).max(0.0);
         }
-        if settling {
-            wa = 1.0;
-        }
+        wa = wa.max(value);
         let a = wa.min(1.0);
         let (mut mean, mut sh) = (cell.mean, cell.sh);
         if !fresh && (sun_gain - 1.0).abs() > 1.0e-3 {
@@ -493,6 +498,7 @@ mod tests {
             mean,
             sh,
             sets: (t + add).min(WRC_CAP),
+            value,
         }
     }
 
@@ -501,6 +507,7 @@ mod tests {
         mean: [f32; 3],
         sh: ShL1,
         sets: f32,
+        value: f32,
     }
 
     fn luma(c: [f32; 3]) -> f32 {
@@ -511,8 +518,8 @@ mod tests {
     fn model_only_wrc_weight_holds_a_constant_and_settling_replaces_it() {
         // Not the stage-2 gate. The picture and the dumped cells are graded
         // in `examples/stress/tests/cache_energy.rs`. This only checks the
-        // transcribed weight: the axis read is the stored mean, settling
-        // (`wa = 1`) replaces a sample, and the capped mean left alone does not.
+        // transcribed weight: the axis read is the stored mean. A black
+        // sample disagrees and replaces. A two-percent step does not.
         let lit_rad = |_: [f32; 3]| [1.0, 0.85, 0.7];
         let (lit, sh_lit) = relight(UP, 64, 11, lit_rad);
         let (dark, sh_dark) = relight(UP, 64, 12, |_| [0.0; 3]);
@@ -520,9 +527,10 @@ mod tests {
             mean: [0.0; 3],
             sh: ShL1::default(),
             sets: 0.0,
+            value: 1.0,
         };
         for _ in 0..128 {
-            cell = model_wrc_weight(&cell, lit, &sh_lit, false, true, 1.0);
+            cell = model_wrc_weight(&cell, lit, &sh_lit, 1.0);
         }
         let energy = luma(cell.sh.tilt(cell.mean, UP, UP)) / luma(lit);
         assert!(energy >= 0.9, "axis energy {energy}");
@@ -533,19 +541,12 @@ mod tests {
         let lit_luma = luma(cell.mean);
         let mut cleared = cell;
         for _ in 0..120 {
-            cleared = model_wrc_weight(&cleared, dark, &sh_dark, true, false, 1.0);
+            cleared = model_wrc_weight(&cleared, dark, &sh_dark, 1.0);
         }
         let linger = luma(cleared.sh.tilt(cleared.mean, UP, face)) / lit_luma;
-        assert!(linger <= 0.05, "lamp still present at frame 120 ({linger})");
-
-        let mut stuck = cell;
-        for _ in 0..120 {
-            stuck = model_wrc_weight(&stuck, dark, &sh_dark, false, true, 1.0);
-        }
-        let remain = luma(stuck.mean) / lit_luma;
         assert!(
-            remain > 0.05,
-            "the capped mean would already pass the lamp gate ({remain})"
+            linger <= 0.05,
+            "a black sample should replace by frame 120 ({linger})"
         );
 
         // Lag: lamps on, the first rounds still dark, then the reference.
@@ -554,15 +555,16 @@ mod tests {
             mean: [0.0; 3],
             sh: ShL1::default(),
             sets: 0.0,
+            value: 1.0,
         };
         for frame in 1..=300 {
             let (sample, sh) = if frame < 40 { (dark, &sh_dark) } else { (lit, &sh_lit) };
-            filling = model_wrc_weight(&filling, sample, sh, frame <= 120, frame > 120, 1.0);
+            filling = model_wrc_weight(&filling, sample, sh, 1.0);
         }
         let lag = luma(filling.sh.tilt(filling.mean, UP, UP)) / luma(lit);
         assert!(lag >= 0.9, "lag {lag}");
 
-        let gained = model_wrc_weight(&cell, lit, &sh_lit, false, true, 2.0);
+        let gained = model_wrc_weight(&cell, lit, &sh_lit, 2.0);
         assert_eq!(gained.sh.tilt(gained.mean, UP, UP), gained.mean);
         assert!(luma(gained.mean) > 1.5 * lit_luma, "sun rescale {}", luma(gained.mean));
     }

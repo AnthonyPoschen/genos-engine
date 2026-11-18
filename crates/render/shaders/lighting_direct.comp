@@ -56,7 +56,7 @@ void main() {
     } else if (lighting_ray_fill_on() && lighting_dense()) {
         // The cache-ray dispatch only. The picture dispatch is not dense, and
         // taking this branch there would shade cache rays instead of pixels.
-        if (idx >= lighting_fill_u(0)) {
+        if (idx >= lighting_fill_traced()) {
             return;
         }
         idx = pixels + kept + idx;
@@ -810,10 +810,11 @@ void main() {
                 mean_e = vec3(pr.w_sum, pr.target, uintBitsToFloat(hg.w));
                 prev_pack = pr.lamp;
             }
+        } else if (restir_words[15u] == 0u) {
+            atomicAdd(gstats.diag[LIGHTING_RESET_DIRECT_MISS], 1u);
         }
-        // Re-trace the stored sample before the cap. A moving occluder passes
-        // reprojection and changes no lamp, and a frozen mean would keep the
-        // old shadow. The shade ray is reused when the lamp matches.
+        // A one-step luma change and a visibility flip do not zero the mean.
+        // A failed reprojection above already dropped a different surface.
         bool mean_dropped = false;
         uint luma_steps = 0u;
         if (mean_prev > 0u) {
@@ -855,6 +856,7 @@ void main() {
                 bool big_move = changed_here && luma_steps >= RESTIR_CHANGE_DROP_STEPS;
                 if (vis_now != old_vis || (!changed_here && restir_mean_target_moved(old_q, luma_now)) || big_move) {
                     mean_dropped = true;
+                    atomicAdd(gstats.diag[LIGHTING_RESET_MEAN], 1u);
                     mean_prev = 0u;
                     mean_e = drawn;
                 }
@@ -869,6 +871,7 @@ void main() {
                 cap = max(RESTIR_CHANGE_FADE / luma_steps, 1u);
             }
             if (mean_prev > cap) {
+                atomicAdd(gstats.diag[LIGHTING_RESET_FADE], 1u);
                 mean_prev = cap;
             }
         }

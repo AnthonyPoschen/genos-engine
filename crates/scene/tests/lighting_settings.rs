@@ -753,6 +753,15 @@ fn fill_budgets_follow_the_preset_and_round_trip() {
     assert_eq!(high.surface_cache.fill.warmup_rays, 16);
     assert_eq!(high.surface_cache.fill.check_rate, 9);
     assert_eq!(high.surface_cache.fill.max_picks, 4);
+    let mut picks = high.clone();
+    picks
+        .set_key("surface_cache.fill_max_picks", "1000")
+        .expect("max picks");
+    assert_eq!(picks.surface_cache.fill.max_picks, 64);
+    picks
+        .set_key("surface_cache.fill_max_picks", "0")
+        .expect("max picks");
+    assert_eq!(picks.surface_cache.fill.max_picks, 1);
     assert_eq!(high.surface_cache.fill.share, 0);
     assert_eq!(high.surface_cache.fill.share_cap, 32);
     assert_eq!(high.surface_cache.fill.share_receivers, 3);

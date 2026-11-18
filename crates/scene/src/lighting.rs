@@ -565,6 +565,17 @@ pub struct FillSettings {
     /// is `warmup_rays`. Other seeds keep the 16-set handover. The ray cap
     /// does not move.
     pub share_handover: u32,
+    /// `0` leaves the base floor off. Any other value turns it on. The device
+    /// gives one ray to each selected cell; it does not spend this as a count.
+    pub floor_rays: u32,
+    /// How often a live cell gets its floor ray. `1` every frame, `2` every
+    /// second frame, `4` every fourth. The cell is due when its slot index
+    /// mod this value equals the frame mod this value.
+    pub floor_rate: u32,
+    /// Rays spent highest-value first after the floor. `0` spends none.
+    /// High is 25000, Medium half of that, Low a quarter. The traced count
+    /// is the floor plus this, not `budget`.
+    pub burst: u32,
 }
 
 impl FillSettings {
@@ -602,6 +613,9 @@ impl FillSettings {
             share_conf: 0.25,
             share_receivers: 3,
             share_handover: 16,
+            floor_rays: 1,
+            floor_rate: 1,
+            burst: 25_000,
         }
     }
 }
@@ -971,6 +985,8 @@ impl LightingSettings {
                 s.ambient.intensity = 0.35;
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
                 s.surface_cache.fill.budget = 25_000;
+                s.surface_cache.fill.floor_rate = 4;
+                s.surface_cache.fill.burst = 6_250;
                 s.surface_cache.fill.tile = 32;
             }
             LightingPreset::Medium => {
@@ -990,6 +1006,8 @@ impl LightingSettings {
                     LAMP_PICK_SPATIAL_RADIUS,
                 );
                 s.surface_cache.fill.budget = 50_000;
+                s.surface_cache.fill.floor_rate = 2;
+                s.surface_cache.fill.burst = 12_500;
                 s.surface_cache.fill.tile = 16;
             }
         }
@@ -1142,7 +1160,7 @@ impl LightingSettings {
             1.0
         };
         fill.check_rate = fill.check_rate.max(1);
-        fill.max_picks = fill.max_picks.clamp(1, 8);
+        fill.max_picks = fill.max_picks.clamp(1, 64);
         fill.lambda_decay = if fill.lambda_decay.is_finite() {
             fill.lambda_decay.clamp(0.0, 1.0)
         } else {
@@ -1188,6 +1206,11 @@ impl LightingSettings {
         };
         fill.share_receivers = fill.share_receivers.min(8);
         fill.share_handover = fill.share_handover.max(1);
+        fill.floor_rate = if fill.floor_rate == 2 || fill.floor_rate == 4 {
+            fill.floor_rate
+        } else {
+            1
+        };
         if let Some(mode) = self.gi.world_mode {
             // Mode 2 pushed screen-probe irradiance into world patches.
             // That pass is removed, so the stored mode becomes the surface cache.
@@ -1558,6 +1581,9 @@ impl LightingSettings {
         let _ = writeln!(out, "surface_cache.fill_share_conf={}", num_text(fill.share_conf));
         let _ = writeln!(out, "surface_cache.fill_share_receivers={}", fill.share_receivers);
         let _ = writeln!(out, "surface_cache.fill_share_handover={}", fill.share_handover);
+        let _ = writeln!(out, "surface_cache.fill_floor_rays={}", fill.floor_rays);
+        let _ = writeln!(out, "surface_cache.fill_floor_rate={}", fill.floor_rate);
+        let _ = writeln!(out, "surface_cache.fill_burst={}", fill.burst);
         let _ = writeln!(
             out,
             "surface_cache.sh_cells={}",
@@ -1851,6 +1877,13 @@ impl LightingSettings {
             "surface_cache.fill_share_handover" => {
                 self.surface_cache.fill.share_handover = num_u32(value)?;
             }
+            "surface_cache.fill_floor_rays" => {
+                self.surface_cache.fill.floor_rays = num_u32(value)?;
+            }
+            "surface_cache.fill_floor_rate" => {
+                self.surface_cache.fill.floor_rate = num_u32(value)?;
+            }
+            "surface_cache.fill_burst" => self.surface_cache.fill.burst = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
             "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
             "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
@@ -2216,6 +2249,15 @@ impl LightingSettings {
                 "GENOS_LIGHTING_FILL_SHARE_HANDOVER",
                 "surface_cache.fill_share_handover",
             ),
+            (
+                "GENOS_LIGHTING_FILL_FLOOR_RAYS",
+                "surface_cache.fill_floor_rays",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_FLOOR_RATE",
+                "surface_cache.fill_floor_rate",
+            ),
+            ("GENOS_LIGHTING_FILL_BURST", "surface_cache.fill_burst"),
         ];
         for (var, key) in keys {
             if key == "direct_specular" && launch.direct_specular.is_some() {

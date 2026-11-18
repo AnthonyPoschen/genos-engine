@@ -279,6 +279,21 @@ const uint LIGHTING_DIAG_FILTER_HEAVY = 60u;
 // next 12 are tiles kept because the bounce still moved, and the top 4 are
 // the picture's corner tiles (bit set means that corner was unheld).
 const uint LIGHTING_DIAG_REACH = 8u;
+// History resets, always on. The index is a diag word (stats word 24 + index).
+// lightingreset prints them. A settled still scene leaves these at zero:
+// a steady count is a wipe of a surface that is still there.
+const uint LIGHTING_RESET_LEASH = 42u;
+const uint LIGHTING_RESET_COARSEN = 43u;
+const uint LIGHTING_RESET_AGE = 44u;
+const uint LIGHTING_RESET_EVICT = 45u;
+const uint LIGHTING_RESET_ADOPT = 46u;
+const uint LIGHTING_RESET_DECAY = 47u;
+const uint LIGHTING_RESET_REPROJECT = 4u;
+const uint LIGHTING_RESET_MEAN = 49u;
+const uint LIGHTING_RESET_FADE = 50u;
+const uint LIGHTING_RESET_RESTIR = 7u;
+const uint LIGHTING_RESET_MOVER = 9u;
+const uint LIGHTING_RESET_DIRECT_MISS = 10u;
 // Tile mask, one bit per 32 px tile, then one change word per tile, then one
 // bit per cache slot. lighting_gpu.rs sizes the key buffer with the same counts.
 // A measured change notes a tile by storing 1 in its change word. The reach
@@ -1046,6 +1061,8 @@ void lighting_sc_seed_apply(uint slot);
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz);
 uint lighting_mover_on(vec3 pos, vec3 n);
 bool lighting_sc_local_on();
+bool lighting_fill_pixel(vec3 p, out uint px, out uint py);
+float lighting_fill_leash(uint level);
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
@@ -1063,6 +1080,19 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     }
     if (!claim || !LIGHTING_SC_WRITES) {
         return ~0u;
+    }
+    // A cell this size past the level-0 leash, and off screen, is coarsened
+    // on the next visit. Claiming it again is a steady wipe. On screen, and
+    // inside the leash, the claim stands. The leash is read on every claim:
+    // a load inside this branch faults in lavapipe when the wave skips it
+    // (the bounce presented-frame gate).
+    float leash0 = lighting_fill_leash(0u);
+    if (size <= LIGHTING_SC_HIT) {
+        uint keep_x;
+        uint keep_y;
+        if (!lighting_fill_pixel(pos, keep_x, keep_y) && length(pos - scene.eye.xyz) > leash0) {
+            return ~0u;
+        }
     }
 #ifndef GENOS_COMPOSE_NO_WALK
     // #286 → pool: a hit on a mover never writes a world cell.
@@ -4171,6 +4201,7 @@ bool lighting_fine_evict(vec3 pos, vec3 n) {
     if (atomicCompSwap(ckeys.key[best], best_key, 0u) != best_key) {
         return false;
     }
+    atomicAdd(gstats.diag[LIGHTING_RESET_EVICT], 1u);
     atomicAdd(gstats.freed, 1u);
     lighting_sc_forget(best);
     cache.v[3u * best + 1u] = vec4(0.0);
@@ -6618,6 +6649,53 @@ vec4 lighting_svgf_target(uint slot) {
     return vec4(outc, max(W, cw));
 }
 float lighting_sc_lambda(uint slot);
+const uint LIGHTING_SC_GRAD_AT = 11u * LIGHTING_CACHE_SLOTS;
+// A shown weight at or above this has a mean the agreement test can read.
+const float LIGHTING_HISTORY_SHOWN = 0.5;
+// Variance below this is treated as the noise floor, and the same floor
+// keeps a zero mean from dividing the relative step.
+const float LIGHTING_HISTORY_NOISE = 1.0e-4;
+// A sample inside this many standard errors of the mean agrees with it.
+// The divisor is the ray count, so a wide sample cloud does not hide a shift.
+const float LIGHTING_HISTORY_SIGMA = 2.0;
+// Agreement lowers the value by this fraction of the full range.
+const float LIGHTING_HISTORY_DROP = 1.0 / 3.0;
+bool lighting_history_usable(vec3 c) {
+    return !isnan(c.x) && !isinf(c.x) && !isnan(c.y) && !isinf(c.y) && !isnan(c.z) && !isinf(c.z);
+}
+
+// History weight is one minus this value. A sample inside the stored noise
+// lowers the value by a third. A sample outside it raises the value by the
+// relative step. A cell with no mean yet stays at 1. A non-finite sample or
+// mean returns -1 and leaves the stored value: it is not agreement.
+float lighting_history_value(uint slot, vec3 old_rgb, vec3 sample_rgb) {
+    if (!lighting_history_usable(old_rgb) || !lighting_history_usable(sample_rgb)) {
+        return -1.0;
+    }
+    vec4 shown = cache.v[3u * slot + 2u];
+    float value = 1.0;
+    if (shown.w >= LIGHTING_HISTORY_SHOWN) {
+        value = clamp(abs(cache.v[LIGHTING_SC_GRAD_AT + slot].x), 0.0, 1.0);
+        float mean_l = max(dot(max(old_rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
+        float sample_l = max(dot(max(sample_rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
+        float variance = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot].w, 0.0);
+        // Standard error of the mean. The sample spread hid a shifted mean:
+        // every new ray looked like agreement, so the value stayed 0.
+        float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w, 1.0);
+        float noise = max(sqrt(variance / rays), LIGHTING_HISTORY_NOISE);
+        if (abs(sample_l - mean_l) > LIGHTING_HISTORY_SIGMA * noise) {
+            float denom = max(max(abs(sample_l), abs(mean_l)), LIGHTING_HISTORY_NOISE);
+            value = min(1.0, value + abs(sample_l - mean_l) / denom);
+        } else {
+            value = max(0.0, value - LIGHTING_HISTORY_DROP);
+        }
+    }
+    vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
+    g.x = value;
+    cache.v[LIGHTING_SC_GRAD_AT + slot] = g;
+    return value;
+}
+
 void lighting_svgf_push(uint slot) {
     if (lighting_fine_has_prior(slot)) {
         float child_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));
@@ -6742,22 +6820,15 @@ void lighting_svgf_push(uint slot) {
             // λ of 0 keeps the sixteenth. A lamp that left
             // (lighting_lamp_keep is 0) takes the target on this push.
             float catch_up = LIGHTING_FIELD_CATCH;
-            float y_prev = dot(max(prev, vec3(0.0)), LIGHTING_SVGF_LW);
-            // A lamp that left, or a field the filter has left by the edge
-            // test, takes the target on this push. A quiet texel keeps the
-            // 1/16 step. The idle hash would otherwise show the old field
-            // for LIGHTING_PUSH_IDLE frames. The fill and a change take the
-            // target too: leaving the 1/16 step to pile up and then snap was
-            // the open-picture pop.
-            if (field_behind
-                || lighting_sh_lum_disagrees(max(y_target, y_prev), min(y_target, y_prev))
-                || lighting_lamp_keep(cache.v[3u * slot].xyz, 0u) <= LIGHTING_KEEP_NONE) {
-                catch_up = 1.0;
+            // The stored field moves by the cell value. A lamp keep of 0, a
+            // 1 mm move, and a luminance step do not take the target whole.
+            float value = lighting_history_value(slot, prev, outc);
+            if (value < 0.0) {
+                outc = prev;
             } else {
-                float lam = clamp(lighting_sc_lambda(slot), 0.0, 1.0);
-                catch_up = (1.0 - lam) * catch_up + lam;
+                catch_up = clamp((1.0 - value) * catch_up + value, 0.0, 1.0);
+                outc = mix(prev, outc, catch_up);
             }
-            outc = mix(prev, outc, catch_up);
         }
     }
     uint field_pack = lighting_pack_rgb9e5(outc);
@@ -6823,7 +6894,6 @@ void lighting_svgf_push(uint slot) {
 const bool LIGHTING_SC_ASVGF = true;
 bool lighting_sc_asvgf_on() { return LIGHTING_SC_ASVGF && lighting_sc_svgf(); }
 const bool LIGHTING_GRAD_CHECKS_ON = true;
-const uint LIGHTING_SC_GRAD_AT = 11u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_SC_GRAD2_AT = 12u * LIGHTING_CACHE_SLOTS;
 const uint LIGHTING_GRAD_COUNT_AT = LIGHTING_SC_HIST_AT + 72u;
 const uint LIGHTING_EXT_AT = LIGHTING_ARGS_AT + 16u + 3u * 65536u;
@@ -7308,6 +7378,7 @@ bool lighting_sc_drop_stale_mover_world(uint slot) {
     if (!on && !aged) {
         return false;
     }
+    atomicAdd(gstats.diag[LIGHTING_RESET_MOVER], 1u);
     ckeys.key[slot] = 0u;
     lighting_sc_forget(slot);
     cache.v[3u * slot + 1u] = vec4(0.0);

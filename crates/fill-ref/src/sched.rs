@@ -104,6 +104,12 @@ pub struct Tunables {
     pub share_receivers: u32,
     /// Own rays after which a fill seed's display weight is 0. High matches warmup.
     pub share_handover: u32,
+    /// `0` leaves the floor off. Any other value turns on one ray per selected cell.
+    pub floor_rays: u32,
+    /// 1, 2, or 4. A cell is due when its index mod this equals the frame mod this.
+    pub floor_rate: u32,
+    /// Ranked rays after the floor. 0 spends none.
+    pub burst: u32,
 }
 
 impl Tunables {
@@ -142,6 +148,9 @@ impl Tunables {
             share_conf: 0.25,
             share_receivers: 3,
             share_handover: 16,
+            floor_rays: 1,
+            floor_rate: 1,
+            burst: 25_000,
         }
     }
 

@@ -165,9 +165,13 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --surface-cache-ray-budget N
                          cache-round ray cap; 0 keeps the existing lists
                          (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET).
-                         World mode 3 does not use this ceiling. It spends
-                         surface_cache.fill_budget every cache round
-                         (GENOS_LIGHTING_FILL_BUDGET, High 100000, 0 traces none).
+                         World mode 3 does not spend this number. A positive
+                         fill_budget turns the pass on. The traced count is one
+                         floor ray per live cell whose slot mod fill_floor_rate
+                         equals the frame mod that rate, plus fill_burst.
+                         fill_floor_rate is 1, 2, or 4 (High 1, Medium 2, Low 4).
+                         fill_burst 0 spends no extra rays. High defaults to 25000,
+                         Medium to 12500, Low to 6250. fill_budget 0 traces none.
                          The other fill knobs are surface_cache.fill_* and
                          GENOS_LIGHTING_FILL_TILE, FILL_LOD_NEAR, FILL_CELL_MAX,
                          FILL_LEASH, FILL_LOOK_AHEAD, FILL_FAR, FILL_FAR_SHARE,
@@ -178,8 +182,8 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          FILL_SHARE, FILL_SHARE_MIN_HIT, FILL_SHARE_CAP,
                          FILL_SHARE_PLANE, FILL_SHARE_NORMAL, FILL_SHARE_W_CAP,
                          FILL_SHARE_COS, FILL_SHARE_CONF, FILL_SHARE_RECEIVERS,
-                         FILL_SHARE_HANDOVER.
-                         Check rays are one same-seed ray per fill_check_rate block.
+                         FILL_SHARE_HANDOVER, FILL_FLOOR_RAYS, FILL_FLOOR_RATE,
+                         FILL_BURST.
                          fill_share 1 seeds other cells in the same tile.
                          0 turns that off. Ring is not a value here.
   --surface-cache-dormant-rays N
@@ -368,6 +372,9 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_fill_share_conf",
     "lighting_fill_share_receivers",
     "lighting_fill_share_handover",
+    "lighting_fill_floor_rays",
+    "lighting_fill_floor_rate",
+    "lighting_fill_burst",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",

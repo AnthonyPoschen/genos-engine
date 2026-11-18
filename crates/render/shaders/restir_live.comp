@@ -511,6 +511,9 @@ void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float targ
             atomicAdd(restir_words[RESTIR_DIAG_HIST_REJECT], 1u);
         }
     }
+    if (surfaced && restir_hdr(15u) == 0u && !reuse) {
+        atomicAdd(gstats.diag[LIGHTING_RESET_REPROJECT], 1u);
+    }
     uint stride = restir_hdr(19u);
     uint prev = restir_hdr(20u) == 0u ? restir_hdr(4u) : restir_hdr(5u);
     uint h_lamp;
@@ -552,6 +555,7 @@ void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float targ
         bool changed_here = surfaced && restir_changed_reaches(pos + nrm * RESTIR_ORIGIN_LIFT);
         uint fade_m = m_now * RESTIR_CHANGE_FADE;
         if (m_now != 0u && changed_here && hist_m > fade_m) {
+            atomicAdd(gstats.diag[LIGHTING_RESET_RESTIR], 1u);
             hist_w *= m_as_f(fade_m) / m_as_f(hist_m);
             hist_m = fade_m;
         }

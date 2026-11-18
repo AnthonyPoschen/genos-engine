@@ -109,13 +109,17 @@ pub fn trickle_due(id: u32, frame: u32, rate: u32) -> bool {
     hash_u32(id ^ hash_u32(frame)).is_multiple_of(rate)
 }
 
-/// True when a fresh sample is outside the noise the stored variance allows.
+/// True when a fresh sample is outside the noise of the mean.
+///
+/// The gate is `sigma * sqrt(variance / rays)`, the standard error, not the
+/// sample spread. A wide cloud must not count a shifted mean as agreement.
 #[must_use]
-pub fn trickle_disagrees(sample: f32, mean: f32, variance: f32) -> bool {
+pub fn trickle_disagrees(sample: f32, mean: f32, variance: f32, rays: u32) -> bool {
     if !sample.is_finite() || !mean.is_finite() {
         return false;
     }
-    let noise = variance.max(0.0).sqrt().max(1.0e-4);
+    let n = f32::from(u16::try_from(rays.clamp(1, 65_535)).unwrap_or(65_535));
+    let noise = (variance.max(0.0) / n).sqrt().max(1.0e-4);
     (sample - mean).abs() > DISAGREE_SIGMA * noise
 }
 
@@ -137,9 +141,13 @@ pub fn history_confidence(value: f32) -> f32 {
 }
 
 /// Blend one new sample into the stored mean. `confidence` is the weight of
-/// the history. Zero replaces the mean. One leaves it.
+/// the history. Zero replaces the mean. One leaves it. A non-finite sample
+/// or mean is not a sample: the stored mean stays.
 #[must_use]
 pub fn blend_with_confidence(mean: f32, confidence: f32, sample: f32) -> f32 {
+    if !sample.is_finite() || !mean.is_finite() {
+        return mean;
+    }
     let keep = if confidence.is_finite() {
         confidence.clamp(0.0, 1.0)
     } else {
@@ -149,36 +157,42 @@ pub fn blend_with_confidence(mean: f32, confidence: f32, sample: f32) -> f32 {
 }
 
 /// One agreement measure. A sample inside the stored noise lowers the value.
-/// A sample outside it raises the value by the relative step.
+/// A sample outside it raises the value by the relative step. A non-finite
+/// sample or mean is not agreement and does not move the value.
 #[must_use]
-pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32) -> f32 {
+pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32, rays: u32) -> f32 {
     let value = if value.is_finite() {
         value.clamp(0.0, 1.0)
     } else {
         0.0
     };
-    if trickle_disagrees(sample, mean, variance) {
+    if !sample.is_finite() || !mean.is_finite() {
+        return value;
+    }
+    if trickle_disagrees(sample, mean, variance, rays) {
         (value + disagreement_raise(sample, mean)).min(1.0)
     } else {
         (value - 1.0 / 3.0).max(0.0)
     }
 }
 
-/// One ray per live cell, then whatever of `budget` remains is the burst.
-/// The floor is not capped by the budget: a budget smaller than the floor
-/// returns the budget and a zero burst.
+/// `ceil(live / N)` floor rays, plus the burst setting. N is 1, 2, or 4.
 #[must_use]
-pub fn split_floor_and_burst(live_cells: u32, budget: u32, rays_per_cell: u32) -> (u32, u32) {
-    let floor = live_cells.saturating_mul(rays_per_cell.max(1));
-    if floor >= budget {
-        (budget, 0)
+pub fn split_floor_and_burst(live_cells: u32, rate: u32, burst: u32) -> (u32, u32) {
+    let n = if rate == 2 || rate == 4 { rate } else { 1 };
+    (live_cells.div_ceil(n), burst)
+}
+
+fn floor_rate_n(rate: u32) -> u32 {
+    if rate == 2 || rate == 4 {
+        rate
     } else {
-        (floor, budget - floor)
+        1
     }
 }
 
-/// Spend `budget` once. Ranked rays go to the highest rank. Trickle rays are
-/// the reserved floor, one each, on cells the ranked spend did not take.
+/// Floor rays follow the slot rotation. Burst rays go to the highest rank.
+/// `budget` is the cap only when the floor is off.
 #[must_use]
 pub fn allocate(cells: &[CellBid], budget: u32, tun: &Tunables, frame: u32) -> Vec<Grant> {
     let mut grants = cells
@@ -189,9 +203,56 @@ pub fn allocate(cells: &[CellBid], budget: u32, tun: &Tunables, frame: u32) -> V
             trickle: false,
         })
         .collect::<Vec<_>>();
-    if budget == 0 || cells.is_empty() {
+    if cells.is_empty() {
         return grants;
     }
+    if tun.floor_rays == 0 {
+        if budget == 0 {
+            return grants;
+        }
+        return allocate_fraction(cells, budget, tun, frame, grants);
+    }
+    let rate = floor_rate_n(tun.floor_rate);
+    let phase = frame % rate;
+    for (index, grant) in grants.iter_mut().enumerate() {
+        let idx = u32::try_from(index).unwrap_or(0);
+        if idx % rate == phase {
+            grant.rays = 1;
+            grant.trickle = cell_value(&cells[index], tun) <= 0.0;
+        }
+    }
+    let mut order: Vec<usize> = (0..cells.len()).collect();
+    order.sort_by(|&a, &b| {
+        cell_rank(&cells[b], tun)
+            .total_cmp(&cell_rank(&cells[a], tun))
+            .then_with(|| cells[a].id.cmp(&cells[b].id))
+    });
+    let max_per = tun.max_picks.max(1);
+    let mut burst_left = tun.burst;
+    for &index in &order {
+        if burst_left == 0 {
+            break;
+        }
+        if cell_value(&cells[index], tun) <= 0.0 {
+            continue;
+        }
+        let give = max_per.min(burst_left);
+        grants[index].rays = grants[index].rays.saturating_add(give);
+        grants[index].trickle = false;
+        burst_left -= give;
+    }
+    grants
+}
+
+/// The fraction floor. `floor_rays` 0 keeps this path so a zero per-cell
+/// floor still draws the reserved share.
+fn allocate_fraction(
+    cells: &[CellBid],
+    budget: u32,
+    tun: &Tunables,
+    frame: u32,
+    mut grants: Vec<Grant>,
+) -> Vec<Grant> {
     let floor_n = trickle_count(budget, tun.offscreen_floor);
     let mut left = budget.saturating_sub(floor_n);
     let max_per = tun.max_picks.max(1);
@@ -295,8 +356,9 @@ mod tests {
     }
 
     #[test]
-    fn a_new_cell_starts_at_one_and_takes_the_budget() {
-        let tun = Tunables::high();
+    fn a_new_cell_starts_at_one_and_takes_the_burst() {
+        let mut tun = Tunables::high();
+        tun.burst = 4;
         let fresh = bid(1, 0, 2.0);
         let done = bid(2, 64, 2.0);
         assert_eq!(cell_value(&fresh, &tun), 1.0);
@@ -305,13 +367,13 @@ mod tests {
         let fresh_rays = grants.iter().find(|g| g.id == 1).map(|g| g.rays);
         let done_rays = grants.iter().find(|g| g.id == 2).map(|g| g.rays);
         assert!(fresh_rays > done_rays);
-        assert!(fresh_rays.is_some_and(|rays| rays > 0));
+        assert!(fresh_rays.is_some_and(|rays| rays > 1));
     }
 
     #[test]
-    fn the_highest_value_is_spent_first() {
+    fn the_highest_value_takes_the_burst() {
         let mut tun = Tunables::high();
-        tun.offscreen_floor = 0.0;
+        tun.burst = 1;
         tun.max_picks = 1;
         let mut low = bid(1, 32, 2.0);
         low.lambda = 0.05;
@@ -320,8 +382,9 @@ mod tests {
         let mut high = bid(3, 0, 2.0);
         high.lambda = 0.0;
         let grants = allocate(&[low, mid, high], 1, &tun, 0);
-        assert_eq!(grants.iter().find(|g| g.id == 3).map(|g| g.rays), Some(1));
-        assert_eq!(grants.iter().filter(|g| g.rays > 0).count(), 1);
+        let top = grants.iter().find(|g| g.id == 3).map(|g| g.rays);
+        assert_eq!(top, Some(2));
+        assert!(grants.iter().filter(|g| g.id != 3).all(|g| g.rays == 1));
     }
 
     #[test]
@@ -335,17 +398,21 @@ mod tests {
     }
 
     #[test]
-    fn the_grant_never_passes_the_budget() {
-        let tun = Tunables::high();
+    fn the_floor_rotates_and_the_burst_is_not_the_remainder() {
+        let mut tun = Tunables::high();
+        tun.floor_rate = 2;
+        tun.burst = 0;
         let cells: Vec<_> = (0..40u32)
             .map(|id| bid(id, id % 5, 1.0 + f32::from(u16::try_from(id).unwrap_or(0))))
             .collect();
-        let grants = allocate(&cells, tun.budget, &tun, 3);
-        let total: u32 = grants.iter().map(|g| g.rays).sum();
-        assert!(total <= tun.budget);
-        assert!(grants
-            .iter()
-            .all(|g| g.rays <= tun.max_picks.max(1) || g.trickle));
+        let even = allocate(&cells, tun.budget, &tun, 0);
+        let odd = allocate(&cells, tun.budget, &tun, 1);
+        assert_eq!(even.iter().map(|g| g.rays).sum::<u32>(), 20);
+        assert_eq!(odd.iter().map(|g| g.rays).sum::<u32>(), 20);
+        assert!(even.iter().enumerate().all(|(i, g)| g.rays == u32::from(i % 2 == 0)));
+        assert!(odd.iter().enumerate().all(|(i, g)| g.rays == u32::from(i % 2 == 1)));
+        let (floor, burst) = split_floor_and_burst(40, 2, 0);
+        assert_eq!((floor, burst), (20, 0));
     }
 
     #[test]
@@ -363,10 +430,22 @@ mod tests {
         );
         let mut mean = kept;
         let mut reset_mean = reset;
-        for _ in 0..8 {
+        let mut kept_frame = 8u32;
+        let mut reset_frame = 8u32;
+        for frame in 0..8 {
             mean = blend_with_confidence(mean, history_confidence(0.05), truth);
             reset_mean = blend_with_confidence(reset_mean, history_confidence(0.05), truth);
+            if kept_frame == 8 && (mean - truth).abs() <= 0.01 {
+                kept_frame = frame;
+            }
+            if reset_frame == 8 && (reset_mean - truth).abs() <= 0.01 {
+                reset_frame = frame;
+            }
         }
+        assert!(
+            kept_frame <= reset_frame,
+            "kept reached the floor at {kept_frame}, reset at {reset_frame}"
+        );
         assert!((mean - truth).abs() <= (reset_mean - truth).abs() + 1.0e-4);
     }
 
@@ -380,7 +459,7 @@ mod tests {
         let variance = 1.0e-4_f32;
         let mut last_ranked = 0u32;
         for frame in 0..4 {
-            value = apply_agreement(value, mean, mean, variance);
+            value = apply_agreement(value, mean, mean, variance, 32);
             let mut cell = bid(1, 32, 2.0);
             cell.lambda = value;
             let grant = allocate(std::slice::from_ref(&cell), 8, &tun, frame)[0];
@@ -391,18 +470,55 @@ mod tests {
     }
 
     #[test]
-    fn the_floor_is_one_ray_per_live_cell_and_the_burst_is_the_rest() {
-        let (floor, burst) = split_floor_and_burst(1000, 100_000, 1);
+    fn a_wide_cloud_does_not_count_a_shifted_mean_as_agreement() {
+        // |2 - 1| sits inside 2 standard deviations of variance 1, and outside
+        // the standard error once the mean has 64 rays. The value must rise.
+        let cloud = apply_agreement(0.0, 2.0, 1.0, 1.0, 1);
+        assert!(
+            cloud < 0.01,
+            "one sample of a wide cloud agrees, got {cloud}"
+        );
+        let shifted = apply_agreement(0.0, 2.0, 1.0, 1.0, 64);
+        assert!(
+            shifted >= 0.5,
+            "a shifted mean raises the value, got {shifted}"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_sample_does_not_agree_or_replace_the_mean() {
+        let value = 0.9_f32;
+        let mean = 1.25_f32;
+        for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(apply_agreement(value, sample, mean, 1.0e-4, 1), value);
+            assert_eq!(blend_with_confidence(mean, 0.25, sample), mean);
+        }
+        for stored in [f32::NAN, f32::INFINITY] {
+            assert_eq!(apply_agreement(value, mean, stored, 1.0e-4, 1), value);
+            assert_eq!(
+                blend_with_confidence(stored, 0.25, 4.0).to_bits(),
+                stored.to_bits(),
+                "a non-finite mean must not take the new sample"
+            );
+        }
+    }
+
+    #[test]
+    fn the_floor_is_ceil_live_over_rate_plus_the_burst_setting() {
+        let (floor, burst) = split_floor_and_burst(1000, 1, 0);
         assert_eq!(floor, 1000);
-        assert_eq!(burst, 99_000);
-        let (all, none) = split_floor_and_burst(100_000, 80_000, 1);
-        assert_eq!(all, 80_000);
-        assert_eq!(none, 0);
+        assert_eq!(burst, 0);
+        let (quarter, extra) = split_floor_and_burst(1000, 4, 32);
+        assert_eq!(quarter, 250);
+        assert_eq!(extra, 32);
+        let (odd, _) = split_floor_and_burst(5, 2, 0);
+        assert_eq!(odd, 3);
     }
 
     #[test]
     fn a_converged_cell_still_draws_the_trickle_floor() {
         let mut tun = Tunables::high();
+        tun.floor_rays = 0;
         tun.check_rate = 1;
         tun.offscreen_floor = 0.25;
         let done = bid(7, 128, 3.0);
@@ -418,8 +534,8 @@ mod tests {
     #[test]
     fn an_unsignalled_change_recovers_when_the_floor_is_open() {
         let truth = 4.0_f32;
-        let with_floor = recover(0.25, truth);
-        let no_floor = recover(0.0, truth);
+        let with_floor = recover(0.0, 1, truth);
+        let no_floor = recover(0.0, 0, truth);
         assert!(
             with_floor < 0.5,
             "trickle plus the raised value should reach the new light, error {with_floor}"
@@ -431,10 +547,12 @@ mod tests {
         assert!(with_floor < no_floor);
     }
 
-    fn recover(floor: f32, truth: f32) -> f32 {
+    fn recover(floor: f32, floor_rays: u32, truth: f32) -> f32 {
         let mut tun = Tunables::high();
+        tun.floor_rays = floor_rays;
         tun.offscreen_floor = floor;
         tun.budget = 8;
+        tun.burst = 8;
         tun.max_picks = 4;
         tun.check_rate = 1;
         let mut mean = 1.0_f32;
@@ -455,7 +573,7 @@ mod tests {
             if grant.rays == 0 {
                 continue;
             }
-            if grant.trickle && trickle_disagrees(truth, mean, variance) {
+            if grant.trickle && trickle_disagrees(truth, mean, variance, rays) {
                 lambda = disagreement_raise(truth, mean);
             }
             let (next, next_rays) = blend_mean(mean, rays, truth, grant.rays);

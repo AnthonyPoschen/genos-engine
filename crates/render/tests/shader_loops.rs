@@ -118,8 +118,8 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         "the claimer must finish the slot before another ray folds it"
     );
     assert!(
-        fill.contains("lighting_fill_f(7)"),
-        "fill_far_share must be read"
+        fill.contains("lighting_fill_u(32)") && fill.contains("lighting_fill_u(33)"),
+        "the floor rate and the burst are the ray spend"
     );
     assert!(
         !fill.contains("if (prev == mark)"),
@@ -139,12 +139,12 @@ fn the_fill_resolve_folds_one_ray_with_the_warmup_weight() {
         "fill_max_picks is per cell, including a cell that wins several tiles"
     );
     assert!(
-        fill.contains("lighting_round() % tiles"),
-        "screen check rays must rotate with the round, not rescan the same prefix"
+        fill.contains("(slot % rate) == (lighting_round() % rate)"),
+        "the floor ray rotates by slot index, so every cell is covered within N frames"
     );
     assert!(
-        fill.contains("lighting_hash(block ^ lighting_hash(lighting_round()))"),
-        "off-screen checks are one hash per block, not a scan of the slot table"
+        !fill.contains("lighting_fill_push_check(slot)"),
+        "the check-ray scan is not part of the floor-plus-burst schedule"
     );
     let plan = function_body(&fill, "void lighting_fill_dispatch()");
     assert!(
@@ -282,8 +282,8 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         "young cells take turns until the variance bucket is the rank"
     );
     assert!(
-        fill.contains("lighting_fill_pour_row(hist, plan, 64u, left)"),
-        "leftover on-screen rays pour onto the chosen cells"
+        !fill.contains("lighting_fill_pour_row(hist, plan, 64u, left)"),
+        "the 64-ray pour is gone; the burst is the only extra spend"
     );
     assert!(
         !fill.contains("lighting_fill_give"),
@@ -295,17 +295,17 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
     );
     let emit_on = function_body(&fill, "void lighting_fill_emit_on(uint gid)");
     assert!(
-        emit_on.contains("Every tile winner writes a non-zero lock"),
-        "a zero-take tile winner still marks the lock the histogram counted"
+        emit_on.contains("prior >= max_picks"),
+        "the burst cap is per cell"
+    );
+    assert!(
+        emit_on.contains("clamp(lighting_fill_u(17), 1u, 64u)"),
+        "fill_max_picks accepts the 64-ray sweep; the store loop is 64"
     );
     let emit_off = function_body(&fill, "void lighting_fill_emit_off(uint gid)");
     assert!(
-        emit_off.contains("prior == 0u"),
-        "an off-screen emit takes nothing once the cell already has a grant"
-    );
-    assert!(
-        emit_off.contains("lighting_fill_holds_tile"),
-        "a tile winner does not take the off-screen grant"
+        !emit_off.contains("lighting_fill_holds_tile"),
+        "the off-screen bin emit does not grant rays"
     );
     assert!(
         fill.contains("7 occupied-cell count"),
@@ -364,35 +364,29 @@ fn the_scene_ray_loops_are_kept_rolled() {
     }
 }
 
-/// The tile fill rays the world cell. A finer screen texel claims that cell
-/// and returns, so it cannot win the tile.
+/// Compose reads the 12.5 cm texel, so the visit gives it a floor ray. It does
+/// not claim the 25 cm parent: that claim recreated cells the leash drops.
 #[test]
-fn the_fill_visit_rays_the_world_cell_not_the_screen_texel() {
+fn the_fill_visit_rays_the_screen_texel_and_claims_its_parent() {
     let fill = source("lighting_fill.glsl");
     let visit = function_body(&fill, "void lighting_fill_visit(uint slot)");
-    let claim = visit.find("lighting_cache_find_sized(p, n, true, base, p)");
-    let tile = visit.find("lighting_fill_tile_at()");
-    match (claim, tile) {
-        (Some(claim_at), Some(tile_at)) => {
-            assert!(
-                claim_at < tile_at,
-                "the screen texel must return before the tile pick"
-            );
-            assert!(
-                visit[tile_at..].contains("lighting_fill_off_at()"),
-                "an on-screen cell also stays in its off-screen bin"
-            );
-        }
-        (None, _) => panic!("a screen texel must claim the world cell under it"),
-        (Some(_), None) => panic!("a world cell must still enter the tile"),
-    }
     assert!(
-        visit.contains("if (size < base)"),
-        "only a slot finer than the base world cell skips the ray"
+        visit.contains("(slot % rate)"),
+        "a world cell must still take the floor ray"
     );
     assert!(
-        visit.contains("lighting_fill_pack(slot, q)"),
-        "the tile rank is the priority bucket"
+        !visit.contains("lighting_cache_find_sized(p, n, true, base, p)"),
+        "a fine texel must not claim the parent it would coarsen"
+    );
+    let cache = source("lighting_cache.glsl");
+    let find = function_body(&cache, "uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at)");
+    assert!(
+        find.contains("lighting_fill_leash(0u)"),
+        "an off-screen claim past the level-0 leash is refused"
+    );
+    assert!(
+        !visit.contains("atomicMax"),
+        "the visit does not contest a tile or an off-screen bin"
     );
     let pack = function_body(&fill, "uint lighting_fill_pack(uint slot, uint q)");
     assert!(

@@ -493,6 +493,16 @@ kind = "mirror"
 detail = "surface_cache.fill_budget (stress knob lighting_fill_budget); MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_FILL_BURST"
+kind = "mirror"
+detail = "surface_cache.fill_burst (stress knob lighting_fill_burst); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_CELL_LOG"
+kind = "test"
+detail = "harness only: the fill picture test prints fillcell at frame 40"
+
+[[var]]
 name = "GENOS_LIGHTING_FILL_CATCHUP_MAX"
 kind = "mirror"
 detail = "surface_cache.fill_catchup_max (stress knob lighting_fill_catchup_max); MCP set_lighting_settings"
@@ -531,6 +541,16 @@ detail = "surface_cache.fill_far (stress knob lighting_fill_far); MCP set_lighti
 name = "GENOS_LIGHTING_FILL_FAR_SHARE"
 kind = "mirror"
 detail = "surface_cache.fill_far_share (stress knob lighting_fill_far_share); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_FLOOR_RATE"
+kind = "mirror"
+detail = "surface_cache.fill_floor_rate (stress knob lighting_fill_floor_rate); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FILL_FLOOR_RAYS"
+kind = "mirror"
+detail = "surface_cache.fill_floor_rays (stress knob lighting_fill_floor_rays); MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_FILL_FRAME_DT"
