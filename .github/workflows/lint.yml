@@ -160,7 +160,7 @@ jobs:
           # references, shader-source lints and CPU-side packing checks.
           cargo test --locked --no-fail-fast \
             -p genos-debug --test fog_froxel --test fog_integrate --test fog_reference --test fire_reference \
-            -p genos-render --test gpu_budget --test shader_loops --test particle_resident \
+            -p genos-render --test gpu_budget --test shader_loops --test particle_resident --test instance_stride \
             -p genos-stress --test lighting_ref_check --test lighting_ref_generate --test noise_gate \
             -- --test-threads=1
 
@@ -174,3 +174,36 @@ jobs:
           bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools spirv-tools
       - name: presented-frame fill gate, passes and goes red with cache_fill knocked out
         run: ./scripts/ci-fill-knockout.sh
+
+  gpu-integrity:
+    runs-on: ${{ vars.GE_RUNNER == 'house' && fromJSON('["self-hosted","house","genos-engine"]') || 'ubuntu-latest' }}
+    # Job budget; the integrity step has its own tighter timeout below.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: lavapipe, Weston, validation layers
+        run: |
+          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev vulkan-validationlayers pkg-config glslc glslang-tools spirv-tools build-essential python3
+      - name: instance stride, geometry coverage (poison), vk validation
+        # Caps (LP_NUM_THREADS=1, CARGO_BUILD_JOBS=1, potato, --release) live
+        # in scripts/ci-gpu-integrity.sh so a 16 GiB house pod is not OOMKilled.
+        timeout-minutes: 40
+        run: |
+          runtime="${RUNNER_TEMP}/genos-runtime"
+          mkdir -p "$runtime"
+          chmod 700 "$runtime"
+          export XDG_RUNTIME_DIR="$runtime"
+          weston --backend=headless --socket=genos-test >/tmp/weston.log 2>&1 &
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if [ -S "$runtime/genos-test" ]; then
+              break
+            fi
+            sleep 0.5
+          done
+          test -S "$runtime/genos-test"
+          export WAYLAND_DISPLAY=genos-test
+          export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+          export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json
+          chmod +x scripts/ci-gpu-integrity.sh
+          bash scripts/ci-gpu-integrity.sh

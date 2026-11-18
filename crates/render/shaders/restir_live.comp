@@ -483,6 +483,7 @@ bool restir_reproject(vec3 pos, vec3 nrm, out uint hist_pixel, out vec3 hist_pos
 }
 
 #ifndef RESTIR_SPATIAL_ONLY
+#include "restir_reach.glsl"
 void restir_initial(uint pixel, out uint lamp, out float w_sum, out uint m, out float target) {
     initial_tree(pixel, lamp, w_sum, m, target);
     restir_store4(restir_hdr(6u) + pixel * 4u, lamp, w_sum, m, target);
@@ -537,18 +538,22 @@ void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float targ
         cap_history(hist_m, hist_w, m_now);
         // Validation: the history sample is re-scored at this frame's point
         // with this frame's lamp (tq_h below), so a lamp that dimmed, moved
-        // out of reach, or switched off drops out (tq_h = 0). A lamp that
-        // changed this frame also keeps at most the current sample's
-        // confidence: its W was built against the old target, so it gets an
-        // equal vote instead of up to 20 frames' worth. Scaling w_sum with M
-        // keeps the reservoir's W, so the estimate stays unbiased.
+        // out of reach, or switched off drops out (tq_h = 0). Where a changed
+        // lamp's previous or current ball reaches this shaded point, history
+        // keeps about 12 frames of the current sample instead of one. The
+        // trailing side of a move is in that ball, so it starts the same cap.
+        // Scaling w_sum with M keeps the reservoir's W, so the estimate stays
+        // unbiased.
         // The clamp must not depend on which lamp the history holds: a
         // weight keyed to the sample (only a changed lamp loses M) breaks
         // the M-weight partition of unity and darkened a wall by a moving
-        // lamp ~20 %. Header word 39 is "any lamp changed this frame".
-        if (m_now != 0u && hist_m > m_now && restir_hdr(39u) != 0u) {
-            hist_w *= m_as_f(m_now) / m_as_f(hist_m);
-            hist_m = m_now;
+        // lamp ~20 %. The reach test is the pixel, not the sample. Header
+        // word 39 is only the any-bit early-out.
+        bool changed_here = surfaced && restir_changed_reaches(pos + nrm * RESTIR_ORIGIN_LIFT);
+        uint fade_m = m_now * RESTIR_CHANGE_FADE;
+        if (m_now != 0u && changed_here && hist_m > fade_m) {
+            hist_w *= m_as_f(fade_m) / m_as_f(hist_m);
+            hist_m = fade_m;
         }
         // Generalized balance heuristic (GRIS): each sample's MIS weight
         // compares M * p_hat over both domains, with the history domain's

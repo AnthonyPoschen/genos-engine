@@ -150,7 +150,18 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(!direct.contains("e = e_mean"));
     assert!(direct.contains("The graded colour is the mean of the unbiased sample"));
     assert!(direct.contains("mean_prev >= RESTIR_MEAN_CAP"));
-    assert!(direct.contains("restir_words[39u] == 0u"));
+    let reach = include_str!("../shaders/restir_reach.glsl");
+    assert!(reach.contains("restir_words[39u] == 0u"));
+    assert!(reach.contains("restir_words[37u]"));
+    assert!(reach.contains("!(range > 0.0)"));
+    assert!(reach.contains("bool restir_changed_reaches"));
+    assert!(direct.contains("restir_changed_reaches(origin)"));
+    assert!(direct.contains("luma_steps >= RESTIR_CHANGE_DROP_STEPS"));
+    assert!(!direct.contains("RESTIR_CHANGE_LEAVE"));
+    assert!(!reach.contains("RESTIR_CHANGE_LEAVE"));
+    assert!(!direct.contains("restir_words[39u] == 0u"));
+    assert!(live.contains("restir_changed_reaches(pos + nrm * RESTIR_ORIGIN_LIFT)"));
+    assert!(!live.contains("restir_hdr(39u) != 0u"));
     assert!(pick.contains("const uint RESTIR_MEAN_CAP = 4096u;"));
 }
 

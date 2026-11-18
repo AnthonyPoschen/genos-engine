@@ -35,6 +35,14 @@ def grade(found: Counter, allow: set[str]) -> list[str]:
     return sorted(vuid for vuid in found if vuid not in allow)
 
 
+def cargo_profile_args() -> list[str]:
+    # ci-gpu-integrity.sh sets this so lavapipe+validation stay inside the
+    # house 16 GiB cgroup. Assertions are unchanged; only the Rust profile.
+    if os.environ.get("GENOS_GPU_INTEGRITY_RELEASE") == "1":
+        return ["--release"]
+    return []
+
+
 def run(cmd: list[str]) -> str:
     env = dict(os.environ, VK_INSTANCE_LAYERS="VK_LAYER_KHRONOS_validation")
     print("+", " ".join(cmd), flush=True)
@@ -65,11 +73,13 @@ def main() -> int:
     else:
         # Full destroy: the quit path otherwise leaves VkDevice alive, and the
         # validation layer reports object leaks from vkDestroyInstance.
+        profile = cargo_profile_args()
         text = run(
             [
                 "cargo",
                 "run",
                 "--locked",
+                *profile,
                 "-q",
                 "-p",
                 "genos-camera",
@@ -83,7 +93,20 @@ def main() -> int:
             print(text[-4000:])
             print("genos-camera did not draw its frames", file=sys.stderr)
             return 1
-        text += run(["cargo", "test", "--locked", "-p", "genos-render", "--test", "gpu_frame", "--", "--test-threads=1"])
+        text += run(
+            [
+                "cargo",
+                "test",
+                "--locked",
+                *profile,
+                "-p",
+                "genos-render",
+                "--test",
+                "gpu_frame",
+                "--",
+                "--test-threads=1",
+            ]
+        )
     found = errors(text)
     allow = allowed()
     for vuid, n in sorted(found.items()):

@@ -96,7 +96,10 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_px_world_w = 0.0;
     lighting_px_bounce_found = false;
     lighting_sc_display = true;
+    uint pixel = p.y * pc.dims.x + p.x;
+    lighting_px_object_id = (p.x != ~0u && pixel < pc.dims.x * pc.dims.y) ? gbuf_object_id(pixel) : 0u;
     vec4 world = lighting_world_irradiance(pos, n);
+    lighting_px_object_id = 0u;
     lighting_px_world_w = world.w;
     lighting_sc_display = false;
 #ifndef GENOS_COMPOSE_MAINT
