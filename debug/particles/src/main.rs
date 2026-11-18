@@ -503,7 +503,7 @@ fn serve(
         last: String::new(),
     };
     loop {
-        for pending in command::take_wait(Duration::from_secs(1)) {
+        for pending in command::take_wait(Duration::from_secs(1)).unwrap_or_default() {
             let quit = pending.name == "particle_quit";
             let result = handle(&mut session, &pending.name, &pending.args);
             command::reply(pending.id, result);

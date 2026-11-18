@@ -1,8 +1,23 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
-#![expect(clippy::missing_errors_doc, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::must_use_candidate, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![expect(clippy::redundant_closure_for_method_calls, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md")]
-#![cfg_attr(test, expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::must_use_candidate,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![expect(
+    clippy::redundant_closure_for_method_calls,
+    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::unwrap_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Named commands a client sends and the frame thread runs.
 //!
@@ -12,6 +27,7 @@
 //! a capture). The catalogue of commands is registered by whoever runs them, so
 //! this crate stays free of engine types.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -112,23 +128,52 @@ pub fn call(name: &str, args: Value, timeout: Duration) -> Result<Value, String>
     }
 }
 
+static QUEUE_VIOLATIONS: AtomicU32 = AtomicU32::new(0);
+
+/// Times a `genos-job-*` thread called [`take`] or [`take_wait`].
+#[must_use]
+pub fn queue_violations() -> u32 {
+    QUEUE_VIOLATIONS.load(Ordering::Relaxed)
+}
+
+fn reject_job_thread() -> Result<(), &'static str> {
+    let job = std::thread::current()
+        .name()
+        .is_some_and(|name| name.starts_with("genos-job-"));
+    if job {
+        QUEUE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
+        Err("jobs.queue_violation")
+    } else {
+        Ok(())
+    }
+}
+
 /// Commands queued since the last take, oldest first.
-pub fn take() -> Vec<Pending> {
+///
+/// A `genos-job-*` thread is refused. The frame thread drains the queue, and
+/// a job that waited here would stall that thread.
+///
+/// # Errors
+///
+/// `jobs.queue_violation` when the caller is a `genos-job-*` thread.
+pub fn take() -> Result<Vec<Pending>, &'static str> {
+    reject_job_thread()?;
     let mut queue = lock();
     queue.served = true;
-    std::mem::take(&mut queue.waiting)
+    Ok(std::mem::take(&mut queue.waiting))
 }
 
 /// Like [`take`], but a host with no frame loop (a headless debug binary)
 /// blocks here until a command arrives or `timeout` passes.
-pub fn take_wait(timeout: Duration) -> Vec<Pending> {
+pub fn take_wait(timeout: Duration) -> Result<Vec<Pending>, &'static str> {
+    reject_job_thread()?;
     let deadline = Instant::now() + timeout;
     let mut queue = lock();
     queue.served = true;
     loop {
         let now = Instant::now();
         if !queue.waiting.is_empty() || now >= deadline {
-            return std::mem::take(&mut queue.waiting);
+            return Ok(std::mem::take(&mut queue.waiting));
         }
         let (guard, _) = WAKE
             .wait_timeout(queue, deadline.saturating_duration_since(now))
@@ -165,7 +210,7 @@ mod tests {
             schema: json::object([]),
         }]);
         let frame = std::thread::spawn(|| loop {
-            let pending = take();
+            let pending = take().expect("frame thread");
             if let Some(cmd) = pending.into_iter().next() {
                 reply(cmd.id, Ok(cmd.args));
                 break;
@@ -178,9 +223,11 @@ mod tests {
         assert!(call("nope", json::int(1), Duration::from_millis(10)).is_err());
 
         // A host with no frame loop blocks in `take_wait` instead of polling.
-        assert!(take_wait(Duration::from_millis(1)).is_empty());
+        assert!(take_wait(Duration::from_millis(1))
+            .expect("frame thread")
+            .is_empty());
         let host = std::thread::spawn(|| {
-            let pending = take_wait(Duration::from_secs(5));
+            let pending = take_wait(Duration::from_secs(5)).expect("frame thread");
             let cmd = pending.into_iter().next().expect("woken with a command");
             reply(cmd.id, Ok(cmd.args));
         });
