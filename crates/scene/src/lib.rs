@@ -3,6 +3,7 @@
 //! Lights and objects live here. The renderer decides which light reaches which surface.
 //! Positions and directions use `genos-math`.
 
+mod animation;
 mod camera;
 mod codimation;
 mod debug_settings;
@@ -21,6 +22,11 @@ mod script;
 mod settings;
 mod types;
 
+pub use animation::{
+    pose_time, tick, AnimCharacter, AnimCue, AnimFrame, AnimGraph, AnimQuality, AnimState,
+    AnimationSettings, FiredCue, PoseSource, Predicate, TickReport, JOINT_BYTES, SIM_HZ,
+    SKIN_BUDGET_BYTES, VERTEX_BYTES,
+};
 pub use camera::{
     listener_state, look_direction, transform_point, update, view_proj, viewport_uv, Actions,
     Camera, CAMERA_FAR, CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,

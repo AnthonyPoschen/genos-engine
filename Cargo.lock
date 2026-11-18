@@ -159,6 +159,9 @@ version = "0.1.0"
 dependencies = [
  "genos-json",
  "genos-load",
+ "genos-math",
+ "genos-physics",
+ "genos-scene",
 ]
 
 [[package]]
@@ -406,6 +409,7 @@ version = "0.1.0"
 dependencies = [
  "genos-audio",
  "genos-ecs",
+ "genos-json",
  "genos-load",
  "genos-math",
  "genos-physics",

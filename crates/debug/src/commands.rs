@@ -116,6 +116,7 @@ pub fn specs() -> Vec<CommandSpec> {
     .chain(hdr_specs())
     .chain(fog_specs())
     .chain(particle_specs())
+    .chain(animation_specs())
     .chain(host_specs())
     .chain(material_specs())
     .collect()
@@ -217,6 +218,20 @@ fn particle_specs() -> Vec<CommandSpec> {
         spec(
             "fx_spawn",
             "Same as fx.spawn. Rhai name. Omitted count on a zero emitter becomes 64.",
+        ),
+    ]
+}
+
+
+fn animation_specs() -> Vec<CommandSpec> {
+    vec![
+        spec(
+            "get_animation_settings",
+            "The animation settings text: max_skinned, update_rate_far_hz, far_distance_m, dqs, ik. Low is 32, 15 Hz, 25 m, dqs off, ik off. The value lives on the character component. genos-animation --settings prints the Low row. Clip bytes are anim.clip_mb and are not in the 64 MB skin budget.",
+        ),
+        spec(
+            "set_animation_settings",
+            "Partial animation update. Keys are max_skinned, update_rate_far_hz, far_distance_m, dqs, and ik, with or without the animation. prefix. genos-animation --set key=value checks one knob and prints the text. The character keeps the value. Locomotion params are local. This command does not send a pose.",
         ),
     ]
 }
