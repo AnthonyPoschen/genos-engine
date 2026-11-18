@@ -167,10 +167,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET).
                          World mode 3 does not spend this number. A positive
                          fill_budget turns the pass on. The traced count is one
-                         floor ray per live cell at the preset rate (High every
-                         frame, Medium every second, Low every fourth), plus
-                         one ray every frame for a cell a mover is changing,
-                         plus fill_burst. Mover rays beyond that rate come out
+                         floor ray per live cell every 10 frames, plus one ray
+                         every frame for a cell a mover is changing, plus
+                         fill_burst and the rays that 1-in-10 floor no longer
+                         spends. Mover rays beyond the 1-in-10 share come out
                          of the burst.
                          fill_burst 0 spends no extra rays. High defaults to 25000,
                          Medium to 12500, Low to 6250. fill_budget 0 traces none.

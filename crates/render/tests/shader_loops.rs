@@ -464,7 +464,11 @@ fn a_refine_child_inherits_the_parent_mean_at_one_set() {
         "on-screen parents do not spawn a second near-field set"
     );
     assert!(
-        fill.contains("w == 1u || w == 2u || w == 4u"),
-        "the uniform floor uses the preset divisor"
+        !fill.contains("w == 1u || w == 2u || w == 4u"),
+        "1, 2, and 4 are not a floor rate"
+    );
+    assert!(
+        fill.contains("return LIGHTING_FILL_FLOOR_PERIOD"),
+        "a live floor is one ray every 10 frames"
     );
 }
