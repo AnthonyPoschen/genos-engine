@@ -186,8 +186,8 @@ jobs:
         run: |
           bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev vulkan-validationlayers pkg-config glslc glslang-tools spirv-tools build-essential python3
       - name: instance stride, geometry coverage (poison), vk validation
-        # Caps (LP_NUM_THREADS=2, CARGO_BUILD_JOBS=2, --release) live in
-        # scripts/ci-gpu-integrity.sh so a 16 GiB house pod is not OOMKilled.
+        # Caps (LP_NUM_THREADS=1, CARGO_BUILD_JOBS=1, potato, --release) live
+        # in scripts/ci-gpu-integrity.sh so a 16 GiB house pod is not OOMKilled.
         timeout-minutes: 40
         run: |
           runtime="${RUNNER_TEMP}/genos-runtime"
