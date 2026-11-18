@@ -4,6 +4,9 @@
 //! and instances, plus the existing `.gbake` key per mesh from
 //! `genos_bake::load_or_bake`. The cook builds no SDF of its own.
 //!
+//! Each mesh also gets the geometry-LOD stage 1 chain: four levels from
+//! `meshopt_simplify` (100/50/25/12.5 %), object-space error in metres.
+//!
 //! The record is a `.gcook` file named by the source `AssetId`. Its header lists
 //! every input hash and the settings hash, so an unchanged input is skipped
 //! without decoding it. A SHA-256 trailer covers the whole file, so a load that
@@ -12,6 +15,7 @@
 
 mod format;
 pub mod ktx2;
+mod lod;
 mod package;
 mod parallel;
 mod texture;
@@ -22,6 +26,10 @@ use genos_bake::{load_or_bake, BakeMesh, BakeSettings};
 use genos_load::{hex, sha256, ByteSource, GltfMesh, ImportDoc, LoadError, MeshInstance, Sha256};
 
 pub use format::{decode, encode, Input, FORMAT_VERSION, MAGIC};
+pub use lod::{
+    lod_chain, lod_cover_budget_hits, LOD_COUNT, LOD_COVER_QUERY_BUDGET, LOD_COVER_STOP_M,
+    LOD_RATIOS, LOD_TARGET_ERROR_M,
+};
 pub use package::{manifest, package, Manifest};
 pub use parallel::{map_by_cost, Threads};
 pub use texture::{
@@ -30,12 +38,15 @@ pub use texture::{
     CookedTextures, TEXTURE_MAGIC, TEXTURE_VERSION,
 };
 
-/// One cooked mesh: the glTF primitives as imported and the bake key.
+/// One cooked mesh: the glTF primitives as imported, the bake key, and the LOD chain.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CookedMesh {
+    /// Level 0. The draw path still reads this until a later stage selects a level.
     pub mesh: GltfMesh,
     /// `BakeMesh::content_key` for the cook's bake settings.
     pub bake_key: u64,
+    /// Four levels. Level 0 matches `mesh` and its error is 0.
+    pub lods: Vec<genos_load::MeshLod>,
 }
 
 /// A cooked source file.
@@ -96,6 +107,7 @@ impl From<std::io::Error> for CookError {
 pub fn settings_hash(s: &BakeSettings) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(&FORMAT_VERSION.to_le_bytes());
+    lod::stamp_settings(&mut h);
     for v in [s.voxels_per_side, s.voxel_min, s.voxel_max, s.card_texel] {
         h.update(&v.to_bits().to_le_bytes());
     }
@@ -139,8 +151,10 @@ pub fn cook_with(
         |&i| {
             let baked =
                 load_or_bake(&BakeMesh::from_gltf(scene, i), settings).map_err(CookError::Bake)?;
+            let mesh = scene.meshes[i].clone();
             Ok(CookedMesh {
-                mesh: scene.meshes[i].clone(),
+                lods: lod::lod_chain(&mesh),
+                mesh,
                 bake_key: baked.key,
             })
         },
