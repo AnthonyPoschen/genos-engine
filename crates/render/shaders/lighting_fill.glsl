@@ -23,6 +23,17 @@
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
+// Below this many own sets the cell may still replace its mean. A cell
+// created after the opening frames still has to take its first samples.
+const float LIGHTING_FILL_MEAN_OPEN = 4.0;
+// The frame-40 fill is this many frames of the same replace. A skipped floor
+// ray keeps the value at 1, and a full replace after this washes the hall out.
+const uint LIGHTING_FILL_MEAN_FRAMES = 40u;
+// After that, one skipped floor ray may move the mean by at most this much.
+// A full replace runs the bounce away by frame 400. Leaving the blend at the
+// set count keeps the early dark samples, and the mid band stays short of
+// the every-frame floor.
+const float LIGHTING_FILL_MEAN_CATCH = 0.15;
 const float FILL_TINY = 1.0e-4;
 const float FILL_REAL_CAP = 1.0e20;
 const float FILL_TWO = 2.0;
@@ -992,12 +1003,26 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
             float ratio = sample_t / max(sample_t + sample_add, FILL_EPS);
             blend = 1.0 - ratio * ratio * ratio;
         }
-        // A high value (the cell wants rays) raises the new sample's weight.
-        // A lamp note, a 1 mm move, and the 1/8 and 1/32 floors do not.
+        // The value ranks the burst. A cell the 1-in-10 floor skips for nine
+        // frames disagrees with the next sample, so the value stays at 1.
+        // The opening frames, and a cell's first sets, may still take that
+        // sample: frame 40 is that fill. After that, a full replace makes the
+        // bounce read one sample and the hall is near-white by frame 400.
+        // A lamp note, a 1 mm move, and the 1/8 and 1/32 floors do not raise
+        // it further.
         float value = lighting_history_value(slot, old.rgb, e);
         // -1 is an invalid sample. It does not lower the value and does not blend.
         accept = value >= 0.0;
-        blend = accept ? clamp(max(blend, value), 0.0, 1.0) : 0.0;
+        // After the opening the value may raise the blend only up to the
+        // catch. It still ranks the burst either way.
+        bool opening = sample_t < LIGHTING_FILL_MEAN_OPEN || lighting_frame() <= LIGHTING_FILL_MEAN_FRAMES;
+        if (!accept) {
+            blend = 0.0;
+        } else if (opening) {
+            blend = clamp(max(blend, value), 0.0, 1.0);
+        } else {
+            blend = clamp(max(blend, min(value, LIGHTING_FILL_MEAN_CATCH)), 0.0, 1.0);
+        }
     }
     vec3 mean = old.rgb;
     if (!cell && (lighting_sc_flags() & 1048576u) != 0u && lighting_sc_msme() && rays0 >= float(warmup) && old.w > FILL_HALF) {
