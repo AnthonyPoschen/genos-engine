@@ -630,6 +630,9 @@ pub struct SurfaceCacheSettings {
     /// transformed each frame. Static geometry stays on the world lattice.
     /// Off keeps those entries world-anchored.
     pub attach_movers: bool,
+    /// Fixed mover-texel pool size (object-attached lighting cache). High is
+    /// 32768 (~2 MiB at 64 B). `0` disables the pool. Scaled per preset.
+    pub mover_texels: u32,
     /// Published blend. Only a finished long-term mean is shown.
     pub blend: SurfaceCacheBlend,
     /// Firefly clamp in standard deviations of the short-term mean.
@@ -903,6 +906,7 @@ impl LightingSettings {
             }
             LightingPreset::DayCycle => {
                 clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_texels = 0;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
                 s.probes.enabled = false;
@@ -929,12 +933,14 @@ impl LightingSettings {
                 // One bounce reads the world cache. The directional product
                 // stays a High and Medium default.
                 clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_texels = 16_384;
                 s.denoiser.enabled = false;
                 s.prefill = false;
                 s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Potato => {
                 clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_texels = 0;
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -954,6 +960,7 @@ impl LightingSettings {
                 // passes are gone on every preset. The knobs can still turn
                 // the bits on.
                 clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_texels = 4_096;
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
                 s.probes.enabled = false;
@@ -977,6 +984,7 @@ impl LightingSettings {
             LightingPreset::Medium => {
                 // High's directional product stays on: SH cells, texel detail,
                 // the ray cut, and probe retire.
+                s.surface_cache.mover_texels = 16_384;
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
@@ -1021,6 +1029,7 @@ impl LightingSettings {
             },
             surface_cache: SurfaceCacheSettings {
                 attach_movers: true,
+                mover_texels: 32_768,
                 blend: SurfaceCacheBlend::Msme,
                 firefly_sigma: 8.0,
                 ray_budget: 0,
@@ -1106,6 +1115,8 @@ impl LightingSettings {
             8.0
         };
         self.surface_cache.dormant_rays = self.surface_cache.dormant_rays.min(16);
+        // Cap at the High pool; `0` turns the mover texel pool off.
+        self.surface_cache.mover_texels = self.surface_cache.mover_texels.min(32_768);
         self.surface_cache.drain_sigma = if self.surface_cache.drain_sigma.is_finite() {
             self.surface_cache.drain_sigma.max(0.0)
         } else {
@@ -1500,6 +1511,11 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
+            "surface_cache.mover_texels={}",
+            self.surface_cache.mover_texels
+        );
+        let _ = writeln!(
+            out,
             "surface_cache.blend={}",
             self.surface_cache.blend.name()
         );
@@ -1776,6 +1792,7 @@ impl LightingSettings {
             "gi_refresh" => self.gi.refresh_frames = num_u32(value)?.max(1),
             "budget_shift" => self.gi.budget_shift = num_u32(value)?.min(7),
             "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
+            "surface_cache.mover_texels" => self.surface_cache.mover_texels = num_u32(value)?,
             "surface_cache.blend" => {
                 self.surface_cache.blend = SurfaceCacheBlend::parse(value)
                     .ok_or_else(|| format!("surface_cache.blend is msme or hold, got {value}"))?

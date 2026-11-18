@@ -3,9 +3,9 @@
 // GI compute passes. Same vertices (gbuffer.vert) and depth prepass as the picture; early
 // depth tests so only the surface the pixel shows writes its record.
 //
-// Record (5 uints, gbuffer_layout.glsl): distance, octahedral normal, albedo plus
+// Record (6 uints, gbuffer_layout.glsl): distance, octahedral normal, albedo plus
 // a two-sided flag, emission (the light pass overwrites it with direct light),
-// then roughness, metallic, and material flags.
+// roughness/metallic/material flags, then object / bone id.
 //
 // Particle cards, fog cards and unlit quads are not in GI yet: they discard.
 #extension GL_GOOGLE_include_directive : require
@@ -23,6 +23,7 @@ layout(location = 8) flat in float v_cutoff;
 layout(location = 9) flat in float v_rough;
 layout(location = 10) flat in float v_metal;
 layout(location = 11) flat in uint v_mat;
+layout(location = 12) flat in uint v_object_id;
 layout(location = 0) out vec4 out_color;
 
 #include "scene_data.glsl"
@@ -103,14 +104,23 @@ void main() {
     // positive floats order as uints), the same answer every frame.
     uint i = p.y * gbuf.header.x + p.x;
     float dist = max(length(v_pos - scene.eye.xyz), 1.0e-6);
-    atomicMin(gbuf.words[i * 5u], floatBitsToUint(dist));
-    atomicMin(gbuf.words[i * 5u + 1u], lighting_pack_normal(n));
-    atomicMin(gbuf.words[i * 5u + 2u], packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
+    uint dist_bits = floatBitsToUint(dist);
+    // Elect the nearest fragment (positive floats order as uints). Object 0 and the
+    // shading fields take atomicMin; object id must follow the same winner so a
+    // farther mover fragment cannot leave its oid on a nearer static surface.
+    uint prev_dist = atomicMin(gbuf.words[i * GBUF_STRIDE], dist_bits);
+    atomicMin(gbuf.words[i * GBUF_STRIDE + 1u], lighting_pack_normal(n));
+    atomicMin(gbuf.words[i * GBUF_STRIDE + 2u], packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
     uint flags = (v_mat & 1u) != 0u ? 1u : 0u;
     const float gbuf_flag_byte = 255.0;
-    atomicMin(gbuf.words[i * 5u + 4u], packUnorm4x8(vec4(clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 0.0, float(flags) / gbuf_flag_byte)));
+    atomicMin(gbuf.words[i * GBUF_STRIDE + 4u], packUnorm4x8(vec4(clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 0.0, float(flags) / gbuf_flag_byte)));
     if (v_emit != 0u) {
-        atomicMin(gbuf.words[i * 5u + 3u], v_emit);
+        atomicMin(gbuf.words[i * GBUF_STRIDE + 3u], v_emit);
+    }
+    // Depth-consistent oid: only a fragment that is at least as near as the
+    // elected distance may publish. Ties keep one of the front-most ids.
+    if (dist_bits <= prev_dist) {
+        gbuf.words[i * GBUF_STRIDE + 5u] = v_object_id;
     }
     out_color = vec4(albedo, 1.0);
 }

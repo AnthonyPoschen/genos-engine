@@ -1058,10 +1058,13 @@ impl Renderer {
             self.gpu.wait_flight(slot)?;
         }
         self.gpu.bind_flight();
+        // Field movers must be noted before instance oid tagging so mesh KEEP
+        // ids (10001+) match this frame's live set.
+        self.sync_fields(world)?;
         let mut dynamic = Vec::new();
         let mut draws = Vec::new();
         let mut instances = vec![identity_instance()];
-        for item in &pack.draws {
+        for (draw_i, item) in pack.draws.iter().enumerate() {
             match item {
                 pack::PackedDraw::Shape {
                     key,
@@ -1089,6 +1092,11 @@ impl Renderer {
                         continue;
                     };
                     let instance = instances.len() as u32;
+                    // Stable draw→mover id: occluder KEEP index + 1, or mesh
+                    // field KEEP index + 10001. Static / non-KEEP stays 0.
+                    let occ = pack.draw_occluder.get(draw_i).copied().flatten();
+                    let obj = pack.draw_object.get(draw_i).copied();
+                    let object_id = self.gpu.mover_object_id_for_draw(occ, obj);
                     instances.push(InstanceRec {
                         model: *model,
                         // w: emitted light as shared-exponent bits (0: none) for the
@@ -1102,6 +1110,7 @@ impl Renderer {
                         atlas: *color_rect,
                         normal_atlas: *normal_rect,
                         extra: [*cutoff, *roughness, *metallic, f32::from_bits(*material_flags)],
+                        ids: [object_id, 0, 0, 0],
                     });
                     draws.push(DrawSpan {
                         shapes: true,
@@ -1188,7 +1197,6 @@ impl Renderer {
         }
         self.debug.apply(&mut pack);
         self.debug.view = saved_debug_view;
-        self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
@@ -1328,6 +1336,26 @@ impl Renderer {
     /// Returns an error when the device rejects the dispatch.
     pub fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
         self.gpu.texel_detail_prod()
+    }
+
+    /// Like [`Self::texel_detail_prod`], with the mover-pool slide measurement on
+    /// (`lamp.w = 1`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_slide(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_slide()
+    }
+
+    /// Compose stored-id lattice load (`GENOS_COMPOSE_NO_WALK`) for the mover
+    /// warm-up prior. Slide `warm_ok` locks the live gather only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_compose_lattice(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_compose_lattice()
     }
 
     /// Writing specialization with `lamp.x = 1`. The returned bytes are the
@@ -1685,6 +1713,10 @@ struct DrawSpan {
     instance: u32,
 }
 
+/// Bytes per instance in the SSBO (must match every `struct Instance` in
+/// `scene.vert`, `gbuffer.vert`, and `reflections_portal.vert`).
+const INSTANCE_REC_BYTES: usize = 144;
+
 struct InstanceRec {
     model: [f32; 16],
     color: [f32; 4],
@@ -1693,7 +1725,12 @@ struct InstanceRec {
     normal_atlas: [f32; 4],
     /// x is the alpha cutoff. 0 does not discard.
     extra: [f32; 4],
+    /// x = object / transform id for the mover cache (0 = none).
+    /// y = top-weight bone id for skinned meshes (0 = use object id).
+    ids: [u32; 4],
 }
+
+const _: () = assert!(std::mem::size_of::<InstanceRec>() == INSTANCE_REC_BYTES);
 
 fn identity_instance() -> InstanceRec {
     InstanceRec {
@@ -1703,6 +1740,7 @@ fn identity_instance() -> InstanceRec {
         atlas: [0.0; 4],
         normal_atlas: [0.0; 4],
         extra: [0.0; 4],
+        ids: [0; 4],
     }
 }
 
@@ -3701,7 +3739,8 @@ impl Gpu {
     }
 
     fn write_instances(&mut self, items: &[InstanceRec]) -> Result<(), String> {
-        let mut bytes = Vec::with_capacity(items.len() * 128);
+        // mat4 + 4×vec4 + uvec4 ids = INSTANCE_REC_BYTES per instance.
+        let mut bytes = Vec::with_capacity(items.len() * INSTANCE_REC_BYTES);
         for item in items {
             for value in item
                 .model
@@ -3712,6 +3751,9 @@ impl Gpu {
                 .chain(item.extra)
             {
                 bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+            for id in item.ids {
+                bytes.extend_from_slice(&id.to_ne_bytes());
             }
         }
         // GI holds its light while nothing it sees changes (lighting_gpu.rs).
@@ -7512,17 +7554,57 @@ impl Gpu {
             let req_size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
             let align = u64::from_ne_bytes(req[8..16].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
-            let memory = self.alloc(req_size, bits, memory)?;
+            let memory_kind = memory;
+            let memory = self.alloc(req_size, bits, memory_kind)?;
             check(
                 (self.fns.bind_buffer)(self.device, buffer, memory, 0),
                 "bind buffer",
             )?;
-            Ok(Buffer {
+            let created = Buffer {
                 buffer,
                 memory,
                 size: req_size,
                 align,
-            })
+            };
+            // CI GPU path: fill new host-visible buffers with NaN/garbage so
+            // out-of-bounds or uninitialised reads fail on lavapipe like NVIDIA.
+            self.poison_new_buffer(&created, memory_kind);
+            Ok(created)
+        }
+    }
+
+    fn poison_new_buffer(&self, buffer: &Buffer, memory_kind: Memory) {
+        if memory_kind == Memory::Device {
+            return;
+        }
+        if genos_scene::lighting_env_os("GENOS_BUFFER_POISON").is_none() {
+            return;
+        }
+        let size = buffer.size;
+        if size == 0 || buffer.memory.is_null() {
+            return;
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(self.device, buffer.memory, 0, size, 0, &mut mapped) != 0
+                || mapped.is_null()
+            {
+                return;
+            }
+            // 0xFFFFFFFF is NaN for f32 and ~0 for uint — never a quiet zero.
+            let words = (size / 4) as usize;
+            let ptr = mapped as *mut u32;
+            for i in 0..words {
+                *ptr.add(i) = 0xFFFF_FFFF;
+            }
+            let rem = (size % 4) as usize;
+            if rem > 0 {
+                let bytes = mapped as *mut u8;
+                for i in 0..rem {
+                    *bytes.add(words * 4 + i) = 0xFF;
+                }
+            }
+            (self.fns.unmap_mem)(self.device, buffer.memory);
         }
     }
 

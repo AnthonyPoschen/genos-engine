@@ -17,6 +17,7 @@ layout(local_size_x = 64) in;
 layout(std430, set = 0, binding = 19) buffer RestirWords {
     uint restir_words[];
 };
+#include "restir_reach.glsl"
 // Near point lamps actually added on a ReSTIR pixel. Header word, same slot
 // the history counts use. Compact keeps gstats.diag[13] for an on-screen
 // surface-cache entry when LIGHTING_DIAG is on.
@@ -165,7 +166,7 @@ void main() {
                 uint prev = outc.px[pixels + idx];
                 // Emitted stays out of the picture buffer; compose reads it here.
                 outc.px[pixels + idx] = glow;
-                gbuf.words[idx * 5u + 3u] = floatBitsToUint(pv[c + 1u]);
+                gbuf.words[idx * GBUF_STRIDE + 3u] = floatBitsToUint(pv[c + 1u]);
                 if (glow != prev) {
                     lighting_compose_mark_px(idx);
                 }
@@ -771,8 +772,12 @@ void main() {
     // buffer. The shadow ray above re-traces the stored sample when the
     // reservoir kept that lamp. A different lamp traces the stored one once.
     // History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9), one pixel, and
-    // drops when the reservoir resets (word 15) or the pixel is a different
-    // surface. A lamp change (word 39) and a one-step luma move do not.
+    // drops when the reservoir resets (word 15). A changed lamp shortens it
+    // to RESTIR_CHANGE_FADE where that lamp's previous or current ball reaches
+    // the shaded origin, the same cap on the side it left and the side it
+    // still covers. The re-traced sample's visibility flip still clears it,
+    // and 8 log codes still clear it. The 12-bit unshadowed-target clear runs
+    // only where neither ball reaches, so a slow move does not defeat the fade.
     // That check runs before the cap, so a frozen mean still drops. At
     // RESTIR_MEAN_CAP the colour otherwise stays, so a still surface stops
     // moving. The mean of one fixed integrand stays unbiased: temporal
@@ -793,6 +798,10 @@ void main() {
         // pixel only, and the geo load stops before a neighbour. Two slots
         // leave the previous frame alone, so a reprojected neighbour is safe.
         uint mean_only = lamp_res_one_slot() ? idx : ~0u;
+        // origin is pos + n * 0.02, the point the shade just lit. Reach is
+        // the union of the changed lamp's previous and current balls, not
+        // the lamp id stored in the mean.
+        bool changed_here = restir_changed_reaches(origin);
         if (restir_words[15u] == 0u && lamp_pick_reproject_at(pos, n, mean_only, mean_px, z_ignore)) {
             uvec4 hg = lamp_geo_load(mean_px, lamp_res_slot_prev());
             if (hg.z == LAMP_GEO_RESTIR_MEAN) {
@@ -805,6 +814,63 @@ void main() {
         // A one-step luma change and a visibility flip do not zero the mean.
         // A failed reprojection above already dropped a different surface.
         bool mean_dropped = false;
+        uint luma_steps = 0u;
+        if (mean_prev > 0u) {
+            uint old_lamp = prev_pack & 0xffffu;
+            bool old_vis = (prev_pack & 0x10000u) != 0u;
+            uint old_q = prev_pack >> 17u;
+            if (old_lamp != RESTIR_MEAN_NO_LAMP && old_lamp < restir_words[0u]) {
+                float luma_now = 0.0;
+                bool vis_now = false;
+                if (restir_sampled && restir_lamp == old_lamp) {
+                    luma_now = restir_luma;
+                    vis_now = restir_vis;
+                } else {
+                    // A different lamp from the one stored. One shadow ray,
+                    // and only when that lamp still reaches this point.
+                    uint la = restir_words[1u] + old_lamp * 8u;
+                    Lamp old_l;
+                    old_l.pos = vec4(uintBitsToFloat(restir_words[la]), uintBitsToFloat(restir_words[la + 1u]), uintBitsToFloat(restir_words[la + 2u]), 0.0);
+                    old_l.color = vec4(uintBitsToFloat(restir_words[la + 4u]), uintBitsToFloat(restir_words[la + 5u]), uintBitsToFloat(restir_words[la + 6u]), uintBitsToFloat(restir_words[la + 3u]));
+                    vec3 old_target;
+                    vec3 old_light = lamp_light(old_l, origin, n, two_sided, old_target);
+                    luma_now = old_light.r + old_light.g + old_light.b;
+                    if (luma_now > 0.0) {
+                        if ((gstats.ctrl_bits & 2u) == 0u) {
+                            vis_now = true;
+                        } else {
+                            vis_now = !trace_occluded(origin, old_target);
+                            if (lamp_pick_diag()) {
+                                atomicAdd(gstats.diag[48u], 1u);
+                            }
+                        }
+                    }
+                }
+                uint q_now = restir_mean_quant(luma_now);
+                luma_steps = q_now > old_q ? q_now - old_q : old_q - q_now;
+                // A slow move is one or two codes and keeps the fade. A jump
+                // of RESTIR_CHANGE_DROP_STEPS (about 9%) is a different
+                // integrand, the same bar as a visibility flip.
+                bool big_move = changed_here && luma_steps >= RESTIR_CHANGE_DROP_STEPS;
+                if (vis_now != old_vis || (!changed_here && restir_mean_target_moved(old_q, luma_now)) || big_move) {
+                    mean_dropped = true;
+                    mean_prev = 0u;
+                    mean_e = drawn;
+                }
+            }
+        }
+        if (changed_here && mean_prev > 0u) {
+            // Same 12 on the side the lamp left and the side it still covers.
+            // A 2-sample cap there drops the other lamps' converged mean and
+            // salts the wake. The 8-code clear above is the hard drop.
+            uint cap = RESTIR_CHANGE_FADE;
+            if (luma_steps > 1u) {
+                cap = max(RESTIR_CHANGE_FADE / luma_steps, 1u);
+            }
+            if (mean_prev > cap) {
+                mean_prev = cap;
+            }
+        }
         vec3 e_mean = drawn;
         uint mean_n = 1u;
         if (mean_prev >= RESTIR_MEAN_CAP) {
@@ -950,7 +1016,7 @@ void main() {
             prev_d = floatBitsToUint(work.v[lighting_pix_at() + idx / 2u][c + 1u]);
         }
         outc.px[pixels + idx] = glow;
-        gbuf.words[idx * 5u + 3u] = packed;
+        gbuf.words[idx * GBUF_STRIDE + 3u] = packed;
         if (tracked) {
             uint c = (idx & 1u) * 2u;
             // Packed direct moved because the sun did. The sun compose writes

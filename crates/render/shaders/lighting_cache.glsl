@@ -46,6 +46,12 @@ uint lighting_sc_id(uint slot) {
 
 // Per frame, read back by the CPU to tell when the light has settled: the largest
 // relative change of a relit patch (millionths), patches relit, live patches.
+// Object-attached mover table + texel pool (mover_cache.rs). Header is 16 uints
+// (64 B), then MOVER_TABLE_SLOTS × 4 vec4 records, then pool_cap × 4 vec4 texels.
+layout(std430, set = 0, binding = 15) buffer MoverCacheBuf {
+    uint header[];
+} movers_gpu;
+
 layout(std430, set = 0, binding = 11) buffer CacheStats {
     uint max_change;
     uint relit;
@@ -979,7 +985,9 @@ bool lighting_sc_stale(uint slot) {
     }
     return lighting_ls_ratio(u) > LIGHTING_SC_STALE_UP;
 }
-// Set while a lookup runs in a mover's frame: id + 1 salts the key.
+// Retired: object-local keys no longer salt the shared world hash. Mover
+// lighting lives in the side mover texel pool (mover_cache.rs). Kept as a
+// zero so older call sites that save/restore it stay valid until removed.
 float lighting_obj_salt = 0.0;
 
 vec3 lighting_axis_vec(uint a) {
@@ -996,9 +1004,6 @@ uint lighting_cache_key_sized(vec3 pos, vec3 n, float size) {
     ivec3 c = ivec3(floor(pos / size - inset));
     uint h = hash_cell3(c, 0u);
     h = lighting_hash(h ^ lighting_hash(lighting_axis(n) ^ lighting_hash(floatBitsToUint(size))));
-    if (lighting_obj_salt > 0.5) {
-        h = lighting_hash(h ^ (uint(lighting_obj_salt) * 0x85ebca6bu));
-    }
     return max(h, 1u);
 }
 
@@ -1039,6 +1044,8 @@ void lighting_sc_seed_apply(uint slot);
 // second, unlit copy of that patch.
 // ADR 0039 stage 2 SH-L1 store (defined with the SH reads below), for the claim's reset.
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz);
+uint lighting_mover_on(vec3 pos, vec3 n);
+bool lighting_sc_local_on();
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
@@ -1057,6 +1064,12 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     if (!claim || !LIGHTING_SC_WRITES) {
         return ~0u;
     }
+#ifndef GENOS_COMPOSE_NO_WALK
+    // #286 → pool: a hit on a mover never writes a world cell.
+    if (lighting_sc_local_on() && lighting_mover_on(pos, n) != ~0u) {
+        return ~0u;
+    }
+#endif
     [[dont_unroll]] for (uint i = free_at; i < LIGHTING_CACHE_SEARCH; i++) {
         uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
         uint prev = atomicCompSwap(ckeys.key[slot], 0u, key);
@@ -1087,7 +1100,9 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
             cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(0.0);
             cache.v[LIGHTING_SC_SPARSE_AT + slot] = vec4(0.0);
             if (lighting_world_mode() == 3u) {
-                cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(lighting_obj_salt, 0.0, 0.0, 0.0);
+                // .x was the object-local salt; always 0 after the mover-pool cutover.
+                // .y / .w still carry other surface-cache scratch.
+                cache.v[LIGHTING_SC_OBJ_AT + slot] = vec4(0.0, 0.0, 0.0, 0.0);
             }
             // ADR 0039 stage 2: no harmonics from the slot's last owner.
             if (lighting_world_mode() == 3u && (lighting_sc_flags() & 8388608u) != 0u) {
@@ -1283,32 +1298,307 @@ vec4 lighting_sc_resample(vec3 pos, vec3 n, float size, uint slot) {
 // How far around a change a patch is relit first (lighting_compact.comp), metres.
 const float LIGHTING_NEAR_CHANGE = 1.0;
 
-// Movers (lighting_gpu.rs lighting_movers): occluders that moved in the last
-// LIGHTING_MOVER_KEEP frames, listed after the changes, four vec4 each: bounding
-// sphere; centre and id + 1; half extents (x, y, z); cosine and sine of the yaw.
-// Count in head w above 200000, the object-local texel switch at 100000.
+// Movers: presence/count lives in head w (/ 200000) for unhold. Records live
+// in movers_gpu (binding 15). attach_movers bit stays at / 100000.
 const uint LIGHTING_MOVER_VEC4 = 4u;
+const uint LIGHTING_MOVER_TABLE_SLOTS = 4096u;
 uint lighting_movers_first() {
     vec4 head = work.v[lighting_change_at()];
     return head.y > 0.5 ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
 }
 uint lighting_movers_count() {
-    uint n = uint(work.v[lighting_change_at()].w) / 200000u;
-    return min(n, (LIGHTING_CHANGES - lighting_movers_first()) / LIGHTING_MOVER_VEC4);
+    return uint(work.v[lighting_change_at()].w) / 200000u;
 }
-vec4 lighting_mover(uint m, uint k) {
-    return work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + lighting_movers_first() + LIGHTING_MOVER_VEC4 * m + k];
-}
-// Object-local cache entries (GIBS 2021 §1.5: a surfel stores a transform id
-// and an object-relative position). Movers only; static geometry stays
+// Object-attached mover pool (GIBS 2021 §1.5). Static geometry stays
 // world-lattice (ADR 0012). The bit is surface_cache.attach_movers, head w / 100000.
 bool lighting_sc_local_on() {
     return lighting_world_mode() == 3u && ((uint(work.v[lighting_change_at()].w) / 100000u) & 1u) != 0u;
 }
 
-// A point inside the bounds of a mover.
+// Header words in movers_gpu (mover_cache.rs pack).
+uint lighting_mover_pool_cap() { return movers_gpu.header[0]; }
+uint lighting_mover_table_off() { return movers_gpu.header[5] / 4u; }
+uint lighting_mover_pool_off() { return movers_gpu.header[6] / 4u; }
+
+uint lighting_mover_table_hash(uint object_id) {
+    return (object_id * 2654435761u) & (LIGHTING_MOVER_TABLE_SLOTS - 1u);
+}
+
+// O(1) open-address lookup. Returns table slot or ~0.
+uint lighting_mover_find_slot(uint object_id) {
+    if (object_id == 0u || !lighting_sc_local_on()) {
+        return ~0u;
+    }
+    uint start = lighting_mover_table_hash(object_id);
+    uint base = lighting_mover_table_off();
+    for (uint step = 0u; step < 16u; step++) {
+        uint slot = (start + step) & (LIGHTING_MOVER_TABLE_SLOTS - 1u);
+        uint at = base + slot * 16u; // 64 B = 16 uints
+        uint id = movers_gpu.header[at];
+        if (id == object_id) {
+            return slot;
+        }
+        if (id == 0u) {
+            return ~0u;
+        }
+    }
+    return ~0u;
+}
+
+// Tier (0 Near, 1 Mid, 2 Far) for a table slot.
+uint lighting_mover_tier(uint slot) {
+    uint at = lighting_mover_table_off() + slot * 16u;
+    return movers_gpu.header[at + 1u];
+}
+
+uint lighting_mover_texel_base(uint slot) {
+    uint at = lighting_mover_table_off() + slot * 16u;
+    return movers_gpu.header[at + 2u];
+}
+
+uint lighting_mover_texel_count(uint slot) {
+    uint at = lighting_mover_table_off() + slot * 16u;
+    return movers_gpu.header[at + 3u];
+}
+
+// Tiny length for normalize / weight divides on mover texels (also used by lookup).
+const float LIGHTING_MOVER_EPS = 1.0e-6;
+const float LIGHTING_MOVER_HALF = 0.5;
+const float LIGHTING_MOVER_UV_MAX = 0.9999;
+const float LIGHTING_MOVER_FACE_SPAN = 2.0;
+
+// Dense face-grid index for object_id at local_pos (matches host layout order:
+// faces +X,-X,+Y,-Y,+Z,-Z, then u, then v). Replaces hash%count, which mapped
+// many face cells onto one texel and painted dark crawling patches.
+//
+// Face pick prefers the shading normal (local) so edge/corner hits do not flip
+// onto a neighbouring face via abs(local) and paint a thin dark slit.
+uint lighting_mover_texel_lookup(uint object_id, vec3 local_pos, vec3 local_n) {
+    uint slot = lighting_mover_find_slot(object_id);
+    if (slot == ~0u) {
+        return ~0u;
+    }
+    if (lighting_mover_tier(slot) >= 2u) {
+        return ~0u; // Far: read world cells only
+    }
+    uint base = lighting_mover_texel_base(slot);
+    uint count = lighting_mover_texel_count(slot);
+    if (count == 0u || base == ~0u) {
+        return ~0u;
+    }
+    uint rt = lighting_mover_table_off() + slot * 16u;
+    vec3 he = abs(vec3(
+        uintBitsToFloat(movers_gpu.header[rt + 12u]),
+        uintBitsToFloat(movers_gpu.header[rt + 13u]),
+        uintBitsToFloat(movers_gpu.header[rt + 14u])));
+    he = max(he, vec3(LIGHTING_SC_TEXEL));
+    vec3 an = abs(local_n);
+    vec3 a = abs(local_pos);
+    // Prefer normal when it clearly names a face; else fall back to position.
+    bool use_n = (an.x + an.y + an.z) > LIGHTING_MOVER_HALF;
+    vec3 pick = use_n ? an : a;
+    uint face;
+    float u_ext;
+    float v_ext;
+    float u;
+    float v;
+    if (pick.x >= pick.y && pick.x >= pick.z) {
+        float sgn = use_n ? local_n.x : local_pos.x;
+        face = sgn >= 0.0 ? 0u : 1u;
+        u_ext = he.y;
+        v_ext = he.z;
+        u = local_pos.y;
+        v = local_pos.z;
+    } else if (pick.y >= pick.z) {
+        float sgn = use_n ? local_n.y : local_pos.y;
+        face = sgn >= 0.0 ? 2u : 3u;
+        u_ext = he.x;
+        v_ext = he.z;
+        u = local_pos.x;
+        v = local_pos.z;
+    } else {
+        float sgn = use_n ? local_n.z : local_pos.z;
+        face = sgn >= 0.0 ? 4u : 5u;
+        u_ext = he.x;
+        v_ext = he.y;
+        u = local_pos.x;
+        v = local_pos.y;
+    }
+    uint u_steps = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * u_ext) / LIGHTING_SC_TEXEL)), 1u);
+    uint v_steps = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * v_ext) / LIGHTING_SC_TEXEL)), 1u);
+    // Prefix sum of face strides (cube → face * u_steps * v_steps).
+    uint off = 0u;
+    for (uint f = 0u; f < face; f++) {
+        float fu_ext = (f <= 1u) ? he.y : ((f <= 3u) ? he.x : he.x);
+        float fv_ext = (f <= 1u) ? he.z : ((f <= 3u) ? he.z : he.y);
+        uint fu = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * fu_ext) / LIGHTING_SC_TEXEL)), 1u);
+        uint fv = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * fv_ext) / LIGHTING_SC_TEXEL)), 1u);
+        off += fu * fv;
+    }
+    float u01 = clamp(
+        LIGHTING_MOVER_HALF * (u / max(u_ext, LIGHTING_MOVER_EPS) + 1.0),
+        0.0,
+        LIGHTING_MOVER_UV_MAX);
+    float v01 = clamp(
+        LIGHTING_MOVER_HALF * (v / max(v_ext, LIGHTING_MOVER_EPS) + 1.0),
+        0.0,
+        LIGHTING_MOVER_UV_MAX);
+    uint ui = min(uint(floor(u01 * float(u_steps))), u_steps - 1u);
+    uint vi = min(uint(floor(v01 * float(v_steps))), v_steps - 1u);
+    uint within = ui * v_steps + vi;
+    uint tex = base + off + within;
+    if (tex >= base + count) {
+        return ~0u;
+    }
+    uint pool = lighting_mover_pool_off();
+    uint at = pool + tex * 16u;
+    if (movers_gpu.header[at + 3u] != object_id) {
+        return ~0u;
+    }
+    return tex;
+}
+
+vec4 lighting_mover_texel_mean(uint tex) {
+    uint at = lighting_mover_pool_off() + tex * 16u;
+    return vec4(
+        uintBitsToFloat(movers_gpu.header[at + 4u]),
+        uintBitsToFloat(movers_gpu.header[at + 5u]),
+        uintBitsToFloat(movers_gpu.header[at + 6u]),
+        uintBitsToFloat(movers_gpu.header[at + 7u])); // samples in w
+}
+
+// Object-local → world (yaw about Y). Inverse is lighting_mover_world_to_local.
+// Compose needs the inverse under GENOS_COMPOSE_NO_WALK; fill uses both.
+vec3 lighting_mover_yaw_local(vec3 local, float yc, float ys) {
+    return vec3(yc * local.x + ys * local.z, local.y, -ys * local.x + yc * local.z);
+}
+
+vec3 lighting_mover_world_to_local(vec3 world_off, float yc, float ys) {
+    return vec3(yc * world_off.x - ys * world_off.z, world_off.y, ys * world_off.x + yc * world_off.z);
+}
+
+// Stage H fill/deposit stays out of compose (GENOS_COMPOSE_NO_WALK) to keep
+// lighting_compose.comp under the 248k SPIR-V ceiling.
+#ifndef GENOS_COMPOSE_NO_WALK
+// Scale-aware outward fill bias: fraction of max(texel size, min half-extent).
+// For a 0.5 m half-extent box this is 0.02 m (same as the old fixed bias);
+// smaller movers shrink with their extent, larger ones stay at least one texel.
+const float LIGHTING_MOVER_RAY_BIAS_FRAC = 0.04;
+
+float lighting_mover_ray_bias(float min_half_extent) {
+    return max(LIGHTING_SC_TEXEL, max(min_half_extent, LIGHTING_MOVER_EPS))
+        * LIGHTING_MOVER_RAY_BIAS_FRAC;
+}
+
+uint lighting_mover_fill_count() { return movers_gpu.header[8]; }
+uint lighting_mover_fill_off() { return movers_gpu.header[9] / 4u; }
+uint lighting_mover_fill_texel(uint i) {
+    return movers_gpu.header[lighting_mover_fill_off() + i];
+}
+
+vec3 lighting_mover_texel_world(uint tex, out vec3 world_n) {
+    uint at = lighting_mover_pool_off() + tex * 16u;
+    vec3 local = vec3(
+        uintBitsToFloat(movers_gpu.header[at + 0u]),
+        uintBitsToFloat(movers_gpu.header[at + 1u]),
+        uintBitsToFloat(movers_gpu.header[at + 2u]));
+    vec3 ln = vec3(
+        uintBitsToFloat(movers_gpu.header[at + 8u]),
+        uintBitsToFloat(movers_gpu.header[at + 9u]),
+        uintBitsToFloat(movers_gpu.header[at + 10u]));
+    uint oid = movers_gpu.header[at + 3u];
+    uint slot = lighting_mover_find_slot(oid);
+    if (slot == ~0u) {
+        world_n = normalize(ln + vec3(LIGHTING_MOVER_EPS));
+        float extent = max(max(abs(local.x), abs(local.y)), abs(local.z));
+        return local + world_n * lighting_mover_ray_bias(extent);
+    }
+    uint rt = lighting_mover_table_off() + slot * 16u;
+    vec3 centre = vec3(
+        uintBitsToFloat(movers_gpu.header[rt + 8u]),
+        uintBitsToFloat(movers_gpu.header[rt + 9u]),
+        uintBitsToFloat(movers_gpu.header[rt + 10u]));
+    float yc = uintBitsToFloat(movers_gpu.header[rt + 11u]);
+    float ys = uintBitsToFloat(movers_gpu.header[rt + 15u]);
+    vec3 he = vec3(
+        uintBitsToFloat(movers_gpu.header[rt + 12u]),
+        uintBitsToFloat(movers_gpu.header[rt + 13u]),
+        uintBitsToFloat(movers_gpu.header[rt + 14u]));
+    float min_he = min(min(abs(he.x), abs(he.y)), abs(he.z));
+    vec3 w = lighting_mover_yaw_local(local, yc, ys) + centre;
+    world_n = normalize(lighting_mover_yaw_local(ln, yc, ys) + vec3(LIGHTING_MOVER_EPS));
+    return w + world_n * lighting_mover_ray_bias(min_he);
+}
+
+void lighting_mover_deposit(uint tex, vec3 rgb, float w) {
+    if (w <= 0.0 || tex == ~0u) {
+        return;
+    }
+    uint at = lighting_mover_pool_off() + tex * 16u;
+    if (movers_gpu.header[at + 3u] == 0u) {
+        return;
+    }
+    float prev = uintBitsToFloat(movers_gpu.header[at + 7u]);
+    float next = prev + w;
+    float a = w / max(next, LIGHTING_MOVER_EPS);
+    vec3 mean = vec3(
+        uintBitsToFloat(movers_gpu.header[at + 4u]),
+        uintBitsToFloat(movers_gpu.header[at + 5u]),
+        uintBitsToFloat(movers_gpu.header[at + 6u]));
+    mean += (rgb - mean) * a;
+    movers_gpu.header[at + 4u] = floatBitsToUint(mean.x);
+    movers_gpu.header[at + 5u] = floatBitsToUint(mean.y);
+    movers_gpu.header[at + 6u] = floatBitsToUint(mean.z);
+    movers_gpu.header[at + 7u] = floatBitsToUint(next);
+}
+#endif
+
+// Presence list (header 12..14): live table slots for mover_on / change volume.
+// Stays out of compose (248k ceiling). Compose uses G-buffer object id only.
+#ifndef GENOS_COMPOSE_NO_WALK
+uint lighting_mover_presence_count() {
+    return min(movers_gpu.header[12], movers_gpu.header[14]);
+}
+uint lighting_mover_presence_off() { return movers_gpu.header[13] / 4u; }
+uint lighting_mover_presence_slot(uint i) {
+    return movers_gpu.header[lighting_mover_presence_off() + i];
+}
+uint lighting_movers_hitch() { return lighting_mover_presence_count(); }
+vec4 lighting_mover(uint m, uint k) {
+    if (m >= lighting_mover_presence_count()) {
+        return vec4(0.0);
+    }
+    uint slot = lighting_mover_presence_slot(m);
+    uint at = lighting_mover_table_off() + slot * 16u;
+    if (k == 0u) {
+        return vec4(
+            uintBitsToFloat(movers_gpu.header[at + 4u]),
+            uintBitsToFloat(movers_gpu.header[at + 5u]),
+            uintBitsToFloat(movers_gpu.header[at + 6u]),
+            uintBitsToFloat(movers_gpu.header[at + 7u]));
+    }
+    if (k == 1u) {
+        return vec4(
+            uintBitsToFloat(movers_gpu.header[at + 8u]),
+            uintBitsToFloat(movers_gpu.header[at + 9u]),
+            uintBitsToFloat(movers_gpu.header[at + 10u]),
+            float(movers_gpu.header[at]));
+    }
+    if (k == 2u) {
+        return vec4(
+            uintBitsToFloat(movers_gpu.header[at + 12u]),
+            uintBitsToFloat(movers_gpu.header[at + 13u]),
+            uintBitsToFloat(movers_gpu.header[at + 14u]),
+            0.0);
+    }
+    return vec4(
+        uintBitsToFloat(movers_gpu.header[at + 11u]),
+        uintBitsToFloat(movers_gpu.header[at + 15u]),
+        0.0,
+        0.0);
+}
 bool lighting_in_change(vec3 p) {
-    uint n = lighting_movers_count();
+    uint n = lighting_movers_hitch();
     [[dont_unroll]] for (uint m = 0u; m < n; m++) {
         vec4 b = lighting_mover(m, 0u);
         vec3 d = p - b.xyz;
@@ -1318,7 +1608,18 @@ bool lighting_in_change(vec3 p) {
     }
     return false;
 }
+#else
+uint lighting_movers_hitch() { return 0u; }
+vec4 lighting_mover(uint m, uint k) { return vec4(0.0); }
+bool lighting_in_change(vec3 p) { return false; }
+#endif
 
+// Hitch-list mover frame / on-surface test. Compose uses the G-buffer object
+// id pool path only (GENOS_COMPOSE_NO_WALK); keeping mf_sample + mat3 inverse
+// out of lighting_compose.comp is what keeps the 248k SPIR-V ceiling.
+#ifdef GENOS_COMPOSE_NO_WALK
+uint lighting_mover_on(vec3 pos, vec3 n) { return ~0u; }
+#else
 // Mover m's frame: world point to local and back. An occluder turns about +Y
 // (scene_rays.glsl occ_local and occ_world); a traced mesh instance (id + 1 past
 // 10000) uses its mesh field rows (world to object) and their inverse.
@@ -1362,7 +1663,7 @@ uint lighting_mover_on(vec3 pos, vec3 n) {
     if (!lighting_sc_local_on()) {
         return ~0u;
     }
-    uint cnt = lighting_movers_count();
+    uint cnt = lighting_movers_hitch();
     [[dont_unroll]] for (uint m = 0u; m < cnt; m++) {
         vec4 b = lighting_mover(m, 0u);
         vec3 d = pos - b.xyz;
@@ -1397,7 +1698,7 @@ uint lighting_mover_on(vec3 pos, vec3 n) {
 // Mover list position of the object with id + 1 = idp, or ~0 (it has rested and
 // left the list).
 uint lighting_mover_by_id(float idp) {
-    uint n = lighting_movers_count();
+    uint n = lighting_movers_hitch();
     [[dont_unroll]] for (uint m = 0u; m < n; m++) {
         if (abs(lighting_mover(m, 1u).w - idp) < 0.5) {
             return m;
@@ -1405,22 +1706,12 @@ uint lighting_mover_by_id(float idp) {
     }
     return ~0u;
 }
-// Texel slot's surface point and normal in the world now: a texel of a moving
-// object stores them in the object's frame (LIGHTING_SC_OBJ_AT holds id + 1). False
-// for an object texel whose object is no longer listed.
+#endif
+// Texel slot's surface point and normal in the world. Object-local shared-hash
+// slots are gone; stored positions are always world.
 bool lighting_sc_texel_world(uint slot, out vec3 p, out vec3 n) {
     p = cache.v[3u * slot].xyz;
     n = cache.v[3u * slot + 1u].xyz;
-    float idp = cache.v[LIGHTING_SC_OBJ_AT + slot].x;
-    if (idp < 0.5) {
-        return true;
-    }
-    uint m = lighting_mover_by_id(idp);
-    if (m == ~0u) {
-        return false;
-    }
-    p = lighting_mover_to_world(m, p, false);
-    n = lighting_mover_to_world(m, n, true);
     return true;
 }
 vec3 lighting_sc_texel_pos(uint slot) {
@@ -4664,45 +4955,96 @@ uint lighting_px_classify_shown(uint slot) {
     }
     return 8u;
 }
+// Optional object id from the G-buffer (0 = none). Set by compose before read.
+uint lighting_px_object_id = 0u;
+
 vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     lighting_px_unfilled = false;
     lighting_px_shade = 8u;
     lighting_px_parent = 0u;
     uint mode = lighting_world_mode();
-    // Detail off (GENOS_LIGHTING_SC_LOCAL=1): a mover still reads object-local
-    // texels, trust 0, and is not a detail candidate. Detail on returns above
-    // that, before the local transform, through lighting_sh_read with claim
-    // false. That call does not enter the object-local texel loop.
-    uint om = mode == 3u ? lighting_mover_on(pos, n) : ~0u;
-    // Detail on: a mover shows the world-cell read at this world position and
-    // true normal. It does not enter the object-local texel loop, does not
-    // seed, and does not stamp (claim stays false). An empty read has w = 0,
-    // so a coarse miss keeps the fine world colour. Detail off still uses the object frame below.
+    lighting_obj_salt = 0.0;
+    // Mover texel pool via G-buffer object id (O(1)). Far → world cells.
+    // The pixel must also lie inside the mover's sphere: a stale or colliding
+    // object id on static geometry must not read empty/wrong pool texels as
+    // full-trust black (w = 1) over walls, floor and ceiling.
+    if (mode == 3u && lighting_px_object_id != 0u && lighting_sc_local_on()) {
+        uint slot = lighting_mover_find_slot(lighting_px_object_id);
+        if (slot != ~0u && lighting_mover_tier(slot) < 2u) {
+            uint at = lighting_mover_table_off() + slot * 16u;
+            vec3 sphere_c = vec3(
+                uintBitsToFloat(movers_gpu.header[at + 4u]),
+                uintBitsToFloat(movers_gpu.header[at + 5u]),
+                uintBitsToFloat(movers_gpu.header[at + 6u]));
+            float sphere_r = uintBitsToFloat(movers_gpu.header[at + 7u]);
+            vec3 d_sph = pos - sphere_c;
+            if (dot(d_sph, d_sph) < sphere_r * sphere_r) {
+                vec3 centre = vec3(
+                    uintBitsToFloat(movers_gpu.header[at + 8u]),
+                    uintBitsToFloat(movers_gpu.header[at + 9u]),
+                    uintBitsToFloat(movers_gpu.header[at + 10u]));
+                float yc = uintBitsToFloat(movers_gpu.header[at + 11u]);
+                float ys = uintBitsToFloat(movers_gpu.header[at + 15u]);
+                // Compose must use object-local coords (inverse yaw). A world
+                // offset here keyed rotating faces to the wrong hash buckets.
+                vec3 local = lighting_mover_world_to_local(pos - centre, yc, ys);
+                // Object-local shading normal (yaw only) picks the face.
+                vec3 local_n = lighting_mover_world_to_local(n, yc, ys);
+                uint tex = lighting_mover_texel_lookup(lighting_px_object_id, local, local_n);
+                if (tex != ~0u) {
+                    vec4 mean = lighting_mover_texel_mean(tex);
+                    // Trust follows sample sets. Eight sets → full trust.
+                    // Below that, blend with a world prior just outside the
+                    // surface along the shading normal (on-mover world cells
+                    // are dropped, so hollow fallthrough stayed dark).
+                    const float LIGHTING_MOVER_FULL_SETS = 8.0;
+                    // Empty texels: skip the pool read and take the prior only.
+                    // Returning w=0 here let fallthrough hit the on-mover world
+                    // drop and paint black rectangles on unfilled faces.
+                    if (mean.w < LIGHTING_MOVER_HALF) {
+                        vec3 nn = normalize(n + vec3(LIGHTING_MOVER_EPS));
+                        vec3 outside = pos + nn * LIGHTING_SC_TEXEL;
+                        uint saved_oid = lighting_px_object_id;
+                        lighting_px_object_id = 0u;
+                        vec4 prior = lighting_sh_compose_lattice(outside, n, false);
+                        lighting_px_object_id = saved_oid;
+                        if (prior.w > LIGHTING_CACHE_HAS_W) {
+                            return prior;
+                        }
+                    } else if (mean.w >= LIGHTING_MOVER_FULL_SETS) {
+                        return vec4(mean.rgb, 1.0);
+                    } else {
+                    // Warm-up prior: SH lattice just outside the surface. Do not
+                    // call lighting_world_irradiance_in here — that inlines the
+                    // mode-3 body into compose and blows the 248k SPIR-V ceiling.
+                    vec3 nn = normalize(n + vec3(LIGHTING_MOVER_EPS));
+                    vec3 outside = pos + nn * LIGHTING_SC_TEXEL;
+                    uint saved_oid = lighting_px_object_id;
+                    lighting_px_object_id = 0u;
+                    vec4 prior = lighting_sh_compose_lattice(outside, n, false);
+                    lighting_px_object_id = saved_oid;
+                    float w = mean.w / LIGHTING_MOVER_FULL_SETS;
+                    if (mean.w > 0.0 || prior.w > LIGHTING_CACHE_HAS_W) {
+                        float tw = prior.w > LIGHTING_CACHE_HAS_W ? prior.w : 0.0;
+                        return vec4(mix(prior.rgb, mean.rgb, w), mix(tw, 1.0, w));
+                    }
+                    }
+                }
+            }
+        }
+    }
+    uint om = mode == 3u && !lighting_sc_local_on() ? lighting_mover_on(pos, n) : ~0u;
     if (om != ~0u && lighting_sh_texel_detail_on()) {
-        lighting_obj_salt = 0.0;
         vec4 sh = lighting_sh_compose_lattice(pos, n, false);
         if ((lighting_toggles() & LIGHTING_TOGGLE_CELLS_ONLY) != 0u) {
             return vec4(sh.rgb, 1.0);
         }
         return sh;
     }
-    vec3 lpos = pos;
-    vec3 ln = n;
-    if (om != ~0u) {
-        lighting_obj_salt = lighting_mover(om, 1u).w;
-        lpos = lighting_mover_to_local(om, pos, false);
-        ln = lighting_mover_to_local(om, n, true);
-    }
-    // Flag 4194304 (surface cache): a pixel on or inside the bounds of a mover
-    // (an object that moved in the last LIGHTING_MOVER_KEEP frames) takes the screen
-    // probes, which trace it as it is now, instead of world texels it sweeps
-    // through.
     if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }
-    vec4 r = lighting_world_irradiance_in(lpos, ln, pos, om != ~0u);
-    lighting_obj_salt = 0.0;
-    return r;
+    return lighting_world_irradiance_in(pos, n, pos, om != ~0u);
 }
 // Debug view "texels" (lighting_compose.comp mode 7): the size a pixel at pos facing n
 // reads and the sets its texel holds (0 when unclaimed).
@@ -6956,6 +7298,38 @@ void lighting_sc_forget(uint slot) {
     ckeys.key[lighting_sc_offer_word(slot)] = 0u;
     ckeys.key[lighting_sc_seed_word(slot)] = 0u;
 }
+#ifndef GENOS_COMPOSE_NO_WALK
+// #286 → pool: a world cell a mover sits on drops now. An unread world cell
+// inside this frame's change volume drops after two frames (age >= 2). Fresh
+// cells (no stamp / last == 0) stay so the scheduler can relight.
+bool lighting_sc_drop_stale_mover_world(uint slot) {
+    if (!LIGHTING_SC_WRITES || lighting_world_mode() != 3u || slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    if (ckeys.key[slot] == 0u || cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5) {
+        return false;
+    }
+    vec3 p = cache.v[3u * slot].xyz;
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float size = cache.v[3u * slot + 1u].w;
+    bool on = lighting_mover_on(p, n) != ~0u;
+    bool aged = false;
+    if (!on && size > LIGHTING_HIT_PATCH && lighting_near_change(p)) {
+        uint last = floatBitsToUint(cache.v[3u * slot].w);
+        // last == 0 is unset / fresh — never age-drop those (was: last == 0
+        // treated as aged, which wiped the hall fill inside change volumes).
+        aged = last != 0u && int(lighting_frame() - last) >= 2;
+    }
+    if (!on && !aged) {
+        return false;
+    }
+    ckeys.key[slot] = 0u;
+    lighting_sc_forget(slot);
+    cache.v[3u * slot + 1u] = vec4(0.0);
+    cache.v[3u * slot + 2u] = vec4(0.0);
+    return true;
+}
+#endif
 // Distance in bits 21..30 (plus one, so a real offer is never 0). Bit 31 stays
 // clear: glslc lowers atomicMin to a signed min, and a set sign bit would
 // keep the farther sample. The low bits are tangent offsets, so the word is

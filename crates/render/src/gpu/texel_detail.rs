@@ -24,11 +24,13 @@ const CACHE_BYTES: u64 = SLOTS * 392;
 const WORK_BYTES: u64 = (98_304 * 16 + 64) * 16;
 // Row 34 is the trust-0 pop. Rows 35 and 36 are the settled mover and the
 // coarse miss. 8 head words, 37 rows of 17, the 40-word motion trailer, then
-// the 32-word lattice parity.
-const OUT_FLOATS: usize = 8 + 37 * 17 + 40 + 32;
+// the 32-word lattice parity, then the 109-word slide measurement.
+const OUT_FLOATS: usize = 8 + 37 * 17 + 40 + 32 + 109;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 3;
+/// Small mover pool for the production fixture (binding 15).
+const MOVER_POOL_CAP: u32 = 32;
 
 pub(super) struct Pipe {
     scene: Buffer,
@@ -39,6 +41,7 @@ pub(super) struct Pipe {
     keys: Buffer,
     cache: Buffer,
     stats: Buffer,
+    movers: Buffer,
     desc_layout: Handle,
     desc_pool: Handle,
     set: Handle,
@@ -110,7 +113,56 @@ fn ckeys_bytes() -> u64 {
 
 impl Gpu {
     pub(super) fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
-        self.texel_detail_dispatch()
+        self.texel_detail_dispatch(0)
+    }
+
+    /// Lean `PROD_SLIDE_ONLY` specialization: mover-pool slide measurement
+    /// without the 37-row fixture or the screen-probe include.
+    pub(super) fn texel_detail_prod_slide(&mut self) -> Result<Vec<f32>, String> {
+        release_compiler_heap();
+        if self.texel_detail.is_some() {
+            self.destroy_texel_detail();
+        }
+        self.texel_detail =
+            Some(self.create_texel_detail_pipe(super::TEXEL_DETAIL_PROD_SLIDE_SPV)?);
+        self.zero_texel_buffers()?;
+        let keys = self
+            .texel_detail
+            .as_ref()
+            .ok_or("texel detail production check is not created")?
+            .keys
+            .memory;
+        self.write_texel_detail_heads(keys)?;
+        self.submit_texel(false, 0, 0, 0, 1)?;
+        let out = self.read_texel_out()?;
+        self.destroy_texel_detail();
+        release_compiler_heap();
+        Ok(out)
+    }
+
+    /// `PROD_COMPOSE_LATTICE` + `GENOS_COMPOSE_NO_WALK`: stored-id lattice load
+    /// as `lighting_compose.comp` runs it. Slide `warm_ok` is the live gather.
+    pub(super) fn texel_detail_prod_compose_lattice(&mut self) -> Result<Vec<f32>, String> {
+        release_compiler_heap();
+        if self.texel_detail.is_some() {
+            self.destroy_texel_detail();
+        }
+        self.texel_detail = Some(
+            self.create_texel_detail_pipe(super::TEXEL_DETAIL_PROD_COMPOSE_LATTICE_SPV)?,
+        );
+        self.zero_texel_buffers()?;
+        let keys = self
+            .texel_detail
+            .as_ref()
+            .ok_or("texel detail production check is not created")?
+            .keys
+            .memory;
+        self.write_texel_detail_heads(keys)?;
+        self.submit_texel(false, 0, 0, 0, 0)?;
+        let out = self.read_texel_out()?;
+        self.destroy_texel_detail();
+        release_compiler_heap();
+        Ok(out)
     }
 
     /// Writing specialization, `lamp.x = 1`. Copies the cache and the key table
@@ -126,7 +178,7 @@ impl Gpu {
             .keys
             .memory;
         self.write_texel_detail_heads(keys)?;
-        self.submit_texel(false, 1, 0, 0)?;
+        self.submit_texel(false, 1, 0, 0, 0)?;
         let plant = self.snapshot_texel_plant()?;
         self.destroy_texel_detail();
         release_compiler_heap();
@@ -153,7 +205,7 @@ impl Gpu {
         // The read-only module is folded in build.rs; these chunks are the
         // dispatch the assertions count.
         for begin in (0u32..12).step_by(2) {
-            self.submit_texel(false, 0, begin, 2)?;
+            self.submit_texel(false, 0, begin, 2, 0)?;
             release_compiler_heap();
         }
         self.read_texel_out()
@@ -166,7 +218,7 @@ impl Gpu {
         Ok(())
     }
 
-    fn texel_detail_dispatch(&mut self) -> Result<Vec<f32>, String> {
+    fn texel_detail_dispatch(&mut self, lamp_w: u32) -> Result<Vec<f32>, String> {
         self.ensure_texel_writer()?;
         self.zero_texel_buffers()?;
         let keys = self
@@ -176,7 +228,7 @@ impl Gpu {
             .keys
             .memory;
         self.write_texel_detail_heads(keys)?;
-        self.submit_texel(false, 0, 0, 0)?;
+        self.submit_texel(false, 0, 0, 0, lamp_w)?;
         self.read_texel_out()
     }
 
@@ -215,6 +267,7 @@ impl Gpu {
         self.destroy_buffer(&mut pipe.keys);
         self.destroy_buffer(&mut pipe.cache);
         self.destroy_buffer(&mut pipe.stats);
+        self.destroy_buffer(&mut pipe.movers);
     }
 
     fn create_texel_detail_pipe(&mut self, code: &[u8]) -> Result<Pipe, String> {
@@ -228,6 +281,11 @@ impl Gpu {
         let keys = self.make_buffer(ckeys_bytes(), 0x20, Memory::Readback)?;
         let cache = self.make_buffer(CACHE_BYTES, 0x20, Memory::Readback)?;
         let stats = self.make_buffer(4096, 0x20, Memory::Readback)?;
+        let movers = self.make_buffer(
+            crate::mover_cache::mover_gpu_bytes(MOVER_POOL_CAP),
+            0x20,
+            Memory::Readback,
+        )?;
         #[repr(C)]
         struct Binding {
             binding: u32,
@@ -244,7 +302,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bind_at = [0, 5, 6, 7, 8, 9, 10, 11];
+        let bind_at = [0, 5, 6, 7, 8, 9, 10, 11, 15];
         let bindings: Vec<Binding> = bind_at
             .into_iter()
             .map(|binding| Binding {
@@ -435,6 +493,7 @@ impl Gpu {
             keys,
             cache,
             stats,
+            movers,
             desc_layout,
             desc_pool,
             set,
@@ -477,8 +536,9 @@ impl Gpu {
             &pipe.keys,
             &pipe.cache,
             &pipe.stats,
+            &pipe.movers,
         ];
-        let bind_at = [0, 5, 6, 7, 8, 9, 10, 11];
+        let bind_at = [0, 5, 6, 7, 8, 9, 10, 11, 15];
         let infos: Vec<BufInfo> = buffers
             .iter()
             .map(|buffer| BufInfo {
@@ -646,6 +706,7 @@ impl Gpu {
                 (state.keys.memory, state.keys.size),
                 (state.cache.memory, state.cache.size),
                 (state.stats.memory, state.stats.size),
+                (state.movers.memory, state.movers.size),
             ]
         };
         for (memory, size) in zeros {
@@ -751,6 +812,7 @@ impl Gpu {
         lamp_x: u32,
         row: u32,
         rows: u32,
+        lamp_w: u32,
     ) -> Result<(), String> {
         let (pipe, layout, set, cmd, fence) = {
             let Some(state) = self.texel_detail.as_ref() else {
@@ -807,7 +869,7 @@ impl Gpu {
             let pc = Pc {
                 dims: [1, 1, 1, 1],
                 params: [0, 1, 0, 10],
-                lamp: [lamp_x, row, rows, 0],
+                lamp: [lamp_x, row, rows, lamp_w],
             };
             (self.fns.cmd_push)(
                 cmd,

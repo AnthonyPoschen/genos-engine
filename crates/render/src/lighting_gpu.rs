@@ -94,6 +94,12 @@ const LIGHTING_FILL_WALK: u32 = 8;
 /// Shader `LIGHTING_SCENE_CHANGED_MARK`. Added to the change count's fraction
 /// when the host scene hash changed this frame.
 const LIGHTING_SCENE_CHANGED_MARK: f32 = 0.25;
+/// Host `prepare_fill` measured-change weight when `still == 0` (scene hash moved).
+const LIGHTING_MOVER_FILL_SCENE_CHANGE: f32 = LIGHTING_SCENE_CHANGED_MARK;
+/// Host `prepare_fill` metres-moved weight while any hitch record is live this sync.
+const LIGHTING_MOVER_FILL_MOVED_M: f32 = 0.05;
+/// Host `prepare_fill` eye-distance stand-in until per-mover camera range is wired.
+const LIGHTING_MOVER_FILL_DISTANCE_M: f32 = 3.0;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
 fn lighting_compose_at() -> u64 {
@@ -397,11 +403,19 @@ pub(crate) struct Lighting {
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
     movers: std::collections::BTreeMap<usize, u32>,
+    /// Object-attached mover texel pool + O(1) table (replaces the change-block hitch list).
+    mover_cache: crate::mover_cache::MoverCache,
+    /// GPU SSBO: header + table + texel pool (binding 15). Host-visible upload.
+    mover_buf: Buffer,
+    /// Equivalent mover-fill rays deposited last sync (16 × deposits).
+    mover_fill_rays: u32,
     /// Traced mesh instances (mesh_field order): last poses, the ones that moved in
     /// the last LIGHTING_MOVER_KEEP frames, and every instance's bounding sphere now.
     mesh_poses: Vec<[f32; 16]>,
     mesh_movers: std::collections::BTreeMap<usize, u32>,
     mesh_spheres: Vec<[f32; 4]>,
+    /// Parallel to live field order: `FieldInstance::object` for draw→mesh oid.
+    mesh_field_object: Vec<Option<usize>>,
     /// What each round in flight was built from (frame slots, then the async one):
     /// the light hash and whether it took young patches only.
     stats_light: [u64; 2],
@@ -792,9 +806,13 @@ impl Default for Lighting {
             round_entries: 0,
             cache_rays: 0,
             movers: std::collections::BTreeMap::new(),
+            mover_cache: crate::mover_cache::MoverCache::high(),
+            mover_buf: Buffer::empty(),
+            mover_fill_rays: 0,
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
+            mesh_field_object: Vec::new(),
             stats_light: [0; 2],
             stats_young: [false; 2],
             dump: Vec::new(),
@@ -965,6 +983,9 @@ impl Gpu {
     pub(crate) fn note_field_movers(&mut self, live: &[&crate::mesh_field::FieldInstance]) {
         let g = &mut self.lighting;
         lighting_mesh_movers(live, &mut g.mesh_poses, &mut g.mesh_movers, &mut g.mesh_spheres);
+        g.mesh_field_object.clear();
+        g.mesh_field_object
+            .extend(live.iter().map(|f| f.object));
     }
 
     /// Note how long a pipeline took to build (tests check it stays short).
@@ -990,7 +1011,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -1079,7 +1100,8 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            let size = Size { kind: 7, count: 48 };
+            // 3 sets × 16 storage bindings (added mover table/pool at 15).
+            let size = Size { kind: 7, count: 51 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -1525,7 +1547,8 @@ impl Gpu {
             // One word: the dirty-compose list length, copied after the passes.
             self.lighting.compose_host = self.make_buffer(256, 0x2, Memory::Readback)?;
         }
-        self.lighting.gbuf = self.make_buffer(16 + pixels * 20, 0x20 | 0x1 | 0x2, Memory::Device)?;
+        // GBUF_STRIDE = 6 uints/pixel (object id in word 5).
+        self.lighting.gbuf = self.make_buffer(16 + pixels * 24, 0x20 | 0x1 | 0x2, Memory::Device)?;
         self.lighting.work =
             self.make_buffer_queues(work_vec4.max(1) * 16, 0x20 | 0x1 | 0x2, Memory::Device, &share)?;
         // Picture, emitted light, and (when direct refresh is slower than every
@@ -1623,6 +1646,27 @@ impl Gpu {
         self.lighting.restir_have_prev = false;
         self.lighting.restir_slot = 0;
         self.lighting.restir_frame = false;
+        // Mover table + texel pool SSBO (binding 15). Host-visible so dirty
+        // ranges upload each frame. Stand-in when the pool is off.
+        {
+            let mut old = std::mem::replace(&mut self.lighting.mover_buf, Buffer::empty());
+            self.destroy_buffer(&mut old);
+            let pool = settings.surface_cache.mover_texels;
+            let bytes = if pool == 0 {
+                256
+            } else {
+                crate::mover_cache::mover_gpu_bytes(pool)
+            };
+            self.lighting.mover_buf = self.make_buffer(bytes, 0x20 | 0x2, Memory::Upload)?;
+            if pool > 0 {
+                self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
+            }
+            let packed = self.lighting.mover_cache.pack_gpu();
+            let cap = usize::try_from(self.lighting.mover_buf.size).unwrap_or(0);
+            let n = packed.len().min(cap);
+            self.write_buffer(&self.lighting.mover_buf, &packed[..n])?;
+            self.lighting.mover_cache.clear_dirty();
+        }
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
@@ -1681,6 +1725,7 @@ impl Gpu {
                 (8, self.lighting.out.buffer),
                 (13, self.lighting.scene_lin.buffer),
                 (14, self.lighting.hdr_params.buffer),
+                (15, self.bound_or_standin(&self.lighting.mover_buf)),
                 (16, self.bound_or_standin(&self.lighting.bloom)),
                 (17, self.bound_or_standin(&self.lighting.hdr_encode)),
                 (18, if meter.is_null() { self.lighting.hdr_params.buffer } else { meter }),
@@ -4432,35 +4477,46 @@ impl Gpu {
             }
         }
         sent += used;
-        // Movers (surface cache): bounds of every occluder that moved in the
-        // last LIGHTING_MOVER_KEEP frames, after the changes; head w carries their count above mode and cap.
-        // Compared whenever there is a last scene (not only when the trace key held:
-        // a spinning box can change the key every frame and must stay a mover).
+        // Movers (surface cache): KEEP timers still run; head w carries the
+        // live count for unhold. The 16×4-vec4 hitch list in the change block
+        // is gone — records live in MoverCache (O(1) table + texel pool).
         if world == 3 && !self.lighting.kept_bytes.is_empty() {
-            let movers = lighting_movers(&self.lighting.kept_bytes, &self.frame_bytes, &mut self.lighting.movers);
-            let mut movers = movers;
-            // Traced mesh instances that moved: id 10001 + instance index (the
-            // shader reads their frame from the mesh field).
+            let packed = lighting_movers(
+                &self.lighting.kept_bytes,
+                &self.frame_bytes,
+                &mut self.lighting.movers,
+            );
+            let mut records = packed;
             for &i in self.lighting.mesh_movers.keys() {
                 if let Some(sph) = self.lighting.mesh_spheres.get(i) {
-                    movers.push([*sph, [0.0, 0.0, 0.0, (10001 + i) as f32], [0.0; 4], [0.0; 4]]);
+                    // Centre is the world bounds centre (sphere xyz), not origin.
+                    // Centre=[0,0,0] made every draw near the origin match the
+                    // first mesh mover and broke the local texel frame.
+                    let mesh_id = 10_001u32.saturating_add(u32::try_from(i).unwrap_or(0));
+                    records.push([
+                        *sph,
+                        [sph[0], sph[1], sph[2], f32::from_bits(mesh_id)],
+                        [0.0; 4],
+                        [1.0, 0.0, 0.0, 0.0],
+                    ]);
                 }
             }
-            let n = movers.len().min((LIGHTING_CHANGES - used) / 4);
-            for (j, m) in movers.iter().take(n).enumerate() {
-                for (k, b) in m.iter().enumerate() {
-                    let at = 4 * (LIGHTING_CHANGE_HEAD + used + 4 * j + k);
-                    block[at..at + 4].copy_from_slice(b);
-                }
-            }
+            self.sync_mover_cache(&records);
+            let n = records.len();
+            // Unhold signal only — do not pack hitch records into the change block.
             block[3] += (n * 200000) as f32;
-            sent += 4 * n;
             if lighting_debug_on() {
-                eprintln!("lighting world {world} cap {} flags {flags} local {} movers {n} of {} occs {} meshes {} of {} {:?}", head.mode_cap % 1000, u8::from(self.lighting.settings.surface_cache.attach_movers), self.lighting.movers.len(), lighting_occs(&self.frame_bytes).len(), self.lighting.mesh_movers.len(), self.lighting.mesh_poses.len(), movers.iter().map(|m| (m[0], m[2], m[3])).collect::<Vec<_>>());
+                eprintln!(
+                    "lighting world {world} cap {} flags {flags} local {} movers {n} pool {}/{} occs {} meshes {} of {}",
+                    head.mode_cap % 1000,
+                    u8::from(self.lighting.settings.surface_cache.attach_movers),
+                    self.lighting.mover_cache.used_texels(),
+                    self.lighting.mover_cache.pool_cap(),
+                    lighting_occs(&self.frame_bytes).len(),
+                    self.lighting.mesh_movers.len(),
+                    self.lighting.mesh_poses.len()
+                );
             }
-            // Object-local cache entries for movers (GIBS §1.5). The public
-            // knob is surface_cache.attach_movers. Static geometry stays on
-            // the world lattice.
             if self.lighting.settings.surface_cache.attach_movers {
                 block[3] += 100000.0;
             }
@@ -5671,6 +5727,7 @@ impl Gpu {
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         let mut compose_host = std::mem::replace(&mut self.lighting.compose_host, Buffer::empty());
+        let mut mover_buf = std::mem::replace(&mut self.lighting.mover_buf, Buffer::empty());
         for k in 0..2 {
             let mut stats_dev = std::mem::replace(&mut self.lighting.stats_dev[k], Buffer::empty());
             self.destroy_buffer(&mut stats_dev);
@@ -5696,6 +5753,9 @@ impl Gpu {
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
         self.destroy_buffer(&mut compose_host);
+        // Binding 15 mover SSBO: skipping this left VkBuffer + memory alive and
+        // tripped VUID-vkDestroyDevice-device-05137 under gpu-integrity.
+        self.destroy_buffer(&mut mover_buf);
         unsafe {
             for pipe in self
                 .lighting
@@ -5955,6 +6015,126 @@ fn lighting_occ_bounds(rec: &[u8]) -> [f32; 4] {
     [f(0), f(1), f(2), (hx * hx + hy * hy + hz * hz).sqrt() + 0.05]
 }
 
+
+impl Gpu {
+    /// Stable draw→mover id at submission: occluder KEEP index + 1, or mesh
+    /// field KEEP index + 10001. Never matches by translation (that collided
+    /// static draws near a mover centre and origin-centred mesh movers).
+    pub(crate) fn mover_object_id_for_draw(
+        &self,
+        occluder_index: Option<u32>,
+        world_object: Option<usize>,
+    ) -> u32 {
+        if let Some(occ) = occluder_index {
+            let key = usize::try_from(occ).unwrap_or(usize::MAX);
+            if self.lighting.movers.contains_key(&key) {
+                return occ.saturating_add(1);
+            }
+        }
+        if let Some(obj) = world_object {
+            for &field_i in self.lighting.mesh_movers.keys() {
+                if self
+                    .lighting
+                    .mesh_field_object
+                    .get(field_i)
+                    .copied()
+                    .flatten()
+                    == Some(obj)
+                {
+                    return 10_001u32.saturating_add(u32::try_from(field_i).unwrap_or(0));
+                }
+            }
+        }
+        0
+    }
+
+    /// Rebuilds the host mover table from this frame's KEEP hitch records.
+    /// Drops movers that left the list so their texels are freed (no orphans).
+    fn sync_mover_cache(&mut self, records: &[[[f32; 4]; 4]]) {
+        use crate::mover_cache::{MoverRecord, MoverTier, MOVER_ID_NONE};
+        let want: std::collections::BTreeSet<u32> = records
+            .iter()
+            .filter_map(|m| {
+                let id = m[1][3].to_bits();
+                (id != MOVER_ID_NONE).then_some(id)
+            })
+            .collect();
+        let live = self.lighting.mover_cache.table_object_ids();
+        for id in live {
+            if !want.contains(&id) {
+                self.lighting.mover_cache.remove(id);
+            }
+        }
+        let pool = self.lighting.settings.surface_cache.mover_texels;
+        if pool > 0 && self.lighting.mover_cache.pool_cap() != pool {
+            self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
+        }
+        for m in records {
+            let id = m[1][3].to_bits();
+            if id == MOVER_ID_NONE {
+                continue;
+            }
+            let rec = MoverRecord {
+                object_id: id,
+                sphere: m[0],
+                centre: [m[1][0], m[1][1], m[1][2]],
+                half_extents: [m[2][0], m[2][1], m[2][2]],
+                yaw_cos: m[3][0],
+                yaw_sin: m[3][1],
+                texel_base: u32::MAX,
+                texel_count: 0,
+                tier: MoverTier::Near,
+            };
+            let _ = self.lighting.mover_cache.upsert(rec);
+        }
+        self.lighting.mover_cache.rebalance_all();
+        // Stage H: rank mover texels into the shared fill list. The cache pass
+        // deposits world-direction lighting from the lattice (Far never listed).
+        // Knobs (named): measured scene change, metres moved, lamp-near, eye distance.
+        // `still > 0` means no host scene change — pass zeros so KEEP hitch
+        // leftovers do not spend the world fill budget (fill_knockout late).
+        let budget = self.lighting.settings.surface_cache.ray_budget;
+        let budget = if budget == 0 { 4096 } else { budget };
+        let (measured_change, distance_moved_m) = if self.lighting.still == 0 {
+            (LIGHTING_MOVER_FILL_SCENE_CHANGE, LIGHTING_MOVER_FILL_MOVED_M)
+        } else {
+            (0.0, 0.0)
+        };
+        let lamp_change_near = false;
+        let distance_m = LIGHTING_MOVER_FILL_DISTANCE_M;
+        let stats = self.lighting.mover_cache.prepare_fill(
+            budget,
+            measured_change,
+            distance_moved_m,
+            lamp_change_near,
+            distance_m,
+        );
+        self.lighting.mover_fill_rays = stats.rays;
+        self.upload_mover_cache();
+    }
+
+    /// Uploads dirty mover table/pool ranges to binding 15 (full rewrite when needed).
+    fn upload_mover_cache(&mut self) {
+        if self.lighting.mover_buf.buffer.is_null() {
+            return;
+        }
+        let chunks = self.lighting.mover_cache.pack_dirty();
+        if chunks.is_empty() {
+            return;
+        }
+        for (offset, bytes) in chunks {
+            if bytes.is_empty() {
+                continue;
+            }
+            if offset.saturating_add(bytes.len() as u64) > self.lighting.mover_buf.size {
+                continue;
+            }
+            let _ = self.write_buffer_at(&self.lighting.mover_buf, offset, &bytes);
+        }
+        self.lighting.mover_cache.clear_dirty();
+    }
+}
+
 /// Movers: occluders (by index) whose record differs between two scene blocks of
 /// the same length join `set` for good (a list of another length starts it again);
 /// returns their bounds now.
@@ -5982,9 +6162,10 @@ pub(crate) fn lighting_movers(old: &[u8], new: &[u8], set: &mut std::collections
             // radius r. Cosine and sine of the yaw sit in the bounce vec4 (z, w).
             let (hx, hz) = if f(3) < 0.5 { (f(4).abs(), f(6).abs()) } else { (rad, rad) };
             let (c, s) = if f(3) < 0.5 { (f(14), f(15)) } else { (1.0, 0.0) };
+            let oid = u32::try_from(i.saturating_add(1)).unwrap_or(u32::MAX);
             [
                 lighting_occ_bounds(r),
-                [f(0), f(1), f(2), (i + 1) as f32],
+                [f(0), f(1), f(2), f32::from_bits(oid)],
                 [hx, f(5).abs() * 0.5, hz, 0.0],
                 [c, s, 0.0, 0.0],
             ]
@@ -6756,11 +6937,12 @@ mod sun_step {
         // record, the shown-mean age tally, the bounce store rule, and the
         // retry list sit in this pass. Compose compiles the slot count as a
         // literal, so the compiler folds it. Specialization constant 1 left
-        // every slot mask dynamic and that module was 252_688 bytes, 5_540
-        // above the folded lighting-v3 module (247_148). A mover tile sets
-        // the field bit compose already tests. The tile bitset stays out of
-        // this shader. Compose is 247_868 bytes. 248_000 still rejects a
-        // second occluder walk.
+        // every slot mask dynamic and that module was 252_688 bytes.
+        // Hitch mesh/on bodies stay out of GENOS_COMPOSE_NO_WALK (pool path
+        // + lattice warm-up). A mover tile sets the field bit compose already
+        // tests; the tile bitset stays out of this shader. Compose is
+        // 230_656 bytes after merging #285. 248_000 still rejects a second
+        // occluder walk.
         assert!(
             LIGHTING_COMPOSE_SPV.len() < 248_000,
             "compose SPIR-V is {} bytes",
