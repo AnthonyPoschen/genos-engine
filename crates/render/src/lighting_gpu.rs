@@ -4947,12 +4947,21 @@ impl Gpu {
                 let floor_rate = if fill.floor_rays == 0 {
                     0
                 } else {
-                    genos_scene::fill_legacy_divisor(self.lighting.settings.preset)
+                    genos_scene::FILL_FLOOR_PERIOD
                 };
-                // The ranked burst is the preset burst. The rays a 1-in-10
-                // floor would have dropped are the uniform floor above, one
-                // per cell at this preset's old rate, not a closeness ranking.
-                let burst = fill.burst;
+                // The ranked burst is the preset burst plus the rays the
+                // 1-in-10 floor no longer spends. The round stays about one
+                // ray per live cell plus the preset burst. `live` is the
+                // previous frame's count.
+                let burst = if fill.floor_rays == 0 {
+                    fill.burst
+                } else {
+                    genos_scene::fill_scaled_burst(
+                        self.lighting.live,
+                        self.lighting.settings.preset,
+                        fill.burst,
+                    )
+                };
                 let fill_words = [
                     fill.budget,
                     fill.tile.max(1),

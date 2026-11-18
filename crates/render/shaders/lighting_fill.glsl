@@ -1,11 +1,10 @@
 // Stages F2, F3, and F4a. The world cache is the only store. A cache round traces
-// one floor ray for each live cell at the preset's uniform rate (High every
-// frame, Medium every second, Low every fourth), plus fill_burst rays on the
-// highest value cells. That burst is split equally across the four screen
+// one floor ray for each live cell every 10 frames, on every preset, plus the
+// ranked burst. That burst is the preset burst plus the rays the old
+// per-preset floor no longer spends, split equally across the four screen
 // quarters, plus an off-screen share, so the near floor cannot take the back
-// wall's rays. A cell a mover is changing is due every frame. Those
-// mover rays come out of the burst only when the uniform rate is slower than
-// every frame.
+// wall's rays. A cell a mover is changing is due every frame. Those mover
+// rays past the 1-in-10 share come out of the burst.
 // Word 0 stays a positive enable; the plan writes the traced count. F4a writes a
 // low-confidence seed into other cells of the same screen tile. The seed is not
 // an own sample and it does not add a ray. Ring sharing is not this stage.
@@ -24,6 +23,17 @@
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
+// Below this many own sets the cell may still replace its mean. A cell
+// created after the opening frames still has to take its first samples.
+const float LIGHTING_FILL_MEAN_OPEN = 4.0;
+// The frame-40 fill is this many frames of the same replace. A skipped floor
+// ray keeps the value at 1, and a full replace after this washes the hall out.
+const uint LIGHTING_FILL_MEAN_FRAMES = 40u;
+// After that, one skipped floor ray may move the mean by at most this much.
+// A full replace runs the bounce away by frame 400. Leaving the blend at the
+// set count keeps the early dark samples, and the mid band stays short of
+// the every-frame floor.
+const float LIGHTING_FILL_MEAN_CATCH = 0.15;
 const float FILL_TINY = 1.0e-4;
 const float FILL_REAL_CAP = 1.0e20;
 const float FILL_TWO = 2.0;
@@ -122,18 +132,13 @@ float lighting_fill_f(uint i) {
 bool lighting_ray_fill_on() {
     return lighting_world_mode() == 3u && lighting_fill_u(0) > 0u;
 }
-// Word 32 is the uniform floor divisor: 1, 2, or 4. 0 leaves the floor off.
-// Any other non-zero word is the 1-in-10 minimum. Ranking the rays a 1-in-10
-// floor no longer spent put them on the near field and left the back of the
-// hall dark, so the retired floor is uniform again.
+// Word 32 is only an enable. 0 leaves the floor off. Any other value is one
+// ray every 10 frames, on every preset. The old 1, 2, and 4 divisors are not
+// a rate. The rays they used to spend are in the ranked burst.
 const uint LIGHTING_FILL_FLOOR_PERIOD = 10u;
 uint lighting_fill_rate() {
-    uint w = lighting_fill_u(32);
-    if (w == 0u) {
+    if (lighting_fill_u(32) == 0u) {
         return 0u;
-    }
-    if (w == 1u || w == 2u || w == 4u) {
-        return w;
     }
     return LIGHTING_FILL_FLOOR_PERIOD;
 }
@@ -360,7 +365,7 @@ float lighting_fill_check_u(uint slot) {
 }
 
 // Off-screen cells stay in the same ranking, below an on-screen cell of the
-// same value and distance. The uniform floor still reaches both. The burst
+// same value and distance. The 1-in-10 floor still reaches both. The burst
 // itself is split: four screen quarters share the on-screen part equally, and
 // the off-screen part is offscreen_floor of the burst. Closeness inside one
 // quarter was spending the whole burst on the near floor.
@@ -771,8 +776,8 @@ void lighting_fill_dispatch() {
     // Mover rays are already in the floor count. The part past the 1/10 share
     // comes out of the burst, so the round stays inside the device budget.
     uint mover_rays = ckeys.key[lighting_fill_header_at() + 6u];
-    // Every cell already has the uniform floor. Mover rays are extra only
-    // when that floor is slower than every frame.
+    // The floor is one ray in ten. Mover rays beyond that share come out of
+    // the burst, so the round stays inside the old device total.
     uint period = max(lighting_fill_rate(), 1u);
     uint mover_extra = period > 1u ? mover_rays - mover_rays / period : 0u;
     if (burst > mover_extra) {
@@ -998,12 +1003,26 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
             float ratio = sample_t / max(sample_t + sample_add, FILL_EPS);
             blend = 1.0 - ratio * ratio * ratio;
         }
-        // A high value (the cell wants rays) raises the new sample's weight.
-        // A lamp note, a 1 mm move, and the 1/8 and 1/32 floors do not.
+        // The value ranks the burst. A cell the 1-in-10 floor skips for nine
+        // frames disagrees with the next sample, so the value stays at 1.
+        // The opening frames, and a cell's first sets, may still take that
+        // sample: frame 40 is that fill. After that, a full replace makes the
+        // bounce read one sample and the hall is near-white by frame 400.
+        // A lamp note, a 1 mm move, and the 1/8 and 1/32 floors do not raise
+        // it further.
         float value = lighting_history_value(slot, old.rgb, e);
         // -1 is an invalid sample. It does not lower the value and does not blend.
         accept = value >= 0.0;
-        blend = accept ? clamp(max(blend, value), 0.0, 1.0) : 0.0;
+        // After the opening the value may raise the blend only up to the
+        // catch. It still ranks the burst either way.
+        bool opening = sample_t < LIGHTING_FILL_MEAN_OPEN || lighting_frame() <= LIGHTING_FILL_MEAN_FRAMES;
+        if (!accept) {
+            blend = 0.0;
+        } else if (opening) {
+            blend = clamp(max(blend, value), 0.0, 1.0);
+        } else {
+            blend = clamp(max(blend, min(value, LIGHTING_FILL_MEAN_CATCH)), 0.0, 1.0);
+        }
     }
     vec3 mean = old.rgb;
     if (!cell && (lighting_sc_flags() & 1048576u) != 0u && lighting_sc_msme() && rays0 >= float(warmup) && old.w > FILL_HALF) {
