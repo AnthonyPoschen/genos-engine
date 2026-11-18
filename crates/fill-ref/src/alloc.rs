@@ -126,6 +126,57 @@ pub fn disagreement_raise(sample: f32, mean: f32) -> f32 {
     ((sample - mean).abs() / denom).clamp(0.0, 1.0)
 }
 
+/// How much of the stored mean to keep. Confidence is one minus the cell's
+/// value: a cell that wants many new rays keeps little of its history.
+#[must_use]
+pub fn history_confidence(value: f32) -> f32 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    1.0 - value.clamp(0.0, 1.0)
+}
+
+/// Blend one new sample into the stored mean. `confidence` is the weight of
+/// the history. Zero replaces the mean. One leaves it.
+#[must_use]
+pub fn blend_with_confidence(mean: f32, confidence: f32, sample: f32) -> f32 {
+    let keep = if confidence.is_finite() {
+        confidence.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    keep * mean + (1.0 - keep) * sample
+}
+
+/// One agreement measure. A sample inside the stored noise lowers the value.
+/// A sample outside it raises the value by the relative step.
+#[must_use]
+pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32) -> f32 {
+    let value = if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    if trickle_disagrees(sample, mean, variance) {
+        (value + disagreement_raise(sample, mean)).min(1.0)
+    } else {
+        (value - 1.0 / 3.0).max(0.0)
+    }
+}
+
+/// One ray per live cell, then whatever of `budget` remains is the burst.
+/// The floor is not capped by the budget: a budget smaller than the floor
+/// returns the budget and a zero burst.
+#[must_use]
+pub fn split_floor_and_burst(live_cells: u32, budget: u32, rays_per_cell: u32) -> (u32, u32) {
+    let floor = live_cells.saturating_mul(rays_per_cell.max(1));
+    if floor >= budget {
+        (budget, 0)
+    } else {
+        (floor, budget - floor)
+    }
+}
+
 /// Spend `budget` once. Ranked rays go to the highest rank. Trickle rays are
 /// the reserved floor, one each, on cells the ranked spend did not take.
 #[must_use]
@@ -295,6 +346,58 @@ mod tests {
         assert!(grants
             .iter()
             .all(|g| g.rays <= tun.max_picks.max(1) || g.trickle));
+    }
+
+    #[test]
+    fn a_small_change_keeps_more_of_the_mean_than_a_reset() {
+        let old = 1.0_f32;
+        let truth = 1.02_f32;
+        let noisy = 1.6_f32;
+        let kept = blend_with_confidence(old, history_confidence(0.05), noisy);
+        let reset = blend_with_confidence(old, history_confidence(1.0), noisy);
+        let kept_err = (kept - truth).abs();
+        let reset_err = (reset - truth).abs();
+        assert!(
+            kept_err < reset_err,
+            "proportional history {kept_err} should beat a reset {reset_err}"
+        );
+        let mut mean = kept;
+        let mut reset_mean = reset;
+        for _ in 0..8 {
+            mean = blend_with_confidence(mean, history_confidence(0.05), truth);
+            reset_mean = blend_with_confidence(reset_mean, history_confidence(0.05), truth);
+        }
+        assert!((mean - truth).abs() <= (reset_mean - truth).abs() + 1.0e-4);
+    }
+
+    #[test]
+    fn a_false_alarm_stops_asking_for_rays() {
+        let mut tun = Tunables::high();
+        tun.offscreen_floor = 0.0;
+        tun.max_picks = 4;
+        let mut value = 1.0_f32;
+        let mean = 1.0_f32;
+        let variance = 1.0e-4_f32;
+        let mut last_ranked = 0u32;
+        for frame in 0..4 {
+            value = apply_agreement(value, mean, mean, variance);
+            let mut cell = bid(1, 32, 2.0);
+            cell.lambda = value;
+            let grant = allocate(std::slice::from_ref(&cell), 8, &tun, frame)[0];
+            last_ranked = if grant.trickle { 0 } else { grant.rays };
+        }
+        assert_eq!(value, 0.0, "three agreeing frames clear a false alarm");
+        assert_eq!(last_ranked, 0, "the ranked spend stops once confidence is back");
+    }
+
+    #[test]
+    fn the_floor_is_one_ray_per_live_cell_and_the_burst_is_the_rest() {
+        let (floor, burst) = split_floor_and_burst(1000, 100_000, 1);
+        assert_eq!(floor, 1000);
+        assert_eq!(burst, 99_000);
+        let (all, none) = split_floor_and_burst(100_000, 80_000, 1);
+        assert_eq!(all, 80_000);
+        assert_eq!(none, 0);
     }
 
     #[test]

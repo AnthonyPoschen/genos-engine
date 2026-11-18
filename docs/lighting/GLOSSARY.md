@@ -462,6 +462,9 @@ Role: SCHED · Literature: Lumen off-screen update · More detail: [../systems/l
 **Trickle floor**: a reserved share of `fill_budget` drawn one ray at a time by every cell in range, including a cell whose value has reached 0. Proposed in the one-ray note. The device does not do this. On the device, `fill_offscreen_floor` is the off-screen floor.
 Role: SCHED · Literature: a residual sample inside a fixed budget · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
+**History confidence**: one minus the cell's value. The stored mean is kept by that fraction when a new sample arrives. A value of 1 replaces the mean. The device does not do this yet.
+Role: TEMPORAL · Literature: A-SVGF variance-clipped blend · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
+
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
 Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8
 
