@@ -56,7 +56,7 @@ void main() {
     } else if (lighting_ray_fill_on() && lighting_dense()) {
         // The cache-ray dispatch only. The picture dispatch is not dense, and
         // taking this branch there would shade cache rays instead of pixels.
-        if (idx >= lighting_fill_u(0)) {
+        if (idx >= lighting_fill_traced()) {
             return;
         }
         idx = pixels + kept + idx;

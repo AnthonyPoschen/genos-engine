@@ -565,11 +565,15 @@ pub struct FillSettings {
     /// is `warmup_rays`. Other seeds keep the 16-set handover. The ray cap
     /// does not move.
     pub share_handover: u32,
-    /// Rays each live world cell takes every frame, before the burst.
-    /// High is 1. `0` leaves that base floor off.
+    /// `0` leaves the base floor off. Any other value turns it on. The device
+    /// gives one ray to each selected cell; it does not spend this as a count.
     pub floor_rays: u32,
-    /// Rays spent highest-value first after the floor. `0` means whatever of
-    /// `budget` the floor did not take.
+    /// How often a live cell gets its floor ray. `1` every frame, `2` every
+    /// second frame, `4` every fourth. The cell is due when its slot index
+    /// mod this value equals the frame mod this value.
+    pub floor_rate: u32,
+    /// Rays spent highest-value first after the floor. `0` spends none.
+    /// The traced count is the floor plus this, not `budget`.
     pub burst: u32,
 }
 
@@ -609,6 +613,7 @@ impl FillSettings {
             share_receivers: 3,
             share_handover: 16,
             floor_rays: 1,
+            floor_rate: 1,
             burst: 0,
         }
     }
@@ -979,6 +984,7 @@ impl LightingSettings {
                 s.ambient.intensity = 0.35;
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
                 s.surface_cache.fill.budget = 25_000;
+                s.surface_cache.fill.floor_rate = 4;
                 s.surface_cache.fill.tile = 32;
             }
             LightingPreset::Medium => {
@@ -998,6 +1004,7 @@ impl LightingSettings {
                     LAMP_PICK_SPATIAL_RADIUS,
                 );
                 s.surface_cache.fill.budget = 50_000;
+                s.surface_cache.fill.floor_rate = 2;
                 s.surface_cache.fill.tile = 16;
             }
         }
@@ -1196,6 +1203,11 @@ impl LightingSettings {
         };
         fill.share_receivers = fill.share_receivers.min(8);
         fill.share_handover = fill.share_handover.max(1);
+        fill.floor_rate = if fill.floor_rate == 2 || fill.floor_rate == 4 {
+            fill.floor_rate
+        } else {
+            1
+        };
         if let Some(mode) = self.gi.world_mode {
             // Mode 2 pushed screen-probe irradiance into world patches.
             // That pass is removed, so the stored mode becomes the surface cache.
@@ -1567,6 +1579,7 @@ impl LightingSettings {
         let _ = writeln!(out, "surface_cache.fill_share_receivers={}", fill.share_receivers);
         let _ = writeln!(out, "surface_cache.fill_share_handover={}", fill.share_handover);
         let _ = writeln!(out, "surface_cache.fill_floor_rays={}", fill.floor_rays);
+        let _ = writeln!(out, "surface_cache.fill_floor_rate={}", fill.floor_rate);
         let _ = writeln!(out, "surface_cache.fill_burst={}", fill.burst);
         let _ = writeln!(
             out,
@@ -1863,6 +1876,9 @@ impl LightingSettings {
             }
             "surface_cache.fill_floor_rays" => {
                 self.surface_cache.fill.floor_rays = num_u32(value)?;
+            }
+            "surface_cache.fill_floor_rate" => {
+                self.surface_cache.fill.floor_rate = num_u32(value)?;
             }
             "surface_cache.fill_burst" => self.surface_cache.fill.burst = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
@@ -2233,6 +2249,10 @@ impl LightingSettings {
             (
                 "GENOS_LIGHTING_FILL_FLOOR_RAYS",
                 "surface_cache.fill_floor_rays",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_FLOOR_RATE",
+                "surface_cache.fill_floor_rate",
             ),
             ("GENOS_LIGHTING_FILL_BURST", "surface_cache.fill_burst"),
         ];

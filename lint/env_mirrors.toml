@@ -538,6 +538,11 @@ kind = "mirror"
 detail = "surface_cache.fill_far_share (stress knob lighting_fill_far_share); MCP set_lighting_settings"
 
 [[var]]
+name = "GENOS_LIGHTING_FILL_FLOOR_RATE"
+kind = "mirror"
+detail = "surface_cache.fill_floor_rate (stress knob lighting_fill_floor_rate); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_FILL_FLOOR_RAYS"
 kind = "mirror"
 detail = "surface_cache.fill_floor_rays (stress knob lighting_fill_floor_rays); MCP set_lighting_settings"

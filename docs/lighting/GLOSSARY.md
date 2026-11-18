@@ -447,8 +447,8 @@ Role: SCHED · Literature: Lumen World Cache fill; SHaRC update pass · More det
 **Pick**: one ray from one world-cache entry, chosen by need, or one clipmap ray.
 Role: SAMPLE · Literature: ReSTIR candidate; Lumen's per-tile pixel · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.2
 
-**Fill budget**: `fill_budget`, the ray count one cache round traces. It is spent in full. High starts at 100,000. `0` traces no cache rays. `surface_cache.ray_budget` stays the ceiling for the other modes.
-Role: SCHED · Literature: Lumen's fixed update budget · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §5.1
+**Fill budget**: `fill_budget`. `0` traces no cache rays. A positive value turns the world-cache pass on. The device does not spend this number: the traced count is the floor rate plus `fill_burst`. High still stores 100,000 so older readers see the same key. `surface_cache.ray_budget` stays the ceiling for the other modes.
+Role: SCHED · Literature: Lumen's fixed update budget · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
 **Clipmap**: player-centred cells. 25 cm inside `fill_lod_near` (8 m), then double until `fill_cell_max` (4 m), then that size out to `fill_far`. Screen texels stay 12.5 cm.
 Role: STORE · Literature: clipmap LOD · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md)
@@ -464,10 +464,14 @@ Role: SCHED · Literature: a residual sample inside a fixed budget · More detai
 
 **History confidence**: one minus the cell's value. The stored mean is kept by that fraction when a new sample arrives. A value of 1 replaces the mean. One agreement step moves the value: a sample inside the stored noise lowers it by a third, and a sample outside the noise raises it by the relative step.
 
-**Floor rays**: `fill_floor_rays`. Rays each live world cell takes every frame before the burst. High is 1. `0` turns that base floor off. The device trace stays the tile contest, which is what holds the frozen fill gate. The reference allocator in `crates/fill-ref` spends this floor.
+**Floor rays**: `fill_floor_rays`. `0` turns the base floor off. Any other value turns it on. The device gives one ray to each cell the floor rate selects. It does not spend this as a ray count.
+Role: SCHED · Literature: a per-cell sample floor · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
-**Burst budget**: `fill_burst`. Rays spent highest-value first after the floor. `0` means whatever of `fill_budget` the floor did not take.
-Role: TEMPORAL · Literature: A-SVGF variance-clipped blend · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
+**Floor rate**: `fill_floor_rate`. `1` gives the floor ray to every live cell every frame, `2` to half of them, `4` to a quarter. A cell is due when its slot index mod N equals the frame mod N, so each cell is covered within N frames. High is 1. Medium is 2. Low is 4.
+Role: SCHED · Literature: a round-robin sample · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
+
+**Burst budget**: `fill_burst`. Extra rays spent highest-value first after the floor. `0` spends none. The device ray count is the floor plus this.
+Role: SCHED · Literature: a priority budget on top of a floor · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
 Role: STORE · Literature: SHaRC accumulation · More detail: [../systems/lighting/screen-tile-fill-design.md](../systems/lighting/screen-tile-fill-design.md) §8

@@ -172,21 +172,23 @@ pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32) -> f32
     }
 }
 
-/// One ray per live cell, then whatever of `budget` remains is the burst.
-/// The floor is not capped by the budget: a budget smaller than the floor
-/// returns the budget and a zero burst.
+/// `ceil(live / N)` floor rays, plus the burst setting. N is 1, 2, or 4.
 #[must_use]
-pub fn split_floor_and_burst(live_cells: u32, budget: u32, rays_per_cell: u32) -> (u32, u32) {
-    let floor = live_cells.saturating_mul(rays_per_cell.max(1));
-    if floor >= budget {
-        (budget, 0)
+pub fn split_floor_and_burst(live_cells: u32, rate: u32, burst: u32) -> (u32, u32) {
+    let n = if rate == 2 || rate == 4 { rate } else { 1 };
+    (live_cells.div_ceil(n), burst)
+}
+
+fn floor_rate_n(rate: u32) -> u32 {
+    if rate == 2 || rate == 4 {
+        rate
     } else {
-        (floor, budget - floor)
+        1
     }
 }
 
-/// Spend `budget` once. Ranked rays go to the highest rank. Trickle rays are
-/// the reserved floor, one each, on cells the ranked spend did not take.
+/// Floor rays follow the slot rotation. Burst rays go to the highest rank.
+/// `budget` is the cap only when the floor is off.
 #[must_use]
 pub fn allocate(cells: &[CellBid], budget: u32, tun: &Tunables, frame: u32) -> Vec<Grant> {
     let mut grants = cells
@@ -197,34 +199,32 @@ pub fn allocate(cells: &[CellBid], budget: u32, tun: &Tunables, frame: u32) -> V
             trickle: false,
         })
         .collect::<Vec<_>>();
-    if budget == 0 || cells.is_empty() {
+    if cells.is_empty() {
         return grants;
     }
     if tun.floor_rays == 0 {
+        if budget == 0 {
+            return grants;
+        }
         return allocate_fraction(cells, budget, tun, frame, grants);
     }
-    let live = u32::try_from(cells.len()).unwrap_or(u32::MAX);
-    let (floor_budget, rest) = split_floor_and_burst(live, budget, tun.floor_rays);
-    let burst_budget = if tun.burst == 0 { rest } else { rest.min(tun.burst) };
+    let rate = floor_rate_n(tun.floor_rate);
+    let phase = frame % rate;
+    for (index, grant) in grants.iter_mut().enumerate() {
+        let idx = u32::try_from(index).unwrap_or(0);
+        if idx % rate == phase {
+            grant.rays = 1;
+            grant.trickle = cell_value(&cells[index], tun) <= 0.0;
+        }
+    }
     let mut order: Vec<usize> = (0..cells.len()).collect();
     order.sort_by(|&a, &b| {
         cell_rank(&cells[b], tun)
             .total_cmp(&cell_rank(&cells[a], tun))
             .then_with(|| cells[a].id.cmp(&cells[b].id))
     });
-    let per = tun.floor_rays.max(1);
-    let mut floor_left = floor_budget;
-    for &index in &order {
-        if floor_left == 0 {
-            break;
-        }
-        let give = per.min(floor_left);
-        grants[index].rays = give;
-        grants[index].trickle = cell_value(&cells[index], tun) <= 0.0;
-        floor_left -= give;
-    }
     let max_per = tun.max_picks.max(1);
-    let mut burst_left = burst_budget;
+    let mut burst_left = tun.burst;
     for &index in &order {
         if burst_left == 0 {
             break;
@@ -352,8 +352,9 @@ mod tests {
     }
 
     #[test]
-    fn a_new_cell_starts_at_one_and_takes_the_budget() {
-        let tun = Tunables::high();
+    fn a_new_cell_starts_at_one_and_takes_the_burst() {
+        let mut tun = Tunables::high();
+        tun.burst = 4;
         let fresh = bid(1, 0, 2.0);
         let done = bid(2, 64, 2.0);
         assert_eq!(cell_value(&fresh, &tun), 1.0);
@@ -362,13 +363,13 @@ mod tests {
         let fresh_rays = grants.iter().find(|g| g.id == 1).map(|g| g.rays);
         let done_rays = grants.iter().find(|g| g.id == 2).map(|g| g.rays);
         assert!(fresh_rays > done_rays);
-        assert!(fresh_rays.is_some_and(|rays| rays > 0));
+        assert!(fresh_rays.is_some_and(|rays| rays > 1));
     }
 
     #[test]
-    fn the_highest_value_is_spent_first() {
+    fn the_highest_value_takes_the_burst() {
         let mut tun = Tunables::high();
-        tun.offscreen_floor = 0.0;
+        tun.burst = 1;
         tun.max_picks = 1;
         let mut low = bid(1, 32, 2.0);
         low.lambda = 0.05;
@@ -377,8 +378,9 @@ mod tests {
         let mut high = bid(3, 0, 2.0);
         high.lambda = 0.0;
         let grants = allocate(&[low, mid, high], 1, &tun, 0);
-        assert_eq!(grants.iter().find(|g| g.id == 3).map(|g| g.rays), Some(1));
-        assert_eq!(grants.iter().filter(|g| g.rays > 0).count(), 1);
+        let top = grants.iter().find(|g| g.id == 3).map(|g| g.rays);
+        assert_eq!(top, Some(2));
+        assert!(grants.iter().filter(|g| g.id != 3).all(|g| g.rays == 1));
     }
 
     #[test]
@@ -392,16 +394,21 @@ mod tests {
     }
 
     #[test]
-    fn the_grant_never_passes_the_budget() {
-        let tun = Tunables::high();
+    fn the_floor_rotates_and_the_burst_is_not_the_remainder() {
+        let mut tun = Tunables::high();
+        tun.floor_rate = 2;
+        tun.burst = 0;
         let cells: Vec<_> = (0..40u32)
             .map(|id| bid(id, id % 5, 1.0 + f32::from(u16::try_from(id).unwrap_or(0))))
             .collect();
-        let grants = allocate(&cells, tun.budget, &tun, 3);
-        let total: u32 = grants.iter().map(|g| g.rays).sum();
-        assert!(total <= tun.budget);
-        let cap = tun.max_picks.max(1).saturating_add(tun.floor_rays);
-        assert!(grants.iter().all(|g| g.rays <= cap || g.trickle));
+        let even = allocate(&cells, tun.budget, &tun, 0);
+        let odd = allocate(&cells, tun.budget, &tun, 1);
+        assert_eq!(even.iter().map(|g| g.rays).sum::<u32>(), 20);
+        assert_eq!(odd.iter().map(|g| g.rays).sum::<u32>(), 20);
+        assert!(even.iter().enumerate().all(|(i, g)| g.rays == u32::from(i % 2 == 0)));
+        assert!(odd.iter().enumerate().all(|(i, g)| g.rays == u32::from(i % 2 == 1)));
+        let (floor, burst) = split_floor_and_burst(40, 2, 0);
+        assert_eq!((floor, burst), (20, 0));
     }
 
     #[test]
@@ -477,13 +484,15 @@ mod tests {
     }
 
     #[test]
-    fn the_floor_is_one_ray_per_live_cell_and_the_burst_is_the_rest() {
-        let (floor, burst) = split_floor_and_burst(1000, 100_000, 1);
+    fn the_floor_is_ceil_live_over_rate_plus_the_burst_setting() {
+        let (floor, burst) = split_floor_and_burst(1000, 1, 0);
         assert_eq!(floor, 1000);
-        assert_eq!(burst, 99_000);
-        let (all, none) = split_floor_and_burst(100_000, 80_000, 1);
-        assert_eq!(all, 80_000);
-        assert_eq!(none, 0);
+        assert_eq!(burst, 0);
+        let (quarter, extra) = split_floor_and_burst(1000, 4, 32);
+        assert_eq!(quarter, 250);
+        assert_eq!(extra, 32);
+        let (odd, _) = split_floor_and_burst(5, 2, 0);
+        assert_eq!(odd, 3);
     }
 
     #[test]
@@ -523,6 +532,7 @@ mod tests {
         tun.floor_rays = floor_rays;
         tun.offscreen_floor = floor;
         tun.budget = 8;
+        tun.burst = 8;
         tun.max_picks = 4;
         tun.check_rate = 1;
         let mut mean = 1.0_f32;

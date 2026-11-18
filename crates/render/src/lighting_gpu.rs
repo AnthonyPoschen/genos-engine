@@ -157,7 +157,7 @@ fn lighting_reach_words() -> u64 {
 
 /// Fill param words sit after the per-pixel seed payload. One lock word per
 /// slot follows them (`lighting_fill.glsl`).
-const FILL_PARAM_WORDS: u64 = 32;
+const FILL_PARAM_WORDS: u64 = 34;
 const FILL_LOCK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
 /// Header, off-screen bins, histograms, water-fill plan, extra cursors, then
 /// two hit words and two link words per cache-ray slot. Matches
@@ -4634,6 +4634,11 @@ impl Gpu {
                 } else {
                     fill.frame_dt
                 };
+                let floor_rate = if fill.floor_rays == 0 {
+                    0
+                } else {
+                    fill.floor_rate
+                };
                 let fill_words = [
                     fill.budget,
                     fill.tile.max(1),
@@ -4667,6 +4672,8 @@ impl Gpu {
                     fill.share_conf.to_bits(),
                     fill.share_receivers,
                     fill.share_handover,
+                    floor_rate,
+                    fill.burst,
                 ];
                 let frame_pixels =
                     u64::from(self.extent_w.max(1)).saturating_mul(u64::from(self.extent_h.max(1)));

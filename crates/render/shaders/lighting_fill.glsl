@@ -1,18 +1,21 @@
-// Stages F2, F3, and F4a. The world cache is the only store. A cache round spends
-// fill_budget single rays. F3 water-fills them by priority and spends part of
-// the budget on one same-seed check ray per fill_check_rate block. F4a writes a
+// Stages F2, F3, and F4a. The world cache is the only store. A cache round traces
+// one floor ray for each live cell whose slot index mod N equals the frame mod N,
+// plus fill_burst rays on the highest value cells. N is 1, 2, or 4. Word 0 stays
+// a positive enable; the plan writes the traced count. F4a writes a
 // low-confidence seed into other cells of the same screen tile. The seed is not
 // an own sample and it does not add a ray. Ring sharing is not this stage.
 // The radii, the weight, the fold, and the share gates match crates/fill-ref.
 //
 // Param words, after the per-pixel seed payload:
-// 0 budget, 1 tile, 2 lod_near, 3 leash, 4 look_ahead, 5 cell_max, 6 far,
+// 0 enable (a positive fill_budget; not the ray count), 1 tile, 2 lod_near,
+// 3 leash, 4 look_ahead, 5 cell_max, 6 far,
 // 7 far_share, 8 offscreen_floor, 9 error_target, 10 prox_min, 11 change_weight,
 // 12 warmup rays, 13 ray cap, 14 frame_dt, 15 base cell, 16 check_rate,
 // 17 max_picks, 18 lambda_decay, 19 window_floor, 20 catchup_max, 21 check_sigma,
 // 22 share (0 off, 1 tile), 23 min hit, 24 own cap, 25 plane, 26 normal,
 // 27 weight cap, 28 cosine floor, 29 seed confidence, 30 receivers,
 // 31 share handover, in own rays. 0 means the warmup count (word 12).
+// 32 floor rate (1, 2, or 4; 0 leaves the floor off), 33 burst ray count.
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
@@ -50,7 +53,7 @@ const float FILL_Q10 = 1023.0;
 const float FILL_SHARE_COS0 = 0.05;
 const vec3 FILL_MSME = vec3(0.299, 0.587, 0.114);
 
-const uint LIGHTING_FILL_PARAMS = 32u;
+const uint LIGHTING_FILL_PARAMS = 34u;
 const uint LIGHTING_FILL_TILE_CAP = 262144u;
 
 uint lighting_fill_param_at() {
@@ -63,8 +66,8 @@ uint lighting_fill_lock_at() {
 // histograms, then the water-fill plan (six 64-word rows), then three extra
 // cursors (64 words each), then two hit words per cache ray and two link
 // words per ray. The host sizes the same tail.
-// Header: 0 on count, 1 ranked count, 2 check count, 3 check cursor,
-// 4 far count, 5 planned far budget, 6 planned near budget,
+// Header: 0 floor-ray count, 1 burst-ray count, 2 check count, 3 check cursor,
+// 4 candidate count, 5 traced-ray count, 6 planned near budget,
 // 7 occupied-cell count.
 const uint LIGHTING_FILL_OFF_CAP = 16384u;
 const uint LIGHTING_FILL_HIST_WORDS = 192u;
@@ -113,6 +116,18 @@ float lighting_fill_f(uint i) {
 }
 bool lighting_ray_fill_on() {
     return lighting_world_mode() == 3u && lighting_fill_u(0) > 0u;
+}
+// 1, 2, or 4. 0 leaves the floor off. Any other value is every frame.
+uint lighting_fill_rate() {
+    uint n = lighting_fill_u(32);
+    if (n == 0u || n == 2u || n == 4u) {
+        return n;
+    }
+    return 1u;
+}
+// The plan writes this. Word 0 is only the enable.
+uint lighting_fill_traced() {
+    return ckeys.key[lighting_fill_header_at() + 5u];
 }
 uint lighting_fill_check_cap() {
     uint budget = lighting_fill_u(0);
@@ -375,51 +390,24 @@ void lighting_fill_visit(uint slot) {
     if (size <= LIGHTING_WRC_CELL_SIZE && lighting_compact_hold_texel_rays(slot)) {
         return;
     }
-    uint px;
-    uint py;
     uint q = lighting_fill_q(slot, d);
-    if (!lighting_fill_pixel(p, px, py)) {
-        // One bin per hash, highest priority kept. The scheduler walks the
-        // bins, not the slot table. The round is in the hash so a collision
-        // does not pin the same cell.
-        // The lock starts empty. A stale chain head from last resolve is not a grant.
-        ckeys.key[lighting_fill_lock_at() + slot] = 0u;
-        uint cap = lighting_fill_off_cap();
-        uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
-        uint packed = lighting_fill_pack(slot, q);
-        // A band child does not take the cold-start rank, and it only
-        // contends for one bin in eight. An empty child in every bin
-        // outranks the cells the presented frame is still filling.
-        if (size < base) {
-            if ((bin & 7u) != 0u) {
-                return;
-            }
-            packed = ((q & 63u) << 21u) | (slot + 1u);
+    uint rate = lighting_fill_rate();
+    if (q > 0u) {
+        atomicAdd(ckeys.key[lighting_fill_hist_at() + q], 1u);
+        uint packed = ((q & 63u) << 21u) | (slot + 1u);
+        uint c = atomicAdd(ckeys.key[lighting_fill_header_at() + 4u], 1u);
+        if (c < LIGHTING_FILL_TILE_CAP) {
+            ckeys.key[lighting_fill_tile_at() + c] = packed;
         }
-        atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
-        uint rate = max(lighting_fill_u(16), 1u);
-        uint block = slot / rate;
-        uint local = slot - block * rate;
-        if (local == lighting_hash(block ^ lighting_hash(lighting_round())) % rate) {
-            lighting_fill_push_check(slot);
+    }
+    // Slot index, so the same cell is due again N frames later. A dense
+    // counter would follow thread order and skip cells.
+    if (rate != 0u && (slot % rate) == (lighting_round() % rate)) {
+        uint i = atomicAdd(ckeys.key[lighting_fill_header_at()], 1u);
+        if (i < lighting_fill_rays_max()) {
+            ckeys.key[lighting_fill_pick_at() + i] = slot;
         }
-        return;
     }
-    uint tile = max(lighting_fill_u(1), 1u);
-    uint tiles_x = (pc.dims.x + tile - 1u) / tile;
-    uint ti = px / tile + (py / tile) * tiles_x;
-    if (ti >= LIGHTING_FILL_TILE_CAP) {
-        return;
-    }
-    // The tile keeps one cell. A cell that loses that slot stays a ranked
-    // candidate. The winner's one grant is the on-screen emit; the lock stops
-    // the off-screen emit from granting it again.
-    ckeys.key[lighting_fill_lock_at() + slot] = 0u;
-    uint packed = lighting_fill_pack(slot, q);
-    atomicMax(ckeys.key[lighting_fill_tile_at() + ti], packed);
-    uint cap = lighting_fill_off_cap();
-    uint bin = lighting_hash(slot ^ lighting_hash(lighting_round())) % cap;
-    atomicMax(ckeys.key[lighting_fill_off_at() + bin], packed);
 }
 
 void lighting_fill_plan(uint hist[64], uint share, uint max_picks, inout uint base_m[64], inout uint extra_m[64], out uint take) {
@@ -599,60 +587,11 @@ bool lighting_fill_holds_tile(uint slot) {
     return w != 0u && (w & 2097151u) == slot + 1u;
 }
 
-// One thread per tile and per off-screen bin. Counts the winners. Does not
-// walk the slot table. pad3 is this dispatch's group count.
+// The visit already counted value buckets. This dispatch only publishes its
+// width. The fill harness reads that width; it is not a tile contest.
 void lighting_fill_hist(uint gid) {
-    if (!lighting_ray_fill_on()) {
-        return;
-    }
     if (gid == 0u) {
         gstats.pad3 = gl_NumWorkGroups.x;
-    }
-    uint tiles;
-    uint tiles_x;
-    lighting_fill_tile_grid(tiles, tiles_x);
-    if (gid < tiles) {
-        uint w = ckeys.key[lighting_fill_tile_at() + gid];
-        if (w != 0u) {
-            uint q = lighting_fill_packed_q(w);
-            if (q > 0u) {
-                atomicAdd(ckeys.key[lighting_fill_hist_at() + q], 1u);
-            }
-            uint rate = max(lighting_fill_u(16), 1u);
-            uint side = 1u;
-            while (side < 8u && side * side < rate) {
-                side++;
-            }
-            uint area = max(side * side, 1u);
-            uint tx = gid % max(tiles_x, 1u);
-            uint ty = gid / max(tiles_x, 1u);
-            uint bx = tx / side;
-            uint by = ty / side;
-            uint ox = tx - bx * side;
-            uint oy = ty - by * side;
-            uint phase = tiles == 0u ? 0u : lighting_round() % tiles;
-            uint h = lighting_hash(bx ^ lighting_hash(by ^ lighting_hash(lighting_round())));
-            if (oy * side + ox == (h + phase) % area) {
-                lighting_fill_push_check((w & 2097151u) - 1u);
-            }
-        }
-    }
-    uint cap = lighting_fill_off_cap();
-    if (gid < cap) {
-        uint w = ckeys.key[lighting_fill_off_at() + gid];
-        if (w != 0u) {
-            uint q = lighting_fill_packed_q(w);
-            uint slot = (w & 2097151u) - 1u;
-            if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u
-                && !lighting_fill_holds_tile(slot)) {
-                uint level = lighting_fill_level_of_size(cache.v[3u * slot + 1u].w);
-                uint at = lighting_fill_hist_at() + 64u + q;
-                if (level != lighting_fill_lod_max()) {
-                    at += 64u;
-                }
-                atomicAdd(ckeys.key[at], 1u);
-            }
-        }
     }
 }
 
@@ -665,214 +604,111 @@ void lighting_fill_store_picks(uint m, uint slot, uint dest) {
     }
 }
 
-// One thread per tile. The lock word holds this frame's pick count until
-// resolve clears it. prior >= max_picks drops a tile once the cell is full.
+// One thread per candidate the visit listed. prior >= max_picks is the burst
+// cap: the floor ray is already stored, and this pass adds only the burst.
 void lighting_fill_emit_on(uint gid) {
+    // prior >= max_picks is the per-cell burst cap. The floor ray is separate.
     if (!lighting_ray_fill_on()) {
         return;
     }
-    uint tiles;
-    uint tiles_x;
-    lighting_fill_tile_grid(tiles, tiles_x);
+    uint n = ckeys.key[lighting_fill_header_at() + 4u];
     uint m = 0u;
     uint slot = 0u;
-    if (gid < tiles) {
+    if (gid < n && gid < LIGHTING_FILL_TILE_CAP) {
         uint w = ckeys.key[lighting_fill_tile_at() + gid];
-        ckeys.key[lighting_fill_tile_at() + gid] = 0u;
-        if (w != 0u) {
-            uint q = lighting_fill_packed_q(w);
-            slot = (w & 2097151u) - 1u;
-            uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
-            if (q > 0u && slot < LIGHTING_CACHE_SLOTS) {
-                uint base = ckeys.key[lighting_fill_plan_at() + q];
-                uint extra = ckeys.key[lighting_fill_plan_at() + 64u + q];
-                uint want = base;
-                uint cap_picks = max(base, max_picks);
-                if (extra > 0u && want < cap_picks) {
-                    uint ticket = atomicAdd(ckeys.key[lighting_fill_extra_at() + q], 1u);
-                    if (ticket < extra) {
-                        want += 1u;
-                        cap_picks = max(cap_picks, want);
-                    }
-                }
-                // The lock is this frame's pick count. A failed swap retries.
-                // prior >= max_picks drops a tile once the fair cap is full
-                // and this bucket was not poured extra rays.
-                uint prior = atomicAdd(ckeys.key[lighting_fill_lock_at() + slot], 0u);
-                for (uint attempt = 0u; attempt < 8u; attempt++) {
-                    uint room = prior >= cap_picks ? 0u : cap_picks - prior;
-                    if (prior >= max_picks && base <= max_picks) {
-                        room = 0u;
-                    }
-                    uint take = min(want, room);
-                    uint got = atomicCompSwap(
-                        ckeys.key[lighting_fill_lock_at() + slot], prior, prior + take);
-                    if (got == prior) {
-                        m = take;
-                        break;
-                    }
-                    prior = got;
+        uint q = w >> 21u;
+        slot = (w & 2097151u) - 1u;
+        uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
+        if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u) {
+            uint base = ckeys.key[lighting_fill_plan_at() + q];
+            uint extra = ckeys.key[lighting_fill_plan_at() + 64u + q];
+            uint want = base;
+            if (want > max_picks) {
+                want = max_picks;
+            }
+            if (extra > 0u && want < max_picks) {
+                uint ticket = atomicAdd(ckeys.key[lighting_fill_extra_at() + q], 1u);
+                if (ticket < extra) {
+                    want += 1u;
                 }
             }
-            // A zero take leaves the lock at 0. The off-screen emit then
-            // reads a tile word this pass already cleared, so holds_tile is
-            // false and that winner takes a grant the histogram did not
-            // count. Every tile winner writes a non-zero lock.
-            if (slot < LIGHTING_CACHE_SLOTS) {
-                uint held = atomicAdd(ckeys.key[lighting_fill_lock_at() + slot], 0u);
-                if (held == 0u) {
-                    atomicCompSwap(ckeys.key[lighting_fill_lock_at() + slot], 0u, 1u);
-                }
-            }
-        }
-    }
-    uint place = lighting_fill_wg_place(m, lighting_fill_header_at());
-    if (m == 0u) {
-        return;
-    }
-    lighting_fill_store_picks(m, slot, ckeys.key[lighting_fill_header_at() + 2u] + place);
-}
-
-// One thread per off-screen bin. Far and near share the ranked range. The
-// far count is separate so discovery can keep the far reserve.
-void lighting_fill_emit_off(uint gid) {
-    if (!lighting_ray_fill_on()) {
-        return;
-    }
-    uint cap = lighting_fill_off_cap();
-    uint m = 0u;
-    uint m_far = 0u;
-    uint slot = 0u;
-    if (gid < cap) {
-        uint w = ckeys.key[lighting_fill_off_at() + gid];
-        if (w != 0u) {
-            uint q = lighting_fill_packed_q(w);
-            slot = (w & 2097151u) - 1u;
-            // The on-screen emit clears the tile word before this dispatch,
-            // so holds_tile is false for a winner. The histogram skipped
-            // that winner while the word was still set. A non-zero lock is
-            // the grant it counted, including a zero-take winner.
-            if (q > 0u && slot < LIGHTING_CACHE_SLOTS && ckeys.key[slot] != 0u
-                && !lighting_fill_holds_tile(slot)) {
-                // The on-screen emit already ran. A non-zero lock is that
-                // grant, so this cell does not take a second one.
-                uint prior = atomicAdd(ckeys.key[lighting_fill_lock_at() + slot], 0u);
-                if (prior == 0u) {
-                    bool far = lighting_fill_level_of_size(cache.v[3u * slot + 1u].w) == lighting_fill_lod_max();
-                    uint row = far ? 128u : 256u;
-                    uint extra_row = far ? 64u : 128u;
-                    uint base = ckeys.key[lighting_fill_plan_at() + row + q];
-                    uint extra = ckeys.key[lighting_fill_plan_at() + row + 64u + q];
-                    m = base;
-                    if (extra > 0u) {
-                        uint ticket = atomicAdd(ckeys.key[lighting_fill_extra_at() + extra_row + q], 1u);
-                        if (ticket < extra) {
-                            m += 1u;
-                        }
-                    }
-                    uint got = atomicCompSwap(ckeys.key[lighting_fill_lock_at() + slot], 0u, max(m, 1u));
-                    if (got != 0u) {
-                        m = 0u;
-                    } else if (far) {
-                        m_far = m;
-                    }
-                }
-            }
+            m = want;
         }
     }
     uint place = lighting_fill_wg_place(m, lighting_fill_header_at() + 1u);
-    lighting_fill_wg_place(m_far, lighting_fill_header_at() + 4u);
-    if (gid == 0u) {
-        uint on = ckeys.key[lighting_fill_header_at()];
-        uint checks = ckeys.key[lighting_fill_header_at() + 2u];
-        gstats.due = on;
-        gstats.scouts = lighting_fill_u(0) - on - checks;
-    }
     if (m == 0u) {
         return;
     }
-    uint dest = ckeys.key[lighting_fill_header_at() + 2u] + ckeys.key[lighting_fill_header_at()] + place;
+    uint dest = ckeys.key[lighting_fill_header_at()] + place;
+    uint room = lighting_fill_rays_max();
+    if (dest >= room) {
+        return;
+    }
+    if (dest + m > room) {
+        m = room - dest;
+    }
     lighting_fill_store_picks(m, slot, dest);
 }
 
+// The off-screen bin contest is gone. Burst picks are lighting_fill_emit_on.
+void lighting_fill_emit_off(uint gid) {
+    if (gid == ~0u) {
+        return;
+    }
+}
+
 void lighting_fill_dispatch() {
-    // One thread. The histograms are already in memory. Emitting the rays is
-    // a later parallel dispatch. This function does not walk tiles or slots.
-    uint budget = lighting_fill_u(0);
+    // One thread. The value histogram is already in memory. Emitting the burst
+    // is a later parallel dispatch. This function does not walk tiles or slots.
     uint max_picks = clamp(lighting_fill_u(17), 1u, 8u);
+    uint burst = lighting_fill_u(33);
     uint hist[64];
-    uint hist_far[64];
-    uint hist_near[64];
     uint serial = 0u;
     uint hist_at = lighting_fill_hist_at();
     for (uint i = 0u; i < 64u; i++) {
         hist[i] = ckeys.key[hist_at + i];
-        hist_far[i] = ckeys.key[hist_at + 64u + i];
-        hist_near[i] = ckeys.key[hist_at + 128u + i];
-        serial += 3u;
+        serial += 1u;
     }
-    uint check_n = min(ckeys.key[lighting_fill_header_at() + 3u], lighting_fill_check_cap());
-    uint spend = budget - check_n;
-    uint floor_n = min(uint(ceil(float(spend) * lighting_fill_f(8))), spend);
-    uint on_cap = spend - floor_n;
     uint base_m[64];
     uint extra_m[64];
-    uint on_take = 0u;
-    lighting_fill_plan(hist, on_cap, max_picks, base_m, extra_m, on_take);
+    uint burst_take = 0u;
+    lighting_fill_plan(hist, burst, max_picks, base_m, extra_m, burst_take);
     uint plan = lighting_fill_plan_at();
     for (uint i = 0u; i < 64u; i++) {
         ckeys.key[plan + i] = base_m[i];
         ckeys.key[plan + 64u + i] = extra_m[i];
         serial += 2u;
     }
-    uint off = spend - on_take;
-    uint far_n = min(uint(ceil(float(off) * lighting_fill_f(7))), off);
-    uint near_n = off - far_n;
-    uint far_take = 0u;
-    lighting_fill_plan(hist_far, far_n, max_picks, base_m, extra_m, far_take);
-    for (uint i = 0u; i < 64u; i++) {
-        ckeys.key[plan + 128u + i] = base_m[i];
-        ckeys.key[plan + 192u + i] = extra_m[i];
-        serial += 2u;
+    uint floor_n = ckeys.key[lighting_fill_header_at()];
+    uint cap = lighting_fill_rays_max();
+    if (floor_n > cap) {
+        floor_n = cap;
     }
-    uint near_budget = min(near_n, off - far_take);
-    uint near_take = 0u;
-    lighting_fill_plan(hist_near, near_budget, max_picks, base_m, extra_m, near_take);
-    for (uint i = 0u; i < 64u; i++) {
-        ckeys.key[plan + 256u + i] = base_m[i];
-        ckeys.key[plan + 320u + i] = extra_m[i];
-        serial += 2u;
+    ckeys.key[lighting_fill_header_at()] = floor_n;
+    uint room = cap - floor_n;
+    if (burst_take > room) {
+        burst_take = room;
     }
-    // Leftover rays stay on the cells already chosen, and they stop at the
-    // same per-cell cap as the fair pass.
-    uint used = check_n + on_take + far_take + near_take;
-    uint left = used >= budget ? 0u : budget - used;
-    // The fair pass stops at fill_max_picks. Rays still in the budget are more
-    // samples on those cells: one screen bucket up to 64, and 16 rays off screen.
-    // A set is 64 rays, so the off-screen cap is not one set.
-    lighting_fill_pour_row(hist, plan, 64u, left);
-    lighting_fill_pour_row(hist_far, plan + 128u, LIGHTING_CACHE_RAYS, left);
-    lighting_fill_pour_row(hist_near, plan + 256u, LIGHTING_CACHE_RAYS, left);
-    serial += 192u;
-    // Emit passes fill the cursors. They start at zero from the host clear.
-    ckeys.key[lighting_fill_header_at() + 2u] = check_n;
-    ckeys.key[lighting_fill_header_at() + 5u] = far_n;
-    ckeys.key[lighting_fill_header_at() + 6u] = near_take;
-    ckeys.key[LIGHTING_ARGS_AT + 0u] = max((budget + 63u) / 64u, 1u);
+    uint total = floor_n + burst_take;
+    ckeys.key[lighting_fill_header_at() + 2u] = 0u;
+    ckeys.key[lighting_fill_header_at() + 5u] = total;
+    ckeys.key[LIGHTING_ARGS_AT + 0u] = max((total + 63u) / 64u, 1u);
     ckeys.key[LIGHTING_ARGS_AT + 1u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 2u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 3u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 4u] = 1u;
     ckeys.key[LIGHTING_ARGS_AT + 5u] = 1u;
-    ckeys.key[LIGHTING_ARGS_AT + 6u] = budget;
-    ckeys.key[LIGHTING_ARGS_AT + 7u] = budget;
-    ckeys.key[LIGHTING_ARGS_AT + 8u] = budget;
-    ckeys.key[LIGHTING_ARGS_AT + 9u] = budget;
-    ckeys.key[LIGHTING_ARGS_AT + 10u] = budget;
+    ckeys.key[LIGHTING_ARGS_AT + 6u] = total;
+    ckeys.key[LIGHTING_ARGS_AT + 7u] = total;
+    ckeys.key[LIGHTING_ARGS_AT + 8u] = total;
+    ckeys.key[LIGHTING_ARGS_AT + 9u] = total;
+    ckeys.key[LIGHTING_ARGS_AT + 10u] = total;
     gstats.rays = 0u;
-    gstats.pad4 = check_n;
+    gstats.pad4 = 0u;
     gstats.pad2 = serial;
-    gstats.round_entries = (budget + 15u) / 16u;
+    gstats.due = floor_n;
+    gstats.scouts = burst_take;
+    gstats.round_entries = (total + 15u) / 16u;
 }
 
 bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
@@ -883,7 +719,7 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
         return false;
     }
     uint r = ray - lighting_probe_rays();
-    uint budget = lighting_fill_u(0);
+    uint budget = lighting_fill_traced();
     if (r >= budget) {
         return false;
     }
@@ -891,35 +727,30 @@ bool lighting_fill_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     uint on = ckeys.key[lighting_fill_header_at()];
     uint ranked = ckeys.key[lighting_fill_header_at() + 1u];
     uint placed = min(checks + on + ranked, budget);
-    if (r < placed) {
-        uint slot = ckeys.key[lighting_fill_pick_at() + r];
-        if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
-            return false;
-        }
-        vec3 p;
-        if (!lighting_sc_texel_world(slot, p, n)) {
-            return false;
-        }
-        origin = p + n * FILL_RAY_BIAS;
-        if (r < checks) {
-            // Same seed every frame. The round is not part of the direction.
-            uint seed = floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + slot].z);
-            if (seed == 0u) {
-                seed = max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u);
-            }
-            dir = lighting_dir(seed, n, seed % 64u, 64u);
-        } else {
-            uint rk = lighting_sc_ray_key(slot, ckeys.key[slot]);
-            uint stratum = (lighting_hash(rk) + lighting_round() + r) % 64u;
-            dir = lighting_dir(rk, n, stratum, 64u);
-        }
-        return true;
+    if (r >= placed) {
+        return false;
     }
-    uint disc = max(budget - placed, 1u);
-    uint i = (r - placed + lighting_round()) % disc;
-    dir = lighting_fill_fibonacci(i, disc);
-    origin = scene.eye.xyz;
-    n = dir;
+    uint slot = ckeys.key[lighting_fill_pick_at() + r];
+    if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
+        return false;
+    }
+    vec3 p;
+    if (!lighting_sc_texel_world(slot, p, n)) {
+        return false;
+    }
+    origin = p + n * FILL_RAY_BIAS;
+    if (r < checks) {
+        // Same seed every frame. The round is not part of the direction.
+        uint seed = floatBitsToUint(cache.v[LIGHTING_SC_GRAD_AT + slot].z);
+        if (seed == 0u) {
+            seed = max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u);
+        }
+        dir = lighting_dir(seed, n, seed % 64u, 64u);
+    } else {
+        uint rk = lighting_sc_ray_key(slot, ckeys.key[slot]);
+        uint stratum = (lighting_hash(rk) + lighting_round() + r) % 64u;
+        dir = lighting_dir(rk, n, stratum, 64u);
+    }
     return true;
 }
 
@@ -929,7 +760,7 @@ void lighting_fill_stash(uint ray, float t, uint packed_n) {
         return;
     }
     uint r = ray - lighting_probe_rays();
-    if (r >= lighting_fill_u(0)) {
+    if (r >= lighting_fill_traced()) {
         return;
     }
     ckeys.key[lighting_fill_hit_at() + r * 2u] = floatBitsToUint(t);
@@ -1258,7 +1089,7 @@ vec3 lighting_fill_share_rgb(uint recv, vec3 contrib) {
 // phase 0 clears the receiver lock, phase 1 elects, phase 2 writes the seed.
 // The three passes recompute the same tile, so the winner does not need a store.
 void lighting_fill_share_pass(uint gid, uint phase) {
-    uint budget = lighting_fill_u(0);
+    uint budget = lighting_fill_traced();
     uint checks = ckeys.key[lighting_fill_header_at() + 2u];
     uint on = ckeys.key[lighting_fill_header_at()];
     uint placed = min(checks + on, budget);
@@ -1389,7 +1220,7 @@ void lighting_fill_resolve(uint gid) {
     if (gid >= 64u) {
         return;
     }
-    uint budget = lighting_fill_u(0);
+    uint budget = lighting_fill_traced();
     uint checks = ckeys.key[lighting_fill_header_at() + 2u];
     uint on = ckeys.key[lighting_fill_header_at()];
     uint ranked = ckeys.key[lighting_fill_header_at() + 1u];

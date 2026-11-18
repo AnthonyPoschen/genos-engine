@@ -2,12 +2,12 @@
 //!
 //! Stage F1 estimators live in the other modules: need-weighted picks,
 //! water-filling, a fixed-point deposit, one writer at resolve, and the
-//! reconnection weight. Stage F2 is [`sched`]: the always-on budget, the
-//! clipmap, and the single-ray fold the GPU scheduler mirrors. Stage F3 adds
-//! the check ray, the decaying lambda, and the water-fill of that budget.
+//! reconnection weight. Stage F2 is [`sched`]: the clipmap radii and the
+//! single-ray fold. Stage F3 keeps the check ray and the decaying lambda.
+//! The device does not water-fill `fill_budget`.
 //! [`alloc`] spends one value per cell, highest rank first, with the trickle
-//! floor inside that budget. The device does not run that spend. The frozen
-//! fill gate stays on the tile contest and the off-screen bins in [`sched`].
+//! floor inside that budget. The device ray count is the floor rate plus the
+//! burst in [`alloc`], not the tile contest in [`sched`].
 //! Stage F4a seeds the other cells of the same tile that pass the share gates.
 //! The seed is low confidence. It is not an own sample and it has no count
 //! field. Ring sharing is not in this crate's live path.
