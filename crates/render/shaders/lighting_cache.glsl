@@ -294,6 +294,8 @@ const uint LIGHTING_RESET_FADE = 50u;
 const uint LIGHTING_RESET_RESTIR = 7u;
 const uint LIGHTING_RESET_MOVER = 9u;
 const uint LIGHTING_RESET_DIRECT_MISS = 10u;
+// Fill header word 6, copied here so the trace can read it. Not a reset.
+const uint LIGHTING_DIAG_MOVER_RAYS = 51u;
 // Tile mask, one bit per 32 px tile, then one change word per tile, then one
 // bit per cache slot. lighting_gpu.rs sizes the key buffer with the same counts.
 // A measured change notes a tile by storing 1 in its change word. The reach
@@ -1063,6 +1065,9 @@ uint lighting_mover_on(vec3 pos, vec3 n);
 bool lighting_sc_local_on();
 bool lighting_fill_pixel(vec3 p, out uint px, out uint py);
 float lighting_fill_leash(uint level);
+float lighting_fill_create(uint level);
+float lighting_fine_word(uint at);
+void lighting_fine_raise_value(uint slot, float value);
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
     uint key = lighting_cache_key_sized(pos, n, size);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
@@ -1081,18 +1086,20 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     if (!claim || !LIGHTING_SC_WRITES) {
         return ~0u;
     }
-    // A cell this size past the level-0 leash, and off screen, is coarsened
-    // on the next visit. Claiming it again is a steady wipe. On screen, and
-    // inside the leash, the claim stands. The leash is read on every claim:
-    // a load inside this branch faults in lavapipe when the wave skips it
-    // (the bounce presented-frame gate).
-    float leash0 = lighting_fill_leash(0u);
-    if (size <= LIGHTING_SC_HIT) {
-        uint keep_x;
-        uint keep_y;
-        if (!lighting_fill_pixel(pos, keep_x, keep_y) && length(pos - scene.eye.xyz) > leash0) {
-            return ~0u;
-        }
+    // A new cell is born inside its create distance. The loads stay outside
+    // the size test: lavapipe faults when a wave skips a descriptor load
+    // (the bounce presented-frame gate). Screen and occlusion do not decide.
+    float claim_dist = length(pos - scene.eye.xyz);
+    float fine_create = lighting_fine_word(LIGHTING_FINE_CREATE_AT);
+    float base_create = lighting_fill_create(0u);
+    float claim_limit = base_create;
+    if (size <= LIGHTING_SC_TEXEL && fine_create > 0.0) {
+        claim_limit = fine_create;
+    }
+    // create 0 means the fill radii were not uploaded. A fixture that plants
+    // cells still claims. A live fill writes a positive radius and refuses past it.
+    if (size <= LIGHTING_SC_HIT && claim_limit > 0.0 && claim_dist > claim_limit) {
+        return ~0u;
     }
 #ifndef GENOS_COMPOSE_NO_WALK
     // #286 → pool: a hit on a mover never writes a world cell.
@@ -4040,9 +4047,6 @@ uint lighting_sc_entries(uint slot, bool full) {
 // hit, by distance from the player, in every direction. The drop distance is
 // farther than the create distance. Motion and a turn stretch the band ahead.
 // The camera only raises priority. The ray share is a slice of the existing room.
-const float LIGHTING_FINE_AHEAD_EPS = 1.0e-6;
-const float LIGHTING_FINE_AHEAD_STEP = 8.0;
-const float LIGHTING_FINE_AHEAD_TURN = 4.0;
 const float LIGHTING_FINE_VALID = 0.5;
 const float LIGHTING_FINE_REACH_MIN = 0.05;
 const float LIGHTING_FINE_SHARE_CAP = 0.5;
@@ -4128,47 +4132,25 @@ const float LIGHTING_FINE_FIELD_SLOW = 0.25;
 float lighting_fine_word(uint at) {
     return uintBitsToFloat(ckeys.key[at]);
 }
-// Motion and a turn only. A still camera leaves the band centred: the view
-// raises priority, it does not change who is inside the distance.
-vec3 lighting_fine_ahead() {
-    vec4 last_eye = work.v[lighting_change_at() + 1u];
-    vec3 last_fwd = work.v[lighting_change_at() + 4u].xyz;
-    if (!(last_eye.w > LIGHTING_FINE_VALID) || !(dot(last_fwd, last_fwd) > LIGHTING_FINE_VALID)) {
-        return vec3(0.0);
-    }
-    vec3 fwd = normalize(scene.view_forward.xyz + vec3(0.0, LIGHTING_FINE_AHEAD_EPS, 0.0));
-    vec3 step = scene.eye.xyz - last_eye.xyz;
-    vec3 turn = fwd - normalize(last_fwd);
-    vec3 motion = LIGHTING_FINE_AHEAD_STEP * step + LIGHTING_FINE_AHEAD_TURN * turn;
-    if (!(dot(motion, motion) > LIGHTING_FINE_AHEAD_EPS)) {
-        return vec3(0.0);
-    }
-    return normalize(motion);
-}
 float lighting_fine_reach(vec3 p) {
-    vec3 from = p - scene.eye.xyz;
-    float dist = length(from);
-    float look = lighting_fine_word(LIGHTING_FINE_AHEAD_AT);
-    if (!(look > 0.0)) {
-        return dist;
-    }
-    float along = dot(from, lighting_fine_ahead());
-    return dist - look * clamp(along / max(dist, LIGHTING_FINE_REACH_MIN), 0.0, 1.0);
+    return length(p - scene.eye.xyz);
 }
 bool lighting_fine_past_drop(vec3 p) {
     float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
     return drop > 0.0 && lighting_fine_reach(p) > drop;
 }
-// One probe window. Past the drop distance outranks a settled texel, which
-// outranks a young off-screen texel. The farthest reach wins a tie. A texel
-// a pixel showed in the last 60 frames is not a victim.
+// Pool pressure only. A texel past its drop distance goes first. Otherwise
+// the oldest record, then the one with the least confidence. Leaving the
+// view is not a reason.
 bool lighting_fine_evict(vec3 pos, vec3 n) {
     uint key = lighting_cache_key_sized(pos, n, LIGHTING_SC_TEXEL);
     uint start = lighting_hash(key ^ 0x9e3779b9u);
     uint best = ~0u;
     uint best_key = 0u;
-    float best_reach = -1.0;
+    uint best_age = 0u;
+    float best_sets = 0.0;
     int best_rank = -1;
+    uint frame = lighting_frame();
     [[dont_unroll]] for (uint i = 0u; i < LIGHTING_CACHE_SEARCH; i++) {
         uint slot = (start + i) & (LIGHTING_CACHE_SLOTS - 1u);
         uint k = ckeys.key[slot];
@@ -4178,20 +4160,19 @@ bool lighting_fine_evict(vec3 pos, vec3 n) {
         if (cache.v[3u * slot + 1u].w > LIGHTING_HIT_PATCH) {
             continue;
         }
-        uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
-        if (lighting_sc_pixel_fresh(shown, 60)) {
-            continue;
-        }
         vec3 p = lighting_sc_texel_pos(slot);
-        float reach = lighting_fine_reach(p);
         bool far = lighting_fine_past_drop(p);
-        bool settled = lighting_sc_settled(slot, cache.v[3u * slot + 2u].w);
-        int rank = far ? 2 : (settled ? 1 : 0);
-        bool better = best == ~0u || rank > best_rank || (rank == best_rank && reach > best_reach);
+        uint touched = floatBitsToUint(cache.v[3u * slot].w);
+        uint age = frame - touched;
+        float sets = cache.v[3u * slot + 2u].w;
+        int rank = far ? 1 : 0;
+        bool older = age > best_age || (age == best_age && sets < best_sets);
+        bool better = best == ~0u || rank > best_rank || (rank == best_rank && older);
         if (better) {
             best = slot;
             best_key = k;
-            best_reach = reach;
+            best_age = age;
+            best_sets = sets;
             best_rank = rank;
         }
     }
@@ -4373,19 +4354,41 @@ void lighting_fine_spawn(uint slot) {
         } else {
             vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + born];
             mark.y = 1.0;
+            // The child keeps the parent's radiance. Confidence scales with
+            // the area step (12.5 cm over the parent), and the value rises by
+            // the same step so the next rays check the inherited mean.
+            vec4 parent_mean = cache.v[3u * slot + 2u];
+            float parent_size = max(cache.v[3u * slot + 1u].w, LIGHTING_SC_TEXEL);
+            float area = clamp((LIGHTING_SC_TEXEL * LIGHTING_SC_TEXEL) / (parent_size * parent_size), 0.0, 1.0);
+            bool inherited = parent_mean.w > LIGHTING_SC_SET_HALF;
+            if (inherited) {
+                float sets = parent_mean.w * area;
+                cache.v[3u * born + 2u] = vec4(parent_mean.rgb, sets);
+                vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
+                cache.v[LIGHTING_SC_EST_AT + 2u * born] = ea;
+                vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
+                cache.v[LIGHTING_SC_EST_AT + 2u * born + 1u] = vec4(eb.xyz, max(eb.w, 0.0) * area);
+                lighting_fine_raise_value(born, 1.0 - area);
+                lighting_sc_set_seed(born, parent_mean.rgb, max(area, 0.05), lighting_sc_sunfrac_now(slot));
+                mark.z = sets;
+                mark.w = max(ea.w, 0.0);
+                atomicAdd(gstats.diag[LIGHTING_RESET_ADOPT], 1u);
+            }
 #ifndef GENOS_COMPOSE_NO_WALK
-            vec3 pr;
-            float pn;
-            float pv;
-            float ps;
-            lighting_fine_prior(q, n, pr, pn, pv, ps);
-            if (pn > LIGHTING_SC_SET_HALF) {
-                lighting_sc_set_seed(born, pr, 1.0, ps);
-                mark.z = pn;
-                mark.w = pv;
+            else {
+                vec3 pr;
+                float pn;
+                float pv;
+                float ps;
+                lighting_fine_prior(q, n, pr, pn, pv, ps);
+                if (pn > LIGHTING_SC_SET_HALF) {
+                    lighting_sc_set_seed(born, pr, max(area, 0.05), ps);
+                    mark.z = pn * area;
+                    mark.w = pv;
+                }
             }
             cache.v[LIGHTING_SC_SHOWN_AT + born] = mark;
-            if (pn > LIGHTING_SC_SET_HALF) {
+            if (inherited || cache.v[LIGHTING_SC_SHOWN_AT + born].z > LIGHTING_SC_SET_HALF) {
                 lighting_fine_publish(born);
             }
 #else
@@ -6650,6 +6653,15 @@ vec4 lighting_svgf_target(uint slot) {
 }
 float lighting_sc_lambda(uint slot);
 const uint LIGHTING_SC_GRAD_AT = 11u * LIGHTING_CACHE_SLOTS;
+void lighting_fine_raise_value(uint slot, float value) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    vec4 g = cache.v[LIGHTING_SC_GRAD_AT + slot];
+    g.x = clamp(value, 0.0, 1.0);
+    g.z = uintBitsToFloat(max(lighting_hash(ckeys.key[slot] ^ 0x00C3E7u), 1u));
+    cache.v[LIGHTING_SC_GRAD_AT + slot] = g;
+}
 // A shown weight at or above this has a mean the agreement test can read.
 const float LIGHTING_HISTORY_SHOWN = 0.5;
 // Variance below this is treated as the noise floor, and the same floor
@@ -7126,10 +7138,10 @@ void lighting_sc_grad_take(uint slot, float l_now) {
 }
 // Shadow reuse for static lamps (S74A, Anthony 16:11): a light-cache or probe
 // hit's shadow ray to a lamp is kept per 12.5 cm cell, facing axis and lamp, with
-// the lamp's epoch; the epoch moves when the lamp moves or changes, or when a
-// change of the traced world (this frame's change list, old and new bounds, or
-// a whole-world change) falls within its range (suns: anywhere). A moving lamp
-// moves its epoch every frame, so it re-shadows as before.
+// the lamp's epoch; the epoch moves when the lamp moves or changes, or on a
+// whole-world change. A mover does not bump the epoch. Cells the mover reaches
+// miss the cache and re-trace; the rest of the lamp keeps its shadow history.
+// A moving lamp moves its epoch every frame, so it re-shadows as before.
 const bool LIGHTING_SHADOW_CACHE = true;
 const uint LIGHTING_SHADOW_AT = 13u * LIGHTING_CACHE_SLOTS;
 void lighting_shadow_epochs() {
@@ -7139,7 +7151,6 @@ void lighting_shadow_epochs() {
     uint n = min(scene.lamp_count, LIGHTING_WRC_SNAP_LAMPS);
     vec4 head = work.v[lighting_change_at()];
     bool all = head.y > 0.5;
-    uint changes = all ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
     for (uint i = 0u; i < n; i++) {
         Lamp l = scene_lamp(i);
         uint at = LIGHTING_SHADOW_EPOCH_AT + 8u * i;
@@ -7155,10 +7166,6 @@ void lighting_shadow_epochs() {
         uint col = lighting_hash(floatBitsToUint(l.color.x) ^ lighting_hash(floatBitsToUint(l.color.y) ^ lighting_hash(floatBitsToUint(l.color.z))));
         bool bump = all || any(notEqual(last, now)) || ckeys.key[at + 5u] != col;
         ckeys.key[at + 5u] = col;
-        for (uint c = 0u; c < changes && !bump; c++) {
-            vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + c];
-            bump = l.color.w <= 0.0 || length(b.xyz - l.pos.xyz) < l.color.w + b.w;
-        }
         if (bump) {
             ckeys.key[at] += 1u;
             ckeys.key[at + 1u] = floatBitsToUint(now.x);
@@ -7196,6 +7203,11 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
     }
     uint tag;
     uint at = lighting_shadow_cell(o, n, li, tag);
+    // A mover at this point changes the shadow. Re-trace, and leave the
+    // cached bit for the frames after the mover has left.
+    if (lighting_near_change(o)) {
+        return -1.0;
+    }
     vec4 e = cache.v[at];
     if (floatBitsToUint(e.x) == tag && floatBitsToUint(e.z) == ckeys.key[LIGHTING_SHADOW_EPOCH_AT + 8u * li]) {
         return e.y;
@@ -7354,9 +7366,10 @@ void lighting_sc_forget(uint slot) {
     ckeys.key[lighting_sc_seed_word(slot)] = 0u;
 }
 #ifndef GENOS_COMPOSE_NO_WALK
-// #286 → pool: a world cell a mover sits on drops now. An unread world cell
-// inside this frame's change volume drops after two frames (age >= 2). Fresh
-// cells (no stamp / last == 0) stay so the scheduler can relight.
+// A mover used to free the world cell it sits on, and any unread cell in its
+// change volume after two frames. Those cells came back empty on the next
+// claim, so the shadow and the bounce repopulated every step. The cell stays.
+// The every-frame mover ray is what keeps or down-weights the mean.
 bool lighting_sc_drop_stale_mover_world(uint slot) {
     if (!LIGHTING_SC_WRITES || lighting_world_mode() != 3u || slot >= LIGHTING_CACHE_SLOTS) {
         return false;
@@ -7364,26 +7377,7 @@ bool lighting_sc_drop_stale_mover_world(uint slot) {
     if (ckeys.key[slot] == 0u || cache.v[LIGHTING_SC_OBJ_AT + slot].x > 0.5) {
         return false;
     }
-    vec3 p = cache.v[3u * slot].xyz;
-    vec3 n = cache.v[3u * slot + 1u].xyz;
-    float size = cache.v[3u * slot + 1u].w;
-    bool on = lighting_mover_on(p, n) != ~0u;
-    bool aged = false;
-    if (!on && size > LIGHTING_HIT_PATCH && lighting_near_change(p)) {
-        uint last = floatBitsToUint(cache.v[3u * slot].w);
-        // last == 0 is unset / fresh — never age-drop those (was: last == 0
-        // treated as aged, which wiped the hall fill inside change volumes).
-        aged = last != 0u && int(lighting_frame() - last) >= 2;
-    }
-    if (!on && !aged) {
-        return false;
-    }
-    atomicAdd(gstats.diag[LIGHTING_RESET_MOVER], 1u);
-    ckeys.key[slot] = 0u;
-    lighting_sc_forget(slot);
-    cache.v[3u * slot + 1u] = vec4(0.0);
-    cache.v[3u * slot + 2u] = vec4(0.0);
-    return true;
+    return false;
 }
 #endif
 // Distance in bits 21..30 (plus one, so a real offer is never 0). Bit 31 stays

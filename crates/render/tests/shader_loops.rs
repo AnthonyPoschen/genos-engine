@@ -381,8 +381,8 @@ fn the_fill_visit_rays_the_screen_texel_and_claims_its_parent() {
     let cache = source("lighting_cache.glsl");
     let find = function_body(&cache, "uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at)");
     assert!(
-        find.contains("lighting_fill_leash(0u)"),
-        "an off-screen claim past the level-0 leash is refused"
+        find.contains("lighting_fill_create(0u)"),
+        "a claim past the create distance is refused"
     );
     assert!(
         !visit.contains("atomicMax"),

@@ -6,16 +6,15 @@
 //! Replicated state: none. The rank stays on the shading client.
 //! Authority: the client that shades.
 //! Prediction / rollback: none.
-//! Determinism: the rank is the value, the distance, and the on-screen weight.
+//! Determinism: the rank is the value and the distance.
 //! The trickle draw is a hash of the cell and the frame.
 //! Headless server: a server that does not shade does not run this.
 
 use crate::sched::{closeness, remaining_error, Tunables};
 use crate::water::bucket;
 
-/// Off-screen cells stay in the same ranking, below an on-screen cell of the
-/// same value and distance.
-pub const OFF_SCREEN_WEIGHT: f32 = 0.25;
+/// One floor ray per live cell every this many frames.
+pub const FLOOR_PERIOD: u32 = 10;
 
 /// A disagreement past this many standard deviations raises the cell.
 const DISAGREE_SIGMA: f32 = 2.0;
@@ -54,15 +53,10 @@ pub fn cell_value(cell: &CellBid, tun: &Tunables) -> f32 {
     (err + tun.change_weight * lam).max(0.0)
 }
 
-/// Value, weighted by closeness and by whether the cell is on screen.
+/// Value, weighted by closeness. On screen and occluded share the rank.
 #[must_use]
 pub fn cell_rank(cell: &CellBid, tun: &Tunables) -> f32 {
-    let screen = if cell.on_screen {
-        1.0
-    } else {
-        OFF_SCREEN_WEIGHT
-    };
-    screen * closeness(cell.distance, tun) * cell_value(cell, tun)
+    closeness(cell.distance, tun) * cell_value(cell, tun)
 }
 
 /// Rays reserved before the ranked spend. Zero when the floor is 0.
@@ -176,19 +170,21 @@ pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32, rays: 
     }
 }
 
-/// `ceil(live / N)` floor rays, plus the burst setting. N is 1, 2, or 4.
+/// `ceil(live / 10)` floor rays, and a burst that keeps the old round size.
+/// `legacy_divisor` is the preset's old floor (High 1, Medium 2, Low 4).
 #[must_use]
-pub fn split_floor_and_burst(live_cells: u32, rate: u32, burst: u32) -> (u32, u32) {
-    let n = if rate == 2 || rate == 4 { rate } else { 1 };
-    (live_cells.div_ceil(n), burst)
+pub fn split_floor_and_burst(live_cells: u32, legacy_divisor: u32, burst: u32) -> (u32, u32) {
+    let old = live_cells.div_ceil(legacy_divisor.max(1));
+    let floor = live_cells.div_ceil(FLOOR_PERIOD);
+    (floor, burst.saturating_add(old.saturating_sub(floor)))
 }
 
-fn floor_rate_n(rate: u32) -> u32 {
-    if rate == 2 || rate == 4 {
-        rate
-    } else {
-        1
-    }
+/// Mover rays are already inside the floor count. The part past the 1/10
+/// share comes out of the burst.
+#[must_use]
+pub fn burst_after_mover_rays(burst: u32, mover_rays: u32) -> u32 {
+    let extra = mover_rays - mover_rays / FLOOR_PERIOD;
+    burst.saturating_sub(extra)
 }
 
 /// Floor rays follow the slot rotation. Burst rays go to the highest rank.
@@ -212,7 +208,7 @@ pub fn allocate(cells: &[CellBid], budget: u32, tun: &Tunables, frame: u32) -> V
         }
         return allocate_fraction(cells, budget, tun, frame, grants);
     }
-    let rate = floor_rate_n(tun.floor_rate);
+    let rate = FLOOR_PERIOD;
     let phase = frame % rate;
     for (index, grant) in grants.iter_mut().enumerate() {
         let idx = u32::try_from(index).unwrap_or(0);
@@ -383,36 +379,61 @@ mod tests {
         high.lambda = 0.0;
         let grants = allocate(&[low, mid, high], 1, &tun, 0);
         let top = grants.iter().find(|g| g.id == 3).map(|g| g.rays);
-        assert_eq!(top, Some(2));
-        assert!(grants.iter().filter(|g| g.id != 3).all(|g| g.rays == 1));
+        // Frame 0's floor ray is index 0. The burst still goes to the highest value.
+        assert_eq!(top, Some(1));
+        assert_eq!(grants.iter().find(|g| g.id == 1).map(|g| g.rays), Some(1));
+        assert_eq!(grants.iter().find(|g| g.id == 2).map(|g| g.rays), Some(0));
     }
 
     #[test]
-    fn an_on_screen_cell_outranks_the_same_cell_off_screen() {
+    fn an_occluded_cell_ranks_with_the_same_cell_on_screen() {
         let tun = Tunables::high();
         let mut on = bid(1, 0, 4.0);
         on.on_screen = true;
         let mut off = bid(2, 0, 4.0);
         off.on_screen = false;
-        assert!(cell_rank(&on, &tun) > cell_rank(&off, &tun));
+        assert!(on.on_screen);
+        assert!(!off.on_screen);
+        assert_eq!(
+            cell_rank(&on, &tun).to_bits(),
+            cell_rank(&off, &tun).to_bits()
+        );
     }
 
     #[test]
-    fn the_floor_rotates_and_the_burst_is_not_the_remainder() {
+    fn the_floor_rotates_every_tenth_frame() {
         let mut tun = Tunables::high();
-        tun.floor_rate = 2;
         tun.burst = 0;
         let cells: Vec<_> = (0..40u32)
             .map(|id| bid(id, id % 5, 1.0 + f32::from(u16::try_from(id).unwrap_or(0))))
             .collect();
-        let even = allocate(&cells, tun.budget, &tun, 0);
-        let odd = allocate(&cells, tun.budget, &tun, 1);
-        assert_eq!(even.iter().map(|g| g.rays).sum::<u32>(), 20);
-        assert_eq!(odd.iter().map(|g| g.rays).sum::<u32>(), 20);
-        assert!(even.iter().enumerate().all(|(i, g)| g.rays == u32::from(i % 2 == 0)));
-        assert!(odd.iter().enumerate().all(|(i, g)| g.rays == u32::from(i % 2 == 1)));
+        let first = allocate(&cells, tun.budget, &tun, 0);
+        let next = allocate(&cells, tun.budget, &tun, 1);
+        assert_eq!(first.iter().map(|g| g.rays).sum::<u32>(), 4);
+        assert_eq!(next.iter().map(|g| g.rays).sum::<u32>(), 4);
+        assert!(first
+            .iter()
+            .enumerate()
+            .all(|(i, g)| g.rays == u32::from(i % 10 == 0)));
+        assert!(next
+            .iter()
+            .enumerate()
+            .all(|(i, g)| g.rays == u32::from(i % 10 == 1)));
         let (floor, burst) = split_floor_and_burst(40, 2, 0);
-        assert_eq!((floor, burst), (20, 0));
+        assert_eq!((floor, burst), (4, 16));
+    }
+
+    #[test]
+    fn mover_rays_come_out_of_the_same_budget() {
+        let (floor, burst) = split_floor_and_burst(1000, 1, 25_000);
+        assert_eq!(floor, 100);
+        assert_eq!(burst, 25_900);
+        assert_eq!(floor + burst, 1000 + 25_000);
+        let mover = 80u32;
+        let spent = burst_after_mover_rays(burst, mover);
+        let extra = mover - mover / FLOOR_PERIOD;
+        assert_eq!(spent, burst - extra);
+        assert_eq!(floor + spent + extra, floor + burst);
     }
 
     #[test]
@@ -466,7 +487,10 @@ mod tests {
             last_ranked = if grant.trickle { 0 } else { grant.rays };
         }
         assert_eq!(value, 0.0, "three agreeing frames clear a false alarm");
-        assert_eq!(last_ranked, 0, "the ranked spend stops once confidence is back");
+        assert_eq!(
+            last_ranked, 0,
+            "the ranked spend stops once confidence is back"
+        );
     }
 
     #[test]
@@ -504,15 +528,18 @@ mod tests {
     }
 
     #[test]
-    fn the_floor_is_ceil_live_over_rate_plus_the_burst_setting() {
+    fn the_floor_is_ceil_live_over_ten_and_the_burst_keeps_the_old_total() {
         let (floor, burst) = split_floor_and_burst(1000, 1, 0);
-        assert_eq!(floor, 1000);
-        assert_eq!(burst, 0);
+        assert_eq!(floor, 100);
+        assert_eq!(burst, 900);
+        assert_eq!(floor + burst, 1000);
         let (quarter, extra) = split_floor_and_burst(1000, 4, 32);
-        assert_eq!(quarter, 250);
-        assert_eq!(extra, 32);
-        let (odd, _) = split_floor_and_burst(5, 2, 0);
-        assert_eq!(odd, 3);
+        assert_eq!(quarter, 100);
+        assert_eq!(extra, 182);
+        assert_eq!(quarter + extra, 250 + 32);
+        let (odd, rest) = split_floor_and_burst(5, 2, 0);
+        assert_eq!(odd, 1);
+        assert_eq!(rest, 2);
     }
 
     #[test]

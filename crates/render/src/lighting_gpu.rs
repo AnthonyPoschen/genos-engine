@@ -2995,7 +2995,7 @@ impl Gpu {
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 // diag index is stats word 24 + index. See LIGHTING_RESET_* in lighting_cache.glsl.
                 eprintln!(
-                    "lightingreset {queue} frame {} live {} leash {} coarsen {} age {} evict {} adopt {} decay {} reproject {} direct_miss {} mean {} fade {} restir {} mover {} pool {}",
+                    "lightingreset {queue} frame {} live {} leash {} coarsen {} age {} evict {} adopt {} decay {} reproject {} direct_miss {} mean {} fade {} restir {} mover {} pool {} mover_rays {}",
                     self.lighting.frame,
                     w[2],
                     w[24 + 42],
@@ -3010,7 +3010,8 @@ impl Gpu {
                     w[24 + 50],
                     w[24 + 7],
                     w[24 + 9],
-                    self.lighting.mover_cache.history_drops()
+                    self.lighting.mover_cache.history_drops(),
+                    w[24 + 51]
                 );
                 eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
@@ -4929,8 +4930,13 @@ impl Gpu {
                 let floor_rate = if fill.floor_rays == 0 {
                     0
                 } else {
-                    fill.floor_rate
+                    genos_scene::FILL_FLOOR_PERIOD
                 };
+                let burst = genos_scene::fill_scaled_burst(
+                    self.lighting.live,
+                    self.lighting.settings.preset,
+                    fill.burst,
+                );
                 let fill_words = [
                     fill.budget,
                     fill.tile.max(1),
@@ -4965,7 +4971,7 @@ impl Gpu {
                     fill.share_receivers,
                     fill.share_handover,
                     floor_rate,
-                    fill.burst,
+                    burst,
                 ];
                 let frame_pixels =
                     u64::from(self.extent_w.max(1)).saturating_mul(u64::from(self.extent_h.max(1)));

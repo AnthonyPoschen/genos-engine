@@ -464,13 +464,13 @@ Role: SCHED · Literature: a residual sample inside a fixed budget · More detai
 
 **History confidence**: one minus the cell's value. The stored mean is kept by that fraction when a new sample arrives. A value of 1 replaces the mean. One agreement step moves the value: a sample inside the stored noise lowers it by a third, and a sample outside the noise raises it by the relative step.
 
-**Floor rays**: `fill_floor_rays`. `0` turns the base floor off. Any other value turns it on. The device gives one ray to each cell the floor rate selects. It does not spend this as a ray count.
+**Floor rays**: `fill_floor_rays`. `0` turns the base floor off. Any other value turns it on. The device gives one ray to each live cell every 10 frames, and one ray every frame to a cell a mover is changing. It does not spend this as a ray count. The mover rays are counted out of the same round budget.
 Role: SCHED · Literature: a per-cell sample floor · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
-**Floor rate**: `fill_floor_rate`. `1` gives the floor ray to every live cell every frame, `2` to half of them, `4` to a quarter. A cell is due when its slot index mod N equals the frame mod N, so each cell is covered within N frames. High is 1. Medium is 2. Low is 4.
+**Floor period**: every live cell is due when its slot index mod 10 equals the frame mod 10. A cell inside a mover's change volume is due every frame while that mover is moving, then returns to the period. The old `fill_floor_rate` values 1, 2, and 4 are removed; a saved key warns and is ignored.
 Role: SCHED · Literature: a round-robin sample · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
-**Burst budget**: `fill_burst`. Extra rays spent highest-value first after the floor (value times closeness, and 0.25 off screen). `0` spends none. High is 25000, Medium 12500, Low 6250. The device ray count is the floor plus this. One cell takes at most `fill_max_picks` of the burst (High default 4, range 1 to 64).
+**Burst budget**: `fill_burst`. Extra rays spent highest-value first after the floor (value times closeness). `0` spends none of the ranked pool. High stores 25000, Medium 12500, Low 6250. The device adds the rays the 1-in-10 floor no longer spends, so the round stays about the old floor plus this burst. The mover rays past that 1-in-10 share then come out of the burst. One cell takes at most `fill_max_picks` of the burst (High default 4, range 1 to 64).
 Role: SCHED · Literature: a priority budget on top of a floor · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.

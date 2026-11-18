@@ -4,12 +4,12 @@
 //! Positions and directions use `genos-math`.
 
 mod camera;
-mod hdr;
 mod codimation;
 mod debug_settings;
 mod event_loop;
 mod fog;
 mod fps_counter;
+mod hdr;
 mod lighting;
 mod menu;
 mod particles;
@@ -27,27 +27,28 @@ pub use debug_settings::DebugSettings;
 pub use event_loop::EventLoopSettings;
 pub use fog::{
     apply_fog_arg, check_fog_arg, fog_flag_needs_value, parse_fog_count, parse_fog_grid,
-    parse_fog_number, parse_fog_switch,
-    FogCli, FogEnv, FogInspect, FogSettings, FogShape, FogVolume,
+    parse_fog_number, parse_fog_switch, FogCli, FogEnv, FogInspect, FogSettings, FogShape,
+    FogVolume,
 };
 pub use fps_counter::{parse_enabled, parse_rate, FpsCli, FpsCounterSettings};
-pub use hdr::{
-    hdr_flag_needs_value, DisplayTransform, ExposureMode, HdrCli, HdrEnv, HdrSettings,
-    OutputMode, HDR_ENV_MIRRORS,
-};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
+pub use hdr::{
+    hdr_flag_needs_value, DisplayTransform, ExposureMode, HdrCli, HdrEnv, HdrSettings, OutputMode,
+    HDR_ENV_MIRRORS,
+};
 pub use lighting::{
-    check_lighting_arg, lighting_arg_time_of_day, lighting_env, lighting_env_flag, lighting_env_os,
-    lighting_flag_needs_value, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
-    DirectSettings, GiSettings, GpuBuckets, LightingExperimentSettings, parse_lighting_toggles,
-    LIGHTING_DEFAULT_SC_FLAGS, LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_CELLS_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
-    LIGHTING_TOGGLE_FREEZE_CACHE, LIGHTING_TOGGLE_FREEZE_PROBES, LampPickMode, LampPickSettings, LightingPreset,
-    LightingSettings, ProbeSettings, ShadowFilter, ShadowSettings, SurfaceCacheBlend,
-    SurfaceCacheSettings, WorldCacheSettings, LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW,
-    LAMP_PICK_CANDIDATES_MEDIUM, LAMP_PICK_SPATIAL_RADIUS,
-    LIGHTING_BOUNCES_UNLIMITED, RESTIR_CANDIDATES, RESTIR_RESOLUTION_SCALE,
-    RESTIR_SPATIAL_CHECKERBOARD, RESTIR_SPATIAL_NEIGHBORS, RESTIR_SPATIAL_RADIUS,
-    RESTIR_SPLIT_PASSES,
+    check_lighting_arg, fill_legacy_divisor, fill_scaled_burst, lighting_arg_time_of_day,
+    lighting_env, lighting_env_flag, lighting_env_os, lighting_flag_needs_value,
+    parse_lighting_toggles, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
+    DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings,
+    LightingExperimentSettings, LightingPreset, LightingSettings, ProbeSettings, ShadowFilter,
+    ShadowSettings, SurfaceCacheBlend, SurfaceCacheSettings, WorldCacheSettings, FILL_FLOOR_PERIOD,
+    LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW, LAMP_PICK_CANDIDATES_MEDIUM,
+    LAMP_PICK_SPATIAL_RADIUS, LIGHTING_BOUNCES_UNLIMITED, LIGHTING_DEFAULT_SC_FLAGS,
+    LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_CELLS_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,
+    LIGHTING_TOGGLE_FREEZE_CACHE, LIGHTING_TOGGLE_FREEZE_PROBES, RESTIR_CANDIDATES,
+    RESTIR_RESOLUTION_SCALE, RESTIR_SPATIAL_CHECKERBOARD, RESTIR_SPATIAL_NEIGHBORS,
+    RESTIR_SPATIAL_RADIUS, RESTIR_SPLIT_PASSES,
 };
 pub use menu::{parse_focus_policy, parse_menu_visible, FocusPolicy, MenuCli, MenuSettings};
 pub use particles::{

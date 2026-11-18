@@ -1,7 +1,8 @@
 // Stages F2, F3, and F4a. The world cache is the only store. A cache round traces
-// one floor ray for each live cell whose slot index mod N equals the frame mod N,
-// plus fill_burst rays on the highest value cells. N is 1, 2, or 4. Word 0 stays
-// a positive enable; the plan writes the traced count. F4a writes a
+// one floor ray for each live cell every LIGHTING_FILL_FLOOR_PERIOD frames,
+// plus one ray every frame for a cell a mover is changing, plus fill_burst rays
+// on the highest value cells. The mover rays come out of that same budget.
+// Word 0 stays a positive enable; the plan writes the traced count. F4a writes a
 // low-confidence seed into other cells of the same screen tile. The seed is not
 // an own sample and it does not add a ray. Ring sharing is not this stage.
 // The radii, the weight, the fold, and the share gates match crates/fill-ref.
@@ -15,7 +16,7 @@
 // 22 share (0 off, 1 tile), 23 min hit, 24 own cap, 25 plane, 26 normal,
 // 27 weight cap, 28 cosine floor, 29 seed confidence, 30 receivers,
 // 31 share handover, in own rays. 0 means the warmup count (word 12).
-// 32 floor rate (1, 2, or 4; 0 leaves the floor off), 33 burst ray count.
+// 32 floor enable (0 off; any other value is one ray every 10 frames), 33 burst.
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
@@ -117,13 +118,15 @@ float lighting_fill_f(uint i) {
 bool lighting_ray_fill_on() {
     return lighting_world_mode() == 3u && lighting_fill_u(0) > 0u;
 }
-// 1, 2, or 4. 0 leaves the floor off. Any other value is every frame.
+// One floor ray per live cell every this many frames. A cell a mover is
+// changing is the exception: it is due every frame, and that ray is counted
+// out of the burst. 0 in the param word leaves the floor off.
+const uint LIGHTING_FILL_FLOOR_PERIOD = 10u;
 uint lighting_fill_rate() {
-    uint n = lighting_fill_u(32);
-    if (n == 0u || n == 2u || n == 4u) {
-        return n;
+    if (lighting_fill_u(32) == 0u) {
+        return 0u;
     }
-    return 1u;
+    return LIGHTING_FILL_FLOOR_PERIOD;
 }
 // The plan writes this. Word 0 is only the enable.
 uint lighting_fill_traced() {
@@ -188,14 +191,6 @@ uint lighting_fill_level_of_size(float size) {
     }
     return min(uint(floor(log2(size / max(base, FILL_EPS)) + FILL_HALF)), lighting_fill_lod_max());
 }
-vec3 lighting_fill_look() {
-    vec4 last = work.v[lighting_change_at() + 1u];
-    if (last.w < FILL_HALF) {
-        return vec3(0.0);
-    }
-    float dt = max(lighting_fill_f(14), FILL_TINY);
-    return (scene.eye.xyz - last.xyz) * (lighting_fill_f(4) / dt);
-}
 vec3 lighting_fill_fibonacci(uint i, uint n) {
     if (n == 0u) {
         return vec3(0.0, 1.0, 0.0);
@@ -218,8 +213,67 @@ void lighting_fill_free(uint slot) {
     cache.v[LIGHTING_SC_GRAD2_AT + slot] = vec4(0.0);
 }
 
-// The fine cell is past its leash and a coarser cell still covers the point.
-// Copy into an empty parent, then drop the fine one. A failed claim keeps it.
+uint lighting_fill_seed(uint slot);
+float lighting_fill_unit(float v);
+
+// Confidence-weighted merge of one cell into a coarser one. `src_scale` is
+// the source area over the destination area, so a child does not claim the
+// whole parent. The destination's value rises by the size step. The source
+// is freed by the caller.
+void lighting_fill_merge_into(uint dst, uint src, float src_scale) {
+    float scale = clamp(src_scale, 0.0, 1.0);
+    vec4 d = cache.v[3u * dst + 2u];
+    vec4 s = cache.v[3u * src + 2u];
+    float wd = max(d.w, 0.0);
+    float ws = max(s.w, 0.0) * scale;
+    float w = wd + ws;
+    if (!(w > 0.0)) {
+        return;
+    }
+    vec3 mean = (d.rgb * wd + s.rgb * ws) / w;
+    float ld = dot(max(d.rgb, vec3(0.0)), FILL_LUMA);
+    float ls = dot(max(s.rgb, vec3(0.0)), FILL_LUMA);
+    float lm = dot(max(mean, vec3(0.0)), FILL_LUMA);
+    float vd = max(cache.v[LIGHTING_SC_EST_AT + 2u * dst].w, 0.0);
+    float vs = max(cache.v[LIGHTING_SC_EST_AT + 2u * src].w, 0.0);
+    float var = (wd * (vd + (ld - lm) * (ld - lm)) + ws * (vs + (ls - lm) * (ls - lm))) / w;
+    cache.v[3u * dst + 2u] = vec4(mean, w);
+    vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * dst];
+    if (!(wd > 0.0)) {
+        ea.rgb = cache.v[LIGHTING_SC_EST_AT + 2u * src].rgb;
+    }
+    ea.w = var;
+    cache.v[LIGHTING_SC_EST_AT + 2u * dst] = ea;
+    vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * dst + 1u];
+    float rd = max(eb.w, 0.0);
+    float rs = max(cache.v[LIGHTING_SC_EST_AT + 2u * src + 1u].w, 0.0) * scale;
+    cache.v[LIGHTING_SC_EST_AT + 2u * dst + 1u] = vec4(eb.xyz, rd + rs);
+    if (lighting_sh_on()) {
+        vec3 c0;
+        vec3 cx;
+        vec3 cy;
+        vec3 cz;
+        vec3 s0;
+        vec3 sx;
+        vec3 sy;
+        vec3 sz;
+        lighting_sh_get(dst, c0, cx, cy, cz);
+        lighting_sh_get(src, s0, sx, sy, sz);
+        float inv = 1.0 / w;
+        lighting_sh_put(dst, (c0 * wd + s0 * ws) * inv, (cx * wd + sx * ws) * inv, (cy * wd + sy * ws) * inv, (cz * wd + sz * ws) * inv);
+    }
+    vec4 g = cache.v[LIGHTING_SC_GRAD_AT + dst];
+    uint want = lighting_fill_seed(dst);
+    if (floatBitsToUint(g.z) != want) {
+        g = vec4(0.0);
+        g.z = uintBitsToFloat(want);
+    }
+    g.x = max(lighting_fill_unit(g.x), 1.0 - scale);
+    cache.v[LIGHTING_SC_GRAD_AT + dst] = g;
+}
+
+// The cell is past the distance for its size. Merge it into the coarser cell
+// that still covers the point, then drop it. A failed claim keeps it.
 void lighting_fill_coarsen(uint slot, vec3 p, vec3 n, uint target) {
     float size = lighting_fill_cell_size(target);
     uint parent = lighting_cache_find_sized(p, n, true, size, p);
@@ -227,19 +281,9 @@ void lighting_fill_coarsen(uint slot, vec3 p, vec3 n, uint target) {
         return;
     }
     atomicAdd(gstats.diag[LIGHTING_RESET_COARSEN], 1u);
-    if (cache.v[3u * parent + 2u].w < FILL_HALF) {
-        cache.v[3u * parent + 2u] = cache.v[3u * slot + 2u];
-        cache.v[LIGHTING_SC_EST_AT + 2u * parent] = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
-        cache.v[LIGHTING_SC_EST_AT + 2u * parent + 1u] = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
-        if (lighting_sh_on()) {
-            vec3 c0;
-            vec3 cx;
-            vec3 cy;
-            vec3 cz;
-            lighting_sh_get(slot, c0, cx, cy, cz);
-            lighting_sh_put(parent, c0, cx, cy, cz);
-        }
-    }
+    float child = cache.v[3u * slot + 1u].w;
+    float scale = (child * child) / max(size * size, FILL_EPS);
+    lighting_fill_merge_into(parent, slot, scale);
     lighting_fill_free(slot);
 }
 
@@ -306,10 +350,9 @@ float lighting_fill_check_u(uint slot) {
     return lighting_unit(key ^ (seed * 0x85ebca6bu + 0x5bd1e995u));
 }
 
-// Off-screen cells stay in the same ranking, below an on-screen cell of the
-// same value and distance. Matches OFF_SCREEN_WEIGHT in crates/fill-ref.
-const float LIGHTING_FILL_OFF_SCREEN = 0.25;
-uint lighting_fill_q(uint slot, float d, bool on_screen) {
+// Rank is closeness times remaining error. On screen, off screen, and
+// occluded share that rank. The floor ray covers every live cell.
+uint lighting_fill_q(uint slot, float d) {
     vec4 shown_v = cache.v[3u * slot + 2u];
     vec4 est = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
     float rays = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w;
@@ -319,9 +362,6 @@ uint lighting_fill_q(uint slot, float d, bool on_screen) {
     float err = rays < FILL_HALF ? 1.0 : max(0.0, dev / mean - lighting_fill_f(9));
     float close = 1.0 / max(d, lighting_fill_f(10));
     float pri = close * (err + lighting_fill_f(11) * lam);
-    if (!on_screen) {
-        pri *= LIGHTING_FILL_OFF_SCREEN;
-    }
     return lighting_fill_bucket(pri);
 }
 
@@ -351,47 +391,40 @@ void lighting_fill_visit(uint slot) {
     }
     float size = cache.v[3u * slot + 1u].w;
     float base = lighting_fill_f(15);
-    uint last = floatBitsToUint(cache.v[3u * slot].w);
-    uint shown = floatBitsToUint(cache.v[LIGHTING_WORLD_AT + slot].z);
     lighting_fill_decay(slot);
+    // Size follows distance from the camera. Behind the camera, off screen,
+    // and occluded use the same leash. A cell inside it stays, including one
+    // the view has left.
     float d = length(p - scene.eye.xyz);
-    float extra = length(lighting_fill_look());
     if (size >= base * FILL_CELL_KEEP) {
         uint level = lighting_fill_level_of_size(size);
-        float keep = lighting_fill_leash(level) + extra;
+        float keep = lighting_fill_leash(level);
         if (d > keep) {
-            // Compose reads the base world cell on screen, including past the
-            // clipmap leash. Coarsen and evict only the off-screen copy.
-            uint px_keep;
-            uint py_keep;
-            if (!lighting_fill_pixel(p, px_keep, py_keep)) {
-                uint target = level;
-                uint cap = lighting_fill_lod_max();
-                while (target < cap && d > lighting_fill_leash(target) + extra) {
-                    target++;
-                }
-                if (target > level && d <= lighting_fill_leash(target) + extra) {
-                    lighting_fill_coarsen(slot, p, n, target);
-                } else if (d > lighting_fill_leash(target) + extra) {
-                    atomicAdd(gstats.diag[LIGHTING_RESET_LEASH], 1u);
-                    lighting_fill_free(slot);
-                }
-                return;
+            uint target = level;
+            uint cap = lighting_fill_lod_max();
+            while (target < cap && d > lighting_fill_leash(target)) {
+                target++;
             }
+            if (target > level && d <= lighting_fill_leash(target)) {
+                lighting_fill_coarsen(slot, p, n, target);
+            } else if (d > lighting_fill_leash(target)) {
+                atomicAdd(gstats.diag[LIGHTING_RESET_LEASH], 1u);
+                lighting_fill_free(slot);
+            }
+            return;
         }
-    } else if (lighting_sc_expired(last, shown)) {
-        atomicAdd(gstats.diag[LIGHTING_RESET_AGE], 1u);
-        lighting_fill_free(slot);
-        return;
+    } else {
+        float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
+        if (drop > 0.0 && d > drop) {
+            lighting_fill_coarsen(slot, p, n, 0u);
+            return;
+        }
     }
     // Compose reads the 12.5 cm texel (world mode 3's lighting_cell_size).
     // The 25 cm parent is the SH prior, so the texel still claims it. The
     // texel takes its own floor ray: compose shows that texel, and a per-cell
     // floor does not steal the parent's ray.
-    uint seen_x;
-    uint seen_y;
-    bool seen = lighting_fill_pixel(p, seen_x, seen_y);
-    if (size >= base && !seen) {
+    if (size >= base) {
         lighting_fine_spawn(slot);
     }
     // The 12.5 cm texel does not claim the 25 cm parent. That claim recreated
@@ -400,7 +433,7 @@ void lighting_fill_visit(uint slot) {
     if (size <= LIGHTING_WRC_CELL_SIZE && lighting_compact_hold_texel_rays(slot)) {
         return;
     }
-    uint q = lighting_fill_q(slot, d, seen);
+    uint q = lighting_fill_q(slot, d);
     uint rate = lighting_fill_rate();
     if (q > 0u) {
         atomicAdd(ckeys.key[lighting_fill_hist_at() + q], 1u);
@@ -410,12 +443,17 @@ void lighting_fill_visit(uint slot) {
             ckeys.key[lighting_fill_tile_at() + c] = packed;
         }
     }
-    // Slot index, so the same cell is due again N frames later. A dense
-    // counter would follow thread order and skip cells.
-    if (rate != 0u && (slot % rate) == (lighting_round() % rate)) {
+    // Slot index, so the same cell is due again every period. A cell a mover
+    // is changing is due every frame: that sample is what keeps or down-weights
+    // the stored mean. Header word 6 counts those mover rays.
+    bool mover_due = lighting_near_change(p);
+    if (rate != 0u && (mover_due || (slot % rate) == (lighting_round() % rate))) {
         uint i = atomicAdd(ckeys.key[lighting_fill_header_at()], 1u);
         if (i < lighting_fill_rays_max()) {
             ckeys.key[lighting_fill_pick_at() + i] = slot;
+            if (mover_due) {
+                atomicAdd(ckeys.key[lighting_fill_header_at() + 6u], 1u);
+            }
         }
     }
 }
@@ -672,6 +710,16 @@ void lighting_fill_dispatch() {
     // is a later parallel dispatch. This function does not walk tiles or slots.
     uint max_picks = clamp(lighting_fill_u(17), 1u, 64u);
     uint burst = lighting_fill_u(33);
+    // Mover rays are already in the floor count. The part past the 1/10 share
+    // comes out of the burst, so the round stays inside the device budget.
+    uint mover_rays = ckeys.key[lighting_fill_header_at() + 6u];
+    uint mover_extra = mover_rays - mover_rays / LIGHTING_FILL_FLOOR_PERIOD;
+    if (burst > mover_extra) {
+        burst -= mover_extra;
+    } else {
+        burst = 0u;
+    }
+    gstats.diag[LIGHTING_DIAG_MOVER_RAYS] = mover_rays;
     uint hist[64];
     uint serial = 0u;
     uint hist_at = lighting_fill_hist_at();
@@ -717,7 +765,6 @@ void lighting_fill_dispatch() {
     ckeys.key[LIGHTING_ARGS_AT + 9u] = total;
     ckeys.key[LIGHTING_ARGS_AT + 10u] = total;
     gstats.rays = 0u;
-    gstats.pad4 = 0u;
     gstats.pad2 = serial;
     gstats.due = floor_n;
     gstats.scouts = burst_take;
@@ -1291,7 +1338,7 @@ void lighting_fill_resolve(uint gid) {
             }
             vec3 pos = origin + dir * t;
             vec3 hn = lighting_unpack_normal(ckeys.key[lighting_fill_hit_at() + r * 2u + 1u]);
-            float d = length(pos - (scene.eye.xyz + lighting_fill_look()));
+            float d = length(pos - scene.eye.xyz);
             if (d > lighting_fill_f(6)) {
                 continue;
             }
