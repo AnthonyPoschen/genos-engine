@@ -5727,6 +5727,7 @@ impl Gpu {
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         let mut compose_host = std::mem::replace(&mut self.lighting.compose_host, Buffer::empty());
+        let mut mover_buf = std::mem::replace(&mut self.lighting.mover_buf, Buffer::empty());
         for k in 0..2 {
             let mut stats_dev = std::mem::replace(&mut self.lighting.stats_dev[k], Buffer::empty());
             self.destroy_buffer(&mut stats_dev);
@@ -5752,6 +5753,9 @@ impl Gpu {
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
         self.destroy_buffer(&mut compose_host);
+        // Binding 15 mover SSBO: skipping this left VkBuffer + memory alive and
+        // tripped VUID-vkDestroyDevice-device-05137 under gpu-integrity.
+        self.destroy_buffer(&mut mover_buf);
         unsafe {
             for pipe in self
                 .lighting
