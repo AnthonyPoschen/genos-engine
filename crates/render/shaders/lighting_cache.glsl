@@ -6628,10 +6628,18 @@ const float LIGHTING_HISTORY_NOISE = 1.0e-4;
 const float LIGHTING_HISTORY_SIGMA = 2.0;
 // Agreement lowers the value by this fraction of the full range.
 const float LIGHTING_HISTORY_DROP = 1.0 / 3.0;
+bool lighting_history_usable(vec3 c) {
+    return !isnan(c.x) && !isinf(c.x) && !isnan(c.y) && !isinf(c.y) && !isnan(c.z) && !isinf(c.z);
+}
+
 // History weight is one minus this value. A sample inside the stored noise
 // lowers the value by a third. A sample outside it raises the value by the
-// relative step. A cell with no mean yet stays at 1.
+// relative step. A cell with no mean yet stays at 1. A non-finite sample or
+// mean returns -1 and leaves the stored value: it is not agreement.
 float lighting_history_value(uint slot, vec3 old_rgb, vec3 sample_rgb) {
+    if (!lighting_history_usable(old_rgb) || !lighting_history_usable(sample_rgb)) {
+        return -1.0;
+    }
     vec4 shown = cache.v[3u * slot + 2u];
     float value = 1.0;
     if (shown.w >= LIGHTING_HISTORY_SHOWN) {
@@ -6780,8 +6788,12 @@ void lighting_svgf_push(uint slot) {
             // The stored field moves by the cell value. A lamp keep of 0, a
             // 1 mm move, and a luminance step do not take the target whole.
             float value = lighting_history_value(slot, prev, outc);
-            catch_up = clamp((1.0 - value) * catch_up + value, 0.0, 1.0);
-            outc = mix(prev, outc, catch_up);
+            if (value < 0.0) {
+                outc = prev;
+            } else {
+                catch_up = clamp((1.0 - value) * catch_up + value, 0.0, 1.0);
+                outc = mix(prev, outc, catch_up);
+            }
         }
     }
     uint field_pack = lighting_pack_rgb9e5(outc);

@@ -452,6 +452,9 @@ mod tests {
         sun_gain: f32,
     ) -> Held {
         let fresh = cell.sets < 0.5;
+        if !sample.iter().all(|v| v.is_finite()) || !cell.mean.iter().all(|v| v.is_finite()) {
+            return *cell;
+        }
         let t = if fresh { 0.0 } else { cell.sets };
         let add = 1.0;
         let mut wa = add / (t + add);

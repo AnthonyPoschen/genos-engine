@@ -1009,6 +1009,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     float sample_t = old.w < FILL_HALF ? 0.0 : lighting_sc_count(slot);
     float sample_add = n > 0.0 ? max(floor(n / float(LIGHTING_CACHE_RAYS)), 1.0) : 0.0;
     float blend = clamp(k, 0.0, 1.0);
+    bool accept = true;
     if (cell && n > 0.0) {
         blend = sample_add / max(sample_t + sample_add, FILL_EPS);
         if (lighting_sc_dark_fill() && sample_t < FILL_HALF * LIGHTING_WRC_CAP) {
@@ -1018,7 +1019,9 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         // A high value (the cell wants rays) raises the new sample's weight.
         // A lamp note, a 1 mm move, and the 1/8 and 1/32 floors do not.
         float value = lighting_history_value(slot, old.rgb, e);
-        blend = clamp(max(blend, value), 0.0, 1.0);
+        // -1 is an invalid sample. It does not lower the value and does not blend.
+        accept = value >= 0.0;
+        blend = accept ? clamp(max(blend, value), 0.0, 1.0) : 0.0;
     }
     vec3 mean = old.rgb;
     if (!cell && (lighting_sc_flags() & 1048576u) != 0u && lighting_sc_msme() && rays0 >= float(warmup) && old.w > FILL_HALF) {
@@ -1049,17 +1052,20 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
         b = vec4(vb, inc, k, b.w);
     } else if (cell) {
-        mean = old.w < FILL_HALF ? e : mix(old.rgb, e, blend);
+        mean = (accept && old.w < FILL_HALF) ? e : mix(old.rgb, e, blend);
         // The texel MSME fold above is `!cell`. A world cell still has to
         // store short variance or its priority falls to 0 after one ray.
-        lighting_fill_note_var(slot, e);
+        // An invalid sample does not.
+        if (accept) {
+            lighting_fill_note_var(slot, e);
+        }
     } else {
         mean = old.w < FILL_HALF ? e : mix(old.rgb, e, clamp(k, 0.0, 1.0));
     }
     float cap = float(lighting_fill_u(13));
     float rays_after = min(rays0 + n, max(cap, float(warmup)));
     cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u] = vec4(b.xyz, rays_after);
-    if (cell && lighting_sh_on()) {
+    if (cell && lighting_sh_on() && (accept || old.w >= LIGHTING_CACHE_HAS_W)) {
         float wr = LIGHTING_TAU;
         vec3 n0 = lk_mean * (wr * LIGHTING_SH_Y0);
         vec3 nx = shx * (wr * LIGHTING_SH_Y1);
@@ -1088,7 +1094,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     cache.v[3u * slot].w = uintBitsToFloat(max(lighting_frame(), 1u));
     cache.v[LIGHTING_SC_OBJ_AT + slot].y = uintBitsToFloat(lighting_frame());
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u) {
-        float shown_w = min(sample_t + sample_add, lighting_sc_cap(slot));
+        float shown_w = min(sample_t + (accept ? sample_add : 0.0), lighting_sc_cap(slot));
         vec4 shown = vec4(mean, shown_w);
         if (gstats.chg[31] != 0u) {
             lighting_chg(CHG_TEX_WRITE, 1u);

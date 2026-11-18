@@ -137,9 +137,13 @@ pub fn history_confidence(value: f32) -> f32 {
 }
 
 /// Blend one new sample into the stored mean. `confidence` is the weight of
-/// the history. Zero replaces the mean. One leaves it.
+/// the history. Zero replaces the mean. One leaves it. A non-finite sample
+/// or mean is not a sample: the stored mean stays.
 #[must_use]
 pub fn blend_with_confidence(mean: f32, confidence: f32, sample: f32) -> f32 {
+    if !sample.is_finite() || !mean.is_finite() {
+        return mean;
+    }
     let keep = if confidence.is_finite() {
         confidence.clamp(0.0, 1.0)
     } else {
@@ -149,7 +153,8 @@ pub fn blend_with_confidence(mean: f32, confidence: f32, sample: f32) -> f32 {
 }
 
 /// One agreement measure. A sample inside the stored noise lowers the value.
-/// A sample outside it raises the value by the relative step.
+/// A sample outside it raises the value by the relative step. A non-finite
+/// sample or mean is not agreement and does not move the value.
 #[must_use]
 pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32) -> f32 {
     let value = if value.is_finite() {
@@ -157,6 +162,9 @@ pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32) -> f32
     } else {
         0.0
     };
+    if !sample.is_finite() || !mean.is_finite() {
+        return value;
+    }
     if trickle_disagrees(sample, mean, variance) {
         (value + disagreement_raise(sample, mean)).min(1.0)
     } else {
@@ -448,6 +456,24 @@ mod tests {
         }
         assert_eq!(value, 0.0, "three agreeing frames clear a false alarm");
         assert_eq!(last_ranked, 0, "the ranked spend stops once confidence is back");
+    }
+
+    #[test]
+    fn a_non_finite_sample_does_not_agree_or_replace_the_mean() {
+        let value = 0.9_f32;
+        let mean = 1.25_f32;
+        for sample in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(apply_agreement(value, sample, mean, 1.0e-4), value);
+            assert_eq!(blend_with_confidence(mean, 0.25, sample), mean);
+        }
+        for stored in [f32::NAN, f32::INFINITY] {
+            assert_eq!(apply_agreement(value, mean, stored, 1.0e-4), value);
+            assert_eq!(
+                blend_with_confidence(stored, 0.25, 4.0).to_bits(),
+                stored.to_bits(),
+                "a non-finite mean must not take the new sample"
+            );
+        }
     }
 
     #[test]
