@@ -413,13 +413,10 @@ void lighting_fill_visit(uint slot) {
             }
             return;
         }
-    } else {
-        float drop = lighting_fine_word(LIGHTING_FINE_DROP_AT);
-        if (drop > 0.0 && d > drop) {
-            lighting_fill_coarsen(slot, p, n, 0u);
-            return;
-        }
     }
+    // A 12.5 cm texel is the only cell compose reads in world mode 3, at every
+    // distance. Coarsening it past the fine drop removed the hall outside that
+    // band. The drop still stops new children from being spawned.
     // Compose reads the 12.5 cm texel (world mode 3's lighting_cell_size).
     // The 25 cm parent is the SH prior, so the texel still claims it. The
     // texel takes its own floor ray: compose shows that texel, and a per-cell

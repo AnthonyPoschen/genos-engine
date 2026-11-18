@@ -2495,6 +2495,13 @@ impl Gpu {
                 if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
                     self.lighting.cache_rays = rays;
                 }
+                // The scaled burst is ceil(live/old) - ceil(live/10) on top of
+                // the stored burst. Mode 3 does not take the full stats read
+                // (S70B), and without this word the host uploads the stored
+                // burst only. The fence for this slot has already been waited.
+                if let Ok(live) = self.read_stats_word(self.lighting.stats[slot].memory, 2) {
+                    self.lighting.live = live;
+                }
                 // diag[8], a frame or two behind the dispatch that wrote it.
                 if let Ok(reach) = self.read_stats_word(self.lighting.stats[slot].memory, 32) {
                     self.lighting.reach_hot = (reach >> 16) & 0xfff;
@@ -2995,9 +3002,13 @@ impl Gpu {
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 // diag index is stats word 24 + index. See LIGHTING_RESET_* in lighting_cache.glsl.
                 eprintln!(
-                    "lightingreset {queue} frame {} live {} leash {} coarsen {} age {} evict {} adopt {} decay {} reproject {} direct_miss {} mean {} fade {} restir {} mover {} pool {} mover_rays {}",
+                    "lightingreset {queue} frame {} live {} floor {} burst {} mover_rays {} traced {} leash {} coarsen {} age {} evict {} adopt {} decay {} reproject {} direct_miss {} mean {} fade {} restir {} mover {} pool {}",
                     self.lighting.frame,
                     w[2],
+                    w[17],
+                    w[19],
+                    w[24 + 51],
+                    w[16],
                     w[24 + 42],
                     w[24 + 43],
                     w[24 + 44],
@@ -3010,8 +3021,7 @@ impl Gpu {
                     w[24 + 50],
                     w[24 + 7],
                     w[24 + 9],
-                    self.lighting.mover_cache.history_drops(),
-                    w[24 + 51]
+                    self.lighting.mover_cache.history_drops()
                 );
                 eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);

@@ -707,15 +707,15 @@ void prod_slide_note(uint rel, vec3 shown) {
         // in the change volume. Both keep the stored mean.
         lighting_sc_drop_stale_mover_world(on_slot);
         float drop_on = on_slot != ~0u && ckeys.key[on_slot] != 0u
-            && cache.v[3u * on_slot + 2u].w > 0.5 ? 1.0 : 0.0;
+            && cache.v[3u * on_slot + 2u].w > PROD_HALF ? 1.0 : 0.0;
         float drop_kept = floor_slot != ~0u && ckeys.key[floor_slot] != 0u
-            && cache.v[3u * floor_slot + 2u].w > 0.5 ? 1.0 : 0.0;
+            && cache.v[3u * floor_slot + 2u].w > PROD_HALF ? 1.0 : 0.0;
         if (floor_slot != ~0u) {
             cache.v[3u * floor_slot].w = uintBitsToFloat(lighting_frame() - 5u);
         }
         lighting_sc_drop_stale_mover_world(floor_slot);
         float drop_stale = floor_slot != ~0u && ckeys.key[floor_slot] != 0u
-            && cache.v[3u * floor_slot + 2u].w > 0.5 ? 1.0 : 0.0;
+            && cache.v[3u * floor_slot + 2u].w > PROD_HALF ? 1.0 : 0.0;
         // #288 black-slab regression: colliding mover oid on a far static
         // point must not return the pool colour as full-trust irradiance.
         vec3 far_p = vec3(PROD_SLIDE_FAR, 1.0, PROD_SLIDE_FAR);

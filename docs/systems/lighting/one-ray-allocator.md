@@ -58,7 +58,7 @@ The trigger is the problem. Most of these fire on a tiny change and drop a lot o
 5. With the urgent bit and flag 4096, a near mover wipes the stored hit point.
 6. `lighting_fill_coarsen` merges a fine cell into its parent when the cell is past the distance leash. The reach is distance from the camera. Lookahead and view direction are not part of it. The child is freed after the merge.
 7. `lighting_fine_evict` runs only when the pool needs a slot. Victim: past the drop distance, else the oldest touch, else the fewest sets.
-8. `lighting_fine_spawn` copies the parent's radiance into a new child, scaled by the area step, and raises the child's value by the same step.
+8. `lighting_fine_spawn` shows a new child the parent's prior, unscaled, and leaves the child's own mean empty so its rays replace that prior. Writing the parent into the mean kept the field on that copy. The area step raises the child's value.
 9. `lighting_shadow_epochs` drops that lamp's direct-light cache when the lamp moves or its colour changes, or the whole world is marked. A mover sphere does not bump the epoch. A shadow read inside a change sphere re-traces and leaves the cached bit.
 10. `restir_live.comp` cuts every pixel's history count down to this frame's candidates. Trigger: header word 39, any lamp change anywhere.
 11. `lighting_direct.comp` skips the running mean for every pixel on that same word 39. With the word clear, one step of the 12-bit log luma (about 1%) or a visibility flip still zeroes the mean.

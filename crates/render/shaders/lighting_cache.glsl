@@ -1066,6 +1066,7 @@ bool lighting_sc_local_on();
 bool lighting_fill_pixel(vec3 p, out uint px, out uint py);
 float lighting_fill_leash(uint level);
 float lighting_fill_create(uint level);
+float lighting_fill_f(uint i);
 float lighting_fine_word(uint at);
 void lighting_fine_raise_value(uint slot, float value);
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
@@ -1089,12 +1090,16 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     // A new cell is born inside its create distance. The loads stay outside
     // the size test: lavapipe faults when a wave skips a descriptor load
     // (the bounce presented-frame gate). Screen and occlusion do not decide.
+    // Mode 3 looks up a texel at every distance, so a texel claim uses the
+    // fill's far distance. fine_create is only who spawns off a parent; using
+    // it as the claim edge left the rest of the hall with no cell.
     float claim_dist = length(pos - scene.eye.xyz);
     float fine_create = lighting_fine_word(LIGHTING_FINE_CREATE_AT);
     float base_create = lighting_fill_create(0u);
+    float far = lighting_fill_f(6);
     float claim_limit = base_create;
     if (size <= LIGHTING_SC_TEXEL && fine_create > 0.0) {
-        claim_limit = fine_create;
+        claim_limit = far;
     }
     // create 0 means the fill radii were not uploaded. A fixture that plants
     // cells still claims. A live fill writes a positive radius and refuses past it.
@@ -2565,6 +2570,9 @@ void lighting_sc_clear_seed(uint slot) {
 }
 // Only the seed election's winner calls this. y and z land in one store, with
 // the sun fraction from the same payload, so two readers cannot split them.
+// lighting_sc_set_seed clamps confidence to this. A new child uses it as the
+// floor so a tiny area step does not store a zero-weight seed.
+const float LIGHTING_SC_SEED_FLOOR = 0.05;
 void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     if (!LIGHTING_SC_WRITES) {
         return;
@@ -2577,7 +2585,7 @@ void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac) {
     }
     cache.v[LIGHTING_SC_SPARSE_AT + slot].yz = vec2(
         uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0)))),
-        clamp(conf, 0.05, 1.0));
+        clamp(conf, LIGHTING_SC_SEED_FLOOR, 1.0));
 }
 // A fill seed stores its confidence above this. The 16-set handover does not
 // read the mark. Detail seeds stay negative and below it.
@@ -4353,42 +4361,41 @@ void lighting_fine_spawn(uint slot) {
             all = false;
         } else {
             vec4 mark = cache.v[LIGHTING_SC_SHOWN_AT + born];
+            // A later retry must not touch a child that already has samples.
+            bool fresh = !(mark.y > LIGHTING_FINE_VALID);
             mark.y = 1.0;
-            // The child keeps the parent's radiance. Confidence scales with
-            // the area step (12.5 cm over the parent), and the value rises by
-            // the same step so the next rays check the inherited mean.
-            vec4 parent_mean = cache.v[3u * slot + 2u];
-            float parent_size = max(cache.v[3u * slot + 1u].w, LIGHTING_SC_TEXEL);
-            float area = clamp((LIGHTING_SC_TEXEL * LIGHTING_SC_TEXEL) / (parent_size * parent_size), 0.0, 1.0);
-            bool inherited = parent_mean.w > LIGHTING_SC_SET_HALF;
-            if (inherited) {
-                float sets = parent_mean.w * area;
-                cache.v[3u * born + 2u] = vec4(parent_mean.rgb, sets);
-                vec4 ea = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
-                cache.v[LIGHTING_SC_EST_AT + 2u * born] = ea;
-                vec4 eb = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
-                cache.v[LIGHTING_SC_EST_AT + 2u * born + 1u] = vec4(eb.xyz, max(eb.w, 0.0) * area);
-                lighting_fine_raise_value(born, 1.0 - area);
-                lighting_sc_set_seed(born, parent_mean.rgb, max(area, 0.05), lighting_sc_sunfrac_now(slot));
-                mark.z = sets;
-                mark.w = max(ea.w, 0.0);
-                atomicAdd(gstats.diag[LIGHTING_RESET_ADOPT], 1u);
-            }
 #ifndef GENOS_COMPOSE_NO_WALK
-            else {
+            if (fresh) {
+                // The displayed radiance is the parent's prior, unscaled. The
+                // child's own mean stays empty so its rays replace the prior
+                // once it has a ready set. Writing the parent into the mean
+                // scaled the field and the later rays sampled that copy.
+                vec4 parent_mean = cache.v[3u * slot + 2u];
+                float parent_size = max(cache.v[3u * slot + 1u].w, LIGHTING_SC_TEXEL);
+                float area = clamp((LIGHTING_SC_TEXEL * LIGHTING_SC_TEXEL) / (parent_size * parent_size), 0.0, 1.0);
                 vec3 pr;
                 float pn;
                 float pv;
                 float ps;
                 lighting_fine_prior(q, n, pr, pn, pv, ps);
+                if (!(pn > LIGHTING_SC_SET_HALF) && parent_mean.w > LIGHTING_SC_SET_HALF) {
+                    pr = parent_mean.rgb;
+                    pn = parent_mean.w;
+                    pv = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot].w, 0.0);
+                    ps = lighting_sc_sunfrac_now(slot);
+                }
                 if (pn > LIGHTING_SC_SET_HALF) {
-                    lighting_sc_set_seed(born, pr, max(area, 0.05), ps);
-                    mark.z = pn * area;
+                    // The seed weight stays 1. A lower weight scaled the displayed
+                    // field down, and the rays then sampled that darker copy.
+                    lighting_sc_set_seed(born, pr, 1.0, ps);
+                    mark.z = pn;
                     mark.w = pv;
+                    lighting_fine_raise_value(born, 1.0 - area);
+                    atomicAdd(gstats.diag[LIGHTING_RESET_ADOPT], 1u);
                 }
             }
             cache.v[LIGHTING_SC_SHOWN_AT + born] = mark;
-            if (inherited || cache.v[LIGHTING_SC_SHOWN_AT + born].z > LIGHTING_SC_SET_HALF) {
+            if (fresh && cache.v[LIGHTING_SC_SHOWN_AT + born].z > LIGHTING_SC_SET_HALF) {
                 lighting_fine_publish(born);
             }
 #else

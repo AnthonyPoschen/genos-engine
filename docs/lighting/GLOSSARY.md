@@ -470,7 +470,7 @@ Role: SCHED · Literature: a per-cell sample floor · More detail: [../systems/l
 **Floor period**: every live cell is due when its slot index mod 10 equals the frame mod 10. A cell inside a mover's change volume is due every frame while that mover is moving, then returns to the period. The old `fill_floor_rate` values 1, 2, and 4 are removed; a saved key warns and is ignored.
 Role: SCHED · Literature: a round-robin sample · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
-**Burst budget**: `fill_burst`. Extra rays spent highest-value first after the floor (value times closeness). `0` spends none of the ranked pool. High stores 25000, Medium 12500, Low 6250. The device adds the rays the 1-in-10 floor no longer spends, so the round stays about the old floor plus this burst. The mover rays past that 1-in-10 share then come out of the burst. One cell takes at most `fill_max_picks` of the burst (High default 4, range 1 to 64).
+**Burst budget**: `fill_burst`. Extra rays spent highest-value first after the floor (value times closeness). `0` spends none of the ranked pool. High stores 25000, Medium 12500, Low 6250. The host adds the rays the 1-in-10 floor no longer spends, from the live-cell count, so the round stays about the old floor plus this burst. The mover rays past that 1-in-10 share then come out of the burst. One cell takes at most `fill_max_picks` of the burst (High default 4, range 1 to 64).
 Role: SCHED · Literature: a priority budget on top of a floor · More detail: [../systems/lighting/one-ray-allocator.md](../systems/lighting/one-ray-allocator.md)
 
 **Deposit**: the fixed-point sum of a frame's samples for one cache entry. One resolve writes the entry.
