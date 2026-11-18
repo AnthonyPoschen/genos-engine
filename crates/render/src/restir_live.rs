@@ -220,8 +220,9 @@ fn word_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
-/// Records where the changed-lamp bitset starts and whether any bit is set,
-/// so the temporal clamp can apply to every history sample alike.
+/// Records where the changed-lamp bitset starts and whether any bit is set.
+/// Word 39 is the any-bit early-out. The shaders drop history only where a
+/// set bit's lamp reaches the pixel.
 fn mark_changed(words: &mut [u32], changed_base: usize) {
     words[CHANGED_AT_WORD] = word_u32(changed_base);
     let any = words
