@@ -198,9 +198,10 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         commit[cell_arm..cell_arm + after_cell].contains("lighting_fill_note_var(slot, e)"),
         "a world cell must store short variance in its own deposit"
     );
+    let texel = &commit[cell_arm + after_cell..];
     assert!(
-        !commit[cell_arm + after_cell..].contains("lighting_fill_note_var"),
-        "the variance note must not sit in the branch a world cell skips"
+        texel.contains("old.w >= FILL_HALF") && texel.contains("lighting_fill_note_var(slot, e)"),
+        "a texel with a shown mean notes variance so agreement can fall before the MSME warmup"
     );
     assert!(
         fill.contains("lighting_fill_share("),
@@ -381,8 +382,8 @@ fn the_fill_visit_rays_the_screen_texel_and_claims_its_parent() {
     let cache = source("lighting_cache.glsl");
     let find = function_body(&cache, "uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at)");
     assert!(
-        find.contains("lighting_fill_create(0u)"),
-        "a claim past the create distance is refused"
+        find.contains("lighting_fill_leash(0u)") && find.contains("!lighting_fill_pixel"),
+        "an off-screen claim past the level-0 leash is refused; on screen the claim stands"
     );
     assert!(
         !visit.contains("atomicMax"),
