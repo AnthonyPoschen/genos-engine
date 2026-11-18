@@ -1083,11 +1083,14 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     }
     // A cell this size past the level-0 leash, and off screen, is coarsened
     // on the next visit. Claiming it again is a steady wipe. On screen, and
-    // inside the leash, the claim stands.
+    // inside the leash, the claim stands. The leash is read on every claim:
+    // a load inside this branch faults in lavapipe when the wave skips it
+    // (the bounce presented-frame gate).
+    float leash0 = lighting_fill_leash(0u);
     if (size <= LIGHTING_SC_HIT) {
         uint keep_x;
         uint keep_y;
-        if (!lighting_fill_pixel(pos, keep_x, keep_y) && length(pos - scene.eye.xyz) > lighting_fill_leash(0u)) {
+        if (!lighting_fill_pixel(pos, keep_x, keep_y) && length(pos - scene.eye.xyz) > leash0) {
             return ~0u;
         }
     }

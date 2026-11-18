@@ -167,10 +167,15 @@ float lighting_fill_cell_size(uint level) {
     return min(lighting_fill_f(15) * exp2(float(level)), lighting_fill_f(5));
 }
 float lighting_fill_create(uint level) {
-    if (level >= lighting_fill_lod_max()) {
-        return lighting_fill_f(6);
-    }
-    return lighting_fill_f(2) * exp2(float(level));
+    // Both distances load on every call. The far load used to sit in the
+    // coarsest-level branch. Lavapipe still executes that load when the
+    // wave's mask is empty and faults on a null descriptor. The bounce
+    // presented-frame gate does that: a level-0 leash is not the coarsest
+    // level, so the branch is uniformly skipped.
+    float far = lighting_fill_f(6);
+    float grown = lighting_fill_f(2) * exp2(float(level));
+    float at_cap = float(level >= lighting_fill_lod_max());
+    return mix(grown, far, at_cap);
 }
 float lighting_fill_leash(uint level) {
     // Coarsest level included. fill_far alone would create and drop on a jitter.
