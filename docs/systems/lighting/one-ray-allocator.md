@@ -105,3 +105,11 @@ Lavapipe, hall, near error against the path reference (`1 / max(distance, 0.5 m)
 | Boxes and lamps moving | Cell size does not flip between 12.5 cm and 25 cm because something moved. A cell changes size only by crossing the distance band. |
 
 Direct pixels follow the first row on their own mean: a small lamp step keeps more of the mean than today's word-39 clear, and a lamp that goes out still drops inside its old ball.
+
+## Later: neighbour light
+
+Not built.
+
+A cell may borrow light through the level-of-detail tree, looking up to its parent and down to its children. A fine cell near the camera can reach farther than the cells that touch it: its parent, and the rings two and three cells out, so a small cell draws on a wider patch of the world. The weight falls off with distance. Two small cells close together share strongly. Two large cells far apart share weakly. The weight also follows how well the two cells match.
+
+Borrowed light is a guess. Every frame the cell's own ray scores the light already stored and the light it borrowed, and when the borrowed light clearly wins it replaces what was stored, so a day that turns to night goes black instead of grey. The guess comes only from a neighbour's own ray. A cell does not pass on light it borrowed, so the guess travels one hop. Taking a borrow raises that cell's value, and the next rays are what check it.
