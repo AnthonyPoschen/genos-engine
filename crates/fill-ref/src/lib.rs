@@ -39,7 +39,7 @@
 //! Determinism: hashes of tile, frame and cell, and integer deposit sums.
 //! Headless server: this crate is headless. A game server does not run it.
 
-mod alloc;
+pub mod alloc;
 mod commit;
 mod deposit;
 mod pick;

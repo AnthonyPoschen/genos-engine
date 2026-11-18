@@ -411,7 +411,9 @@ fn push_fill_emit(out: &mut LightGroups, settings: &LightingSettings, _w: u32, _
     if !fill_parallel(settings) {
         return;
     }
-    let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
+    let slots = u32::try_from(LIGHTING_CACHE_SLOTS)
+        .unwrap_or(u32::MAX)
+        .div_ceil(64);
     out.push(0, slots, LIGHTING_FILL_EMIT_ON, B_COMPACT);
 }
 
@@ -781,7 +783,7 @@ mod probe_still_tests {
         let emit = moving.groups.iter().find(|g| g.2 == LIGHTING_FILL_EMIT_ON).unwrap();
         assert_eq!(
             emit.1.saturating_mul(64),
-            LIGHTING_CACHE_SLOTS as u32,
+            u32::try_from(LIGHTING_CACHE_SLOTS).unwrap_or(u32::MAX),
             "the spend walks every cache slot"
         );
         let visit = moving.groups.iter().position(|g| g.2 == 1 && g.0 == 0);

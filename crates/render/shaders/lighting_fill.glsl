@@ -50,6 +50,7 @@ const float FILL_BUCKET_STEPS = 62.0;
 const float FILL_T_EPS = 1.0e-3;
 const float FILL_Q10 = 1023.0;
 const float FILL_SHARE_COS0 = 0.05;
+const float FILL_OFF_SCREEN = 0.25;
 const vec3 FILL_MSME = vec3(0.299, 0.587, 0.114);
 
 const uint LIGHTING_FILL_PARAMS = 32u;
@@ -360,7 +361,7 @@ void lighting_fill_visit(uint slot) {
     // so the trickle floor can still draw it.
     uint px;
     uint py;
-    float screen = lighting_fill_pixel(p, px, py) ? 1.0 : 0.25;
+    float screen = lighting_fill_pixel(p, px, py) ? 1.0 : FILL_OFF_SCREEN;
     uint q = lighting_fill_q(slot, d, screen);
     ckeys.key[lighting_fill_lock_at() + slot] = (q & 63u) | 64u;
     if (q > 0u) {

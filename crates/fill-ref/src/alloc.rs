@@ -68,11 +68,28 @@ pub fn cell_rank(cell: &CellBid, tun: &Tunables) -> f32 {
 /// Rays reserved before the ranked spend. Zero when the floor is 0.
 #[must_use]
 pub fn trickle_count(budget: u32, fraction: f32) -> u32 {
-    if budget == 0 || !(fraction > 0.0) || !fraction.is_finite() {
+    if budget == 0 || !fraction.is_finite() || fraction <= 0.0 {
         return 0;
     }
-    let n = (f64::from(budget) * f64::from(fraction.clamp(0.0, 1.0))).ceil();
-    u32::try_from(n as u64).unwrap_or(budget).min(budget)
+    let fraction = fraction.clamp(0.0, 1.0);
+    let target = (f64::from(budget) * f64::from(fraction)).ceil();
+    if !target.is_finite() || target <= 0.0 {
+        return 0;
+    }
+    if target >= f64::from(budget) {
+        return budget;
+    }
+    let mut lo = 0u32;
+    let mut hi = budget;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if f64::from(mid) < target {
+            lo = mid.saturating_add(1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 fn hash_u32(mut v: u32) -> u32 {
@@ -89,7 +106,7 @@ fn hash_u32(mut v: u32) -> u32 {
 #[must_use]
 pub fn trickle_due(id: u32, frame: u32, rate: u32) -> bool {
     let rate = rate.max(1);
-    hash_u32(id ^ hash_u32(frame)) % rate == 0
+    hash_u32(id ^ hash_u32(frame)).is_multiple_of(rate)
 }
 
 /// True when a fresh sample is outside the noise the stored variance allows.
@@ -188,10 +205,26 @@ pub fn blend_mean(mean: f32, rays: u32, sample: f32, n: u32) -> (f32, u32) {
     if n == 0 {
         return (mean, rays);
     }
-    let rays_n = f64::from(rays);
-    let n_n = f64::from(n);
-    let mixed = (rays_n * f64::from(mean) + n_n * f64::from(sample)) / (rays_n + n_n);
-    (mixed as f32, rays.saturating_add(n))
+    let total = rays.saturating_add(n);
+    let rays_n = f32_from_u32(rays);
+    let n_n = f32_from_u32(n);
+    let mixed = (rays_n * mean + n_n * sample) / f32_from_u32(total);
+    (mixed, total)
+}
+
+/// Exact for every `v` below 2^24, which covers a fill budget.
+fn f32_from_u32(v: u32) -> f32 {
+    let mut n = v;
+    let mut acc = 0.0f32;
+    let mut place = 1.0f32;
+    while n > 0 {
+        if n & 1 == 1 {
+            acc += place;
+        }
+        place += place;
+        n >>= 1;
+    }
+    acc
 }
 
 #[cfg(test)]
@@ -218,10 +251,10 @@ mod tests {
         assert_eq!(cell_value(&fresh, &tun), 1.0);
         assert!(cell_value(&done, &tun) < cell_value(&fresh, &tun));
         let grants = allocate(&[done, fresh], 4, &tun, 0);
-        let fresh_rays = grants.iter().find(|g| g.id == 1).unwrap().rays;
-        let done_rays = grants.iter().find(|g| g.id == 2).unwrap().rays;
+        let fresh_rays = grants.iter().find(|g| g.id == 1).map(|g| g.rays);
+        let done_rays = grants.iter().find(|g| g.id == 2).map(|g| g.rays);
         assert!(fresh_rays > done_rays);
-        assert!(fresh_rays > 0);
+        assert!(fresh_rays.is_some_and(|rays| rays > 0));
     }
 
     #[test]
@@ -236,7 +269,7 @@ mod tests {
         let mut high = bid(3, 0, 2.0);
         high.lambda = 0.0;
         let grants = allocate(&[low, mid, high], 1, &tun, 0);
-        assert_eq!(grants.iter().find(|g| g.id == 3).unwrap().rays, 1);
+        assert_eq!(grants.iter().find(|g| g.id == 3).map(|g| g.rays), Some(1));
         assert_eq!(grants.iter().filter(|g| g.rays > 0).count(), 1);
     }
 
@@ -253,7 +286,9 @@ mod tests {
     #[test]
     fn the_grant_never_passes_the_budget() {
         let tun = Tunables::high();
-        let cells: Vec<_> = (0..40).map(|id| bid(id, id % 5, 1.0 + id as f32)).collect();
+        let cells: Vec<_> = (0..40u32)
+            .map(|id| bid(id, id % 5, 1.0 + f32::from(u16::try_from(id).unwrap_or(0))))
+            .collect();
         let grants = allocate(&cells, tun.budget, &tun, 3);
         let total: u32 = grants.iter().map(|g| g.rays).sum();
         assert!(total <= tun.budget);
