@@ -171,8 +171,8 @@ fn a_mover_slides_without_stepping_on_world_cells() {
     // trailer probe exercises warm-up (samples=2 + outside prior) on the live
     // gather (`warm_ok`); compose's stored-id load is
     // `compose_lattice_warm_up_prior_loads_stored_ids`. A mover hit must not
-    // claim a world cell. A world cell on the mover drops now; one inside the
-    // change volume drops after two unread frames and a fresh floor cell stays.
+    // claim a world cell. A world cell on the mover stays, including one the
+    // mover has not read for a few frames, and so does a fresh floor cell.
     let mut owner = open().expect("lavapipe device");
     let renderer = &mut *owner.device;
     assert_eq!(renderer.gpu_kind(), GpuKind::Software);
@@ -238,11 +238,11 @@ fn a_mover_slides_without_stepping_on_world_cells() {
     assert!(slide.bleed.abs() <= ABS, "a world colour appeared on the box");
     assert!(
         (slide.drop_on - 1.0).abs() <= ABS,
-        "a world cell on the mover was kept"
+        "a world cell on the mover was dropped"
     );
     assert!(
         (slide.drop_stale - 1.0).abs() <= ABS,
-        "an unread world cell in the change volume was kept"
+        "an unread world cell in the change volume was dropped"
     );
     assert!(
         (slide.drop_kept - 1.0).abs() <= ABS,

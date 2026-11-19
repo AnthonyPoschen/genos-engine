@@ -30,7 +30,7 @@ const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 3;
 /// Small mover pool for the production fixture (binding 15).
-const MOVER_POOL_CAP: u32 = 32;
+const MOVER_POOL_CAP: u32 = 1536;
 
 pub(super) struct Pipe {
     scene: Buffer,

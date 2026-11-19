@@ -6274,10 +6274,10 @@ void lighting_reach_raise_px(uvec2 px) {
 }
 // A world cell whose new sample left its mean. The note is the cell's square,
 // not the centre: a centre tile misses the rest of the footprint. While a
-// mover is listed those tiles join even outside the mover disc. A tile
+// mover is listed, a tile joins only when the sample leaves the band. A tile
 // already marked stays while the sample is still outside the band, including
-// the frames after the mover stops, and drops once it is not. A cell the
-// mover reaches joins while that mover is listed. A cell on or behind the
+// the frames after the mover stops, and drops once it is not. A cell a mover
+// is changing stays held while its ray agrees. A cell on or behind the
 // camera covers nothing. Half the picture unholds the picture.
 void lighting_reach_note_cell(uint slot, vec3 mean, vec3 taken) {
     if (slot >= LIGHTING_CACHE_SLOTS) {
@@ -6294,13 +6294,9 @@ void lighting_reach_note_cell(uint slot, vec3 mean, vec3 taken) {
     }
     bool hot = lighting_reach_radiance_hot(taken, mean, slot);
     lighting_reach_note_resid(slot, taken, mean);
-    // The residual tail is a few cells and it is not the mover: fill noise
-    // hides a far box's bounce. A cell the mover actually reaches joins on
-    // that fact. The quarter-and-residual test is what joins a cell outside
-    // that disc.
-    if (!hot && lighting_reach_noting() && lighting_near_change(cache.v[3u * slot].xyz)) {
-        hot = true;
-    }
+    // A cell a mover is changing used to join on that fact, every frame, so
+    // the tile rebuilt whether or not the fresh ray agreed with the mean.
+    // The ray is the judgement: inside the band the tile stays held.
     if (!hot) {
         return;
     }
@@ -6332,12 +6328,15 @@ bool lighting_change_reaches() {
     return head.y > LIGHTING_CHANGES_DROPPED;
 }
 // A lamp, the open, or a dropped change list is the whole picture. A mover is
-// the tile the reach pass marked. Compose has already stored the pixel.
+// the surface inside its change sphere: the picture compile cannot read the
+// reach tile bitset, and a screen-space bounce held while that surface moves
+// paints the previous pixel's cells onto the face. The sphere test is the
+// walk. A cell whose ray agrees still walks, because the surface moved.
 bool lighting_pixel_reached(vec3 p) {
     // Compose reads the block stamp at the call. The tile bitset's address
     // does not fit in that compile. The screen wavelet still uses the bitset.
 #ifdef GENOS_COMPOSE_NO_WALK
-    return lighting_change_reaches() || p.x != p.x;
+    return lighting_change_reaches() || p.x != p.x || lighting_near_change(p);
 #else
     return lighting_change_reaches() || p.x != p.x || lighting_reach_tile_bit(lighting_compose_px);
 #endif
@@ -6707,8 +6706,20 @@ float lighting_history_value(uint slot, vec3 old_rgb, vec3 sample_rgb) {
         float variance = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot].w, 0.0);
         // Standard error of the mean. The sample spread hid a shifted mean:
         // every new ray looked like agreement, so the value stayed 0.
+        // A cell a mover is changing is sampled every frame. That standard
+        // error shrinks without bound, so one hemisphere ray always looks
+        // like a shift and the value sticks at 1. The short variance follows
+        // the ray, so it is smaller than the ray too. The spread around the
+        // stored mean is est+1 .z. Until that spread exists, the noise is
+        // the signal: one ray is as large as the mean.
         float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w, 1.0);
-        float noise = max(sqrt(variance / rays), LIGHTING_HISTORY_NOISE);
+        float noise = sqrt(variance / rays);
+        noise = max(noise, LIGHTING_HISTORY_NOISE);
+        if (lighting_near_change(cache.v[3u * slot].xyz)) {
+            float spread = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].z;
+            float scale = max(max(sample_l, mean_l), LIGHTING_HISTORY_NOISE);
+            noise = spread > LIGHTING_HISTORY_NOISE ? max(sqrt(spread), scale) : scale;
+        }
         if (abs(sample_l - mean_l) > LIGHTING_HISTORY_SIGMA * noise) {
             float denom = max(max(abs(sample_l), abs(mean_l)), LIGHTING_HISTORY_NOISE);
             value = min(1.0, value + abs(sample_l - mean_l) / denom);
