@@ -13,7 +13,7 @@ Literature columns: GIBS (EA SEED 2021 surfels), DDGI (Majercik 2019 probes), Lu
 ## Glossary
 
 ### Frame and output
-**Direct light**: light that reaches a pixel straight from a lamp or the sun, with a shadow ray.
+**Direct light**: light that reaches a pixel straight from a lamp or the sun. An exact shadow ray aims at one point on the lamp disc or the sun disc. The running mean of those samples is the penumbra.
 Role: OUT · Literature: GIBS direct + shadow rays; Lumen direct lighting; DDGI —
 More detail: [`crates/render/shaders/lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp), `DirectSettings` in [`crates/scene/src/lighting.rs`](../../crates/scene/src/lighting.rs)
 
@@ -33,7 +33,7 @@ More detail: [`lighting_compose.comp`](../../crates/render/shaders/lighting_comp
 **Sky light**: what a GI ray reads when it misses all geometry.
 Role: SAMPLE · Literature: GIBS sky on miss (§1.11); DDGI/Lumen same · More detail: `--no-sky`
 
-**Sun**: the one directional light. It is always traced, never lamp-picked.
+**Sun**: the one directional light. It is always traced, never lamp-picked. Its exact shadow is the sun disc.
 Role: LIGHTS · Literature: GIBS treats it as a shadow-ray light · More detail: `--lighting-sun`
 
 **Ambient fill**: a flat light used only when GI is off (constant/hemisphere/day/curve). It is not GI.
@@ -223,8 +223,14 @@ Role: SCHED · Literature: Lumen surface-cache update priority · More detail: [
 Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete levels) · More detail: [design §6](../systems/lighting/localized-invalidation-design.md)
 
 ### Lamps and shadows
-**Lamp**: a point light. The sun is not a lamp.
+**Lamp**: a point light. The sun is not a lamp. Its exact shadow is the lamp disc.
 Role: LIGHTS
+
+**Lamp disc**: the 0.1 m disc (`LAMP_RADIUS`) a pixel's exact shadow ray samples for a point lamp. The irradiance stays the centre point formula times the visible fraction.
+Role: VIS · Literature: PBRT uniform disc (pdf 1/(π R²)) · More detail: [`lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp)
+
+**Sun disc**: the sun's exact shadow, the mean solar semi-diameter 0.00465047 rad (`SUN_DISC`) at the 80 m target. One sample per frame, folded into the same mean as the lamp disc.
+Role: VIS · Literature: IAU solar semi-diameter; PBRT uniform disc · More detail: [`lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp)
 
 **Lamp pick**: chooses a few lamps per shaded hit, weighted by their expected contribution. Modes: `off`, `hits` (`gi-1bounce`), `pixels`, `both`, `reuse`. Production screen pixels do not use this pick. They use ReSTIR DI. `reuse (experimental)` is a deprecated value and logs a warning.
 Role: LIGHTS · Literature: RIS (Talbot 2005) · More detail: [`lighting_lamp_pick.glsl`](../../crates/render/shaders/lighting_lamp_pick.glsl)
