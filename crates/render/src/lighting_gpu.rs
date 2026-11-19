@@ -2812,16 +2812,28 @@ impl Gpu {
         if sun_compose || maint.is_null() || drain.is_null() {
             return;
         }
-        // The walk is four world-cache finds per pixel of every dirty block,
-        // and the colour is thrown away. The drain then fills the lattice the
-        // picture compile reads. On a held camera that lattice is already
-        // filled. Frame 32 (and a camera move, which takes the full grid)
-        // requests it again.
+        // Publish reads the lattice centre, or the cell on a miss. The colour
+        // this walk produces is thrown away. The drain fills the centre the
+        // publish pass reads. A camera move does not rebuild the lattice.
+        // The opening, the 32-frame refresh, and a mover's reach still request
+        // it. A held camera with nothing local still returns, which is the
+        // still-idle probe.
         let refresh = self.lighting.frame != 0
             && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
-        // A mover's tiles need the lattice this frame. A held camera with
-        // nothing local still returns, which is the still-idle probe.
-        if self.lighting.still > 0 && !compose_full && !refresh && self.lighting.reach_arm == 0 {
+        let opening = self.lighting.frame != 0 && self.lighting.frame < LIGHTING_FILL_WALK;
+        let bounce_filling = self.lighting.bounce_fill < BOUNCE_FILL_FRAMES;
+        let blocks = u64::from(gx) * u64::from(gy);
+        let lattice = bounce_filling
+            || opening
+            || refresh
+            || !self.lighting.compose_valid
+            || self.lighting.settings.world_mode() != 3
+            || !self.lighting.settings.compose_reuse
+            || !self.lighting.settings.gi.enabled
+            || blocks > LIGHTING_COMPOSE_CAP
+            || (self.particle_stamped && !self.lighting.hdr.legacy_bytes)
+            || self.lighting.reach_arm != 0;
+        if !lattice {
             return;
         }
         self.lighting.maint_ran = true;

@@ -316,6 +316,10 @@ mod tests {
         );
         assert!(gpu.contains("cascade_pub_pipe"));
         assert!(
+            gpu.contains("A camera move does not rebuild the lattice"),
+            "a move does not schedule the lattice drain"
+        );
+        assert!(
             !probe.contains("lighting_cascade_insert"),
             "picture compose does not insert into the level-0 hash"
         );
