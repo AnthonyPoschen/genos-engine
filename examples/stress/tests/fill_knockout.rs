@@ -286,12 +286,18 @@ fn the_presented_frame_moves_when_the_cache_fills() {
 const ENERGY_FRAMES: usize = 400;
 /// Whole-frame and mid-third mean sRGB luma (Rec.709 weights on the 8-bit
 /// codes). Lavapipe hall, 320×180, 1/60, frozen sun, still boxes, three moving
-/// lamps, frame 400. The every-frame floor is 127.81 / 107.33. This floor
-/// measured 127.74 / 107.35. The 1-in-10 floor that kept replacing the cell
-/// mean was 174.91 / 174.73. A few percent of the every-frame hall; the
-/// washout and the stalled mean both fall outside.
+/// lamps, frame 400. The every-frame floor, the path reference for this pose,
+/// is 127.81 / 107.33. This floor measured 127.74 / 107.35. The 1-in-10 floor
+/// that kept replacing the cell mean was 174.91 / 174.73.
+///
+/// The mid ceiling used to be the exclusive end 113. That fit the shared-u
+/// tail walk, which prefers the early weak lamps. The inverse-CDF draw is the
+/// probability `tail_sum / w` assumes. Four lavapipe runs of that draw were
+/// mid 112.37, 113.00, 113.07, and 114.00 (all 131.47 to 132.48). The ceiling
+/// is the exclusive end 116: 8% above the path-reference mid 107.33
+/// (107.33 * 1.08 = 115.9) and still far from the wash at 174.73.
 const ENERGY_ALL_MAX: f64 = 136.0;
-const ENERGY_MID_MAX: f64 = 113.0;
+const ENERGY_MID_MAX: f64 = 116.0;
 const ENERGY_ALL_MIN: f64 = 120.0;
 const ENERGY_MID_MIN: f64 = 101.0;
 

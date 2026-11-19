@@ -196,6 +196,25 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(pick.contains("const uint RESTIR_MEAN_CAP = 4096u;"));
 }
 
+/// The tail lamp is one draw against the finished weight sum. Picking while
+/// that sum is still growing is not the probability `tail_sum / w` assumes.
+#[test]
+fn the_tail_draw_uses_the_finished_weight_sum() {
+    let direct = include_str!("../shaders/lighting_direct.comp");
+    let tail_sum_at = direct
+        .find("cut.tail_sum = run;")
+        .expect("finished tail sum");
+    let mark_at = direct
+        .find("float mark = u * run;")
+        .expect("inverse-CDF mark");
+    assert!(
+        tail_sum_at < mark_at,
+        "the tail draw must use the finished sum"
+    );
+    assert!(direct.contains("const float RESTIR_TAIL_EPS = 1.0e-6;"));
+    assert!(direct.contains("acc >= mark"));
+}
+
 fn assert_no_labelled_exact(counts: &LampPickCounts, what: &str) {
     assert_eq!(
         counts.exact, 0,

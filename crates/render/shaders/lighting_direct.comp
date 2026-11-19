@@ -22,6 +22,9 @@ layout(std430, set = 0, binding = 19) buffer RestirWords {
 // times (n - 1) / n, which is sum * (n - 1) / n^2. One lamp is exact. Equal
 // lamps are all exact. A lamp under the cutoff is the tail. This stays out of
 // the spatial shader: that pass still uses restir_few_lamps.
+// A weight this far under the cutoff is the tail. The gap keeps a lamp that
+// lands on the cutoff, after float rounding, on the exact side.
+const float RESTIR_TAIL_EPS = 1.0e-6;
 struct RestirCut {
     float cutoff;
     float tail_sum;
@@ -63,17 +66,28 @@ RestirCut restir_importance(LampList list, uint count, vec3 origin, vec3 n, bool
     float run = 0.0;
     [[dont_unroll]] for (uint k = begin; k < end; k++) {
         float w = restir_point_weight(list, k, origin, n, two_sided);
-        if (!(w > 0.0) || !(w + 1.0e-6 < cut.cutoff)) {
+        if (w > 0.0 && w + RESTIR_TAIL_EPS < cut.cutoff) {
+            run += w;
+        }
+    }
+    cut.tail_sum = run;
+    // One u against the finished tail sum. Reusing that u as
+    // `u * run < w` while the sum is still growing picks the early lamps
+    // too often, and tail_sum / w then scales the wrong probability.
+    float mark = u * run;
+    float acc = 0.0;
+    [[dont_unroll]] for (uint k = begin; k < end; k++) {
+        float w = restir_point_weight(list, k, origin, n, two_sided);
+        if (!(w > 0.0) || !(w + RESTIR_TAIL_EPS < cut.cutoff)) {
             continue;
         }
-        run += w;
-        if (u * run < w) {
+        acc += w;
+        if (cut.tail_k == ~0u && acc >= mark) {
             cut.tail_k = k;
             cut.tail_w = w;
             cut.tail_lamp = lamp_list_index(list, k);
         }
     }
-    cut.tail_sum = run;
     return cut;
 }
 
@@ -121,10 +135,10 @@ void restir_tail_change_weight(vec3 origin, vec3 n, bool two_sided, float cutoff
         if (((word >> (lamp & 31u)) & 1u) != 0u) {
             was = restir_record_weight(prev_base + lamp * RESTIR_PREV_STRIDE, origin, n, two_sided);
         }
-        if (now + 1.0e-6 < cutoff) {
+        if (now + RESTIR_TAIL_EPS < cutoff) {
             sum_now += now;
         }
-        if (was + 1.0e-6 < cutoff) {
+        if (was + RESTIR_TAIL_EPS < cutoff) {
             sum_was += was;
         }
     }
@@ -749,7 +763,7 @@ void main() {
         // the exact sum. Equals stay on the exact side.
         bool tail_sample = restir_plan && !sun_lamp
             && k >= list.suns.y && k < list.suns.y + list.near.y
-            && w + 1.0e-6 < restir_cut.cutoff;
+            && w + RESTIR_TAIL_EPS < restir_cut.cutoff;
         if (tail_sample) {
             if (k != restir_cut.tail_k) {
                 continue;
