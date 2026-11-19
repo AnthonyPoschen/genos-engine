@@ -202,10 +202,10 @@ vec4 lighting_cascade_facing(vec3 pos, vec3 n, float size) {
 
 vec4 lighting_cascade_ancestor(vec3 pos, vec3 n);
 
-// Pixels toward the image centre. A camera turn inserts a strip of voxels
-// with no ray yet, on the edge, wider than the lattice reach. The first
-// inward pixel whose cell, lattice, or coarser sample already has data is
-// that ancestor. Past eight metres it is a different surface.
+// One neighbour cell toward the image centre. The pixel walk only finds the
+// surface. The hash is that one cell, not a gather at every pixel. Past
+// eight metres, or a flipped normal, the surface is another room.
+const uint CASCADE_INWARD_HOPS = 16u;
 vec4 lighting_cascade_inward(uvec2 p, vec3 pos, vec3 n) {
     ivec2 delta = ivec2(pc.dims.xy) / 2 - ivec2(p);
     int sx = delta.x > 0 ? 1 : (delta.x < 0 ? -1 : 0);
@@ -217,8 +217,11 @@ vec4 lighting_cascade_inward(uvec2 p, vec3 pos, vec3 n) {
         * CASCADE_PARENT_SCALE * CASCADE_PARENT_SCALE
         * CASCADE_PARENT_SCALE * CASCADE_PARENT_SCALE
         * CASCADE_PARENT_SCALE;
-    [[dont_unroll]] for (uint k = 1u; k <= 16u; k++) {
-        ivec2 q = ivec2(p) + ivec2(sx, sy) * int(k);
+    vec3 best_pos = pos;
+    vec3 best_n = n;
+    bool found = false;
+    [[dont_unroll]] for (uint hop = 1u; hop <= CASCADE_INWARD_HOPS; hop++) {
+        ivec2 q = ivec2(p) + ivec2(sx, sy) * int(hop);
         if (q.x < 0 || q.y < 0 || uint(q.x) >= pc.dims.x || uint(q.y) >= pc.dims.y) {
             break;
         }
@@ -227,32 +230,35 @@ vec4 lighting_cascade_inward(uvec2 p, vec3 pos, vec3 n) {
         vec3 albedo;
         bool two;
         if (!lighting_surface(uvec2(q), qpos, qn, albedo, two)) {
-            continue;
+            break;
         }
         if (two && dot(qn, scene.eye.xyz - qpos) < 0.0) {
             qn = -qn;
         }
-        // The new strip's normal is not the wall it just covered. Keep the
-        // sample the inward pixel already resolved. The distance limit is
-        // what refuses a surface in another room.
         if (distance(qpos, pos) > limit) {
-            continue;
+            break;
         }
-        vec4 tap = lighting_sh_lattice_at(qpos, qn);
-        if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
-            tap = lighting_cascade_voxel(qpos, qn, LIGHTING_SC_HIT);
+        if (found && dot(qn, best_n) <= 0.0) {
+            break;
         }
-        if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
-            tap = lighting_cascade_facing(qpos, qn, LIGHTING_SC_HIT);
-        }
-        if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
-            tap = lighting_cascade_ancestor(qpos, qn);
-        }
-        if (tap.w > LIGHTING_CACHE_HAS_W) {
-            return tap;
-        }
+        best_pos = qpos;
+        best_n = qn;
+        found = true;
     }
-    return vec4(0.0);
+    if (!found) {
+        return vec4(0.0);
+    }
+    vec4 tap = lighting_sh_lattice_at(best_pos, best_n);
+    if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
+        tap = lighting_cascade_voxel(best_pos, best_n, LIGHTING_SC_HIT);
+    }
+    if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
+        tap = lighting_cascade_facing(best_pos, best_n, LIGHTING_SC_HIT);
+    }
+    if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
+        tap = lighting_cascade_ancestor(best_pos, best_n);
+    }
+    return tap;
 }
 
 // The next coarser size that still has a sample the gates accept. A missing

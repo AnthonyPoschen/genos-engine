@@ -296,6 +296,14 @@ mod tests {
         assert!(shader.contains("lighting_cascade_ancestor"));
         assert!(shader.contains("lighting_cascade_children"));
         assert!(shader.contains("lighting_cascade_inward"));
+        assert!(
+            shader.contains("One neighbour cell toward the image centre."),
+            "an inward miss is one cell"
+        );
+        assert!(
+            !shader.contains("k <= 16u"),
+            "the sixteen-pixel inward gather is deleted"
+        );
         assert!(shader.contains("lighting_cascade_facing"));
         assert!(shader.contains("LIGHTING_DIAG_CASCADE_GAP = 11u"));
         assert!(shader.contains("LIGHTING_CELL_HALF * size"));
