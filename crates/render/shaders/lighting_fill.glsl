@@ -965,8 +965,6 @@ void lighting_fill_seed_spent(uint slot) {
     }
 }
 
-// `e` is the mean of this frame's n samples (each `lk * cos * TAU`). One writer
-// calls this, after every ray into the slot has been summed.
 void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, vec3 shy, vec3 shz, bool on_screen, float sun_luma) {
     if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || n <= 0.0) {
         return;
@@ -997,6 +995,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     float sample_add = n > 0.0 ? max(floor(n / float(LIGHTING_CACHE_RAYS)), 1.0) : 0.0;
     float blend = clamp(k, 0.0, 1.0);
     bool accept = true;
+    vec3 ray_e = e;
     if (cell && n > 0.0) {
         blend = sample_add / max(sample_t + sample_add, FILL_EPS);
         if (lighting_sc_dark_fill() && sample_t < FILL_HALF * LIGHTING_WRC_CAP) {
@@ -1013,11 +1012,40 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         float value = lighting_history_value(slot, old.rgb, e);
         // -1 is an invalid sample. It does not lower the value and does not blend.
         accept = value >= 0.0;
-        // After the opening the value may raise the blend only up to the
-        // catch. It still ranks the burst either way.
+        bool mover = lighting_near_change(cache.v[3u * slot].xyz);
         bool opening = sample_t < LIGHTING_FILL_MEAN_OPEN || lighting_frame() <= LIGHTING_FILL_MEAN_FRAMES;
         if (!accept) {
             blend = 0.0;
+        } else if (mover) {
+            // One ray a frame. The 1-in-10 catch replaces the shown light
+            // with that ray: the standard error of a one-ray cell is smaller
+            // than the ray, so the value stays at 1 and the catch takes
+            // LIGHTING_FILL_MEAN_CATCH of the mean every frame. The blend
+            // stays the set-count weight. A ray outside the stored spread
+            // shortens the history by the fraction of the gap past the band,
+            // and this frame's blend is the set-count of what remains. One
+            // tail sample does not become the mean, and a run of them forgets
+            // the old surface. The sun share uses this weight.
+            float mean_l = max(dot(max(old.rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
+            float sample_l = max(dot(max(e, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
+            float gap = abs(sample_l - mean_l);
+            // Judge against the spread already stored. Then fold this ray
+            // into it. A ray outside the band shortens the history by the
+            // fraction of the gap past the band. The blend is the set-count
+            // weight of what remains, so one tail sample does not become
+            // the mean, and a run of them forgets the old surface.
+            float band = LIGHTING_HISTORY_SIGMA * max(sqrt(max(b.z, 0.0)), LIGHTING_HISTORY_NOISE);
+            if (b.z > FILL_VAR_EPS && gap > band) {
+                float excess = (gap - band) / max(max(gap, mean_l), LIGHTING_HISTORY_NOISE);
+                sample_t *= clamp(1.0 - excess, 0.0, 1.0);
+            }
+            if (!(b.z > FILL_VAR_EPS)) {
+                float scale = max(max(mean_l, sample_l), FILL_VAR_EPS);
+                b.z = scale * scale;
+            } else {
+                b.z = max(mix(b.z, gap * gap, FILL_VAR_RATE), FILL_VAR_EPS);
+            }
+            blend = sample_add / max(sample_t + sample_add, FILL_EPS);
         } else if (opening) {
             blend = clamp(max(blend, value), 0.0, 1.0);
         } else {
@@ -1053,7 +1081,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
         b = vec4(vb, inc, k, b.w);
     } else if (cell) {
-        mean = (accept && old.w < FILL_HALF) ? e : mix(old.rgb, e, blend);
+        mean = (accept && old.w < FILL_HALF) ? ray_e : mix(old.rgb, ray_e, blend);
         // The texel MSME fold above is `!cell`. A world cell still has to
         // store short variance or its priority falls to 0 after one ray.
         // An invalid sample does not.
@@ -1095,7 +1123,12 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     float el = dot(lk_mean, FILL_LUMA);
     float fe = el > FILL_EPS ? clamp(sun_luma / el, 0.0, 1.0) : 0.0;
     float fo = old.w > FILL_HALF ? lighting_sc_sunfrac_now(slot) : fe;
-    float fnew = mix(fo, fe, max(k, 1.0 / FILL_SUN_DEN));
+    // A mover cell is resampled every frame. The 1/16 floor would replace
+    // its sun share with one ray every frame, and the lattice multiplies
+    // the stored mean by that share. The mean's blend is the judgement.
+    bool mover_cell = cell && lighting_near_change(cache.v[3u * slot].xyz);
+    float sun_w = mover_cell ? blend : max(k, 1.0 / FILL_SUN_DEN);
+    float fnew = mix(fo, fe, clamp(sun_w, 0.0, 1.0));
     float now = lighting_ls_now();
     cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(fnew, now < 0.0 ? cache.v[LIGHTING_SC_SUN_AT + slot].y : now, 0.0, 0.0);
     cache.v[3u * slot].w = uintBitsToFloat(max(lighting_frame(), 1u));
