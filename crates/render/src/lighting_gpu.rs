@@ -511,6 +511,10 @@ pub(crate) struct Lighting {
     lamp_res: Buffer,
     /// Fill the reservoir with empty lamps once, not every frame.
     lamp_res_clear: bool,
+    /// Two vec4s per pixel: the disc-visibility mean and the surface it belongs to.
+    area_mean: Buffer,
+    /// Fill that mean with zeros once, before the first shade.
+    area_clear: bool,
     /// Noise-gate shade. Production stays [`LampShadeGate::Product`].
     shade_gate: LampShadeGate,
     /// ReSTIR DI reservoirs. A 256-byte stand-in while the flag is off.
@@ -862,6 +866,8 @@ impl Default for Lighting {
             alloc_key: (0, 0, 0, 0, 0, 0, 0),
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
+            area_mean: Buffer::empty(),
+            area_clear: false,
             shade_gate: LampShadeGate::Product,
             restir_buf: Buffer::empty(),
             restir_pipe: std::ptr::null_mut(),
@@ -1011,7 +1017,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -1670,6 +1676,14 @@ impl Gpu {
         };
         self.lighting.lamp_res = self.make_buffer_queues(lamp_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.lamp_res_clear = reuse;
+        let mut area_old = std::mem::replace(&mut self.lighting.area_mean, Buffer::empty());
+        self.destroy_buffer(&mut area_old);
+        // Two vec4s a pixel. The shade reads and writes the same pixel, so one
+        // copy is enough. A resize zeros it before the next trace.
+        let area_bytes = pixels.saturating_mul(32).max(64);
+        self.lighting.area_mean =
+            self.make_buffer_queues(area_bytes, 0x20 | 0x2, Memory::Device, &share)?;
+        self.lighting.area_clear = true;
         // ReSTIR reservoirs are sized here, after the frames in flight have
         // finished. A resize inside a recording frame is not this path.
         let mut restir_old = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
@@ -1752,6 +1766,7 @@ impl Gpu {
                 (11, stats),
                 (12, self.lighting.lamp_res.buffer),
                 (19, self.lighting.restir_buf.buffer),
+                (20, self.bound_or_standin(&self.lighting.area_mean)),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -5696,6 +5711,20 @@ impl Gpu {
                     }
                     self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
                 }
+                if pass == 3 && self.lighting.area_clear && !self.lighting.area_mean.buffer.is_null() {
+                    // Allocated after lighting_begin. Zero the mean before the
+                    // shade reads it. The next frame's begin covers a resize
+                    // that lands before the raster.
+                    self.lighting.area_clear = false;
+                    (self.fns.cmd_fill_buffer)(
+                        self.cmd,
+                        self.lighting.area_mean.buffer,
+                        0,
+                        self.lighting.area_mean.size,
+                        0,
+                    );
+                    self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+                }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 if pass == 7 {
                     self.lighting.compose_dispatches = 1;
@@ -6113,6 +6142,7 @@ impl Gpu {
             [Buffer::empty(), Buffer::empty()],
         );
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
+        let mut area_mean = std::mem::replace(&mut self.lighting.area_mean, Buffer::empty());
         let mut restir_buf = std::mem::replace(&mut self.lighting.restir_buf, Buffer::empty());
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
@@ -6138,6 +6168,7 @@ impl Gpu {
             self.destroy_buffer(host);
         }
         self.destroy_buffer(&mut lamp_res);
+        self.destroy_buffer(&mut area_mean);
         self.destroy_buffer(&mut restir_buf);
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);

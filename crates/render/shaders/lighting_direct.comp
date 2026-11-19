@@ -1,7 +1,10 @@
 #version 450
 #define GENOS_SUN_SHADER 1
 // GI direct light: every lamp at a surface point, each with a shadow ray through
-// the tracer. The points are the picture's pixels (G-buffer) followed by every kept
+// the tracer. A pixel's exact ray (the sun and each near lamp at scale 1) aims at
+// one point on that light's disc. The running mean of those samples is the
+// penumbra. Hits, the flame, the ReSTIR tail, and the reservoir sample stay on
+// the centre. The points are the picture's pixels (G-buffer) followed by every kept
 // hit of the screen probes (all strata, so a kept hit always carries this frame's
 // light: no light history), the light cache's ray hits and the probes' fills, so all share this loop
 // and its one trace site. A pixel keeps its irradiance; a hit adds the light cache's bounced
@@ -188,6 +191,100 @@ const uint RESTIR_DIAG_POINT_ADD = 45u;
 // A stored depth of 0 is a miss. Exact and ReSTIR records stay positive.
 const float LAMP_PICK_DEPTH_FLOOR = 1.0e-4;
 const float DIRECT_DIR_EPS = 1.0e-6;
+// Mean solar semi-diameter, radians (IAU). Matches SUN_DISC in the tracer.
+const float SUN_DISC = 0.00465047;
+// One turn. This file is past LIGHTING_TAU; the const keeps the literal named.
+const float DISC_TURN = 6.28318530718;
+const float DISC_EPS = 1.0e-4;
+const float DISC_UP = 0.9;
+// pos.w above this is a sun. Same test as the shade loop's sun_lamp.
+const float SUN_MARK = 0.5;
+
+// One uniform point on the light's disc. `u` and `v` are in [0, 1). The area
+// measure is `u` under the square root (PBRT, uniform disc, pdf 1/(π R²)).
+// A point lamp uses LAMP_RADIUS. A sun uses SUN_DISC at the target distance.
+// The centre itself stays the irradiance sample. Hits do not call this.
+vec3 lamp_disc_point(Lamp lamp, vec3 origin, vec3 centre, float u, float v) {
+    vec3 axis = centre - origin;
+    float dist = length(axis);
+    if (dist < DISC_EPS) {
+        return centre;
+    }
+    axis /= dist;
+    float radius = lamp.pos.w > SUN_MARK ? dist * tan(SUN_DISC) : LAMP_RADIUS;
+    float r = radius * sqrt(u);
+    float a = v * DISC_TURN;
+    vec3 helper = abs(axis.y) > DISC_UP ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tx = normalize(cross(helper, axis));
+    vec3 ty = cross(axis, tx);
+    return centre + (tx * cos(a) + ty * sin(a)) * r;
+}
+
+// Pixel exact-shadow mean. Two vec4s: mean.rgb and count, then depth, packed
+// normal, and the unshadowed sum. A visibility flip is the penumbra and does
+// not reset. Invalid data does: a bad surface, a sum that appears or vanishes,
+// or a non-finite sample with nothing stored.
+layout(std430, set = 0, binding = 20) buffer AreaMean {
+    vec4 v[];
+} area_mean;
+
+vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
+    uint base = idx * 2u;
+    vec4 rec = area_mean.v[base];
+    vec4 geo = area_mean.v[base + 1u];
+    float z = lamp_pick_depth(pos);
+    uint packed = lighting_pack_normal(n);
+    bool sample_ok = sample_rgb.x == sample_rgb.x && sample_rgb.y == sample_rgb.y
+        && sample_rgb.z == sample_rgb.z && open == open;
+    bool stored_ok = rec.w >= 1.0 && rec.x == rec.x && rec.y == rec.y && rec.z == rec.z
+        && geo.x == geo.x && geo.z == geo.z;
+    float gap = abs(z - geo.x);
+    bool depth_ok = !(gap / z > LAMP_PICK_DEPTH_REL && gap > LAMP_PICK_DEPTH_ABS);
+    bool normal_ok = dot(lighting_unpack_normal(floatBitsToUint(geo.y)), n) >= LAMP_PICK_NORMAL_MIN;
+    bool surface = stored_ok && depth_ok && normal_ok;
+    bool now_on = open > 0.0;
+    bool was_on = geo.z > 0.0;
+    vec3 mean = rec.xyz;
+    float count = rec.w;
+    if (!sample_ok) {
+        if (surface) {
+            return mean;
+        }
+        area_mean.v[base] = vec4(0.0);
+        area_mean.v[base + 1u] = vec4(0.0);
+        return vec3(0.0);
+    }
+    bool reset = !surface || now_on != was_on;
+    if (reset) {
+        mean = sample_rgb;
+        count = 0.0;
+    } else if (now_on && was_on) {
+        float ratio = open / geo.z;
+        mean *= ratio;
+        float confidence = min(open, geo.z) / max(open, geo.z);
+        float delta = 1.0 - confidence;
+        if (delta > 0.0) {
+            float fit = 1.0 / delta;
+            if (count > fit) {
+                count = fit;
+            }
+        }
+    }
+    if (lighting_gi_on() && lighting_near_change(pos) && count > LIGHTING_SC_MOVING) {
+        count = LIGHTING_SC_MOVING;
+    }
+    if (!reset && count >= float(RESTIR_MEAN_CAP)) {
+        area_mean.v[base] = vec4(mean, count);
+        area_mean.v[base + 1u] = vec4(z, uintBitsToFloat(packed), open, 0.0);
+        return mean;
+    }
+    count += 1.0;
+    mean += (sample_rgb - mean) / count;
+    area_mean.v[base] = vec4(mean, count);
+    area_mean.v[base + 1u] = vec4(z, uintBitsToFloat(packed), open, 0.0);
+    return mean;
+}
+
 void main() {
     if (gl_GlobalInvocationID.x == 0u) {
         // Unstored bounce blocks from last frame. The compose count was
@@ -691,6 +788,9 @@ void main() {
     float run = 0.0;
     bool lobe = (gstats.ctrl_bits & 2097152u) != 0u && idx < pixels;
     vec3 e = vec3(0.0);
+    vec3 e_area = vec3(0.0);
+    float area_open = 0.0;
+    bool area_any = false;
     vec3 e_sun = vec3(0.0);
     vec3 spec = vec3(0.0);
     vec3 view = vec3(0.0, 1.0, 0.0);
@@ -801,6 +901,19 @@ void main() {
             tail_luma = w;
         }
 #endif
+        // Pixels only. Hits, the flame, a weighted sample, and the tail stay
+        // on the centre. scale 1 is the exact sum (and a ReSTIR lamp at or
+        // above the cutoff). One disc point per exact light per frame.
+        bool area_ray = idx < pixels && take && k < list.suns.y + list.near.y && scale == 1.0;
+#ifdef GENOS_RESTIR_DI
+        if (tail_sample) {
+            area_ray = false;
+        }
+#endif
+        if (area_ray) {
+            area_open += w;
+            area_any = true;
+        }
         // S74A: hits (not pixels) reuse a static lamp's shadow (lighting_cache.glsl).
         // Shadows off skips the trace and the cell. Hard traces every time.
         bool shadow_lit = false;
@@ -825,7 +938,14 @@ void main() {
             if (sc >= 0.0) {
                 shadow_lit = sc > 0.5;
             } else {
-                shadow_lit = !trace_occluded(origin, target);
+                vec3 aim = target;
+                if (area_ray) {
+                    uint h = lighting_hash(idx ^ lighting_hash(lighting_frame() ^ lighting_hash(k)));
+                    float hu = lighting_unit(h);
+                    float hv = lighting_unit(lighting_hash(h ^ 0x27d4eb2du));
+                    aim = lamp_disc_point(sun_lamp_l, origin, target, hu, hv);
+                }
+                shadow_lit = !trace_occluded(origin, aim);
                 // Counts a real shadow ray. A shadow-cell hit does not. Off
                 // unless GENOS_LIGHTING_LAMP_PICK_DIAG set the push bit.
                 if (lamp_pick_diag()) {
@@ -848,6 +968,9 @@ void main() {
             }
 #endif
             e += add;
+            if (area_ray) {
+                e_area += add;
+            }
 #ifdef GENOS_RESTIR_DI
             // Near point lamp added on a ReSTIR pixel. The reservoir path
             // skips the load, so this stays 0 there. Cutoff lamps and the
@@ -967,6 +1090,10 @@ void main() {
         }
     }
 #endif
+    if (idx < pixels && area_any && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
+        vec3 mean = area_history(idx, pos, n, e_area, area_open);
+        e += mean - e_area;
+    }
     n = n_hit;
     if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {
         e = vec3(0.0);
