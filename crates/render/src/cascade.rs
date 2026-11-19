@@ -284,6 +284,14 @@ mod tests {
         assert!(shader.contains("lighting_cascade_interval"));
         assert!(shader.contains("level < 1.0"));
         assert!(shader.contains("lighting_cascade_merge"));
+        assert!(
+            shader.contains("lighting_sh_lattice_at(pos, n)"),
+            "publish reads the lattice centre"
+        );
+        assert!(
+            !shader.contains("lighting_sh_compose_shown"),
+            "the six-ring publish walk is deleted"
+        );
         assert!(shader.contains("lighting_cascade_voxel"));
         assert!(shader.contains("lighting_cascade_ancestor"));
         assert!(shader.contains("lighting_cascade_children"));
