@@ -25,6 +25,23 @@ uint lighting_cascade_base() {
         + (LIGHTING_CACHE_SLOTS >> 5u);
 }
 
+// Picture compose loads these two words. The hash walk stays out of that
+// compile: running it there faults lavapipe. The publish pass writes them
+// after the lattice fill.
+uint lighting_cascade_pixel_at(uint pixel) {
+    return lighting_cascade_base() + 1u + CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE + pixel * 2u;
+}
+
+vec4 lighting_cascade_published(uint pixel) {
+    uint at = lighting_cascade_pixel_at(pixel);
+    if (ckeys.key[at + 1u] != lighting_frame() + 1u) {
+        return vec4(0.0);
+    }
+    return vec4(max(lighting_unpack_rgb9e5(ckeys.key[at]), vec3(0.0)), 1.0);
+}
+
+#ifndef GENOS_COMPOSE_NO_WALK
+
 float lighting_cascade_cheb(vec3 pos) {
     vec3 rel = abs(pos - scene.eye.xyz);
     return max(rel.x, max(rel.y, rel.z));
@@ -293,21 +310,6 @@ vec4 lighting_cascade_at(vec3 pos, vec3 n, uint ring) {
     return lighting_cascade_record(lighting_cascade_find(ivec3(floor(pos / size)), ring), pos, n);
 }
 
-// Gathered level-0 colour for one pixel. Picture compose loads this with no
-// hash walk: that walk in compose faults lavapipe. The gather itself is
-// lighting_cascade_picture, run from the g-buffer pass.
-uint lighting_cascade_pixel_at(uint pixel) {
-    return lighting_cascade_base() + 1u + CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE + pixel * 2u;
-}
-
-vec4 lighting_cascade_published(uint pixel) {
-    uint at = lighting_cascade_pixel_at(pixel);
-    if (ckeys.key[at + 1u] != lighting_frame() + 1u) {
-        return vec4(0.0);
-    }
-    return vec4(max(lighting_unpack_rgb9e5(ckeys.key[at]), vec3(0.0)), 1.0);
-}
-
 // This ring, blended with the next ring across the outer tenth. A refused
 // sample is skipped. The next ring out shows through, so one empty cell is
 // not black while a coarser ring has data.
@@ -343,9 +345,9 @@ vec4 lighting_cascade_picture(vec3 pos, vec3 n) {
 }
 
 void lighting_cascade_publish(uint pixel, vec3 pos, vec3 n) {
-    // This pixel's own level-0 merge. Reading the shared cell here raced the
-    // writer and painted the cell black on a camera turn. The hash still
-    // holds the cell; the pixel shows the merge the cell stores.
+    // This pixel's merge, after the lattice fill. Writing the shared cell
+    // from every pixel raced and painted it black on a camera turn. The
+    // picture loads this pixel's own word.
     vec4 shown = lighting_cascade_merge(pos, n);
     uint at = lighting_cascade_pixel_at(pixel);
     ckeys.key[at] = lighting_pack_rgb9e5(max(shown.rgb, vec3(0.0)));
@@ -369,3 +371,4 @@ void lighting_cascade_insert(vec3 pos, vec3 n) {
     lighting_cascade_store(word, 0u, 0u);
     lighting_cascade_store(word_next, 0u, 0u);
 }
+#endif

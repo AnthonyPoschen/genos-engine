@@ -480,6 +480,9 @@ pub(crate) struct Lighting {
     /// Same-frame gather of the bins and lattices maintenance just wrote.
     /// Null when the kill switch keeps the writes inside compose.
     sh_drain_pipe: Handle,
+    /// Level-0 resolve. Writes the per-pixel merge after the lattice drain.
+    /// Picture compose loads those words and does not walk the hash.
+    cascade_pub_pipe: Handle,
     /// #142 kill switch (GENOS_COMPOSE_SC_WRITES=1): compose's specialization
     /// constant 0, writes compiled into compose and no maintenance pass.
     compose_writes: bool,
@@ -850,6 +853,7 @@ impl Default for Lighting {
             compose_hdr_pipe: std::ptr::null_mut(),
             compose_maint_pipe: std::ptr::null_mut(),
             sh_drain_pipe: std::ptr::null_mut(),
+            cascade_pub_pipe: std::ptr::null_mut(),
             compose_writes: genos_scene::lighting_env("GENOS_COMPOSE_SC_WRITES")
                 .is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
@@ -1182,6 +1186,13 @@ impl Gpu {
             )?;
             self.note_pipeline_time("sh-drain", start);
         }
+        let start = Instant::now();
+        self.lighting.cascade_pub_pipe = self.make_compute_pipe(
+            LIGHTING_CASCADE_PUB_SPV,
+            self.lighting.layout,
+            "cascade-pub",
+        )?;
+        self.note_pipeline_time("cascade-pub", start);
         let start = Instant::now();
         self.lighting.reach_pipe = self.make_compute_pipe(
             LIGHTING_REACH_SPV,
@@ -5688,6 +5699,34 @@ impl Gpu {
                     }
                     self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
                 }
+                // Level 0 is resolved here, after the lattice drain and before
+                // the picture loads it. The hash walk stays out of compose.
+                if pass == 7 && self.lighting.cache_full && !self.lighting.cascade_pub_pipe.is_null()
+                {
+                    if sun_compose && !compose_full {
+                        (self.fns.cmd_fill_buffer)(
+                            self.cmd,
+                            self.lighting.cache_keys.buffer,
+                            (lighting_compose_at() + 3) * 4,
+                            4,
+                            1,
+                        );
+                        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+                    }
+                    (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.cascade_pub_pipe);
+                    if sun_compose || compose_full {
+                        let pgx = if sun_compose { w.div_ceil(8).max(1) } else { gx.max(1) };
+                        let pgy = if sun_compose { h.div_ceil(8).max(1) } else { gy.max(1) };
+                        (self.fns.cmd_dispatch)(self.cmd, pgx, pgy, 1);
+                    } else {
+                        (self.fns.cmd_dispatch_indirect)(
+                            self.cmd,
+                            self.lighting.cache_keys.buffer,
+                            lighting_compose_at() * 4,
+                        );
+                    }
+                    self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 if pass == 7 {
                     self.lighting.compose_dispatches = 1;
@@ -6158,6 +6197,7 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
                 .chain(std::iter::once(&mut self.lighting.sh_drain_pipe))
+                .chain(std::iter::once(&mut self.lighting.cascade_pub_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {

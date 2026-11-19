@@ -114,9 +114,12 @@ pub fn merge(near: [f32; 3], near_w: f32, far: [f32; 3], far_w: f32) -> ([f32; 3
     let far_ok = far_w > 0.5;
     let beta = if near_ok { 0.0 } else { 1.0 };
     let rgb = [
-        if near_ok { near[0].max(0.0) } else { 0.0 } + if far_ok { beta * far[0].max(0.0) } else { 0.0 },
-        if near_ok { near[1].max(0.0) } else { 0.0 } + if far_ok { beta * far[1].max(0.0) } else { 0.0 },
-        if near_ok { near[2].max(0.0) } else { 0.0 } + if far_ok { beta * far[2].max(0.0) } else { 0.0 },
+        if near_ok { near[0].max(0.0) } else { 0.0 }
+            + if far_ok { beta * far[0].max(0.0) } else { 0.0 },
+        if near_ok { near[1].max(0.0) } else { 0.0 }
+            + if far_ok { beta * far[1].max(0.0) } else { 0.0 },
+        if near_ok { near[2].max(0.0) } else { 0.0 }
+            + if far_ok { beta * far[2].max(0.0) } else { 0.0 },
     ];
     let w = if near_ok || far_ok { 1.0 } else { 0.0 };
     (rgb, w)
@@ -139,8 +142,8 @@ pub fn overlap_blend(cheb: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        cell_size, chebyshev, interval, keeps_sample, merge, overlap_blend, ring, FINE, OVERLAP, PROJ,
-        RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
+        cell_size, chebyshev, interval, keeps_sample, merge, overlap_blend, ring, FINE, OVERLAP,
+        PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
     };
 
     #[test]
@@ -172,11 +175,11 @@ mod tests {
         let distance = RING_NEAR * 2.0_f32.powf(2.0 + mid);
         assert_eq!(ring(distance), 2);
         let blend = overlap_blend(distance);
-        assert!(
-            (blend - 0.5).abs() < 1.0e-4,
-            "overlap blend {blend}"
+        assert!((blend - 0.5).abs() < 1.0e-4, "overlap blend {blend}");
+        assert_eq!(
+            overlap_blend(RING_NEAR * 2.0_f32.powf(2.0 + start * 0.5)),
+            0.0
         );
-        assert_eq!(overlap_blend(RING_NEAR * 2.0_f32.powf(2.0 + start * 0.5)), 0.0);
         assert_eq!(overlap_blend(RING_NEAR * 2.0_f32.powf(6.0 + 0.99)), 0.0);
         assert_eq!(RING_MAX, 6);
     }
@@ -220,7 +223,10 @@ mod tests {
     #[test]
     fn the_shader_uses_this_ring_rule() {
         let shader = include_str!("../shaders/lighting_cascade.glsl");
-        assert!(shader.contains("const float CASCADE_PROJ = 0.05;"), "{shader}");
+        assert!(
+            shader.contains("const float CASCADE_PROJ = 0.05;"),
+            "{shader}"
+        );
         assert!(shader.contains("const float CASCADE_RING_NEAR = 1.0;"));
         assert!(shader.contains("const uint CASCADE_RING_MAX = 6u;"));
         assert!(shader.contains("const float CASCADE_OVERLAP = 0.1;"));
@@ -249,9 +255,19 @@ mod tests {
         assert!(shader.contains("beta * far_rgb"));
         let probe = include_str!("../shaders/lighting_screen_probe.glsl");
         assert!(
-            probe.contains("lighting_sh_compose_lattice(pos, n, false)"),
-            "the picture reads the level-0 gather after the lattice fill"
+            probe.contains("lighting_cascade_published(pixel)"),
+            "picture compose loads the published level-0 word"
         );
+        assert!(
+            probe.contains("lighting_sh_compose_lattice(pos, n, false)"),
+            "maintenance still requests the lattice the publish pass reads"
+        );
+        let build = include_str!("../build.rs");
+        assert!(
+            build.contains("GENOS_LEVEL0_PICTURE"),
+            "picture compose is the level-0 load"
+        );
+        assert!(gpu.contains("cascade_pub_pipe"));
         assert!(
             !probe.contains("lighting_cascade_insert"),
             "picture compose does not insert into the level-0 hash"

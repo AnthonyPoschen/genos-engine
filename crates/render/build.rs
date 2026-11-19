@@ -190,7 +190,11 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         // Every compose compile, flags on or off, loads the cache relight.
         // The neighbour walk is not in the module.
         let spv = if *file == "lighting_compose.comp" || *file == "lighting_sun_compose.comp" {
-            compile_args(&src, &dest, &["-DGENOS_COMPOSE_NO_WALK=1"])
+            compile_args(
+                &src,
+                &dest,
+                &["-DGENOS_COMPOSE_NO_WALK=1", "-DGENOS_LEVEL0_PICTURE=1"],
+            )
         } else {
             compile(&src, &dest)
         };
@@ -402,6 +406,7 @@ fn rerun_shader_pieces() {
         "froxel_compose.glsl",
         "lighting_check.comp",
         "lighting_sh_drain.comp",
+        "lighting_cascade_pub.comp",
         "scene.vert",
         "gbuffer.vert",
         "instance_ssbo.glsl",
@@ -448,7 +453,11 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
     let compose_hdr = compile_defines(
         "shaders/lighting_compose.comp",
         &out.join("lighting_compose_hdr.comp.spv"),
-        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_NO_WALK"],
+        &[
+            "GENOS_HDR_COMPOSE",
+            "GENOS_COMPOSE_NO_WALK",
+            "GENOS_LEVEL0_PICTURE",
+        ],
     );
     // #142: the compose writes, run just before the read-only compose.
     // The walk stays out of this compile. Maintenance enqueues. The drain gathers.
@@ -473,8 +482,21 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
     let sun_hdr = compile_defines(
         "shaders/lighting_sun_compose.comp",
         &out.join("lighting_sun_compose_hdr.comp.spv"),
-        &["GENOS_HDR_COMPOSE", "GENOS_COMPOSE_NO_WALK"],
+        &[
+            "GENOS_HDR_COMPOSE",
+            "GENOS_COMPOSE_NO_WALK",
+            "GENOS_LEVEL0_PICTURE",
+        ],
     );
+    // Level-0 resolve, after the lattice drain and before picture compose.
+    let cascade_pub = compile(
+        "shaders/lighting_cascade_pub.comp",
+        &out.join("lighting_cascade_pub.comp.spv"),
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_CASCADE_PUB_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        cascade_pub.display()
+    ));
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
         compose_hdr.display()

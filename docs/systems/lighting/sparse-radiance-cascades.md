@@ -51,7 +51,8 @@ These exist because the picture reads the 25 cm cell directly. Level 0 makes the
 - SH-L1 is the directional store. The papers' higher-order angular basis is not this conversion.
 - The importance cutoff stays the exact/tail split it already is. A cache ray is not a product pixel (`idx < pixels` is false), so the upper-level shade sums every lamp, distant ones included. The per-pixel tail stays the direct remainder. Removing it would drop hall energy or count the same light twice. Distant lamps are not traced as extra exact lights.
 - Lamp area sampling for a soft penumbra is deferred.
-- The finest bounce cell, 25 cm, keeps the full trace from the ray epsilon out to 200 m. The papers start level 0 near 1 m. A cell at least twice that size has a shell from `2^level` to `2^(level+1)`, and the last shell runs out to 200 m. Applying that shell to the cells the picture still reads raised wall splotch from 0.049 to 0.084, so the trace stays the full range until the merge sums the shells.
+- The finest bounce cell, 25 cm, keeps the full trace from the ray epsilon out to 200 m. The papers start level 0 near 1 m. A cell at least twice that size has a shell from `2^level` to `2^(level+1)`, and the last shell runs out to 200 m. Clipping the 25 cm cell before the shells are summed raised wall splotch from 0.049 to 0.084, so that cell keeps the full trace.
+- Picture compose loads the per-pixel level-0 word. It does not walk the hash. That walk faults lavapipe. A publish pass, after the lattice fill, writes the merge into that word. Beta is 0 while the nearer sample exists, so a missing nearer sample is what shows the parent. Black only when neither has data.
 - The merge's nearer term is that full integral. Beta is 0 while it exists, and the parent shows only when the nearer sample is missing. Adding the parent on top of the full integral would count the same light twice.
 
 ## After the conversion

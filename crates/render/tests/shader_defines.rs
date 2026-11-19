@@ -32,7 +32,7 @@ const PRODUCTION: &[ShaderCompile] = &[
         label: "compose",
         compiler: "glslc",
         src: "shaders/lighting_compose.comp",
-        flags: &["-DGENOS_COMPOSE_NO_WALK=1"],
+        flags: &["-DGENOS_COMPOSE_NO_WALK=1", "-DGENOS_LEVEL0_PICTURE=1"],
     },
     ShaderCompile {
         label: "compose hdr",
@@ -44,6 +44,7 @@ const PRODUCTION: &[ShaderCompile] = &[
             "vulkan1.0",
             "-DGENOS_HDR_COMPOSE",
             "-DGENOS_COMPOSE_NO_WALK",
+            "-DGENOS_LEVEL0_PICTURE",
         ],
     },
     ShaderCompile {
@@ -56,7 +57,7 @@ const PRODUCTION: &[ShaderCompile] = &[
         label: "sun compose",
         compiler: "glslc",
         src: "shaders/lighting_sun_compose.comp",
-        flags: &["-DGENOS_COMPOSE_NO_WALK=1"],
+        flags: &["-DGENOS_COMPOSE_NO_WALK=1", "-DGENOS_LEVEL0_PICTURE=1"],
     },
     ShaderCompile {
         label: "sun compose hdr",
@@ -68,7 +69,14 @@ const PRODUCTION: &[ShaderCompile] = &[
             "vulkan1.0",
             "-DGENOS_HDR_COMPOSE",
             "-DGENOS_COMPOSE_NO_WALK",
+            "-DGENOS_LEVEL0_PICTURE",
         ],
+    },
+    ShaderCompile {
+        label: "cascade publish",
+        compiler: "glslc",
+        src: "shaders/lighting_cascade_pub.comp",
+        flags: &[],
     },
     ShaderCompile {
         label: "texel detail",
