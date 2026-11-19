@@ -23,17 +23,6 @@
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
-// Below this many own sets the cell may still replace its mean. A cell
-// created after the opening frames still has to take its first samples.
-const float LIGHTING_FILL_MEAN_OPEN = 4.0;
-// The frame-40 fill is this many frames of the same replace. A skipped floor
-// ray keeps the value at 1, and a full replace after this washes the hall out.
-const uint LIGHTING_FILL_MEAN_FRAMES = 40u;
-// After that, one skipped floor ray may move the mean by at most this much.
-// A full replace runs the bounce away by frame 400. Leaving the blend at the
-// set count keeps the early dark samples, and the mid band stays short of
-// the every-frame floor.
-const float LIGHTING_FILL_MEAN_CATCH = 0.15;
 const float FILL_TINY = 1.0e-4;
 const float FILL_REAL_CAP = 1.0e20;
 const float FILL_TWO = 2.0;
@@ -1089,60 +1078,49 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     bool accept = true;
     vec3 ray_e = e;
     if (cell && n > 0.0) {
-        blend = sample_add / max(sample_t + sample_add, FILL_EPS);
-        if (lighting_sc_dark_fill() && sample_t < FILL_HALF * LIGHTING_WRC_CAP) {
-            float ratio = sample_t / max(sample_t + sample_add, FILL_EPS);
-            blend = 1.0 - ratio * ratio * ratio;
-        }
-        // The value ranks the burst. A cell the 1-in-10 floor skips for nine
-        // frames disagrees with the next sample, so the value stays at 1.
-        // The opening frames, and a cell's first sets, may still take that
-        // sample: frame 40 is that fill. After that, a full replace makes the
-        // bounce read one sample and the hall is near-white by frame 400.
-        // A lamp note, a 1 mm move, and the 1/8 and 1/32 floors do not raise
-        // it further.
-        float value = lighting_history_value(slot, old.rgb, e);
-        // -1 is an invalid sample. It does not lower the value and does not blend.
-        accept = value >= 0.0;
-        bool mover = lighting_near_change(cache.v[3u * slot].xyz);
-        bool opening = sample_t < LIGHTING_FILL_MEAN_OPEN || lighting_frame() <= LIGHTING_FILL_MEAN_FRAMES;
-        if (!accept) {
+        // One rule. A junk mean adopts a usable ray with a short count.
+        // A non-finite ray leaves a good mean alone. Both usable: the ray's
+        // share is one over the count plus the ray, and a ray outside the
+        // stored spread shortens that count by the fraction of the gap past
+        // the band. The allocator value still ranks the burst. It does not
+        // cap the blend, and nothing replaces the mean outright.
+        bool sample_ok = lighting_history_usable(e);
+        bool history_ok = old.w >= FILL_HALF && lighting_history_usable(old.rgb);
+        if (!history_ok && sample_ok) {
+            sample_t = 0.0;
+            blend = 1.0;
+            accept = true;
+            ray_e = e;
+        } else if (!sample_ok) {
+            accept = false;
             blend = 0.0;
-        } else if (mover) {
-            // One ray a frame. The 1-in-10 catch replaces the shown light
-            // with that ray: the standard error of a one-ray cell is smaller
-            // than the ray, so the value stays at 1 and the catch takes
-            // LIGHTING_FILL_MEAN_CATCH of the mean every frame. The blend
-            // stays the set-count weight. A ray outside the stored spread
-            // shortens the history by the fraction of the gap past the band,
-            // and this frame's blend is the set-count of what remains. One
-            // tail sample does not become the mean, and a run of them forgets
-            // the old surface. The sun share uses this weight.
+        } else {
+            lighting_history_value(slot, old.rgb, e);
             float mean_l = max(dot(max(old.rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
             float sample_l = max(dot(max(e, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
             float gap = abs(sample_l - mean_l);
-            // Judge against the spread from before this ray. The reach note
-            // above has already folded the ray into est+1 .z. A ray outside
-            // the prior band shortens the history by the fraction of the gap
-            // past the band. The blend is the set-count weight of what
-            // remains, so one tail sample does not become the mean, and a
-            // run of them forgets the old surface.
-            float band = LIGHTING_HISTORY_SIGMA * max(sqrt(max(spread_z, 0.0)), LIGHTING_HISTORY_NOISE);
-            if (spread_z > FILL_VAR_EPS && gap > band) {
+            // No stored spread is no band. The ray adopts, and this commit
+            // then stores a spread so the next similar ray does not.
+            float band = spread_z > FILL_VAR_EPS
+                ? LIGHTING_HISTORY_SIGMA * max(sqrt(spread_z), LIGHTING_HISTORY_NOISE)
+                : LIGHTING_HISTORY_NOISE;
+            if (gap > band) {
                 float excess = (gap - band) / max(max(gap, mean_l), LIGHTING_HISTORY_NOISE);
                 sample_t *= clamp(1.0 - excess, 0.0, 1.0);
             }
+            // The first band is one variance step of this gap. Half the gap,
+            // or the whole signal, leaves the next ray inside the band and
+            // the frame-40 mean stays on the dark sample. The spread then
+            // only widens. Folding toward a quieter later gap shrinks the
+            // band, and the moving hall adopts that ray.
+            float seen = gap * gap;
             if (!(spread_z > FILL_VAR_EPS)) {
-                float scale = max(max(mean_l, sample_l), FILL_VAR_EPS);
-                b.z = scale * scale;
+                b.z = max(seen * FILL_VAR_RATE, FILL_VAR_EPS);
             } else {
-                b.z = max(mix(spread_z, gap * gap, FILL_VAR_RATE), FILL_VAR_EPS);
+                b.z = max(spread_z, mix(spread_z, seen, FILL_VAR_RATE));
             }
             blend = sample_add / max(sample_t + sample_add, FILL_EPS);
-        } else if (opening) {
-            blend = clamp(max(blend, value), 0.0, 1.0);
-        } else {
-            blend = clamp(max(blend, min(value, LIGHTING_FILL_MEAN_CATCH)), 0.0, 1.0);
+            accept = true;
         }
     }
     vec3 mean = old.rgb;
