@@ -1164,7 +1164,18 @@ impl Gpu {
             // GENOS_COMPOSE_SC_WRITES=1. Maintenance requests the lattice and
             // enqueues texels; the drain fills them before this compile loads.
             let spec = (k == 7).then_some(u32::from(self.lighting.compose_writes));
-            self.lighting.pipes[k] = self.make_compute_pipe_spec(code, self.lighting.layout, LIGHTING_PASS_NAMES[k], spec)?;
+            // Pass 3 is direct. Constant 3 is the lamp disc. Knockout aims the
+            // pixel ray at the centre. Constants 0 and 2 stay the ReSTIR defaults.
+            if k == 3 && !crate::gate::guard(crate::gate::LAMP_DISC) {
+                self.lighting.pipes[k] = self.make_compute_pipe_ids(
+                    code,
+                    self.lighting.layout,
+                    LIGHTING_PASS_NAMES[k],
+                    &[(3, 0)],
+                )?;
+            } else {
+                self.lighting.pipes[k] = self.make_compute_pipe_spec(code, self.lighting.layout, LIGHTING_PASS_NAMES[k], spec)?;
+            }
             self.note_pipeline_time(LIGHTING_PASS_NAMES[k], start);
         }
         if !self.lighting.compose_writes {

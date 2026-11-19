@@ -57,7 +57,8 @@ pub use fog_pass::{
     FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW, YAW_FRAMES,
 };
 pub use gate::{
-    guard as gate_guard, BOUNCE_IN_COMPOSE, CACHE_FILL, DIRECT_IN_COMPOSE, MOVING_LAMP_WALL,
+    guard as gate_guard, BOUNCE_IN_COMPOSE, CACHE_FILL, DIRECT_IN_COMPOSE, LAMP_DISC,
+    MOVING_LAMP_WALL,
 };
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};

@@ -223,7 +223,12 @@ vec3 lamp_disc_point(Lamp lamp, vec3 origin, vec3 centre, float u, float v) {
 
 // One disc point for this pixel, this frame, and this lamp. The literal stays
 // in this one place so a second call site does not add a second magic number.
+// Constant 3 is the picture gate. 0 aims at the centre. Shipping leaves it at 1.
+layout(constant_id = 3) const uint LAMP_DISC = 1u;
 vec3 lamp_disc_aim(Lamp lamp, vec3 origin, vec3 centre, uint px, uint lamp_i) {
+    if (LAMP_DISC == 0u) {
+        return centre;
+    }
     uint h = lighting_hash(px ^ lighting_hash(lighting_frame() ^ lighting_hash(lamp_i)));
     float hu = lighting_unit(h);
     float hv = lighting_unit(lighting_hash(h ^ 0x27d4eb2du));
@@ -231,9 +236,16 @@ vec3 lamp_disc_aim(Lamp lamp, vec3 origin, vec3 centre, uint px, uint lamp_i) {
 }
 
 // Pixel exact-shadow mean. Two vec4s: mean.rgb and count, then depth, packed
-// normal, and the unshadowed sum. A visibility flip is the penumbra and does
-// not reset. Invalid data does: a bad surface, a sum that appears or vanishes,
-// or a non-finite sample with nothing stored.
+// normal, the unshadowed sum, and a short relative disagreement. A visibility
+// flip is the penumbra and does not reset. Invalid data does: a bad surface,
+// a sum that appears or vanishes, or a non-finite sample with nothing stored.
+// The count stops growing at RESTIR_MEAN_CAP. One sample still folds in, so a
+// later shadow is not frozen. A short disagreement past AREA_MOVE shortens
+// the count by that fraction.
+const vec3 AREA_LUMA = vec3(0.2126, 0.7152, 0.0722);
+const float AREA_SHORT = 0.25;
+const float AREA_MOVE = 0.75;
+const float AREA_FLOOR = 8.0;
 layout(std430, set = 0, binding = 20) buffer AreaMean {
     vec4 v[];
 } area_mean;
@@ -283,15 +295,27 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
     if (lighting_gi_on() && lighting_near_change(pos) && count > LIGHTING_SC_MOVING) {
         count = LIGHTING_SC_MOVING;
     }
-    if (!reset && count >= float(RESTIR_MEAN_CAP)) {
-        area_mean.v[base] = vec4(mean, count);
-        area_mean.v[base + 1u] = vec4(z, uintBitsToFloat(packed), open, 0.0);
-        return mean;
+    // Nothing was stored and nothing is lit. Do not write a zero over an
+    // empty slot every frame.
+    if (!now_on && !stored_ok) {
+        return vec3(0.0);
     }
-    count += 1.0;
-    mean += (sample_rgb - mean) / count;
+    float peak = max(max(open, dot(max(mean, vec3(0.0)), AREA_LUMA)), DISC_EPS);
+    float rel = dot(abs(sample_rgb - mean), AREA_LUMA) / peak;
+    float short_rel = reset ? rel : mix(geo.w, rel, AREA_SHORT);
+    bool capped = !reset && count >= float(RESTIR_MEAN_CAP);
+    if (capped && short_rel > AREA_MOVE) {
+        count = max(count * (1.0 - short_rel), AREA_FLOOR);
+        capped = false;
+    }
+    if (capped) {
+        mean += (sample_rgb - mean) / count;
+    } else {
+        count += 1.0;
+        mean += (sample_rgb - mean) / count;
+    }
     area_mean.v[base] = vec4(mean, count);
-    area_mean.v[base + 1u] = vec4(z, uintBitsToFloat(packed), open, 0.0);
+    area_mean.v[base + 1u] = vec4(z, uintBitsToFloat(packed), open, short_rel);
     return mean;
 }
 
@@ -1101,9 +1125,16 @@ void main() {
         }
     }
 #endif
-    if (idx < pixels && area_any && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
-        vec3 mean = area_history(idx, pos, n, e_area, area_open);
-        e += mean - e_area;
+    // A frame with no exact light still records the vanish. Skipping the
+    // write left the old open in the buffer, so the same sum coming back
+    // reused the stale penumbra.
+    if (idx < pixels && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
+        float open_now = area_any ? area_open : 0.0;
+        vec3 sample_now = area_any ? e_area : vec3(0.0);
+        vec3 mean = area_history(idx, pos, n, sample_now, open_now);
+        if (area_any) {
+            e += mean - e_area;
+        }
     }
     n = n_hit;
     if ((lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) != 0u) {

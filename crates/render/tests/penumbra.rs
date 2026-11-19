@@ -9,7 +9,12 @@
 //! radius, 64 stratified points). A later frame in the penumbra moves by a
 //! small fraction of the lit value.
 
-use genos_render::{direct_light_samples, luminance, DebugView, Renderer, SceneRead, ViewMode, World};
+mod common;
+
+use common::PresentedFrame;
+use genos_render::{
+    direct_light_samples, luminance, DebugView, Renderer, SceneRead, ViewMode, World, LAMP_DISC,
+};
 use genos_scene::{
     viewport_uv, AmbientMode, Camera, Floor, LampPickMode, Light, LightingPreset, LightingSettings,
     Scene, Vec3, Wall,
@@ -174,6 +179,82 @@ fn crossing(samples: &[(f64, f64)]) -> Option<f64> {
         prev = Some((z, vis));
     }
     None
+}
+
+fn presented_luma(frame: &PresentedFrame, width: u32, height: u32, uv: [f32; 2]) -> Option<f64> {
+    let x = rounded_index(f64::from(uv[0]) * f64::from(width), width)?;
+    let y = rounded_index(f64::from(uv[1]) * f64::from(height), height)?;
+    let i = usize::try_from(y)
+        .ok()?
+        .saturating_mul(usize::try_from(width).ok()?)
+        .saturating_add(usize::try_from(x).ok()?);
+    frame.luma().get(i).copied()
+}
+
+/// The presented frame shows the disc penumbra, not a hard edge.
+///
+/// A floor sample whose reference visibility is near one half must sit between
+/// the lit floor and the shadowed floor. Knocking out `lamp_disc` aims the
+/// ray at the centre, so that sample becomes one or the other.
+#[test]
+fn the_penumbra_is_in_the_presented_frame() {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let world = World::from_scene(scene());
+    let camera = camera();
+    let scene = scene();
+    renderer.set_lighting_settings(settings());
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Direct,
+        lamp: 0,
+    });
+    let mut last = None;
+    for _ in 0..WARMUP {
+        last = Some(PresentedFrame::from_draw(window, renderer, &world, &camera));
+    }
+    let frame = last.expect("presented frame");
+    let width = renderer.width();
+    let height = renderer.height();
+    let aspect = f32::from(u16::try_from(width).expect("width"))
+        / f32::from(u16::try_from(height).expect("height"));
+    let mut lit = 0.0_f64;
+    let mut dark = 255.0_f64;
+    let mut mid = None::<(f32, f64, f64)>;
+    let mut mid_gap = 1.0_f64;
+    for step in 0u16..28 {
+        let z = 1.50 + f32::from(step) * 0.05;
+        let Some(uv) = viewport_uv(&camera, aspect, [0.0, 0.0, z]) else {
+            continue;
+        };
+        let Some(y) = presented_luma(&frame, width, height, uv) else {
+            continue;
+        };
+        let cpu = reference_at(&scene, z);
+        let lit_cpu = reference_at(&scene, 2.8);
+        let vis = if lit_cpu > 0.0 { cpu / lit_cpu } else { 0.0 };
+        if vis > 0.85 {
+            lit = lit.max(y);
+        }
+        if vis < 0.15 {
+            dark = dark.min(y);
+        }
+        let gap = (vis - 0.5).abs();
+        if gap < mid_gap {
+            mid_gap = gap;
+            mid = Some((z, y, vis));
+        }
+    }
+    let (z, y, vis) = mid.expect("no floor sample");
+    let span = lit - dark;
+    let place = if span > 0.0 { (y - dark) / span } else { 0.0 };
+    eprintln!(
+        "presented penumbra z {z} vis {vis:.3} luma {y:.1} lit {lit:.1} dark {dark:.1} place {place:.3}"
+    );
+    assert!(
+        span > 8.0 && place > 0.2 && place < 0.8,
+        "the presented penumbra is a hard edge (guard {LAMP_DISC}): z {z} vis {vis:.3} luma {y:.1} lit {lit:.1} dark {dark:.1} place {place:.3}"
+    );
 }
 
 #[test]
