@@ -1,6 +1,7 @@
 mod aa;
 mod budget;
 mod cache_probe;
+mod cascade;
 mod cooked_load;
 mod fog;
 mod fog_budget;

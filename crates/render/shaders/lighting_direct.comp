@@ -261,6 +261,10 @@ void main() {
         if (!lighting_surface(uvec2(idx % pc.dims.x, idx / pc.dims.x), pos, n, albedo, two_sided)) {
             return;
         }
+        // Level 0 is the visible surface. A loop here stays out of picture
+        // compose: that compile faults lavapipe on a per-pixel probe walk.
+        // The picture still reads the lattice until the merge replaces it.
+        lighting_cascade_insert(pos, n);
     } else {
         vec4 rec;
         vec3 origin;

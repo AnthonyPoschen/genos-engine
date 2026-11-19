@@ -205,7 +205,17 @@ pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
 }
 
 fn lighting_keys_words(pixels: u64) -> u64 {
-    lighting_fill_keys_words(pixels) + lighting_reach_words()
+    lighting_fill_keys_words(pixels) + lighting_reach_words() + lighting_level0_words()
+}
+
+/// Level-0 surface samples, after the reach words. One count word, then
+/// `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words. Matches
+/// `lighting_cascade.glsl`.
+const CASCADE_LEVEL0_CAP: u64 = 16384;
+const CASCADE_LEVEL0_STRIDE: u64 = 12;
+
+fn lighting_level0_words() -> u64 {
+    1 + CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE
 }
 
 fn lighting_compose_minx() -> u64 {

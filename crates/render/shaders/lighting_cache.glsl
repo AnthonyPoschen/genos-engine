@@ -7720,3 +7720,4 @@ const uint LIGHTING_REACH_TAIL = LIGHTING_FILL_PARAMS + LIGHTING_CACHE_SLOTS + 8
 uint lighting_reach_base() {
     return LIGHTING_SC_SEED_PAY_AT + pc.dims.x * pc.dims.y * 8u + LIGHTING_REACH_TAIL;
 }
+#include "lighting_cascade.glsl"
