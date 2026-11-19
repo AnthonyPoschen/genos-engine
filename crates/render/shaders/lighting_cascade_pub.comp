@@ -35,5 +35,5 @@ void main() {
     if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
         n = -n;
     }
-    lighting_cascade_publish(p.y * pc.dims.x + p.x, pos, n);
+    lighting_cascade_publish(p.y * pc.dims.x + p.x, p, pos, n);
 }

@@ -1565,6 +1565,12 @@ impl Renderer {
         self.gpu.lighting_under_trusted_pixels()
     }
 
+    /// Visible surfaces last frame whose published bounce sample was empty.
+    /// Waits for that frame.
+    pub fn lighting_cascade_gaps(&mut self) -> u32 {
+        self.gpu.lighting_cascade_gaps()
+    }
+
     /// Fill scheduler work from the last frame: serial plan iterations, then
     /// the histogram dispatch's group count. Waits for that frame.
     pub fn lighting_fill_compact_work(&mut self) -> [u32; 2] {

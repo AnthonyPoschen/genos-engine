@@ -52,16 +52,20 @@ These existed because the picture read the 25 cm cell directly. They are not a s
 - The importance cutoff stays the exact/tail split it already is. A cache ray is not a product pixel (`idx < pixels` is false), so the upper-level shade sums every lamp, distant ones included. The per-pixel tail stays the direct remainder. Removing it would drop hall energy or count the same light twice. Distant lamps are not traced as extra exact lights.
 - Lamp area sampling for a soft penumbra is deferred.
 - The finest bounce cell, 25 cm, keeps the full trace from the ray epsilon out to 200 m. The papers start level 0 near 1 m. A cell at least twice that size has a shell from `2^level` to `2^(level+1)`, and the last shell runs out to 200 m. Clipping the 25 cm cell before the shells are summed raised wall splotch from 0.049 to 0.084, so that cell keeps the full trace.
-- Picture compose loads the per-pixel level-0 word. It does not walk the hash. That walk faults lavapipe. A publish pass, after the lattice fill, writes the merge into that word. Beta is 0 while the nearer sample exists, so a missing nearer sample is what shows the parent. Black only when neither has data.
+- Picture compose loads the per-pixel level-0 word. It does not walk the hash. That walk faults lavapipe. A publish pass, after the lattice fill, writes the merge into that word. The lattice holds 16384 records, so a room evicts the farther surfaces and that record is empty while the world cell still has samples. A miss reads that cell, then each coarser size until one passes the plane, facing, stale, and empty gates. A camera move inserts voxels that have no ray and no stored coarser cell yet. Those read the fine cells already traced on that surface, then the inward pixel's resolved sample, out to 8 m, in the same frame. Beta is 0 while the nearer sample exists. Black only when none of those has data.
 - The merge's nearer term is that full integral. Beta is 0 while it exists, and the parent shows only when the nearer sample is missing. Adding the parent on top of the full integral would count the same light twice.
 
 ## After the conversion
 
 Per-pass timings are recorded once, when the cascade is feature complete. They are not part of the conversion commits. The frame-rate target, a worst frame above 100 fps on the stress scene and about 500 fps on the basic scene, is the phase after that. Lavapipe times are the wiring check. They are not that target.
 
+## Known issue
+
+The dark room behind the lit room is not fully closed. A 4070 shot shows thin lit slivers where the shared wall meets the ceiling and the floor, and a lit rectangular patch on the floor near that wall. The rest of that room stays black. Cells or level-0 patches that straddle the junction are the likely cause. The leak fix is held. The thin-wall test still covers a surface the gates refuse. It does not cover these junctions.
+
 ## Gates the conversion keeps
 
-Knockout late error at or under 0.213. ReSTIR reference error 0.05. Compose SPIR-V under 248,000 bytes. Hall energy all 120..136 and mid 101..113, exclusive. Moving-box face and mover flicker, hot limit 3. Floor splotch at or under 0.045 and wall splotch at or under 0.053. The cell-sized black-square test. A thin-wall leak test: light does not cross a surface that the leak gates refuse.
+Knockout late error at or under 0.213. ReSTIR reference error 0.05. Compose SPIR-V under 248,000 bytes. Hall energy all 120..136 and mid 101..113, exclusive. Moving-box face and mover flicker, hot limit 3. Floor splotch at or under 0.045 and wall splotch at or under 0.053. The cell-sized black-square test. A moving camera after the hall has lit, with no published sample left empty. A thin-wall leak test: light does not cross a surface that the leak gates refuse.
 
 ## Networking
 

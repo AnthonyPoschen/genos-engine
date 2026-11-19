@@ -16,7 +16,6 @@ const float CASCADE_PROJ = 0.05;
 const float CASCADE_RING_NEAR = 1.0;
 const uint CASCADE_RING_MAX = 6u;
 const float CASCADE_OVERLAP = 0.1;
-const float CASCADE_CELL_CENTRE = 0.5;
 const float CASCADE_PARENT_SCALE = 2.0;
 
 uint lighting_cascade_base() {
@@ -139,30 +138,42 @@ vec4 lighting_cascade_gated(uint s, vec3 q, vec3 n, float size) {
     return vec4(max(v.rgb, vec3(0.0)), 1.0);
 }
 
-// Sparse trilinear of the parent cells that exist. A missing corner is left
-// out and the weights that remain are renormalised. No corner means black.
-vec4 lighting_cascade_trilinear(vec3 pos, vec3 n, float size) {
-    vec3 g = floor(pos / size);
-    vec3 f = pos / size - g;
+// One world cell. The lattice table is 16384 records with a 16-probe window.
+// A room evicts the farther surfaces, so a lattice miss is not an empty cell.
+// This read is the cell the hash still holds. Claim stays off: publish does
+// not allocate a coarser cell the fill never asked for.
+vec4 lighting_cascade_voxel(vec3 pos, vec3 n, float size) {
+    uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+    return lighting_cascade_gated(s, pos, n, size);
+}
+
+// Fine cells already traced on this surface, one step out. A new voxel has no
+// stored parent, and the coarser slot is often empty too. The step stays on
+// the tangent plane, so a probe does not leave the wall. Each coarser size
+// takes a longer step. The plane and facing gates stay, so the far side of a
+// wall does not join the sum.
+vec4 lighting_cascade_children(vec3 pos, vec3 n, float size) {
+    uint ax = lighting_axis(n) >> 1u;
+    uint a1 = (ax + 1u) % 3u;
+    uint a2 = (ax + 2u) % 3u;
+    float step = size / CASCADE_PARENT_SCALE;
     vec3 sum = vec3(0.0);
     float wsum = 0.0;
-    [[dont_unroll]] for (uint i = 0u; i < 8u; i++) {
-        vec3 corner = g + vec3(float(i & 1u), float((i >> 1u) & 1u), float(i >> 2u));
-        vec3 q = (corner + vec3(CASCADE_CELL_CENTRE)) * size;
-        float bx = (i & 1u) == 0u ? (1.0 - f.x) : f.x;
-        float by = ((i >> 1u) & 1u) == 0u ? (1.0 - f.y) : f.y;
-        float bz = (i >> 2u) == 0u ? (1.0 - f.z) : f.z;
-        float bil = bx * by * bz;
-        if (!(bil > 0.0)) {
+    [[dont_unroll]] for (uint i = 0u; i < 9u; i++) {
+        int s1 = int(i % 3u) - 1;
+        int s2 = int(i / 3u) - 1;
+        if (s1 == 0 && s2 == 0) {
             continue;
         }
-        uint s = lighting_cache_find_sized(q, n, false, size, q);
-        vec4 tap = lighting_cascade_gated(s, pos, n, size);
+        vec3 q = pos;
+        q[a1] += float(s1) * step;
+        q[a2] += float(s2) * step;
+        vec4 tap = lighting_cascade_voxel(q, n, LIGHTING_SC_HIT);
         if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
             continue;
         }
-        sum += bil * tap.rgb;
-        wsum += bil;
+        sum += tap.rgb;
+        wsum += 1.0;
     }
     if (!(wsum > 0.0)) {
         return vec4(0.0);
@@ -170,12 +181,120 @@ vec4 lighting_cascade_trilinear(vec3 pos, vec3 n, float size) {
     return vec4(sum / wsum, 1.0);
 }
 
+// A cell read that keeps the facing gate and drops the plane gate. The plane
+// gate is right for a blend. On a miss it also rejects the lit part of this
+// surface when the new pixel's position sits more than half a cell off the
+// stored hit. The facing gate still refuses the other side of a wall.
+vec4 lighting_cascade_facing(vec3 pos, vec3 n, float size) {
+    uint s = lighting_cache_find_sized(pos, n, false, size, pos);
+    if (s == ~0u || lighting_sc_stale(s)) {
+        return vec4(0.0);
+    }
+    if (dot(cache.v[3u * s + 1u].xyz, n) <= 0.0) {
+        return vec4(0.0);
+    }
+    vec4 v = cache.v[3u * s + 2u];
+    if (!(v.w > LIGHTING_CACHE_HAS_W)) {
+        return vec4(0.0);
+    }
+    return vec4(max(v.rgb, vec3(0.0)), 1.0);
+}
+
+vec4 lighting_cascade_ancestor(vec3 pos, vec3 n);
+
+// Pixels toward the image centre. A camera turn inserts a strip of voxels
+// with no ray yet, on the edge, wider than the lattice reach. The first
+// inward pixel whose cell, lattice, or coarser sample already has data is
+// that ancestor. Past eight metres it is a different surface.
+vec4 lighting_cascade_inward(uvec2 p, vec3 pos, vec3 n) {
+    ivec2 delta = ivec2(pc.dims.xy) / 2 - ivec2(p);
+    int sx = delta.x > 0 ? 1 : (delta.x < 0 ? -1 : 0);
+    int sy = delta.y > 0 ? 1 : (delta.y < 0 ? -1 : 0);
+    if (sx == 0 && sy == 0) {
+        return vec4(0.0);
+    }
+    float limit = LIGHTING_SC_HIT
+        * CASCADE_PARENT_SCALE * CASCADE_PARENT_SCALE
+        * CASCADE_PARENT_SCALE * CASCADE_PARENT_SCALE
+        * CASCADE_PARENT_SCALE;
+    [[dont_unroll]] for (uint k = 1u; k <= 16u; k++) {
+        ivec2 q = ivec2(p) + ivec2(sx, sy) * int(k);
+        if (q.x < 0 || q.y < 0 || uint(q.x) >= pc.dims.x || uint(q.y) >= pc.dims.y) {
+            break;
+        }
+        vec3 qpos;
+        vec3 qn;
+        vec3 albedo;
+        bool two;
+        if (!lighting_surface(uvec2(q), qpos, qn, albedo, two)) {
+            continue;
+        }
+        if (two && dot(qn, scene.eye.xyz - qpos) < 0.0) {
+            qn = -qn;
+        }
+        // The new strip's normal is not the wall it just covered. Keep the
+        // sample the inward pixel already resolved. The distance limit is
+        // what refuses a surface in another room.
+        if (distance(qpos, pos) > limit) {
+            continue;
+        }
+        vec4 tap = lighting_sh_compose_shown(qpos, qn);
+        if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
+            tap = lighting_cascade_voxel(qpos, qn, LIGHTING_SC_HIT);
+        }
+        if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
+            tap = lighting_cascade_facing(qpos, qn, LIGHTING_SC_HIT);
+        }
+        if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
+            tap = lighting_cascade_ancestor(qpos, qn);
+        }
+        if (tap.w > LIGHTING_CACHE_HAS_W) {
+            return tap;
+        }
+    }
+    return vec4(0.0);
+}
+
+// The next coarser size that still has a sample the gates accept. A missing
+// stored cell uses the fine cells already inside that footprint. Each step
+// doubles. Black only when every size missed.
+vec4 lighting_cascade_ancestor(vec3 pos, vec3 n) {
+    float size = LIGHTING_SC_HIT;
+    [[dont_unroll]] for (uint level = 1u; level <= CASCADE_RING_MAX; level++) {
+        size *= CASCADE_PARENT_SCALE;
+        vec4 tap = lighting_cascade_voxel(pos, n, size);
+        if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
+            tap = lighting_cascade_children(pos, n, size);
+        }
+        if (tap.w > LIGHTING_CACHE_HAS_W) {
+            return tap;
+        }
+    }
+    return vec4(0.0);
+}
+
+// Visible surfaces whose published sample is empty. Stats word 35 (diag[11]).
+// diag[46] is the adopt reset and must not be reused.
+const uint LIGHTING_DIAG_CASCADE_GAP = 11u;
+
 // L(a,c) = L(a,b) + beta(a,b) * L(b,c). Beta is 0 when the nearer sample
-// exists, so that sample occludes the parent. A missing nearer sample shows
-// the parent in full. Black only when neither has data.
-vec4 lighting_cascade_merge(vec3 pos, vec3 n) {
+// exists, so that sample occludes the parent. The lattice sample is that
+// nearer sample when it has data. A lattice miss reads the 25 cm cell, then
+// each coarser size. Black only when none of those has data.
+vec4 lighting_cascade_merge(uvec2 p, vec3 pos, vec3 n) {
     vec4 near = lighting_sh_compose_shown(pos, n);
-    vec4 far = lighting_cascade_trilinear(pos, n, LIGHTING_SC_HIT * CASCADE_PARENT_SCALE);
+    vec4 voxel = vec4(0.0);
+    vec4 far = vec4(0.0);
+    if (!(near.w > LIGHTING_CACHE_HAS_W)) {
+        voxel = lighting_cascade_voxel(pos, n, LIGHTING_SC_HIT);
+        near = voxel;
+    }
+    if (!(near.w > LIGHTING_CACHE_HAS_W)) {
+        far = lighting_cascade_ancestor(pos, n);
+    }
+    if (!(near.w > LIGHTING_CACHE_HAS_W) && !(far.w > LIGHTING_CACHE_HAS_W)) {
+        far = lighting_cascade_inward(p, pos, n);
+    }
     float beta = near.w > LIGHTING_CACHE_HAS_W ? 0.0 : 1.0;
     vec3 near_rgb = near.w > LIGHTING_CACHE_HAS_W ? max(near.rgb, vec3(0.0)) : vec3(0.0);
     vec3 far_rgb = far.w > LIGHTING_CACHE_HAS_W ? max(far.rgb, vec3(0.0)) : vec3(0.0);
@@ -183,6 +302,12 @@ vec4 lighting_cascade_merge(vec3 pos, vec3 n) {
     float w = 0.0;
     if (near.w > LIGHTING_CACHE_HAS_W || far.w > LIGHTING_CACHE_HAS_W) {
         w = 1.0;
+    }
+    // A visible surface with no published sample. A real zero has weight and
+    // is not counted. The moving-camera test requires this to stay 0: a new
+    // voxel reads its ancestor in the same frame.
+    if (!(w > LIGHTING_CACHE_HAS_W)) {
+        atomicAdd(gstats.diag[LIGHTING_DIAG_CASCADE_GAP], 1u);
     }
     return vec4(rgb, w);
 }
@@ -345,11 +470,11 @@ vec4 lighting_cascade_picture(vec3 pos, vec3 n) {
     return vec4(0.0);
 }
 
-void lighting_cascade_publish(uint pixel, vec3 pos, vec3 n) {
+void lighting_cascade_publish(uint pixel, uvec2 p, vec3 pos, vec3 n) {
     // This pixel's merge, after the lattice fill. Writing the shared cell
     // from every pixel raced and painted it black on a camera turn. The
     // picture loads this pixel's own word.
-    vec4 shown = lighting_cascade_merge(pos, n);
+    vec4 shown = lighting_cascade_merge(p, pos, n);
     uint at = lighting_cascade_pixel_at(pixel);
     ckeys.key[at] = lighting_pack_rgb9e5(max(shown.rgb, vec3(0.0)));
     ckeys.key[at + 1u] = shown.w > LIGHTING_CACHE_HAS_W ? lighting_frame() + 1u : 0u;

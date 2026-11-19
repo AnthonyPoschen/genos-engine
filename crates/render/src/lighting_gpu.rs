@@ -1884,6 +1884,16 @@ impl Gpu {
             .map_or(0, |w| w[WORD])
     }
 
+    /// Visible surfaces last frame whose published sample was empty. A real
+    /// zero has weight and is not counted. Stats word 35 (`gstats.diag[11]`,
+    /// `LIGHTING_DIAG_CASCADE_GAP`). Waits.
+    pub(crate) fn lighting_cascade_gaps(&mut self) -> u32 {
+        self.idle_device();
+        const WORD: usize = 24 + 11;
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map_or(0, |w| w[WORD])
+    }
+
     /// Serial plan iterations (`gstats.pad2`, stats word 20) and the histogram
     /// dispatch's group count (`gstats.pad3`, word 21) from the last frame.
     /// A slot-table scan is hundreds of thousands of iterations and a dispatch

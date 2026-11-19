@@ -108,6 +108,23 @@ pub fn keeps_sample(facing: f32, plane: f32, half_cell: f32, stale: bool, weight
     !stale && facing > 0.0 && plane.abs() <= half_cell && weight > 0.5
 }
 
+/// First sample whose weight is above a half. Order is the lattice, the
+/// fine cell, then each coarser size. An empty entry is not black when a
+/// later entry has data.
+pub fn shown_sample(samples: &[[f32; 4]]) -> [f32; 4] {
+    for sample in samples {
+        if sample[3] > 0.5 {
+            return [
+                sample[0].max(0.0),
+                sample[1].max(0.0),
+                sample[2].max(0.0),
+                1.0,
+            ];
+        }
+    }
+    [0.0, 0.0, 0.0, 0.0]
+}
+
 /// `L(a,c) = L(a,b) + beta * L(b,c)`. Beta is 0 when the nearer sample exists.
 pub fn merge(near: [f32; 3], near_w: f32, far: [f32; 3], far_w: f32) -> ([f32; 3], f32) {
     let near_ok = near_w > 0.5;
@@ -142,8 +159,8 @@ pub fn overlap_blend(cheb: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        cell_size, chebyshev, interval, keeps_sample, merge, overlap_blend, ring, FINE, OVERLAP,
-        PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
+        cell_size, chebyshev, interval, keeps_sample, merge, overlap_blend, ring, shown_sample,
+        FINE, OVERLAP, PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
     };
 
     #[test]
@@ -194,6 +211,22 @@ mod tests {
         assert_eq!(interval(4.0), (16.0, 32.0));
         assert_eq!(interval(8.0), (32.0, 64.0));
         assert_eq!(interval(16.0), (64.0, TRACE_FAR));
+    }
+
+    #[test]
+    fn an_empty_voxel_shows_the_first_coarser_sample_with_data() {
+        let black = shown_sample(&[[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]);
+        assert_eq!(black, [0.0, 0.0, 0.0, 0.0]);
+        let coarse = shown_sample(&[
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.4, 0.1, 0.0, 1.0],
+        ]);
+        assert_eq!(coarse, [0.4, 0.1, 0.0, 1.0]);
+        let lattice = shown_sample(&[[0.2, 0.0, 0.0, 1.0], [9.0, 0.0, 0.0, 1.0]]);
+        assert_eq!(lattice, [0.2, 0.0, 0.0, 1.0]);
+        let refused = shown_sample(&[[0.0, 0.0, 0.0, 0.5], [0.3, 0.0, 0.0, 0.9]]);
+        assert_eq!(refused, [0.3, 0.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -251,6 +284,12 @@ mod tests {
         assert!(shader.contains("lighting_cascade_interval"));
         assert!(shader.contains("level < 1.0"));
         assert!(shader.contains("lighting_cascade_merge"));
+        assert!(shader.contains("lighting_cascade_voxel"));
+        assert!(shader.contains("lighting_cascade_ancestor"));
+        assert!(shader.contains("lighting_cascade_children"));
+        assert!(shader.contains("lighting_cascade_inward"));
+        assert!(shader.contains("lighting_cascade_facing"));
+        assert!(shader.contains("LIGHTING_DIAG_CASCADE_GAP = 11u"));
         assert!(shader.contains("LIGHTING_CELL_HALF * size"));
         assert!(shader.contains("beta * far_rgb"));
         let probe = include_str!("../shaders/lighting_screen_probe.glsl");
