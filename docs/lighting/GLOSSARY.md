@@ -226,7 +226,7 @@ Role: STORE · Literature: GIBS screen-relative size (§1.6, deviates: discrete 
 **Lamp**: a point light. The sun is not a lamp. Its exact shadow is the lamp disc.
 Role: LIGHTS
 
-**Lamp disc**: the 0.1 m disc (`LAMP_RADIUS`) a pixel's exact shadow ray samples for a point lamp. The irradiance stays the centre point formula times the visible fraction.
+**Lamp disc**: the 0.1 m disc (`LAMP_RADIUS`) a pixel's shadow ray samples for a point lamp: the exact sum, the weighted sample, and the tail. The irradiance stays the centre point formula times the visible fraction.
 Role: VIS · Literature: PBRT uniform disc (pdf 1/(π R²)) · More detail: [`lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp)
 
 **Sun disc**: the sun's exact shadow, the mean solar semi-diameter 0.00465047 rad (`SUN_DISC`) at the 80 m target. One sample per frame, folded into the same mean as the lamp disc.

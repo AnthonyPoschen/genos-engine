@@ -1,9 +1,10 @@
 #version 450
 #define GENOS_SUN_SHADER 1
 // GI direct light: every lamp at a surface point, each with a shadow ray through
-// the tracer. A pixel's exact ray (the sun and each near lamp at scale 1) aims at
-// one point on that light's disc. The running mean of those samples is the
-// penumbra. Hits, the flame, the ReSTIR tail, and the reservoir sample stay on
+// the tracer. A pixel's shadow of the sun or a point lamp aims at one point on
+// that light's disc: the exact sum, the one weighted sample, and the tail.
+// Those samples estimate the same disc integral. The running mean of the
+// scale-1 samples is the penumbra. Hits, cache rays, and the flame stay on
 // the centre. The points are the picture's pixels (G-buffer) followed by every kept
 // hit of the screen probes (all strata, so a kept hit always carries this frame's
 // light: no light history), the light cache's ray hits and the probes' fills, so all share this loop
@@ -218,6 +219,15 @@ vec3 lamp_disc_point(Lamp lamp, vec3 origin, vec3 centre, float u, float v) {
     vec3 tx = normalize(cross(helper, axis));
     vec3 ty = cross(axis, tx);
     return centre + (tx * cos(a) + ty * sin(a)) * r;
+}
+
+// One disc point for this pixel, this frame, and this lamp. The literal stays
+// in this one place so a second call site does not add a second magic number.
+vec3 lamp_disc_aim(Lamp lamp, vec3 origin, vec3 centre, uint px, uint lamp_i) {
+    uint h = lighting_hash(px ^ lighting_hash(lighting_frame() ^ lighting_hash(lamp_i)));
+    float hu = lighting_unit(h);
+    float hv = lighting_unit(lighting_hash(h ^ 0x27d4eb2du));
+    return lamp_disc_point(lamp, origin, centre, hu, hv);
 }
 
 // Pixel exact-shadow mean. Two vec4s: mean.rgb and count, then depth, packed
@@ -901,10 +911,13 @@ void main() {
             tail_luma = w;
         }
 #endif
-        // Pixels only. Hits, the flame, a weighted sample, and the tail stay
-        // on the centre. scale 1 is the exact sum (and a ReSTIR lamp at or
-        // above the cutoff). One disc point per exact light per frame.
-        bool area_ray = idx < pixels && take && k < list.suns.y + list.near.y && scale == 1.0;
+        // A pixel ray of the sun or a point lamp estimates the disc integral,
+        // including the weighted sample and the tail. The flame is the next
+        // slot and stays on the centre. Hits are not pixels. The exact-lamp
+        // mean takes only scale 1: the tail and the weighted sample change
+        // lamp every frame, so they do not join that mean.
+        bool disc_ray = idx < pixels && take && k < list.suns.y + list.near.y;
+        bool area_ray = disc_ray && scale == 1.0;
 #ifdef GENOS_RESTIR_DI
         if (tail_sample) {
             area_ray = false;
@@ -939,11 +952,8 @@ void main() {
                 shadow_lit = sc > 0.5;
             } else {
                 vec3 aim = target;
-                if (area_ray) {
-                    uint h = lighting_hash(idx ^ lighting_hash(lighting_frame() ^ lighting_hash(k)));
-                    float hu = lighting_unit(h);
-                    float hv = lighting_unit(lighting_hash(h ^ 0x27d4eb2du));
-                    aim = lamp_disc_point(sun_lamp_l, origin, target, hu, hv);
+                if (disc_ray) {
+                    aim = lamp_disc_aim(sun_lamp_l, origin, target, idx, k);
                 }
                 shadow_lit = !trace_occluded(origin, aim);
                 // Counts a real shadow ray. A shadow-cell hit does not. Off
@@ -1043,7 +1053,8 @@ void main() {
             bool rvis = true;
             restir_luma = rlight.r + rlight.g + rlight.b;
             if (shadows_on) {
-                rvis = !trace_occluded(origin, rt);
+                vec3 raim = idx < pixels ? lamp_disc_aim(rl, origin, rt, idx, restir_lamp) : rt;
+                rvis = !trace_occluded(origin, raim);
                 if (lamp_pick_diag()) {
                     atomicAdd(gstats.diag[48u], 1u);
                 }
