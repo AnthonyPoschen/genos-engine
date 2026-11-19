@@ -104,6 +104,8 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     if (LIGHTING_SC_WRITES) {
         lighting_cache_find_sized(pos, n, true, LIGHTING_SC_HIT, pos);
     }
+    // The picture gather. A level-0 hash walk in this compile faults
+    // lavapipe, so the pixel reads the lattice the level-0 record is built from.
     vec4 world = lighting_sh_compose_lattice(pos, n, false);
     lighting_px_object_id = 0u;
     lighting_px_world_w = world.w;

@@ -3312,11 +3312,10 @@ vec4 lighting_sh_lattice_at(vec3 pos, vec3 n) {
     }
     return lighting_sh_blend_ids(ids, pos, n);
 }
-vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
-#ifdef GENOS_COMPOSE_NO_WALK
-    if (LIGHTING_SC_WRITES) {
-        lighting_sh_lattice_request(pos, n, claim);
-    }
+// The lattice gather, for the cascade merge in the direct pass. Picture
+// compose keeps its own copy under GENOS_COMPOSE_NO_WALK.
+#ifndef GENOS_COMPOSE_NO_WALK
+vec4 lighting_sh_compose_shown(vec3 pos, vec3 n) {
     vec4 centre = lighting_sh_lattice_at(pos, n);
     // Child weight is sets/full, captured before the neighbour reads
     // overwrite it. Zero sets leaves the parent in full. A missing centre
@@ -3359,6 +3358,67 @@ vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
         }
         // The nearest ring that passes the leak gates is the parent. A ring
         // that fails is skipped, so the next one out is the ancestor.
+        if (parent.w <= 0.0 && level_w > 0.0) {
+            parent = vec4(level / level_w, 1.0);
+        }
+    }
+    if (w <= 0.0) {
+        return vec4(0.0);
+    }
+    vec3 spatial = sum / w;
+    vec3 shown = spatial;
+    if (parent.w > 0.0 && trust < 1.0) {
+        shown = mix(parent.rgb, spatial, trust);
+    }
+    float out_w = centre.w;
+    if (!(out_w > LIGHTING_CACHE_HAS_W)) {
+        out_w = 1.0;
+    }
+    return vec4(shown, out_w);
+}
+#endif
+vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
+#ifdef GENOS_COMPOSE_NO_WALK
+    if (LIGHTING_SC_WRITES) {
+        lighting_sh_lattice_request(pos, n, claim);
+    }
+    vec4 centre = lighting_sh_lattice_at(pos, n);
+    float trust = centre.w > 0.0 ? clamp(lighting_sh_blend_trust, 0.0, 1.0) : 0.0;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 t = vec3(0.0);
+    vec3 b = vec3(0.0);
+    if (ax == 0u) {
+        t = vec3(0.0, 1.0, 0.0);
+        b = vec3(0.0, 0.0, 1.0);
+    } else if (ax == 1u) {
+        t = vec3(1.0, 0.0, 0.0);
+        b = vec3(0.0, 0.0, 1.0);
+    } else {
+        t = vec3(1.0, 0.0, 0.0);
+        b = vec3(0.0, 1.0, 0.0);
+    }
+    vec3 sum = vec3(0.0);
+    float w = 0.0;
+    if (centre.w > 0.0) {
+        sum = centre.rgb * LIGHTING_LATTICE_CENTRE;
+        w = LIGHTING_LATTICE_CENTRE;
+    }
+    vec4 parent = vec4(0.0);
+    float step_m = LIGHTING_SH_CELL;
+    [[dont_unroll]] for (uint s = 1u; s <= LIGHTING_LATTICE_REACH; s++) {
+        float d = float(s) * step_m;
+        vec3 ring[4] = vec3[4](pos + t * d, pos - t * d, pos + b * d, pos - b * d);
+        vec3 level = vec3(0.0);
+        float level_w = 0.0;
+        [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
+            vec4 nb = lighting_sh_lattice_at(ring[i], n);
+            if (nb.w > 0.0) {
+                level += nb.rgb;
+                level_w += 1.0;
+                sum += nb.rgb;
+                w += 1.0;
+            }
+        }
         if (parent.w <= 0.0 && level_w > 0.0) {
             parent = vec4(level / level_w, 1.0);
         }
@@ -5210,8 +5270,8 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }
-    // Mode 3 bounce is the 25 cm SH lattice. The texel gather and its trust
-    // mix are not the picture and not the ray read.
+    // Mode 3 bounce is the 25 cm SH lattice for callers that are not the
+    // picture. The picture reads level 0 in lighting_screen_probe.glsl.
     if (mode == 3u) {
         lighting_px_shade = 1u;
         return lighting_sh_compose_lattice(pos, n, false);
@@ -7720,4 +7780,3 @@ const uint LIGHTING_REACH_TAIL = LIGHTING_FILL_PARAMS + LIGHTING_CACHE_SLOTS + 8
 uint lighting_reach_base() {
     return LIGHTING_SC_SEED_PAY_AT + pc.dims.x * pc.dims.y * 8u + LIGHTING_REACH_TAIL;
 }
-#include "lighting_cascade.glsl"

@@ -85,7 +85,7 @@ pub const INTERVAL_MAX: f32 = 6.0;
 /// The 25 cm cell returns the full trace. A coarser cell returns
 /// `[2^level, 2^(level+1)]`, and level 6 returns `[64, 200]`.
 pub fn interval(size: f32) -> (f32, f32) {
-    if !(size > 0.0) {
+    if size.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) || size < FINE * 2.0 {
         return (TRACE_NEAR, TRACE_FAR);
     }
     let ratio = (size / FINE).max(1.0);
@@ -101,6 +101,25 @@ pub fn interval(size: f32) -> (f32, f32) {
         2.0_f32.powf(level + 1.0)
     };
     (near, far)
+}
+
+/// True when a parent sample survives the thin-wall gates.
+pub fn keeps_sample(facing: f32, plane: f32, half_cell: f32, stale: bool, weight: f32) -> bool {
+    !stale && facing > 0.0 && plane.abs() <= half_cell && weight > 0.5
+}
+
+/// `L(a,c) = L(a,b) + beta * L(b,c)`. Beta is 0 when the nearer sample exists.
+pub fn merge(near: [f32; 3], near_w: f32, far: [f32; 3], far_w: f32) -> ([f32; 3], f32) {
+    let near_ok = near_w > 0.5;
+    let far_ok = far_w > 0.5;
+    let beta = if near_ok { 0.0 } else { 1.0 };
+    let rgb = [
+        if near_ok { near[0].max(0.0) } else { 0.0 } + if far_ok { beta * far[0].max(0.0) } else { 0.0 },
+        if near_ok { near[1].max(0.0) } else { 0.0 } + if far_ok { beta * far[1].max(0.0) } else { 0.0 },
+        if near_ok { near[2].max(0.0) } else { 0.0 } + if far_ok { beta * far[2].max(0.0) } else { 0.0 },
+    ];
+    let w = if near_ok || far_ok { 1.0 } else { 0.0 };
+    (rgb, w)
 }
 
 /// Weight of the next ring. Zero until the outer tenth of this ring.
@@ -120,8 +139,8 @@ pub fn overlap_blend(cheb: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        cell_size, chebyshev, interval, overlap_blend, ring, FINE, OVERLAP, PROJ, RING_MAX, RING_NEAR,
-        TRACE_FAR, TRACE_NEAR,
+        cell_size, chebyshev, interval, keeps_sample, merge, overlap_blend, ring, FINE, OVERLAP, PROJ,
+        RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
     };
 
     #[test]
@@ -175,6 +194,30 @@ mod tests {
     }
 
     #[test]
+    fn a_near_sample_hides_the_parent_and_a_missing_one_shows_it() {
+        let (rgb, w) = merge([0.2, 0.0, 0.0], 1.0, [9.0, 0.0, 0.0], 1.0);
+        assert_eq!(rgb, [0.2, 0.0, 0.0]);
+        assert_eq!(w, 1.0);
+        let (rgb, w) = merge([0.0, 0.0, 0.0], 0.0, [0.4, 0.1, 0.0], 1.0);
+        assert_eq!(rgb, [0.4, 0.1, 0.0]);
+        assert_eq!(w, 1.0);
+        let (rgb, w) = merge([0.0, 0.0, 0.0], 0.0, [1.0, 0.0, 0.0], 0.0);
+        assert_eq!(rgb, [0.0, 0.0, 0.0]);
+        assert_eq!(w, 0.0);
+    }
+
+    #[test]
+    fn a_thin_wall_refuses_the_far_side() {
+        let half = 0.125;
+        assert!(keeps_sample(1.0, 0.0, half, false, 1.0));
+        assert!(!keeps_sample(0.0, 0.0, half, false, 1.0));
+        assert!(!keeps_sample(-0.2, 0.0, half, false, 1.0));
+        assert!(!keeps_sample(1.0, 0.2, half, false, 1.0));
+        assert!(!keeps_sample(1.0, 0.0, half, true, 1.0));
+        assert!(!keeps_sample(1.0, 0.0, half, false, 0.0));
+    }
+
+    #[test]
     fn the_shader_uses_this_ring_rule() {
         let shader = include_str!("../shaders/lighting_cascade.glsl");
         assert!(shader.contains("const float CASCADE_PROJ = 0.05;"), "{shader}");
@@ -192,14 +235,22 @@ mod tests {
         );
         let trace = include_str!("../shaders/lighting_trace.comp");
         assert!(
-            trace.contains("lighting_cascade_ray_range(ray, t0, t1)"),
-            "cache rays take the cell interval"
+            trace.contains("CASCADE_TRACE_NEAR"),
+            "picture cells keep the full trace"
         );
+        assert!(shader.contains("lighting_cascade_interval"));
         assert!(shader.contains("level < 1.0"));
+        assert!(shader.contains("lighting_cascade_merge"));
+        assert!(shader.contains("LIGHTING_CELL_HALF * size"));
+        assert!(shader.contains("beta * far_rgb"));
         let probe = include_str!("../shaders/lighting_screen_probe.glsl");
         assert!(
+            probe.contains("lighting_sh_compose_lattice(pos, n, false)"),
+            "the picture reads the level-0 gather after the lattice fill"
+        );
+        assert!(
             !probe.contains("lighting_cascade_insert"),
-            "picture compose does not walk the level-0 hash"
+            "picture compose does not insert into the level-0 hash"
         );
     }
 }

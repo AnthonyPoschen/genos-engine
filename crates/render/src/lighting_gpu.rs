@@ -205,17 +205,18 @@ pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
 }
 
 fn lighting_keys_words(pixels: u64) -> u64 {
-    lighting_fill_keys_words(pixels) + lighting_reach_words() + lighting_level0_words()
+    lighting_fill_keys_words(pixels) + lighting_reach_words() + lighting_level0_words(pixels)
 }
 
 /// Level-0 surface samples, after the reach words. One count word, then
-/// `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words. Matches
+/// `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words, then two
+/// words per pixel (radiance, stamp) that picture compose loads. Matches
 /// `lighting_cascade.glsl`.
 const CASCADE_LEVEL0_CAP: u64 = 16384;
 const CASCADE_LEVEL0_STRIDE: u64 = 12;
 
-fn lighting_level0_words() -> u64 {
-    1 + CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE
+fn lighting_level0_words(pixels: u64) -> u64 {
+    1 + CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE + pixels * 2
 }
 
 fn lighting_compose_minx() -> u64 {
@@ -8463,5 +8464,19 @@ mod fill_cell_log_tests {
         for share in shares {
             assert!((share - 0.25).abs() < 1.0e-4, "{share}");
         }
+    }
+}
+
+#[cfg(test)]
+mod level0_layout {
+    use super::{lighting_fill_keys_words, lighting_keys_words, lighting_level0_words, lighting_reach_words};
+
+    #[test]
+    fn the_level0_table_fits_in_a_shader_word() {
+        let pixels = 320 * 180;
+        let start = lighting_fill_keys_words(pixels) + lighting_reach_words();
+        let end = lighting_keys_words(pixels);
+        assert_eq!(end - start, lighting_level0_words(pixels));
+        assert!(end < u64::from(u32::MAX), "key words {end} do not fit in a shader index");
     }
 }

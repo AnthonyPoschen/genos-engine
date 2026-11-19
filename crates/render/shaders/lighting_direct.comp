@@ -11,6 +11,7 @@
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
+#include "lighting_cascade.glsl"
 #include "lighting_lamp_pick.glsl"
 #include "pbr_brdf.glsl"
 #ifdef GENOS_RESTIR_DI
@@ -263,7 +264,6 @@ void main() {
         }
         // Level 0 is the visible surface. A loop here stays out of picture
         // compose: that compile faults lavapipe on a per-pixel probe walk.
-        // The picture still reads the lattice until the merge replaces it.
         lighting_cascade_insert(pos, n);
     } else {
         vec4 rec;
