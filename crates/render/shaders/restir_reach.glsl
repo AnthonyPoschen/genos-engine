@@ -9,6 +9,8 @@
 // p-hat now over p-hat then, and its count scales with that change. A zero
 // sum on one side is a discrete jump. A visibility flip is not decided here.
 const uint RESTIR_PREV_STRIDE = 8u;
+// Rec.709, the same weights as RESTIR_LUMA in restir_live.comp.
+const vec3 RESTIR_REACH_LUMA = vec3(0.2126, 0.7152, 0.0722);
 // Bit 0: the lamp's ball this frame. Bit 1: its ball last frame.
 const uint RESTIR_REACH_NOW = 1u;
 const uint RESTIR_REACH_BEFORE = 2u;
@@ -94,7 +96,7 @@ Lamp restir_lamp_record(uint at) {
 float restir_lamp_luma(Lamp lamp, vec3 origin, vec3 n, bool two_sided) {
     vec3 target;
     vec3 light = lamp_light(lamp, origin, n, two_sided, target);
-    return dot(light, vec3(0.2126, 0.7152, 0.0722));
+    return dot(light, RESTIR_REACH_LUMA);
 }
 
 // Unshadowed sum now over the sum with changed lamps at their previous
