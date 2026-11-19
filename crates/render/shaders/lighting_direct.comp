@@ -422,6 +422,14 @@ void main() {
             lamp_res_store(idx, lamp_res_slot_now(), lamp_res_empty());
             lamp_geo_store(idx, lamp_res_slot_now(), uvec4(0u));
         }
+        // A hit with at most eight reaching point lamps sums every one of
+        // them. chosen_k holds four, so the sum cannot go through that list.
+        // More than eight keeps the one systematic sample below. Pixels do
+        // not reach this: ReSTIR cleared lamp_new, and a few-lamp pixel
+        // already summed in the shade loop.
+        if (lamp_hit && !shade_exact && point_lit > 0u && point_lit <= LAMP_PICK_EXACT_LIT) {
+            shade_exact = true;
+        }
         if (!shade_exact && chosen_n == 0u && point_lit > 0u) {
             uint use_rays = lamp_pick_rays();
             float pick_u = lamp_pick_u(idx, pixels, kept, false, reuse_pix, ray, 0u, pos, n);

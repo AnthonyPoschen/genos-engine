@@ -167,6 +167,9 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(reach.contains("const uint RESTIR_PREV_STRIDE = 8u;"));
     assert!(reach.contains("const uint RESTIR_EXACT_LIT = 4u;"));
     assert!(direct.contains("restir_pix && !restir_few"));
+    assert!(direct.contains(
+        "lamp_hit && !shade_exact && point_lit > 0u && point_lit <= LAMP_PICK_EXACT_LIT"
+    ));
     assert!(live.contains("!restir_pixel_few(pixel)"));
     assert!(!direct.contains("RESTIR_CHANGE_LEAVE"));
     assert!(!reach.contains("RESTIR_CHANGE_LEAVE"));
