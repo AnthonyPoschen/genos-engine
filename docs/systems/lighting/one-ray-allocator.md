@@ -110,8 +110,6 @@ Direct pixels follow the first row on their own mean: a small lamp step keeps mo
 
 ## Later: neighbour light
 
-Not built.
+Started, for an empty mover cell only. A mature cell is not overwritten: copying a neighbour every frame oscillated the face.
 
-A cell may borrow light through the level-of-detail tree, looking up to its parent and down to its children. A fine cell near the camera can reach farther than the cells that touch it: its parent, and the rings two and three cells out, so a small cell draws on a wider patch of the world. The weight falls off with distance. Two small cells close together share strongly. Two large cells far apart share weakly. The weight also follows how well the two cells match.
-
-Borrowed light is a guess. Every frame the cell's own ray scores the light already stored and the light it borrowed, and when the borrowed light clearly wins it replaces what was stored, so a day that turns to night goes black instead of grey. The guess comes only from a neighbour's own ray. A cell does not pass on light it borrowed, so the guess travels one hop. Taking a borrow raises that cell's value, and the next rays are what check it.
+An empty cell a mover is changing has one ray and no stored mean. It may take the stored mean of one neighbour when that neighbour agrees with the ray (the gap is inside the ray's luminance). The neighbours are the parent one and two levels up, the four cells two sizes out along the tangent axes, and two cells three sizes out. The closest small gap wins. The copy replaces the ray. It is not a blend. The cell's value goes to 1, so the next rays check it. A neighbour whose value is still high is not a source, so a cell does not pass on light it borrowed. The guess travels one hop. A cell that already has a mean keeps the history judgement above.

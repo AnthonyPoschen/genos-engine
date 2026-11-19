@@ -965,6 +965,94 @@ void lighting_fill_seed_spent(uint slot) {
     }
 }
 
+// `e` is the mean of this frame's n samples (each `lk * cos * TAU`). One writer
+// calls this, after every ray into the slot has been summed.
+// An empty mover cell has one ray and nothing stored. The closest verified
+// neighbour on the same side of the surface replaces that ray. A neighbour
+// whose history value is high has not been checked by its own rays, so a
+// borrowed guess does not travel on. A mature cell is not touched: copying
+// every frame oscillates.
+uint lighting_fill_seed(uint slot, vec3 ray_e, inout vec3 own) {
+    vec3 p = cache.v[3u * slot].xyz;
+    vec3 nrm = cache.v[3u * slot + 1u].xyz;
+    float size = cache.v[3u * slot + 1u].w;
+    if (!(size > LIGHTING_WRC_CELL_SIZE) || !lighting_near_change(p)) {
+        return ~0u;
+    }
+    float ray_l = max(dot(max(ray_e, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
+    float limit = max(ray_l, LIGHTING_HISTORY_NOISE) * LIGHTING_HISTORY_SIGMA;
+    uint ax = lighting_axis(nrm) >> 1u;
+    vec3 t1 = vec3(0.0);
+    vec3 t2 = vec3(0.0);
+    t1[(ax + 1u) % 3u] = 1.0;
+    t2[(ax + 2u) % 3u] = 1.0;
+    vec3 at[8];
+    float dist[8];
+    float parent = size * float(2u);
+    at[0] = p;
+    dist[0] = parent;
+    at[1] = p;
+    dist[1] = parent * float(2u);
+    float ring = size * float(2u);
+    at[2] = p + t1 * ring;
+    at[3] = p - t1 * ring;
+    at[4] = p + t2 * ring;
+    at[5] = p - t2 * ring;
+    dist[2] = ring;
+    dist[3] = ring;
+    dist[4] = ring;
+    dist[5] = ring;
+    ring = size * float(3u);
+    at[6] = p + t1 * ring;
+    at[7] = p + t2 * ring;
+    dist[6] = ring;
+    dist[7] = ring;
+    float find_size[8];
+    find_size[0] = parent;
+    find_size[1] = parent * float(2u);
+    find_size[2] = size;
+    find_size[3] = size;
+    find_size[4] = size;
+    find_size[5] = size;
+    find_size[6] = size;
+    find_size[7] = size;
+    float best = 0.0;
+    uint chosen = ~0u;
+    vec3 color = own;
+    for (uint i = 0u; i < 8u; i++) {
+        uint s = lighting_cache_find_sized(at[i], nrm, false, find_size[i], at[i]);
+        if (s == ~0u || s == slot || s >= LIGHTING_CACHE_SLOTS) {
+            continue;
+        }
+        vec4 shown = cache.v[3u * s + 2u];
+        if (shown.w < LIGHTING_HISTORY_SHOWN) {
+            continue;
+        }
+        if (dot(cache.v[3u * s + 1u].xyz, nrm) <= LIGHTING_HISTORY_SHOWN) {
+            continue;
+        }
+        if (abs(cache.v[LIGHTING_SC_GRAD_AT + s].x) >= LIGHTING_HISTORY_SHOWN) {
+            continue;
+        }
+        float lit = max(dot(max(shown.rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
+        float gap = abs(ray_l - lit);
+        if (!(gap * LIGHTING_HISTORY_SIGMA < limit)) {
+            continue;
+        }
+        float score = gap * max(dist[i], find_size[i]);
+        if (chosen != ~0u && !(score < best)) {
+            continue;
+        }
+        best = score;
+        chosen = s;
+        color = shown.rgb;
+    }
+    if (chosen != ~0u) {
+        own = color;
+    }
+    return chosen;
+}
+
 void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, vec3 shy, vec3 shz, bool on_screen, float sun_luma) {
     if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || n <= 0.0) {
         return;
@@ -1053,6 +1141,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         }
     }
     vec3 mean = old.rgb;
+    uint seed_src = ~0u;
     if (!cell && (lighting_sc_flags() & 1048576u) != 0u && lighting_sc_msme() && rays0 >= float(warmup) && old.w > FILL_HALF) {
         const vec3 msmel = vec3(0.299, 0.587, 0.114);
         vec4 a = cache.v[LIGHTING_SC_EST_AT + 2u * slot];
@@ -1082,6 +1171,12 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         b = vec4(vb, inc, k, b.w);
     } else if (cell) {
         mean = (accept && old.w < FILL_HALF) ? ray_e : mix(old.rgb, ray_e, blend);
+        // An empty cell has one ray. A verified neighbour on the same side
+        // replaces it. A mature cell is left alone: copying every frame
+        // oscillates. A neighbour that itself borrowed stays out.
+        if (accept && old.w < FILL_HALF) {
+            seed_src = lighting_fill_seed(slot, ray_e, mean);
+        }
         // The texel MSME fold above is `!cell`. A world cell still has to
         // store short variance or its priority falls to 0 after one ray.
         // An invalid sample does not.
@@ -1119,6 +1214,17 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
             nz = mix(oz, nz, a);
         }
         lighting_sh_put(slot, n0, nx, ny, nz);
+    }
+    if (seed_src != ~0u) {
+        vec3 c0;
+        vec3 cx;
+        vec3 cy;
+        vec3 cz;
+        lighting_sh_get(seed_src, c0, cx, cy, cz);
+        lighting_sh_put(slot, c0, cx, cy, cz);
+        vec4 gv = cache.v[LIGHTING_SC_GRAD_AT + slot];
+        gv.x = 1.0;
+        cache.v[LIGHTING_SC_GRAD_AT + slot] = gv;
     }
     float el = dot(lk_mean, FILL_LUMA);
     float fe = el > FILL_EPS ? clamp(sun_luma / el, 0.0, 1.0) : 0.0;
