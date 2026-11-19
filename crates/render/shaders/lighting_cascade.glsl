@@ -2,7 +2,7 @@
 // A ring doubles the Chebyshev distance and the cell size together, so the
 // projected size at the ring start stays CASCADE_PROJ. The outer
 // CASCADE_OVERLAP of a ring also inserts the next ring, and the read blends
-// them. GI v1's radiance cascades stay removed.
+// them. GI v1 stays removed.
 //
 // The record sits after the reach words. Word 0 is unused. Each record is
 // CASCADE_LEVEL0_STRIDE words: key, stamp, cell x y z, ring, position xyz,

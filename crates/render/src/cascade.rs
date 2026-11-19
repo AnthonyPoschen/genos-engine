@@ -3,7 +3,7 @@
 //!
 //! The shader in `lighting_cascade.glsl` is the copy the picture runs. These
 //! functions are the same rule, so a test can check a ring without a GPU.
-//! GI v1's radiance cascades stay removed.
+//! GI v1 stays removed.
 
 /// World size over distance. A ring start keeps this projected size.
 pub const PROJ: f32 = 0.05;
