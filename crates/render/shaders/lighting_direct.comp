@@ -854,7 +854,19 @@ void main() {
                 // of RESTIR_CHANGE_DROP_STEPS (about 9%) is a different
                 // integrand, the same bar as a visibility flip.
                 bool big_move = changed_here && luma_steps >= RESTIR_CHANGE_DROP_STEPS;
-                if (vis_now != old_vis || (!changed_here && restir_mean_target_moved(old_q, luma_now)) || big_move) {
+                // A mover flips visibility as it crosses. That shortens the
+                // mean to the fade cap. Zeroing it every frame was the pop.
+                bool mover_here = lighting_near_change(pos);
+                if (mover_here && (vis_now != old_vis || big_move)) {
+                    uint cap = RESTIR_CHANGE_FADE;
+                    if (luma_steps > 1u) {
+                        cap = max(RESTIR_CHANGE_FADE / luma_steps, 1u);
+                    }
+                    if (mean_prev > cap) {
+                        atomicAdd(gstats.diag[LIGHTING_RESET_FADE], 1u);
+                        mean_prev = cap;
+                    }
+                } else if (vis_now != old_vis || (!changed_here && restir_mean_target_moved(old_q, luma_now)) || big_move) {
                     mean_dropped = true;
                     atomicAdd(gstats.diag[LIGHTING_RESET_MEAN], 1u);
                     mean_prev = 0u;

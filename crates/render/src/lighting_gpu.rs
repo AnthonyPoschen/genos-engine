@@ -1950,6 +1950,7 @@ impl Gpu {
                     error,
                     pixels: u32::from(error > 0.0),
                     on_screen: true,
+                    quadrant: screen_quadrant(px, py, width, height),
                     rank: 0,
                     floor: 0,
                     burst: 0,
@@ -1985,6 +1986,7 @@ impl Gpu {
                 error: 0.0,
                 pixels: 0,
                 on_screen: false,
+                quadrant: 4,
                 rank: 0,
                 floor: 0,
                 burst: 0,
@@ -2012,8 +2014,9 @@ impl Gpu {
         }
         let rows: Vec<FillPick> = by_slot.into_values().collect();
         let place = fill_burst_placement(&rows);
+        let quarters = burst_quarter_shares(&rows);
         eprintln!(
-            "fillcell summary cells {} on_screen {} total_err {:.4} floor {} burst {} planned {} candidates {} top_share {:.4} off_share {:.4} top_rank {:.1} burst_rank {:.1}",
+            "fillcell summary cells {} on_screen {} total_err {:.4} floor {} burst {} planned {} candidates {} top_share {:.4} off_share {:.4} top_rank {:.1} burst_rank {:.1} q {:.4} {:.4} {:.4} {:.4}",
             rows.len(),
             on_screen_cells,
             total_error,
@@ -2024,7 +2027,11 @@ impl Gpu {
             place.top_share,
             place.off_share,
             place.top_mean_rank,
-            place.burst_mean_rank
+            place.burst_mean_rank,
+            quarters[0],
+            quarters[1],
+            quarters[2],
+            quarters[3]
         );
         let mut erred: Vec<FillPick> = rows.iter().copied().filter(|row| row.on_screen && row.error > 0.0).collect();
         erred.sort_by(|a, b| b.error.total_cmp(&a.error));
@@ -2494,6 +2501,13 @@ impl Gpu {
                 }
                 if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
                     self.lighting.cache_rays = rays;
+                }
+                // The scaled burst is ceil(live/old) - ceil(live/10) on top of
+                // the stored burst. Mode 3 does not take the full stats read
+                // (S70B), and without this word the host uploads the stored
+                // burst only. The fence for this slot has already been waited.
+                if let Ok(live) = self.read_stats_word(self.lighting.stats[slot].memory, 2) {
+                    self.lighting.live = live;
                 }
                 // diag[8], a frame or two behind the dispatch that wrote it.
                 if let Ok(reach) = self.read_stats_word(self.lighting.stats[slot].memory, 32) {
@@ -2995,9 +3009,13 @@ impl Gpu {
                 eprintln!("lightingdg {queue} frame {} d {:?}", self.lighting.frame, &w[24..88]);
                 // diag index is stats word 24 + index. See LIGHTING_RESET_* in lighting_cache.glsl.
                 eprintln!(
-                    "lightingreset {queue} frame {} live {} leash {} coarsen {} age {} evict {} adopt {} decay {} reproject {} direct_miss {} mean {} fade {} restir {} mover {} pool {}",
+                    "lightingreset {queue} frame {} live {} floor {} burst {} mover_rays {} traced {} leash {} coarsen {} age {} evict {} adopt {} decay {} reproject {} direct_miss {} mean {} fade {} restir {} mover {} pool {}",
                     self.lighting.frame,
                     w[2],
+                    w[17],
+                    w[19],
+                    w[24 + 51],
+                    w[16],
                     w[24 + 42],
                     w[24 + 43],
                     w[24 + 44],
@@ -4929,7 +4947,20 @@ impl Gpu {
                 let floor_rate = if fill.floor_rays == 0 {
                     0
                 } else {
-                    fill.floor_rate
+                    genos_scene::FILL_FLOOR_PERIOD
+                };
+                // The ranked burst is the preset burst plus the rays the
+                // 1-in-10 floor no longer spends. The round stays about one
+                // ray per live cell plus the preset burst. `live` is the
+                // previous frame's count.
+                let burst = if fill.floor_rays == 0 {
+                    fill.burst
+                } else {
+                    genos_scene::fill_scaled_burst(
+                        self.lighting.live,
+                        self.lighting.settings.preset,
+                        fill.burst,
+                    )
                 };
                 let fill_words = [
                     fill.budget,
@@ -4965,7 +4996,7 @@ impl Gpu {
                     fill.share_receivers,
                     fill.share_handover,
                     floor_rate,
-                    fill.burst,
+                    burst,
                 ];
                 let frame_pixels =
                     u64::from(self.extent_w.max(1)).saturating_mul(u64::from(self.extent_h.max(1)));
@@ -7943,6 +7974,8 @@ struct FillPick {
     error: f32,
     pixels: u32,
     on_screen: bool,
+    /// 0..3 is a screen quadrant (x bit, then y bit). 4 is off screen.
+    quadrant: u8,
     rank: u32,
     floor: u32,
     burst: u32,
@@ -8076,6 +8109,33 @@ fn fill_burst_placement(rows: &[FillPick]) -> FillBurstPlacement {
         top_mean_rank: top_rank,
         burst_mean_rank: burst_rank,
     }
+}
+
+/// Screen quadrant of a pixel. Bit 0 is the right half, bit 1 the bottom half.
+fn screen_quadrant(px: u32, py: u32, width: u32, height: u32) -> u8 {
+    let right = u8::from(px >= width / 2);
+    let bottom = u8::from(py >= height / 2);
+    bottom.saturating_mul(2).saturating_add(right)
+}
+
+/// Share of on-screen burst rays in each screen quadrant. A fair split is 0.25.
+fn burst_quarter_shares(rows: &[FillPick]) -> [f32; 4] {
+    let mut part = [0u32; 4];
+    for row in rows {
+        if row.on_screen && row.quadrant < 4 {
+            let at = usize::from(row.quadrant);
+            part[at] = part[at].saturating_add(row.burst);
+        }
+    }
+    let total: u32 = part.iter().sum();
+    let mut out = [0.0f32; 4];
+    if total == 0 {
+        return out;
+    }
+    for (i, n) in part.iter().copied().enumerate() {
+        out[i] = n as f32 / total as f32;
+    }
+    out
 }
 
 fn seven_vec4s(words: &[[f32; 4]], at: usize) -> Option<[[f32; 4]; 7]> {
@@ -8359,21 +8419,36 @@ mod fill_layout_tests {
 
 #[cfg(test)]
 mod fill_cell_log_tests {
-    use super::{fill_burst_placement, FillPick};
+    use super::{burst_quarter_shares, fill_burst_placement, FillPick};
 
     #[test]
     fn burst_on_low_error_cells_is_not_counted_as_covering_the_error() {
         let rows = [
-            FillPick { slot: 1, error: 10.0, pixels: 4, on_screen: true, rank: 2, floor: 1, burst: 0 },
-            FillPick { slot: 2, error: 9.0, pixels: 4, on_screen: true, rank: 3, floor: 1, burst: 0 },
-            FillPick { slot: 3, error: 1.0, pixels: 4, on_screen: true, rank: 60, floor: 1, burst: 50 },
-            FillPick { slot: 4, error: 0.5, pixels: 4, on_screen: true, rank: 61, floor: 1, burst: 50 },
-            FillPick { slot: 5, error: 0.0, pixels: 0, on_screen: false, rank: 40, floor: 0, burst: 20 },
+            FillPick { slot: 1, error: 10.0, pixels: 4, on_screen: true, quadrant: 0, rank: 2, floor: 1, burst: 0 },
+            FillPick { slot: 2, error: 9.0, pixels: 4, on_screen: true, quadrant: 1, rank: 3, floor: 1, burst: 0 },
+            FillPick { slot: 3, error: 1.0, pixels: 4, on_screen: true, quadrant: 2, rank: 60, floor: 1, burst: 50 },
+            FillPick { slot: 4, error: 0.5, pixels: 4, on_screen: true, quadrant: 3, rank: 61, floor: 1, burst: 50 },
+            FillPick { slot: 5, error: 0.0, pixels: 0, on_screen: false, quadrant: 4, rank: 40, floor: 0, burst: 20 },
         ];
         let place = fill_burst_placement(&rows);
         assert!(place.top_share < 0.01, "top error share {}", place.top_share);
         assert!((place.off_share - 20.0 / 120.0).abs() < 1.0e-4, "{}", place.off_share);
         assert!(place.top_mean_rank < 10.0, "{}", place.top_mean_rank);
         assert!(place.burst_mean_rank > 40.0, "{}", place.burst_mean_rank);
+    }
+
+    #[test]
+    fn on_screen_burst_splits_across_the_four_quarters() {
+        let rows = [
+            FillPick { slot: 1, error: 1.0, pixels: 1, on_screen: true, quadrant: 0, rank: 1, floor: 0, burst: 25 },
+            FillPick { slot: 2, error: 1.0, pixels: 1, on_screen: true, quadrant: 1, rank: 1, floor: 0, burst: 25 },
+            FillPick { slot: 3, error: 1.0, pixels: 1, on_screen: true, quadrant: 2, rank: 1, floor: 0, burst: 25 },
+            FillPick { slot: 4, error: 1.0, pixels: 1, on_screen: true, quadrant: 3, rank: 1, floor: 0, burst: 25 },
+            FillPick { slot: 5, error: 0.0, pixels: 0, on_screen: false, quadrant: 4, rank: 1, floor: 0, burst: 100 },
+        ];
+        let shares = burst_quarter_shares(&rows);
+        for share in shares {
+            assert!((share - 0.25).abs() < 1.0e-4, "{share}");
+        }
     }
 }

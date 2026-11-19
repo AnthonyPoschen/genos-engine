@@ -198,9 +198,10 @@ fn the_fill_share_writes_a_seed_under_the_five_gates() {
         commit[cell_arm..cell_arm + after_cell].contains("lighting_fill_note_var(slot, e)"),
         "a world cell must store short variance in its own deposit"
     );
+    let texel = &commit[cell_arm + after_cell..];
     assert!(
-        !commit[cell_arm + after_cell..].contains("lighting_fill_note_var"),
-        "the variance note must not sit in the branch a world cell skips"
+        texel.contains("old.w >= FILL_HALF") && texel.contains("lighting_fill_note_var(slot, e)"),
+        "a texel with a shown mean notes variance so agreement can fall before the MSME warmup"
     );
     assert!(
         fill.contains("lighting_fill_share("),
@@ -381,8 +382,8 @@ fn the_fill_visit_rays_the_screen_texel_and_claims_its_parent() {
     let cache = source("lighting_cache.glsl");
     let find = function_body(&cache, "uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at)");
     assert!(
-        find.contains("lighting_fill_leash(0u)"),
-        "an off-screen claim past the level-0 leash is refused"
+        find.contains("lighting_fill_leash(0u)") && find.contains("!lighting_fill_pixel"),
+        "an off-screen claim past the level-0 leash is refused; on screen the claim stands"
     );
     assert!(
         !visit.contains("atomicMax"),
@@ -425,4 +426,50 @@ fn picture_compose_does_not_walk_occluders() {
             .count();
         assert_eq!(calls, 0, "{name} calls scene_candidates");
     }
+}
+
+/// A refine child starts from the parent's radiance at one set. An empty mean
+/// made the first ray throw that prior away.
+#[test]
+fn a_refine_child_inherits_the_parent_mean_at_one_set() {
+    let cache = source("lighting_cache.glsl");
+    let spawn = function_body(&cache, "void lighting_fine_spawn(");
+    assert!(
+        spawn.contains("cache.v[3u * born + 2u] = vec4(pre, LIGHTING_FINE_INHERIT_SETS)"),
+        "the child mean is the parent radiance at the inherit count"
+    );
+    assert!(
+        spawn.contains("LIGHTING_FINE_INHERIT_VALUE"),
+        "the child value starts high"
+    );
+    assert!(
+        !spawn.contains("1.0 - area"),
+        "the area step must not scale the inherited radiance"
+    );
+    let fill = source("lighting_fill.glsl");
+    let visit = function_body(&fill, "void lighting_fill_visit(");
+    assert!(
+        visit.contains("if (!lighting_fill_pixel(p, px_keep, py_keep))"),
+        "an on-screen cell past the leash stays"
+    );
+    assert!(
+        fill.contains("pri *= LIGHTING_FILL_OFF_SCREEN"),
+        "an off-screen cell ranks below the same on-screen cell"
+    );
+    assert!(
+        fill.contains("LIGHTING_FILL_Q_GROUPS"),
+        "the burst is split across the screen quarters"
+    );
+    assert!(
+        visit.contains("size >= base && !seen"),
+        "on-screen parents do not spawn a second near-field set"
+    );
+    assert!(
+        !fill.contains("w == 1u || w == 2u || w == 4u"),
+        "1, 2, and 4 are not a floor rate"
+    );
+    assert!(
+        fill.contains("return LIGHTING_FILL_FLOOR_PERIOD"),
+        "a live floor is one ray every 10 frames"
+    );
 }

@@ -568,14 +568,40 @@ pub struct FillSettings {
     /// `0` leaves the base floor off. Any other value turns it on. The device
     /// gives one ray to each selected cell; it does not spend this as a count.
     pub floor_rays: u32,
-    /// How often a live cell gets its floor ray. `1` every frame, `2` every
-    /// second frame, `4` every fourth. The cell is due when its slot index
-    /// mod this value equals the frame mod this value.
-    pub floor_rate: u32,
     /// Rays spent highest-value first after the floor. `0` spends none.
-    /// High is 25000, Medium half of that, Low a quarter. The traced count
-    /// is the floor plus this, not `budget`.
+    /// High is 25000, Medium half of that, Low a quarter. The device adds
+    /// the rays the 1-in-10 floor no longer spends, so the round stays about
+    /// the size of the old per-preset floor plus this burst. Mover rays come
+    /// out of that sum.
     pub burst: u32,
+}
+
+/// Every live cell gets one floor ray this often. A cell a mover is changing
+/// is due every frame instead. The old 1/2/4 rate is not a setting.
+pub const FILL_FLOOR_PERIOD: u32 = 10;
+
+/// The floor divisor each preset used before the period was fixed at 10.
+/// High traced every live cell, Medium half, Low a quarter.
+#[must_use]
+pub fn fill_legacy_divisor(preset: LightingPreset) -> u32 {
+    match preset {
+        LightingPreset::Low => 4,
+        LightingPreset::Medium => 2,
+        LightingPreset::Potato
+        | LightingPreset::DayCycle
+        | LightingPreset::Gi1Bounce
+        | LightingPreset::High => 1,
+    }
+}
+
+/// Burst after moving the retired floor rays into the ranked pool.
+/// `ceil(live / old) + burst` stays the round size; the new floor is
+/// `ceil(live / 10)`.
+#[must_use]
+pub fn fill_scaled_burst(live: u32, preset: LightingPreset, burst: u32) -> u32 {
+    let old = live.div_ceil(fill_legacy_divisor(preset));
+    let floor = live.div_ceil(FILL_FLOOR_PERIOD);
+    burst.saturating_add(old.saturating_sub(floor))
 }
 
 impl FillSettings {
@@ -614,7 +640,6 @@ impl FillSettings {
             share_receivers: 3,
             share_handover: 16,
             floor_rays: 1,
-            floor_rate: 1,
             burst: 25_000,
         }
     }
@@ -985,7 +1010,6 @@ impl LightingSettings {
                 s.ambient.intensity = 0.35;
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
                 s.surface_cache.fill.budget = 25_000;
-                s.surface_cache.fill.floor_rate = 4;
                 s.surface_cache.fill.burst = 6_250;
                 s.surface_cache.fill.tile = 32;
             }
@@ -1006,7 +1030,6 @@ impl LightingSettings {
                     LAMP_PICK_SPATIAL_RADIUS,
                 );
                 s.surface_cache.fill.budget = 50_000;
-                s.surface_cache.fill.floor_rate = 2;
                 s.surface_cache.fill.burst = 12_500;
                 s.surface_cache.fill.tile = 16;
             }
@@ -1132,7 +1155,8 @@ impl LightingSettings {
         } else {
             4.0
         };
-        self.surface_cache.fine_lod_create = finite_nonneg(self.surface_cache.fine_lod_create, 6.0).min(64.0);
+        self.surface_cache.fine_lod_create =
+            finite_nonneg(self.surface_cache.fine_lod_create, 6.0).min(64.0);
         self.surface_cache.fine_lod_drop = finite_nonneg(self.surface_cache.fine_lod_drop, 8.0)
             .max(self.surface_cache.fine_lod_create)
             .min(96.0);
@@ -1206,11 +1230,6 @@ impl LightingSettings {
         };
         fill.share_receivers = fill.share_receivers.min(8);
         fill.share_handover = fill.share_handover.max(1);
-        fill.floor_rate = if fill.floor_rate == 2 || fill.floor_rate == 4 {
-            fill.floor_rate
-        } else {
-            1
-        };
         if let Some(mode) = self.gi.world_mode {
             // Mode 2 pushed screen-probe irradiance into world patches.
             // That pass is removed, so the stored mode becomes the surface cache.
@@ -1552,37 +1571,124 @@ impl LightingSettings {
         let fill = &self.surface_cache.fill;
         let _ = writeln!(out, "surface_cache.fill_budget={}", fill.budget);
         let _ = writeln!(out, "surface_cache.fill_tile={}", fill.tile);
-        let _ = writeln!(out, "surface_cache.fill_lod_near={}", num_text(fill.lod_near));
-        let _ = writeln!(out, "surface_cache.fill_cell_max={}", num_text(fill.cell_max));
-        let _ = writeln!(out, "surface_cache.fill_leash={}", num_text(fill.leash_scale));
-        let _ = writeln!(out, "surface_cache.fill_look_ahead={}", num_text(fill.look_ahead));
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_lod_near={}",
+            num_text(fill.lod_near)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_cell_max={}",
+            num_text(fill.cell_max)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_leash={}",
+            num_text(fill.leash_scale)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_look_ahead={}",
+            num_text(fill.look_ahead)
+        );
         let _ = writeln!(out, "surface_cache.fill_far={}", num_text(fill.far));
-        let _ = writeln!(out, "surface_cache.fill_far_share={}", num_text(fill.far_share));
-        let _ = writeln!(out, "surface_cache.fill_offscreen_floor={}", num_text(fill.offscreen_floor));
-        let _ = writeln!(out, "surface_cache.fill_error_target={}", num_text(fill.error_target));
-        let _ = writeln!(out, "surface_cache.fill_prox_min={}", num_text(fill.prox_min));
-        let _ = writeln!(out, "surface_cache.fill_change_weight={}", num_text(fill.change_weight));
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_far_share={}",
+            num_text(fill.far_share)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_offscreen_floor={}",
+            num_text(fill.offscreen_floor)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_error_target={}",
+            num_text(fill.error_target)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_prox_min={}",
+            num_text(fill.prox_min)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_change_weight={}",
+            num_text(fill.change_weight)
+        );
         let _ = writeln!(out, "surface_cache.fill_check_rate={}", fill.check_rate);
         let _ = writeln!(out, "surface_cache.fill_max_picks={}", fill.max_picks);
-        let _ = writeln!(out, "surface_cache.fill_lambda_decay={}", num_text(fill.lambda_decay));
-        let _ = writeln!(out, "surface_cache.fill_window_floor={}", num_text(fill.window_floor));
-        let _ = writeln!(out, "surface_cache.fill_catchup_max={}", num_text(fill.catchup_max));
-        let _ = writeln!(out, "surface_cache.fill_check_sigma={}", num_text(fill.check_sigma));
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_lambda_decay={}",
+            num_text(fill.lambda_decay)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_window_floor={}",
+            num_text(fill.window_floor)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_catchup_max={}",
+            num_text(fill.catchup_max)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_check_sigma={}",
+            num_text(fill.check_sigma)
+        );
         let _ = writeln!(out, "surface_cache.fill_warmup={}", fill.warmup_rays);
         let _ = writeln!(out, "surface_cache.fill_ray_cap={}", fill.ray_cap);
-        let _ = writeln!(out, "surface_cache.fill_frame_dt={}", num_text(fill.frame_dt));
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_frame_dt={}",
+            num_text(fill.frame_dt)
+        );
         let _ = writeln!(out, "surface_cache.fill_share={}", fill.share);
-        let _ = writeln!(out, "surface_cache.fill_share_min_hit={}", num_text(fill.share_min_hit));
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_share_min_hit={}",
+            num_text(fill.share_min_hit)
+        );
         let _ = writeln!(out, "surface_cache.fill_share_cap={}", fill.share_cap);
-        let _ = writeln!(out, "surface_cache.fill_share_plane={}", num_text(fill.share_plane));
-        let _ = writeln!(out, "surface_cache.fill_share_normal={}", num_text(fill.share_normal));
-        let _ = writeln!(out, "surface_cache.fill_share_w_cap={}", num_text(fill.share_w_cap));
-        let _ = writeln!(out, "surface_cache.fill_share_cos={}", num_text(fill.share_cos));
-        let _ = writeln!(out, "surface_cache.fill_share_conf={}", num_text(fill.share_conf));
-        let _ = writeln!(out, "surface_cache.fill_share_receivers={}", fill.share_receivers);
-        let _ = writeln!(out, "surface_cache.fill_share_handover={}", fill.share_handover);
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_share_plane={}",
+            num_text(fill.share_plane)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_share_normal={}",
+            num_text(fill.share_normal)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_share_w_cap={}",
+            num_text(fill.share_w_cap)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_share_cos={}",
+            num_text(fill.share_cos)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_share_conf={}",
+            num_text(fill.share_conf)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_share_receivers={}",
+            fill.share_receivers
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fill_share_handover={}",
+            fill.share_handover
+        );
         let _ = writeln!(out, "surface_cache.fill_floor_rays={}", fill.floor_rays);
-        let _ = writeln!(out, "surface_cache.fill_floor_rate={}", fill.floor_rate);
         let _ = writeln!(out, "surface_cache.fill_burst={}", fill.burst);
         let _ = writeln!(
             out,
@@ -1831,16 +1937,30 @@ impl LightingSettings {
             "surface_cache.fill_look_ahead" => self.surface_cache.fill.look_ahead = num_f32(value)?,
             "surface_cache.fill_far" => self.surface_cache.fill.far = num_f32(value)?,
             "surface_cache.fill_far_share" => self.surface_cache.fill.far_share = num_f32(value)?,
-            "surface_cache.fill_offscreen_floor" => self.surface_cache.fill.offscreen_floor = num_f32(value)?,
-            "surface_cache.fill_error_target" => self.surface_cache.fill.error_target = num_f32(value)?,
+            "surface_cache.fill_offscreen_floor" => {
+                self.surface_cache.fill.offscreen_floor = num_f32(value)?
+            }
+            "surface_cache.fill_error_target" => {
+                self.surface_cache.fill.error_target = num_f32(value)?
+            }
             "surface_cache.fill_prox_min" => self.surface_cache.fill.prox_min = num_f32(value)?,
-            "surface_cache.fill_change_weight" => self.surface_cache.fill.change_weight = num_f32(value)?,
+            "surface_cache.fill_change_weight" => {
+                self.surface_cache.fill.change_weight = num_f32(value)?
+            }
             "surface_cache.fill_check_rate" => self.surface_cache.fill.check_rate = num_u32(value)?,
             "surface_cache.fill_max_picks" => self.surface_cache.fill.max_picks = num_u32(value)?,
-            "surface_cache.fill_lambda_decay" => self.surface_cache.fill.lambda_decay = num_f32(value)?,
-            "surface_cache.fill_window_floor" => self.surface_cache.fill.window_floor = num_f32(value)?,
-            "surface_cache.fill_catchup_max" => self.surface_cache.fill.catchup_max = num_f32(value)?,
-            "surface_cache.fill_check_sigma" => self.surface_cache.fill.check_sigma = num_f32(value)?,
+            "surface_cache.fill_lambda_decay" => {
+                self.surface_cache.fill.lambda_decay = num_f32(value)?
+            }
+            "surface_cache.fill_window_floor" => {
+                self.surface_cache.fill.window_floor = num_f32(value)?
+            }
+            "surface_cache.fill_catchup_max" => {
+                self.surface_cache.fill.catchup_max = num_f32(value)?
+            }
+            "surface_cache.fill_check_sigma" => {
+                self.surface_cache.fill.check_sigma = num_f32(value)?
+            }
             "surface_cache.fill_warmup" => self.surface_cache.fill.warmup_rays = num_u32(value)?,
             "surface_cache.fill_ray_cap" => self.surface_cache.fill.ray_cap = num_u32(value)?,
             "surface_cache.fill_frame_dt" => self.surface_cache.fill.frame_dt = num_f32(value)?,
@@ -1850,7 +1970,8 @@ impl LightingSettings {
                     "1" | "tile" => 1,
                     "2" | "ring" => {
                         return Err(
-                            "surface_cache.fill_share ring is not built; use off or tile".to_string(),
+                            "surface_cache.fill_share ring is not built; use off or tile"
+                                .to_string(),
                         );
                     }
                     _ => {
@@ -1864,11 +1985,15 @@ impl LightingSettings {
                 self.surface_cache.fill.share_min_hit = num_f32(value)?;
             }
             "surface_cache.fill_share_cap" => self.surface_cache.fill.share_cap = num_u32(value)?,
-            "surface_cache.fill_share_plane" => self.surface_cache.fill.share_plane = num_f32(value)?,
+            "surface_cache.fill_share_plane" => {
+                self.surface_cache.fill.share_plane = num_f32(value)?
+            }
             "surface_cache.fill_share_normal" => {
                 self.surface_cache.fill.share_normal = num_f32(value)?;
             }
-            "surface_cache.fill_share_w_cap" => self.surface_cache.fill.share_w_cap = num_f32(value)?,
+            "surface_cache.fill_share_w_cap" => {
+                self.surface_cache.fill.share_w_cap = num_f32(value)?
+            }
             "surface_cache.fill_share_cos" => self.surface_cache.fill.share_cos = num_f32(value)?,
             "surface_cache.fill_share_conf" => self.surface_cache.fill.share_conf = num_f32(value)?,
             "surface_cache.fill_share_receivers" => {
@@ -1881,7 +2006,9 @@ impl LightingSettings {
                 self.surface_cache.fill.floor_rays = num_u32(value)?;
             }
             "surface_cache.fill_floor_rate" => {
-                self.surface_cache.fill.floor_rate = num_u32(value)?;
+                eprintln!(
+                    "warning: surface_cache.fill_floor_rate is removed; every preset uses one floor ray every {FILL_FLOOR_PERIOD} frames (alias ignored for one release)"
+                );
             }
             "surface_cache.fill_burst" => self.surface_cache.fill.burst = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
@@ -1902,10 +2029,12 @@ impl LightingSettings {
                 self.surface_cache.drain_sigma = sigma;
             }
             "surface_cache.fine_lod_create" => {
-                self.surface_cache.fine_lod_create = nonneg_f32("surface_cache.fine_lod_create", value)?;
+                self.surface_cache.fine_lod_create =
+                    nonneg_f32("surface_cache.fine_lod_create", value)?;
             }
             "surface_cache.fine_lod_drop" => {
-                self.surface_cache.fine_lod_drop = nonneg_f32("surface_cache.fine_lod_drop", value)?;
+                self.surface_cache.fine_lod_drop =
+                    nonneg_f32("surface_cache.fine_lod_drop", value)?;
             }
             "surface_cache.fine_lod_lookahead" => {
                 self.surface_cache.fine_lod_lookahead =
@@ -1917,7 +2046,7 @@ impl LightingSettings {
             | "surface_cache.fine_screen_boost"
             | "surface_cache.fine_close_boost" => {
                 warn_fine_rank_removed(key);
-            },
+            }
             "cache_async" => self.experiments.cache_async = on(value)?,
             "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
             "cache_picks" => self.experiments.cache_picks = on(value)?,
@@ -2214,33 +2343,99 @@ impl LightingSettings {
             ),
             ("GENOS_LIGHTING_FILL_BUDGET", "surface_cache.fill_budget"),
             ("GENOS_LIGHTING_FILL_TILE", "surface_cache.fill_tile"),
-            ("GENOS_LIGHTING_FILL_LOD_NEAR", "surface_cache.fill_lod_near"),
-            ("GENOS_LIGHTING_FILL_CELL_MAX", "surface_cache.fill_cell_max"),
+            (
+                "GENOS_LIGHTING_FILL_LOD_NEAR",
+                "surface_cache.fill_lod_near",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_CELL_MAX",
+                "surface_cache.fill_cell_max",
+            ),
             ("GENOS_LIGHTING_FILL_LEASH", "surface_cache.fill_leash"),
-            ("GENOS_LIGHTING_FILL_LOOK_AHEAD", "surface_cache.fill_look_ahead"),
+            (
+                "GENOS_LIGHTING_FILL_LOOK_AHEAD",
+                "surface_cache.fill_look_ahead",
+            ),
             ("GENOS_LIGHTING_FILL_FAR", "surface_cache.fill_far"),
-            ("GENOS_LIGHTING_FILL_FAR_SHARE", "surface_cache.fill_far_share"),
-            ("GENOS_LIGHTING_FILL_OFFSCREEN_FLOOR", "surface_cache.fill_offscreen_floor"),
-            ("GENOS_LIGHTING_FILL_ERROR_TARGET", "surface_cache.fill_error_target"),
-            ("GENOS_LIGHTING_FILL_PROX_MIN", "surface_cache.fill_prox_min"),
-            ("GENOS_LIGHTING_FILL_CHANGE_WEIGHT", "surface_cache.fill_change_weight"),
-            ("GENOS_LIGHTING_FILL_CHECK_RATE", "surface_cache.fill_check_rate"),
-            ("GENOS_LIGHTING_FILL_MAX_PICKS", "surface_cache.fill_max_picks"),
-            ("GENOS_LIGHTING_FILL_LAMBDA_DECAY", "surface_cache.fill_lambda_decay"),
-            ("GENOS_LIGHTING_FILL_WINDOW_FLOOR", "surface_cache.fill_window_floor"),
-            ("GENOS_LIGHTING_FILL_CATCHUP_MAX", "surface_cache.fill_catchup_max"),
-            ("GENOS_LIGHTING_FILL_CHECK_SIGMA", "surface_cache.fill_check_sigma"),
+            (
+                "GENOS_LIGHTING_FILL_FAR_SHARE",
+                "surface_cache.fill_far_share",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_OFFSCREEN_FLOOR",
+                "surface_cache.fill_offscreen_floor",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_ERROR_TARGET",
+                "surface_cache.fill_error_target",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_PROX_MIN",
+                "surface_cache.fill_prox_min",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_CHANGE_WEIGHT",
+                "surface_cache.fill_change_weight",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_CHECK_RATE",
+                "surface_cache.fill_check_rate",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_MAX_PICKS",
+                "surface_cache.fill_max_picks",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_LAMBDA_DECAY",
+                "surface_cache.fill_lambda_decay",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_WINDOW_FLOOR",
+                "surface_cache.fill_window_floor",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_CATCHUP_MAX",
+                "surface_cache.fill_catchup_max",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_CHECK_SIGMA",
+                "surface_cache.fill_check_sigma",
+            ),
             ("GENOS_LIGHTING_FILL_WARMUP", "surface_cache.fill_warmup"),
             ("GENOS_LIGHTING_FILL_RAY_CAP", "surface_cache.fill_ray_cap"),
-            ("GENOS_LIGHTING_FILL_FRAME_DT", "surface_cache.fill_frame_dt"),
+            (
+                "GENOS_LIGHTING_FILL_FRAME_DT",
+                "surface_cache.fill_frame_dt",
+            ),
             ("GENOS_LIGHTING_FILL_SHARE", "surface_cache.fill_share"),
-            ("GENOS_LIGHTING_FILL_SHARE_MIN_HIT", "surface_cache.fill_share_min_hit"),
-            ("GENOS_LIGHTING_FILL_SHARE_CAP", "surface_cache.fill_share_cap"),
-            ("GENOS_LIGHTING_FILL_SHARE_PLANE", "surface_cache.fill_share_plane"),
-            ("GENOS_LIGHTING_FILL_SHARE_NORMAL", "surface_cache.fill_share_normal"),
-            ("GENOS_LIGHTING_FILL_SHARE_W_CAP", "surface_cache.fill_share_w_cap"),
-            ("GENOS_LIGHTING_FILL_SHARE_COS", "surface_cache.fill_share_cos"),
-            ("GENOS_LIGHTING_FILL_SHARE_CONF", "surface_cache.fill_share_conf"),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_MIN_HIT",
+                "surface_cache.fill_share_min_hit",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_CAP",
+                "surface_cache.fill_share_cap",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_PLANE",
+                "surface_cache.fill_share_plane",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_NORMAL",
+                "surface_cache.fill_share_normal",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_W_CAP",
+                "surface_cache.fill_share_w_cap",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_COS",
+                "surface_cache.fill_share_cos",
+            ),
+            (
+                "GENOS_LIGHTING_FILL_SHARE_CONF",
+                "surface_cache.fill_share_conf",
+            ),
             (
                 "GENOS_LIGHTING_FILL_SHARE_RECEIVERS",
                 "surface_cache.fill_share_receivers",

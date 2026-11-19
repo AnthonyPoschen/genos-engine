@@ -106,8 +106,6 @@ pub struct Tunables {
     pub share_handover: u32,
     /// `0` leaves the floor off. Any other value turns on one ray per selected cell.
     pub floor_rays: u32,
-    /// 1, 2, or 4. A cell is due when its index mod this equals the frame mod this.
-    pub floor_rate: u32,
     /// Ranked rays after the floor. 0 spends none.
     pub burst: u32,
 }
@@ -149,7 +147,6 @@ impl Tunables {
             share_receivers: 3,
             share_handover: 16,
             floor_rays: 1,
-            floor_rate: 1,
             burst: 25_000,
         }
     }
@@ -206,11 +203,15 @@ pub fn level_of_size(size: f32, tun: &Tunables) -> u32 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Residency {
-    Create { level: u32 },
+    Create {
+        level: u32,
+    },
     Keep,
     /// The stored cell is finer than the distance still allows. The survivor is
     /// `level` (coarser). Evict only past the coarsest leash.
-    Coarsen { level: u32 },
+    Coarsen {
+        level: u32,
+    },
     Drop,
 }
 
@@ -1015,10 +1016,16 @@ mod tests {
         cell.note(1.0, 0.0);
         assert!(cell.lambda < 1.0e-5);
         cell.note(f32::INFINITY, 0.0);
-        assert_eq!(cell.luma, 1.0, "an infinite sample must not replace the stored luma");
+        assert_eq!(
+            cell.luma, 1.0,
+            "an infinite sample must not replace the stored luma"
+        );
         assert!(cell.lambda < 1.0e-5);
         cell.note(1.0, 0.0);
-        assert!(cell.lambda < 1.0e-5, "the sample after an infinity is not a change");
+        assert!(
+            cell.lambda < 1.0e-5,
+            "the sample after an infinity is not a change"
+        );
     }
 
     #[test]
@@ -1032,7 +1039,10 @@ mod tests {
         assert_eq!(cell.lambda, 0.0);
         assert!(!cell.have);
         cell.note(4.0, 0.0);
-        assert_eq!(cell.lambda, 0.0, "the first sample of a new key is not a change");
+        assert_eq!(
+            cell.lambda, 0.0,
+            "the first sample of a new key is not a change"
+        );
         cell.note(4.0, 0.0);
         assert!(cell.lambda < 1.0e-5);
     }

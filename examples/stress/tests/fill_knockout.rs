@@ -141,6 +141,42 @@ fn reference_plane(width: usize, height: usize) -> (Vec<f32>, Vec<bool>) {
 
 /// Relative luminance error of a presented BGRA picture against the reference,
 /// sum |live - ref| / sum ref over the pixels that are not sky.
+/// Mean sRGB luma of the top, middle, and bottom thirds, then the left and right halves.
+fn band_luma(bgra: &[u8], width: usize, height: usize) -> [f64; 5] {
+    let mut sum = [0.0f64; 5];
+    let mut count = [0u64; 5];
+    let third = height / 3;
+    for y in 0..height {
+        for x in 0..width {
+            let p = (y * width + x) * 4;
+            if p + 2 >= bgra.len() {
+                continue;
+            }
+            let luma = pixel_luminance(&[bgra[p + 2], bgra[p + 1], bgra[p]]);
+            let v = f64::from(luma);
+            let row = if y < third {
+                0
+            } else if y < third * 2 {
+                1
+            } else {
+                2
+            };
+            sum[row] += v;
+            count[row] += 1;
+            let side = if x < width / 2 { 3 } else { 4 };
+            sum[side] += v;
+            count[side] += 1;
+        }
+    }
+    let mut out = [0.0f64; 5];
+    for i in 0..5 {
+        if count[i] > 0 {
+            out[i] = sum[i] / count[i] as f64;
+        }
+    }
+    out
+}
+
 fn error_vs_reference(bgra: &[u8], reference: &(Vec<f32>, Vec<bool>)) -> f64 {
     let (lum, keep) = reference;
     assert_eq!(bgra.len(), lum.len() * 4, "picture and reference sizes differ");
@@ -205,8 +241,10 @@ fn the_presented_frame_moves_when_the_cache_fills() {
     }
     let early_error = error_vs_reference(&early, &reference);
     let late_error = error_vs_reference(&late, &reference);
+    let bands = band_luma(&late, renderer.width() as usize, renderer.height() as usize);
     eprintln!(
-        "fill knockout: early-to-late mean abs {delta:.3} codes, error vs path reference early {early_error:.4} late {late_error:.4}"
+        "fill knockout: early-to-late mean abs {delta:.3} codes, error vs path reference early {early_error:.4} late {late_error:.4} bands top {:.2} mid {:.2} bottom {:.2} left {:.2} right {:.2}",
+        bands[0], bands[1], bands[2], bands[3], bands[4]
     );
     assert!(
         delta >= MIN_DELTA_CODES,
@@ -240,5 +278,99 @@ fn the_presented_frame_moves_when_the_cache_fills() {
     assert!(
         late_error <= BASE_LATE_ERROR + 0.02,
         "{RED} fill late error {late_error:.4} is past the due-list late error {BASE_LATE_ERROR:.4} plus 0.02"
+    );
+}
+
+/// Frames from a cleared cache. Frame 40 still matches the path reference
+/// while a mean that replaces itself is already washing the hall out.
+const ENERGY_FRAMES: usize = 400;
+/// Whole-frame and mid-third mean sRGB luma (Rec.709 weights on the 8-bit
+/// codes). Lavapipe hall, 320×180, 1/60, frozen sun, still boxes, three moving
+/// lamps, frame 400. The every-frame floor is 127.81 / 107.33. This floor
+/// measured 127.74 / 107.35. The 1-in-10 floor that kept replacing the cell
+/// mean was 174.91 / 174.73. A few percent of the every-frame hall; the
+/// washout and the stalled mean both fall outside.
+const ENERGY_ALL_MAX: f64 = 136.0;
+const ENERGY_MID_MAX: f64 = 113.0;
+const ENERGY_ALL_MIN: f64 = 120.0;
+const ENERGY_MID_MIN: f64 = 101.0;
+
+/// Mean sRGB luma of the whole frame and of the middle third.
+fn code_luma(bgra: &[u8], width: usize, height: usize) -> (f64, f64) {
+    let mut all = 0.0f64;
+    let mut mid = 0.0f64;
+    let mut n_all = 0u64;
+    let mut n_mid = 0u64;
+    let third = height / 3;
+    for y in 0..height {
+        for x in 0..width {
+            let p = (y * width + x) * 4;
+            if p + 2 >= bgra.len() {
+                continue;
+            }
+            let l = 0.2126 * f64::from(bgra[p + 2])
+                + 0.7152 * f64::from(bgra[p + 1])
+                + 0.0722 * f64::from(bgra[p]);
+            all += l;
+            n_all += 1;
+            if (third..third * 2).contains(&y) {
+                mid += l;
+                n_mid += 1;
+            }
+        }
+    }
+    (
+        if n_all == 0 { 0.0 } else { all / n_all as f64 },
+        if n_mid == 0 { 0.0 } else { mid / n_mid as f64 },
+    )
+}
+
+/// A cell the 1-in-10 floor skips still disagrees with the next sample, and
+/// the allocator value stays at 1. Replacing the mean with that sample makes
+/// the bounce read one ray, and by frame 400 the hall is near-white. Frame 40
+/// against the path reference does not see it. The lamps move, which is the
+/// run that washed out; the frame-40 gate holds them still.
+#[test]
+fn the_long_run_keeps_the_hall_energy() {
+    // Knockout freezes the cache writes. This check is the fill accumulating.
+    // The presented-frame test is the red gate. `gate_guard` is the read of
+    // GENOS_KNOCKOUT; a shipping build keeps the guard on.
+    if !genos_render::gate_guard(genos_render::CACHE_FILL) {
+        return;
+    }
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer
+        .apply_lighting_preset("high")
+        .expect("high preset");
+    renderer.reset_lighting_cache();
+    let (mut stage, camera) = hall();
+    // The stress hall default: half of the five lamps move. A still mix does
+    // not reproduce the frame-400 washout.
+    stage.mix.dynamic_pct = 50;
+    stage.lamps_still = false;
+    stage.apply();
+    let mut late = Vec::new();
+    for frame in 0..ENERGY_FRAMES {
+        stage.advance(1.0 / 60.0);
+        let pixels = draw(window, renderer, &stage.world, &camera);
+        if frame + 1 == ENERGY_FRAMES {
+            late = pixels;
+        }
+    }
+    let (all, mid) = code_luma(
+        &late,
+        renderer.width() as usize,
+        renderer.height() as usize,
+    );
+    eprintln!(
+        "fill energy: frame {ENERGY_FRAMES} sRGB luma all {all:.2} mid {mid:.2}"
+    );
+    assert!(
+        (ENERGY_ALL_MIN..ENERGY_ALL_MAX).contains(&all) && (ENERGY_MID_MIN..ENERGY_MID_MAX).contains(&mid),
+        "{RED} frame {ENERGY_FRAMES} sRGB luma all {all:.2} mid {mid:.2} left the every-frame hall \
+         (all {ENERGY_ALL_MIN:.0}..{ENERGY_ALL_MAX:.0}, mid {ENERGY_MID_MIN:.0}..{ENERGY_MID_MAX:.0}). \
+         A mean replaced after each skipped floor ray washes the frame out near 175"
     );
 }
