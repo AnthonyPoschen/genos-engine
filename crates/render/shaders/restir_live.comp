@@ -540,24 +540,39 @@ void restir_temporal_from(uint pixel, uint lamp, float w_sum, uint m, float targ
         uint m_now = c_empty ? restir_hdr(9u) : m;
         cap_history(hist_m, hist_w, m_now);
         // Validation: the history sample is re-scored at this frame's point
-        // with this frame's lamp (tq_h below), so a lamp that dimmed, moved
-        // out of reach, or switched off drops out (tq_h = 0). Where a changed
-        // lamp's previous or current ball reaches this shaded point, history
-        // keeps about 12 frames of the current sample instead of one. The
-        // trailing side of a move is in that ball, so it starts the same cap.
-        // Scaling w_sum with M keeps the reservoir's W, so the estimate stays
+        // with this frame's lamp (tq_h below), so a lamp that left the point
+        // drops out (tq_h = 0). A changed lamp keeps the sample. W stays the
+        // old W: w_sum and the stored target both take p-hat_new / p-hat_old,
+        // and the shade multiplies by this frame's lamp_light. The count
+        // scales by the same factor at every sample on this pixel (the sums,
+        // not the lamp the reservoir holds). A zero sum on one side drops
+        // the history. Scaling w_sum with M keeps W, so the estimate stays
         // unbiased.
-        // The clamp must not depend on which lamp the history holds: a
-        // weight keyed to the sample (only a changed lamp loses M) breaks
-        // the M-weight partition of unity and darkened a wall by a moving
-        // lamp ~20 %. The reach test is the pixel, not the sample. Header
-        // word 39 is only the any-bit early-out.
         bool changed_here = surfaced && restir_changed_reaches(pos + nrm * RESTIR_ORIGIN_LIFT);
-        uint fade_m = m_now * RESTIR_CHANGE_FADE;
-        if (m_now != 0u && changed_here && hist_m > fade_m) {
-            atomicAdd(gstats.diag[LIGHTING_RESET_RESTIR], 1u);
-            hist_w *= m_as_f(fade_m) / m_as_f(hist_m);
-            hist_m = fade_m;
+        if (changed_here && hist_m != 0u && h_lamp != LAMP_EMPTY) {
+            bool sided = restir_receiver_two_sided(pixel);
+            float ratio = 1.0;
+            float confidence = 1.0;
+            restir_change_weight(pos + nrm * RESTIR_ORIGIN_LIFT, nrm, sided, ratio, confidence);
+            float phat_new = restir_phat(pixel, h_lamp);
+            if (h_target > 0.0 && phat_new > 0.0) {
+                hist_w *= phat_new / h_target;
+                h_target = phat_new;
+            }
+            if (!(confidence > 0.0)) {
+                atomicAdd(gstats.diag[LIGHTING_RESET_RESTIR], 1u);
+                hist_m = 0u;
+                hist_w = 0.0;
+            } else if (confidence < 1.0 && m_now != 0u) {
+                float delta = 1.0 - confidence;
+                float fit_f = m_as_f(m_now) / delta;
+                if (fit_f < m_as_f(hist_m)) {
+                    uint fit = uint(max(fit_f, 1.0));
+                    atomicAdd(gstats.diag[LIGHTING_RESET_RESTIR], 1u);
+                    hist_w *= m_as_f(fit) / m_as_f(hist_m);
+                    hist_m = fit;
+                }
+            }
         }
         // Generalized balance heuristic (GRIS): each sample's MIS weight
         // compares M * p_hat over both domains, with the history domain's

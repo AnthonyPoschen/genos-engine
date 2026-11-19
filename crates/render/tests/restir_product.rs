@@ -156,7 +156,15 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(reach.contains("!(range > 0.0)"));
     assert!(reach.contains("bool restir_changed_reaches"));
     assert!(direct.contains("restir_changed_reaches(origin)"));
-    assert!(direct.contains("luma_steps >= RESTIR_CHANGE_DROP_STEPS"));
+    assert!(direct.contains("restir_change_weight(origin, n, two_sided, ratio, confidence)"));
+    assert!(live.contains(
+        "restir_change_weight(pos + nrm * RESTIR_ORIGIN_LIFT, nrm, sided, ratio, confidence)"
+    ));
+    assert!(!direct.contains("RESTIR_CHANGE_DROP_STEPS"));
+    assert!(!direct.contains("RESTIR_CHANGE_FADE"));
+    assert!(!reach.contains("RESTIR_CHANGE_DROP_STEPS"));
+    assert!(!reach.contains("RESTIR_CHANGE_FADE"));
+    assert!(reach.contains("const uint RESTIR_PREV_STRIDE = 8u;"));
     assert!(!direct.contains("RESTIR_CHANGE_LEAVE"));
     assert!(!reach.contains("RESTIR_CHANGE_LEAVE"));
     assert!(!direct.contains("restir_words[39u] == 0u"));
