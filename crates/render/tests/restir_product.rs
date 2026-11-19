@@ -165,7 +165,9 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(!reach.contains("RESTIR_CHANGE_DROP_STEPS"));
     assert!(!reach.contains("RESTIR_CHANGE_FADE"));
     assert!(reach.contains("const uint RESTIR_PREV_STRIDE = 8u;"));
-    assert!(reach.contains("const uint RESTIR_EXACT_LIT = 4u;"));
+    assert!(reach.contains("layout(constant_id = 0) const uint RESTIR_EXACT_LIT = 4u;"));
+    assert!(reach.contains("layout(constant_id = 2) const uint RESTIR_KEEP_MOVE = 1u;"));
+    assert!(reach.contains("RESTIR_KEEP_MOVE == 0u"));
     assert!(direct.contains("restir_pix && !restir_few"));
     assert!(direct.contains(
         "lamp_hit && !shade_exact && point_lit > 0u && point_lit <= LAMP_PICK_EXACT_LIT"

@@ -6,11 +6,17 @@
 //!
 //! Sun-only pixels stay smooth because the sun is one exact shadow ray. This
 //! wall has no sun. The still lamp is the converged reference. While the lamp
-//! moves, pixel luma variance (high-pass residual) and the frame-to-frame
-//! residual must stay on that reference. A short reservoir mean paints the
-//! wall with pixel-to-pixel grain.
+//! moves, the presented frame's luma variance (high-pass residual) and the
+//! frame-to-frame residual must stay on that reference. A short reservoir
+//! mean paints the wall with pixel-to-pixel grain.
+//!
+//! `moving_lamp_wall` is the production guard. Knocking it out drops history
+//! inside the lamp's ball and leaves the pixel on the reservoir, so this gate
+//! goes red (`scripts/ci-gate-knockout.sh`).
 
-use genos_render::{lamp_range, tone, DebugView, Renderer, ViewMode, World};
+mod common;
+
+use genos_render::{lamp_range, DebugView, Renderer, ViewMode, World, MOVING_LAMP_WALL};
 use genos_scene::{AmbientMode, Camera, LampPickMode, LightingPreset, LightingSettings, Scene};
 use genos_window::Window;
 
@@ -141,7 +147,7 @@ fn world() -> World {
         fps_counter: genos_scene::FpsCounterSettings::default(),
         event_loop: genos_scene::EventLoopSettings::default(),
         reflections: genos_scene::ReflectionSettings::default(),
-        hdr: genos_scene::HdrSettings::for_preset(LightingPreset::High),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
         fog: genos_scene::FogSettings::default(),
         menu: genos_scene::MenuSettings::default(),
         particles: genos_scene::ParticleSettings::default(),
@@ -201,19 +207,6 @@ fn patch(camera: &Camera) -> Rect {
     }
 }
 
-fn luma_image(rgb: &[f64]) -> Vec<f64> {
-    let pixels = rgb.len() / 3;
-    let mut out = Vec::with_capacity(pixels);
-    for pixel in 0..pixels {
-        let i = pixel.saturating_mul(3);
-        let r = rgb.get(i).copied().unwrap_or(0.0);
-        let g = rgb.get(i.saturating_add(1)).copied().unwrap_or(0.0);
-        let b = rgb.get(i.saturating_add(2)).copied().unwrap_or(0.0);
-        out.push(0.2126 * r + 0.7152 * g + 0.0722 * b);
-    }
-    out
-}
-
 fn index_of(width: u32, x: u32, y: u32) -> usize {
     usize::try_from(u64::from(y) * u64::from(width) + u64::from(x)).unwrap_or(0)
 }
@@ -252,13 +245,7 @@ fn spatial_var(luma: &[f64], width: u32, rect: &Rect) -> f64 {
 }
 
 fn grab(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) -> Vec<f64> {
-    let _ = window.pump();
-    renderer
-        .draw(world, camera, true)
-        .expect("draw")
-        .expect("readback");
-    let read = renderer.read_scene().expect("scene radiance");
-    luma_image(&read.rgb)
+    common::PresentedFrame::from_draw(window, renderer, world, camera).luma()
 }
 
 fn place(world: &mut World, frame: u32) {
@@ -291,8 +278,7 @@ fn patch_mean(luma: &[f64], width: u32, rect: &Rect) -> f64 {
 }
 
 fn luma8(y: f64) -> i32 {
-    let shown = tone(genos_math::f32_from_f64(y.clamp(0.0, 4.0)));
-    let code = (f64::from(shown).clamp(0.0, 1.0) * 255.0).round();
+    let code = y.clamp(0.0, 255.0).round();
     let mut step = 0i32;
     let mut cursor = 0.0_f64;
     while step < 255 && cursor + 0.5 < code {
@@ -379,7 +365,13 @@ fn a_moving_point_lamp_does_not_grain_a_flat_wall() {
         place(&mut world, frame);
         move_exact.push(grab(window, renderer, &world, &camera));
     }
-    grade_wall(&wall, &still_frames, &move_frames, &still_exact, &move_exact);
+    grade_wall(
+        &wall,
+        &still_frames,
+        &move_frames,
+        &still_exact,
+        &move_exact,
+    );
 }
 
 fn grade_wall(
@@ -394,8 +386,8 @@ fn grade_wall(
     let still_mean = patch_mean(still_live, WIDTH, wall);
     let exact_mean = patch_mean(still_exact, WIDTH, wall);
     assert!(
-        still_mean > 0.02 && exact_mean > 0.02,
-        "the wall is dark: live {still_mean:.4} exact {exact_mean:.4}"
+        still_mean > 2.0 && exact_mean > 2.0,
+        "the wall is dark: live {still_mean:.4} exact {exact_mean:.4} (guard {MOVING_LAMP_WALL})"
     );
     let mut still_step = Vec::new();
     let mut earlier = still_frames.first().expect("still pair");
@@ -445,14 +437,14 @@ fn grade_wall(
     let grain_limit = still_grain * GRAIN_RATIO + 0.05;
     assert!(
         moving_spatial <= spatial_limit,
-        "wall luma variance {moving_spatial:.6e} above the still lamp {still_spatial:.6e} (limit {spatial_limit:.6e})"
+        "wall luma variance {moving_spatial:.6e} above the still lamp {still_spatial:.6e} (limit {spatial_limit:.6e}) (guard {MOVING_LAMP_WALL})"
     );
     assert!(
         moving_temporal <= temporal_limit,
-        "frame-to-frame residual {moving_temporal:.6e} above the still lamp {still_temporal:.6e} (limit {temporal_limit:.6e})"
+        "frame-to-frame residual {moving_temporal:.6e} above the still lamp {still_temporal:.6e} (limit {temporal_limit:.6e}) (guard {MOVING_LAMP_WALL})"
     );
     assert!(
         moving_grain <= grain_limit,
-        "8-bit error grain {moving_grain:.3} above the still lamp {still_grain:.3} (limit {grain_limit:.3})"
+        "8-bit error grain {moving_grain:.3} above the still lamp {still_grain:.3} (limit {grain_limit:.3}) (guard {MOVING_LAMP_WALL})"
     );
 }

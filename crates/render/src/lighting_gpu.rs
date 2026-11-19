@@ -1290,15 +1290,49 @@ impl Gpu {
         self.lighting.world_busy = false;
     }
 
-    fn make_compute_pipe(&self, code: &[u8], layout: Handle, what: &str) -> Result<Handle, String> {
-        self.make_compute_pipe_spec(code, layout, what, None)
+    /// Specialization constants for the four ReSTIR pipelines.
+    ///
+    /// `(constant id, value)`. Constant 0 is the few-lamp cap. Constant 2
+    /// keeps history. `[0, 0]` is `moving_lamp_wall` knocked out.
+    fn moving_lamp_wall_spec() -> [(u32, u32); 2] {
+        if crate::gate::guard(crate::gate::MOVING_LAMP_WALL) {
+            [(0, 4), (2, 1)]
+        } else {
+            [(0, 0), (2, 0)]
+        }
     }
 
-    /// `spec` is the 32-bit value of specialization constant 0 (a GLSL bool is
-    /// a VkBool32), or none.
-    fn make_compute_pipe_spec(&self, code: &[u8], layout: Handle, what: &str, spec: Option<u32>) -> Result<Handle, String> {
+    fn make_compute_pipe(&self, code: &[u8], layout: Handle, what: &str) -> Result<Handle, String> {
+        self.make_compute_pipe_ids(code, layout, what, &[])
+    }
+
+    /// `spec` is specialization constant 0 (a GLSL bool is a VkBool32), or none.
+    fn make_compute_pipe_spec(
+        &self,
+        code: &[u8],
+        layout: Handle,
+        what: &str,
+        spec: Option<u32>,
+    ) -> Result<Handle, String> {
+        match spec {
+            Some(value) => self.make_compute_pipe_ids(code, layout, what, &[(0, value)]),
+            None => self.make_compute_pipe_ids(code, layout, what, &[]),
+        }
+    }
+
+    /// `(id, value)` pairs. At most two. Empty keeps the shader defaults.
+    /// The moving-lamp wall sets constant 0 (exact-lamp cap) and constant 2
+    /// (keep history). Constant 1 is the cache slot count and stays default.
+    fn make_compute_pipe_ids(
+        &self,
+        code: &[u8],
+        layout: Handle,
+        what: &str,
+        ids: &[(u32, u32)],
+    ) -> Result<Handle, String> {
         let module = self.shader(code)?;
         #[repr(C)]
+        #[derive(Copy, Clone)]
         struct MapEntry {
             id: u32,
             offset: u32,
@@ -1311,18 +1345,31 @@ impl Gpu {
             size: usize,
             data: *const c_void,
         }
-        let value = spec.unwrap_or(0);
-        let entry = MapEntry { id: 0, offset: 0, size: 4 };
-        let spec_info = SpecInfo {
-            count: 1,
-            entries: &entry,
+        let mut entries = [MapEntry {
+            id: 0,
+            offset: 0,
             size: 4,
-            data: &value as *const u32 as *const c_void,
+        }; 2];
+        let mut data = [0u32; 2];
+        let count = ids.len().min(2);
+        for i in 0..count {
+            entries[i] = MapEntry {
+                id: ids[i].0,
+                offset: u32::try_from(i.saturating_mul(4)).unwrap_or(0),
+                size: 4,
+            };
+            data[i] = ids[i].1;
+        }
+        let spec_info = SpecInfo {
+            count: u32::try_from(count).unwrap_or(0),
+            entries: entries.as_ptr(),
+            size: count.saturating_mul(4),
+            data: data.as_ptr().cast::<c_void>(),
         };
-        let spec_ptr = if spec.is_some() {
-            &spec_info as *const SpecInfo as *const c_void
-        } else {
+        let spec_ptr = if count == 0 {
             std::ptr::null()
+        } else {
+            &spec_info as *const SpecInfo as *const c_void
         };
         #[repr(C)]
         struct Stage {
@@ -3943,7 +3990,12 @@ impl Gpu {
         let resized = self.lighting.restir_w != rw || self.lighting.restir_h != rh;
         if self.lighting.restir_pipe.is_null() {
             let start = Instant::now();
-            match self.make_compute_pipe(RESTIR_LIVE_SPV, self.lighting.layout, "restir-di") {
+            match self.make_compute_pipe_ids(
+                RESTIR_LIVE_SPV,
+                self.lighting.layout,
+                "restir-di",
+                &Self::moving_lamp_wall_spec(),
+            ) {
                 Ok(pipe) => self.lighting.restir_pipe = pipe,
                 Err(err) => {
                     eprintln!("lighting: restir prepare failed: restir-di pipeline: {err}");
@@ -3954,7 +4006,12 @@ impl Gpu {
         }
         if self.lighting.restir_spatial_pipe.is_null() {
             let start = Instant::now();
-            match self.make_compute_pipe(RESTIR_SPATIAL_SPV, self.lighting.layout, "restir-spatial") {
+            match self.make_compute_pipe_ids(
+                RESTIR_SPATIAL_SPV,
+                self.lighting.layout,
+                "restir-spatial",
+                &Self::moving_lamp_wall_spec(),
+            ) {
                 Ok(pipe) => self.lighting.restir_spatial_pipe = pipe,
                 Err(err) => {
                     eprintln!("lighting: restir prepare failed: restir-spatial pipeline: {err}");
@@ -3965,10 +4022,11 @@ impl Gpu {
         }
         if self.lighting.restir_spatial_wide.is_null() {
             let start = Instant::now();
-            match self.make_compute_pipe(
+            match self.make_compute_pipe_ids(
                 RESTIR_SPATIAL_WIDE_SPV,
                 self.lighting.layout,
                 "restir-spatial-wide",
+                &Self::moving_lamp_wall_spec(),
             ) {
                 Ok(pipe) => self.lighting.restir_spatial_wide = pipe,
                 Err(err) => {
@@ -3980,10 +4038,11 @@ impl Gpu {
         }
         if self.lighting.restir_direct.is_null() {
             let start = Instant::now();
-            match self.make_compute_pipe(
+            match self.make_compute_pipe_ids(
                 LIGHTING_DIRECT_RESTIR_SPV,
                 self.lighting.layout,
                 "restir-direct",
+                &Self::moving_lamp_wall_spec(),
             ) {
                 Ok(pipe) => self.lighting.restir_direct = pipe,
                 Err(err) => {

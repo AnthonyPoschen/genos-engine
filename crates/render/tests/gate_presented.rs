@@ -1,12 +1,5 @@
 #![cfg_attr(
     test,
-    expect(
-        clippy::as_conversions,
-        reason = "presented image length is width * height * 4"
-    )
-)]
-#![cfg_attr(
-    test,
     expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
 )]
 
@@ -16,42 +9,12 @@
 //! These two are the compose halves of `the_bounce_adds_light_to_the_direct_view`
 //! in `lighting_frame.rs`.
 
+mod common;
+
+use common::PresentedFrame;
 use genos_render::{DebugView, Renderer, ViewMode, World, BOUNCE_IN_COMPOSE, DIRECT_IN_COMPOSE};
 use genos_scene::{Camera, Scene};
 use genos_window::Window;
-
-struct PresentedFrame {
-    pixels: Vec<u8>,
-}
-
-impl PresentedFrame {
-    fn from_draw(
-        window: &mut Window,
-        renderer: &mut Renderer,
-        world: &World,
-        camera: &Camera,
-    ) -> Self {
-        let _ = window.pump();
-        let pixels = renderer
-            .draw(world, camera, true)
-            .expect("draw")
-            .expect("readback: a lighting/render gate must read the presented image");
-        assert!(!pixels.is_empty(), "presented image was empty");
-        let width = renderer.width();
-        let height = renderer.height();
-        assert_eq!(
-            pixels.len(),
-            (width * height * 4) as usize,
-            "presented image size does not match the surface"
-        );
-        let _ = renderer.gpu_kind();
-        Self { pixels }
-    }
-
-    fn sum_bytes(&self) -> u64 {
-        self.pixels.iter().map(|&b| u64::from(b)).sum()
-    }
-}
 
 fn open() -> (
     std::sync::MutexGuard<'static, ()>,

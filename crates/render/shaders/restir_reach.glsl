@@ -99,14 +99,31 @@ float restir_lamp_luma(Lamp lamp, vec3 origin, vec3 n, bool two_sided) {
     return dot(light, RESTIR_REACH_LUMA);
 }
 
+// A pixel this many point lamps reach is summed exactly: one shadow ray each,
+// the same way the sun is traced. More than this stays on the reservoir.
+// The count stops at one past the limit, so a many-lamp cell does not walk
+// the rest of its list. Specialization constant 0. Shipping pipelines pass 4.
+// The moving-lamp wall gate sets it to 0 when `moving_lamp_wall` is knocked out.
+layout(constant_id = 0) const uint RESTIR_EXACT_LIT = 4u;
+// Specialization constant 2. Constant 1 is the cache slot count. Shipping
+// pipelines pass 1, so a changed ball keeps history. The same knockout
+// passes 0 and that ball drops history.
+layout(constant_id = 2) const uint RESTIR_KEEP_MOVE = 1u;
+
 // Unshadowed sum now over the sum with changed lamps at their previous
 // record. `confidence` is min/max of those sums: 1 when the light held,
 // 0 when one side is empty (the light appeared or vanished). Unchanged
 // lamps use the same value on both sides, so the ratio is the change and
-// not which sample a reservoir happens to hold.
+// not which sample a reservoir happens to hold. `RESTIR_KEEP_MOVE` 0 drops
+// the history instead.
 void restir_change_weight(vec3 p, vec3 n, bool two_sided, out float ratio, out float confidence) {
     ratio = 1.0;
     confidence = 1.0;
+    if (RESTIR_KEEP_MOVE == 0u) {
+        ratio = 0.0;
+        confidence = 0.0;
+        return;
+    }
     if (restir_words[39u] == 0u) {
         return;
     }
@@ -139,12 +156,6 @@ void restir_change_weight(vec3 p, vec3 n, bool two_sided, out float ratio, out f
     ratio = sum_now / sum_was;
     confidence = min(sum_now, sum_was) / max(sum_now, sum_was);
 }
-
-// A pixel this many point lamps reach is summed exactly: one shadow ray each,
-// the same way the sun is traced. More than this stays on the reservoir.
-// The count stops at one past the limit, so a many-lamp cell does not walk
-// the rest of its list.
-const uint RESTIR_EXACT_LIT = 4u;
 
 uint restir_point_reach(vec3 origin, vec3 n, bool two_sided) {
     LampList list = lamps_at(origin);
