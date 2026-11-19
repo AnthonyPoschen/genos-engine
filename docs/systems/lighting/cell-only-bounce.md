@@ -55,7 +55,7 @@ Removed because that blend already covers them:
 
 ## Follow-up
 
-Not this change. The next stage is a sparse cascade: surface samples are level 0, coarse world cells are the upper levels, and the penumbra condition sets the spacing. The removed radiance cascades of GI v1 stay removed. This note does not bring that system back.
+The conversion that follows this note is [sparse-radiance-cascades.md](sparse-radiance-cascades.md). Surface samples are level 0, coarse world cells are the upper levels, and the penumbra condition sets the spacing. The removed radiance cascades of GI v1 stay removed. This note does not bring that system back.
 
 ## Networking
 

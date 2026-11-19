@@ -52,6 +52,8 @@ Plan for moving lamps and moving assets (not yet built; measurement first): [dyn
 
 ## Names
 
+The sparse cascade (19 Nov 2026) is the intent in [sparse-radiance-cascades.md](sparse-radiance-cascades.md). Level 0 is the picture. Coarse world cells are the upper levels. GI v1's radiance cascades stay removed.
+
 Cell-only bounce (19 Nov 2026) is the intent in [cell-only-bounce.md](cell-only-bounce.md). Bounce is the 25 cm SH cells, read at the true normal. The 12.5 cm texel pool, the fine band, the screen denoiser, and the separate mover texel pool are removed by the commits that follow that note. This list of deviations stays until those commits land.
 
 The surface light cache and the world cache are one cache ([glossary](../../lighting/GLOSSARY.md)). A cache entry is one hashed surface patch. A slot is only its storage index. `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the current keys. Moving them under `surface_cache.*`, and keeping the old keys as deprecated aliases, is step 1 of [RENAMES.md](../../lighting/RENAMES.md).
