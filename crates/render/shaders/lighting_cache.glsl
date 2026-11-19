@@ -1200,10 +1200,17 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
         if (s != ~0u) {
             vec4 v = cache.v[3u * s + 2u];
             if (v.w > 0.5) {
-                if (LIGHTING_SC_WRITES) {
-                    cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                // The other side of a thin wall, a cell off the surface, and
+                // a stale mean are not this pixel's parent.
+                vec3 cn = cache.v[3u * s + 1u].xyz;
+                float facing = dot(cn, n);
+                float plane = abs(dot(cache.v[3u * s].xyz - pos, n));
+                if (facing > 0.0 && plane <= LIGHTING_CELL_HALF * size && !lighting_sc_stale(s)) {
+                    if (LIGHTING_SC_WRITES) {
+                        cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                    }
+                    return vec4(v.rgb, 1.0);
                 }
-                return vec4(v.rgb, 1.0);
             }
         }
     }
@@ -5380,18 +5387,10 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 // samples outweigh it. A zero own-count used to leave trust
                 // at 0, so the pixel stayed on the coarse cell.
                 sc_trust = 1.0;
-            } else if (sets >= LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF) {
-                // A full count, including a real zero, is the texel.
-                sc_trust = 1.0;
-            } else if (sets >= LIGHTING_SC_SET_HALF) {
-                // Own samples, not the shown field. The field can be a
-                // neighbour filter while the samples are black. A zero-set
-                // corner never reaches here, so an unclaimed centre stays
-                // on the coarse cell.
-                vec3 own_rgb = max(cache.v[3u * slot + 2u].rgb, vec3(0.0)) * lighting_sc_sun_gain(slot);
-                const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
-                float y_own = dot(own_rgb, lw);
-                sc_trust = y_own > LIGHTING_SC_LIT_LUMA ? 1.0 : 0.0;
+            } else {
+                // The child's weight grows with its own sets. A short lit
+                // count used to snap to trust 1, so the coarse cell popped out.
+                sc_trust = clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0);
             }
         }
         if ((lighting_sc_flags() & 32u) != 0u) {

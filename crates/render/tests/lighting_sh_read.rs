@@ -368,7 +368,8 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
     assert!(slot.contains("lighting_cache_find_sized"));
     assert!(slot.contains("lighting_sc_stale"));
     assert!(slot.contains("lighting_sh_tilt"));
-    assert!(slot.contains("LIGHTING_COARSE_PLANE"));
+    assert!(slot.contains("dot(cache.v[3u * s + 1u].xyz, n) <= 0.0"));
+    assert!(slot.contains("LIGHTING_CELL_HALF * size"));
     assert!(!slot.contains("lighting_sh_read"));
     assert!(!slot.contains("lighting_probe_irradiance"));
     assert!(!coarse.contains("lighting_sh_read"));

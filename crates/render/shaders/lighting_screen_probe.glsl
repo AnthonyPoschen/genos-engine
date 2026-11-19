@@ -15,8 +15,6 @@
 // This does not stamp the cell and it is not a second neighbour gather.
 
 const float LIGHTING_COARSE_HALF = 0.5;
-// Same plane gate as lighting_sc_bilerp_cover. A step or a ledge is another surface.
-const float LIGHTING_COARSE_PLANE = 0.1;
 
 void lighting_coarse_add(vec3 q, vec3 n, float size, float bil, inout vec3 sum, inout float wsum) {
     if (!(bil > 0.0)) {
@@ -29,7 +27,12 @@ void lighting_coarse_add(vec3 q, vec3 n, float size, float bil, inout vec3 sum, 
     if (lighting_sc_stale(s)) {
         return;
     }
-    if (abs(dot(cache.v[3u * s].xyz - q, n)) > LIGHTING_COARSE_PLANE) {
+    // The far side of a thin wall, and a cell more than half its size off
+    // the surface, are not this corner.
+    if (dot(cache.v[3u * s + 1u].xyz, n) <= 0.0) {
+        return;
+    }
+    if (abs(dot(cache.v[3u * s].xyz - q, n)) > LIGHTING_CELL_HALF * size) {
         return;
     }
     vec4 v = cache.v[3u * s + 2u];
