@@ -94,12 +94,6 @@ const LIGHTING_FILL_WALK: u32 = 8;
 /// Shader `LIGHTING_SCENE_CHANGED_MARK`. Added to the change count's fraction
 /// when the host scene hash changed this frame.
 const LIGHTING_SCENE_CHANGED_MARK: f32 = 0.25;
-/// Host `prepare_fill` measured-change weight when `still == 0` (scene hash moved).
-const LIGHTING_MOVER_FILL_SCENE_CHANGE: f32 = LIGHTING_SCENE_CHANGED_MARK;
-/// Host `prepare_fill` metres-moved weight while any hitch record is live this sync.
-const LIGHTING_MOVER_FILL_MOVED_M: f32 = 0.05;
-/// Host `prepare_fill` eye-distance stand-in until per-mover camera range is wired.
-const LIGHTING_MOVER_FILL_DISTANCE_M: f32 = 3.0;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
 fn lighting_compose_at() -> u64 {
@@ -6464,28 +6458,11 @@ impl Gpu {
             };
             let _ = self.lighting.mover_cache.upsert(rec);
         }
-        self.lighting.mover_cache.rebalance_all();
-        // Stage H: rank mover texels into the shared fill list. The cache pass
-        // deposits world-direction lighting from the lattice (Far never listed).
-        // Knobs (named): measured scene change, metres moved, lamp-near, eye distance.
-        // `still > 0` means no host scene change — pass zeros so KEEP hitch
-        // leftovers do not spend the world fill budget (fill_knockout late).
+        // A move does not resize the pool and does not spend fill rays.
+        // The world-cell floor and the ranked burst are the ray budget.
         let budget = self.lighting.settings.surface_cache.ray_budget;
         let budget = if budget == 0 { 4096 } else { budget };
-        let (measured_change, distance_moved_m) = if self.lighting.still == 0 {
-            (LIGHTING_MOVER_FILL_SCENE_CHANGE, LIGHTING_MOVER_FILL_MOVED_M)
-        } else {
-            (0.0, 0.0)
-        };
-        let lamp_change_near = false;
-        let distance_m = LIGHTING_MOVER_FILL_DISTANCE_M;
-        let stats = self.lighting.mover_cache.prepare_fill(
-            budget,
-            measured_change,
-            distance_moved_m,
-            lamp_change_near,
-            distance_m,
-        );
+        let stats = self.lighting.mover_cache.prepare_fill(budget, 0.0, 0.0, false, 0.0);
         self.lighting.mover_fill_rays = stats.rays;
         self.upload_mover_cache();
     }

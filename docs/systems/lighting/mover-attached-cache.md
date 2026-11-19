@@ -58,7 +58,7 @@ This stage is **yaw-only** and **boxes-first**. That is intentional and safe for
 | G | G-buffer object id; compose O(1) table + hashed span read |
 | H | Shared fill list; cache pass deposits world-direction lighting from the lattice |
 | I | Compose: O(1) mover read; Far → world cells only; hitch scan off when attach_movers |
-| #286 port | Presence list; hit never writes world. The on-mover and stale change-volume frees are gone: those cells keep their mean, and a cell the mover is changing takes a floor ray every frame (`mover_rays`) |
+| #286 port | Presence list; hit never writes world. The on-mover and stale change-volume frees are gone: those cells keep their mean, and a cell the mover is changing takes the same 1-in-10 floor ray as a still cell |
 
 ## Stage J / #286 numbers (lavapipe)
 

@@ -3,8 +3,8 @@
 // ranked burst. That burst is the preset burst plus the rays the old
 // per-preset floor no longer spends, split equally across the four screen
 // quarters, plus an off-screen share, so the near floor cannot take the back
-// wall's rays. A cell a mover is changing is due every frame. Those mover
-// rays past the 1-in-10 share come out of the burst.
+// wall's rays. A mover is due on that same 1-in-10 floor. It does not
+// take rays out of the burst.
 // Word 0 stays a positive enable; the plan writes the traced count. F4a writes a
 // low-confidence seed into other cells of the same screen tile. The seed is not
 // an own sample and it does not add a ray. Ring sharing is not this stage.
@@ -487,17 +487,12 @@ void lighting_fill_visit(uint slot) {
             ckeys.key[lighting_fill_tile_at() + c] = packed;
         }
     }
-    // Slot index, so the same cell is due again every period. A cell a mover
-    // is changing is due every frame: that sample is what keeps or down-weights
-    // the stored mean. Header word 6 counts those mover rays.
-    bool mover_due = lighting_near_change(p);
-    if (rate != 0u && (mover_due || (slot % rate) == (lighting_round() % rate))) {
+    // Slot index, so the same cell is due again every period. A mover uses
+    // this floor too. Nothing is due early because an object moved.
+    if (rate != 0u && (slot % rate) == (lighting_round() % rate)) {
         uint i = atomicAdd(ckeys.key[lighting_fill_header_at()], 1u);
         if (i < lighting_fill_rays_max()) {
             ckeys.key[lighting_fill_pick_at() + i] = slot;
-            if (mover_due) {
-                atomicAdd(ckeys.key[lighting_fill_header_at() + 6u], 1u);
-            }
         }
     }
 }
@@ -756,20 +751,10 @@ void lighting_fill_dispatch() {
     // One thread. The value histogram is already in memory. Emitting the burst
     // is a later parallel dispatch. This function does not walk tiles or slots.
     uint max_picks = clamp(lighting_fill_u(17), 1u, 64u);
+    // The floor is one ray in ten. The burst is the preset burst. A mover
+    // does not take either one down.
     uint burst = lighting_fill_u(33);
-    // Mover rays are already in the floor count. The part past the 1/10 share
-    // comes out of the burst, so the round stays inside the device budget.
-    uint mover_rays = ckeys.key[lighting_fill_header_at() + 6u];
-    // The floor is one ray in ten. Mover rays beyond that share come out of
-    // the burst, so the round stays inside the old device total.
-    uint period = max(lighting_fill_rate(), 1u);
-    uint mover_extra = period > 1u ? mover_rays - mover_rays / period : 0u;
-    if (burst > mover_extra) {
-        burst -= mover_extra;
-    } else {
-        burst = 0u;
-    }
-    gstats.diag[LIGHTING_DIAG_MOVER_RAYS] = mover_rays;
+    gstats.diag[LIGHTING_DIAG_MOVER_RAYS] = 0u;
     // Off-screen takes its own share. The rest is split across the four
     // screen quarters, so the near floor cannot spend the back wall's rays.
     uint off_share = uint(float(burst) * lighting_fill_f(8));
@@ -949,92 +934,12 @@ void lighting_fill_seed_spent(uint slot) {
     }
 }
 
-// `e` is the mean of this frame's n samples (each `lk * cos * TAU`). One writer
-// calls this, after every ray into the slot has been summed.
-// An empty mover cell has one ray and nothing stored. The closest verified
-// neighbour on the same side of the surface replaces that ray. A neighbour
-// whose history value is high has not been checked by its own rays, so a
-// borrowed guess does not travel on. A mature cell is not touched: copying
-// every frame oscillates.
+// An empty cell keeps the ray it just traced. Copying a neighbour was the
+// mover path. A still cell and a mover cell use the same ray.
 uint lighting_fill_seed(uint slot, vec3 ray_e, inout vec3 own) {
-    vec3 p = cache.v[3u * slot].xyz;
-    vec3 nrm = cache.v[3u * slot + 1u].xyz;
-    float size = cache.v[3u * slot + 1u].w;
-    if (!(size > LIGHTING_WRC_CELL_SIZE) || !lighting_near_change(p)) {
-        return ~0u;
-    }
-    float ray_l = max(dot(max(ray_e, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
-    float limit = max(ray_l, LIGHTING_HISTORY_NOISE) * LIGHTING_HISTORY_SIGMA;
-    uint ax = lighting_axis(nrm) >> 1u;
-    vec3 t1 = vec3(0.0);
-    vec3 t2 = vec3(0.0);
-    t1[(ax + 1u) % 3u] = 1.0;
-    t2[(ax + 2u) % 3u] = 1.0;
-    vec3 at[8];
-    float dist[8];
-    float parent = size * float(2u);
-    at[0] = p;
-    dist[0] = parent;
-    at[1] = p;
-    dist[1] = parent * float(2u);
-    float ring = size * float(2u);
-    at[2] = p + t1 * ring;
-    at[3] = p - t1 * ring;
-    at[4] = p + t2 * ring;
-    at[5] = p - t2 * ring;
-    dist[2] = ring;
-    dist[3] = ring;
-    dist[4] = ring;
-    dist[5] = ring;
-    ring = size * float(3u);
-    at[6] = p + t1 * ring;
-    at[7] = p + t2 * ring;
-    dist[6] = ring;
-    dist[7] = ring;
-    float find_size[8];
-    find_size[0] = parent;
-    find_size[1] = parent * float(2u);
-    find_size[2] = size;
-    find_size[3] = size;
-    find_size[4] = size;
-    find_size[5] = size;
-    find_size[6] = size;
-    find_size[7] = size;
-    float best = 0.0;
-    uint chosen = ~0u;
-    vec3 color = own;
-    for (uint i = 0u; i < 8u; i++) {
-        uint s = lighting_cache_find_sized(at[i], nrm, false, find_size[i], at[i]);
-        if (s == ~0u || s == slot || s >= LIGHTING_CACHE_SLOTS) {
-            continue;
-        }
-        vec4 shown = cache.v[3u * s + 2u];
-        if (shown.w < LIGHTING_HISTORY_SHOWN) {
-            continue;
-        }
-        if (dot(cache.v[3u * s + 1u].xyz, nrm) <= LIGHTING_HISTORY_SHOWN) {
-            continue;
-        }
-        if (abs(cache.v[LIGHTING_SC_GRAD_AT + s].x) >= LIGHTING_HISTORY_SHOWN) {
-            continue;
-        }
-        float lit = max(dot(max(shown.rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
-        float gap = abs(ray_l - lit);
-        if (!(gap * LIGHTING_HISTORY_SIGMA < limit)) {
-            continue;
-        }
-        float score = gap * max(dist[i], find_size[i]);
-        if (chosen != ~0u && !(score < best)) {
-            continue;
-        }
-        best = score;
-        chosen = s;
-        color = shown.rgb;
-    }
-    if (chosen != ~0u) {
-        own = color;
-    }
-    return chosen;
+    // An empty cell keeps the ray it just traced. Copying a neighbour was
+    // the mover path. A still cell and a mover cell use the same ray.
+    return ~0u;
 }
 
 void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, vec3 shy, vec3 shz, bool on_screen, float sun_luma) {
@@ -1045,11 +950,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     // World mode 3 returns from the cache pass before its own note, on both
     // settings of the fill budget. This commit is the writer that stored the
     // sample. The raw sample against the stored mean, not the blended mean.
-    // The reach note seeds est+1 .z from this ray when that word is unset, so
-    // the mover judgement has to read the spread first. Comparing against the
-    // note's seed makes the band this ray's own gap, and the ray always agrees.
     float spread_z = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].z;
-    lighting_reach_note_cell(slot, old.rgb, e);
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     float rays0 = max(b.w, 0.0);
     uint warmup = max(lighting_fill_u(12), 1u);
@@ -1211,11 +1112,8 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     float el = dot(lk_mean, FILL_LUMA);
     float fe = el > FILL_EPS ? clamp(sun_luma / el, 0.0, 1.0) : 0.0;
     float fo = old.w > FILL_HALF ? lighting_sc_sunfrac_now(slot) : fe;
-    // A mover cell is resampled every frame. The 1/16 floor would replace
-    // its sun share with one ray every frame, and the lattice multiplies
-    // the stored mean by that share. The mean's blend is the judgement.
-    bool mover_cell = cell && lighting_near_change(cache.v[3u * slot].xyz);
-    float sun_w = mover_cell ? blend : max(k, 1.0 / FILL_SUN_DEN);
+    // The sun share uses the same floor on a mover and on a still cell.
+    float sun_w = max(k, 1.0 / FILL_SUN_DEN);
     float fnew = mix(fo, fe, clamp(sun_w, 0.0, 1.0));
     float now = lighting_ls_now();
     cache.v[LIGHTING_SC_SUN_AT + slot] = vec4(fnew, now < 0.0 ? cache.v[LIGHTING_SC_SUN_AT + slot].y : now, 0.0, 0.0);

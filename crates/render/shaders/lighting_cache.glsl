@@ -1931,11 +1931,6 @@ float lighting_sc_count(uint slot) {
         // track it with an EMA floor, lighting_cache.comp).
         return t;
     }
-    bool mover;
-    // S76: under A-SVGF a nearby change only nominates a check; the history stays.
-    if (!lighting_sc_asvgf_on() && lighting_sc_local_change(slot, mover)) {
-        t = min(t, mover ? LIGHTING_SC_MOVING : lighting_sc_light_window());
-    }
     return t;
 }
 // Blend floor of a texel's long-term mean while the light changes anywhere
@@ -6721,11 +6716,6 @@ float lighting_history_value(uint slot, vec3 old_rgb, vec3 sample_rgb) {
         float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w, 1.0);
         float noise = sqrt(variance / rays);
         noise = max(noise, LIGHTING_HISTORY_NOISE);
-        if (lighting_near_change(cache.v[3u * slot].xyz)) {
-            float spread = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].z;
-            float scale = max(max(sample_l, mean_l), LIGHTING_HISTORY_NOISE);
-            noise = spread > LIGHTING_HISTORY_NOISE ? max(sqrt(spread), scale) : scale;
-        }
         if (abs(sample_l - mean_l) > LIGHTING_HISTORY_SIGMA * noise) {
             float denom = max(max(abs(sample_l), abs(mean_l)), LIGHTING_HISTORY_NOISE);
             value = min(1.0, value + abs(sample_l - mean_l) / denom);
@@ -7234,9 +7224,9 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
     }
     uint tag;
     uint at = lighting_shadow_cell(o, n, li, tag);
-    // A mover at this point changes the shadow. Re-trace, and leave the
-    // cached bit for the frames after the mover has left.
-    if (lighting_near_change(o)) {
+    // A non-empty change list means some surface moved. The cached bit is
+    // for the frames after that list is empty. This is one header load.
+    if (lighting_reach_noting()) {
         return -1.0;
     }
     vec4 e = cache.v[at];

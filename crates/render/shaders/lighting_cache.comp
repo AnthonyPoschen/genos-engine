@@ -285,7 +285,6 @@ void main() {
         bool accept = value >= 0.0;
         wa = accept ? clamp(max(wa, value), 0.0, 1.0) : 0.0;
         vec3 mean = (accept && old.w < 0.5) ? e : old.rgb + (e - old.rgb) * min(wa, 1.0);
-        lighting_reach_note_cell(slot, old.rgb, e);
         lighting_tex_put(slot, vec4(mean, min(t + (accept ? add : 0.0), LIGHTING_WRC_CAP)));
         if (sh && (accept || old.w >= LIGHTING_CACHE_HAS_W)) {
             // Same weights as the mean (2 pi / rays a ray), same blend alpha.
