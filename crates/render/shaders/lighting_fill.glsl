@@ -1061,6 +1061,10 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     // World mode 3 returns from the cache pass before its own note, on both
     // settings of the fill budget. This commit is the writer that stored the
     // sample. The raw sample against the stored mean, not the blended mean.
+    // The reach note seeds est+1 .z from this ray when that word is unset, so
+    // the mover judgement has to read the spread first. Comparing against the
+    // note's seed makes the band this ray's own gap, and the ray always agrees.
+    float spread_z = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].z;
     lighting_reach_note_cell(slot, old.rgb, e);
     vec4 b = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u];
     float rays0 = max(b.w, 0.0);
@@ -1117,21 +1121,22 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
             float mean_l = max(dot(max(old.rgb, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
             float sample_l = max(dot(max(e, vec3(0.0)), LIGHTING_SVGF_LW), 0.0);
             float gap = abs(sample_l - mean_l);
-            // Judge against the spread already stored. Then fold this ray
-            // into it. A ray outside the band shortens the history by the
-            // fraction of the gap past the band. The blend is the set-count
-            // weight of what remains, so one tail sample does not become
-            // the mean, and a run of them forgets the old surface.
-            float band = LIGHTING_HISTORY_SIGMA * max(sqrt(max(b.z, 0.0)), LIGHTING_HISTORY_NOISE);
-            if (b.z > FILL_VAR_EPS && gap > band) {
+            // Judge against the spread from before this ray. The reach note
+            // above has already folded the ray into est+1 .z. A ray outside
+            // the prior band shortens the history by the fraction of the gap
+            // past the band. The blend is the set-count weight of what
+            // remains, so one tail sample does not become the mean, and a
+            // run of them forgets the old surface.
+            float band = LIGHTING_HISTORY_SIGMA * max(sqrt(max(spread_z, 0.0)), LIGHTING_HISTORY_NOISE);
+            if (spread_z > FILL_VAR_EPS && gap > band) {
                 float excess = (gap - band) / max(max(gap, mean_l), LIGHTING_HISTORY_NOISE);
                 sample_t *= clamp(1.0 - excess, 0.0, 1.0);
             }
-            if (!(b.z > FILL_VAR_EPS)) {
+            if (!(spread_z > FILL_VAR_EPS)) {
                 float scale = max(max(mean_l, sample_l), FILL_VAR_EPS);
                 b.z = scale * scale;
             } else {
-                b.z = max(mix(b.z, gap * gap, FILL_VAR_RATE), FILL_VAR_EPS);
+                b.z = max(mix(spread_z, gap * gap, FILL_VAR_RATE), FILL_VAR_EPS);
             }
             blend = sample_add / max(sample_t + sample_add, FILL_EPS);
         } else if (opening) {
