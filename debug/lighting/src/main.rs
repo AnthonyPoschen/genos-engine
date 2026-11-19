@@ -172,7 +172,7 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          fill_burst and the rays that 1-in-10 floor no longer
                          spends. Mover rays beyond the 1-in-10 share come out
                          of the burst.
-                         fill_burst 0 spends no extra rays. High defaults to 25000,
+                         fill_burst 0 spends no extra rays. High defaults to 400000,
                          Medium to 12500, Low to 6250. fill_budget 0 traces none.
                          The other fill knobs are surface_cache.fill_* and
                          GENOS_LIGHTING_FILL_TILE, FILL_LOD_NEAR, FILL_CELL_MAX,

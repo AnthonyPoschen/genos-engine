@@ -716,10 +716,17 @@ void lighting_fill_emit_on(uint gid) {
             if (want > max_picks) {
                 want = max_picks;
             }
+            // The leftover is not an atomic ticket. Thread order was choosing
+            // a different set of cells every run, and the wall picture moved
+            // with it. A hash of the slot and the round is the same cells on
+            // every device, and the round rotates who is due.
             if (extra > 0u && want < max_picks) {
-                uint ticket = atomicAdd(ckeys.key[lighting_fill_extra_at() + at], 1u);
-                if (ticket < extra) {
-                    want += 1u;
+                uint count = ckeys.key[lighting_fill_hist_at() + at];
+                if (count > 0u) {
+                    uint pick = lighting_hash(slot ^ (lighting_round() * 0x9E3779B9u)) % count;
+                    if (pick < extra) {
+                        want += 1u;
+                    }
                 }
             }
             m = want;

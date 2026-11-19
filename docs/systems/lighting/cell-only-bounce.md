@@ -30,7 +30,7 @@ A finer cell's weight grows with its own sets until it takes the pixel over. The
 
 Light does not pass through a surface, and it does not land where it cannot.
 
-A parent cell is refused when it is stale, when its normal faces the opposite way, or when it sits more than half a cell off the surface plane. The lattice read keeps the same gates it already has: stale, back-facing, and more than half a cell off the plane.
+A parent cell is refused when it is stale, when its normal faces the opposite way, or when it sits more than half a cell off the surface plane. The lattice read keeps the same gates it already has: stale, back-facing, and more than half a cell off the plane. A lattice corner with fewer than 64 sets leans on the settled corners by that same sets blend. The texel handover stays at four.
 
 ## Exact lamps
 
@@ -42,7 +42,7 @@ The knockout that removes the exact path stays. With that path removed, the pixe
 
 A frame spends the same rays whether or not something moved. The one history rule already adopts a fresh ray, a neighbour, or a parent when the stored mean is junk, and it shortens the count when a ray disagrees. That covers a mover, a lamp that moved, and the opening. Nothing else spends rays, or grows a pool, because something changed.
 
-The ray budget stays the fixed floor plus the fixed ranked burst.
+The ray budget stays the fixed 1-in-10 floor plus the fixed ranked burst. High's burst is 400000 and a cell may take 64 of those rays, so the rays the screen filter used to spend reach the far cells as well as the floor. The picture weights that cell twice and each face neighbour out to six cells once.
 
 Removed because that blend already covers them:
 

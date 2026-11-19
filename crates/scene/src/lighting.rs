@@ -569,7 +569,7 @@ pub struct FillSettings {
     /// gives one ray to each selected cell; it does not spend this as a count.
     pub floor_rays: u32,
     /// Rays spent highest-value first after the floor. `0` spends none.
-    /// High is 25000, Medium half of that, Low a quarter. The device adds
+    /// High is 400000, Medium 12500, Low 6250. The device adds
     /// the rays the 1-in-10 floor no longer spends, so the round stays about
     /// the size of the old per-preset floor plus this burst. Mover rays come
     /// out of that sum.
@@ -621,7 +621,7 @@ impl FillSettings {
             prox_min: 0.5,
             change_weight: 1.0,
             check_rate: 9,
-            max_picks: 4,
+            max_picks: 64,
             lambda_decay: 0.8,
             window_floor: 0.25,
             catchup_max: 0.5,
@@ -640,7 +640,7 @@ impl FillSettings {
             share_receivers: 3,
             share_handover: 16,
             floor_rays: 1,
-            burst: 25_000,
+            burst: 400_000,
         }
     }
 }

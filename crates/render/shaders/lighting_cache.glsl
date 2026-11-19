@@ -2991,6 +2991,11 @@ uint lighting_sh_lattice_find(uint key) {
 }
 // Loads of the eight corners. A missing id, or a corner the live gates leave
 // out, adds no weight. This is not a hash probe.
+// A corner under this many sets leans on the settled corners. The texel
+// handover stays at four. The lattice read waits longer: a 1-in-10 floor
+// cell is still noisy at four sets once the screen filter is gone.
+const float LIGHTING_LATTICE_READY_SETS = 64.0;
+const float LIGHTING_FINE_READY_SETS = 4.0;
 vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
     const float cs = LIGHTING_SH_CELL;
     uint ax;
@@ -3001,10 +3006,18 @@ vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
     lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
     vec3 uv = p / cs - vec3(LIGHTING_CELL_HALF) - inset;
     vec3 fr = uv - floor(uv);
-    vec3 sum = vec3(0.0);
-    float ws = 0.0;
-    float ev = 0.0;
+    vec3 corner_lit[8];
+    float corner_w[8];
+    float corner_sets[8];
+    uint corner_on = 0u;
+    vec3 settled = vec3(0.0);
+    float settled_w = 0.0;
+    vec3 gathered = vec3(0.0);
+    float gathered_w = 0.0;
     [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        corner_w[k] = 0.0;
+        corner_sets[k] = 0.0;
+        corner_lit[k] = vec3(0.0);
         uint s = ids[k];
         if (s == ~0u || s >= LIGHTING_CACHE_SLOTS) {
             continue;
@@ -3032,10 +3045,47 @@ vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
         if (v.w < LIGHTING_CACHE_HAS_W || lighting_sc_stale(s)) {
             continue;
         }
-        float w = tri * facing;
-        sum += w * lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
-        ws += w;
         float sets = floor(max(v.w, 0.0));
+        float w = tri * facing;
+        vec3 lit = lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
+        corner_lit[k] = lit;
+        corner_w[k] = w;
+        corner_sets[k] = sets;
+        corner_on |= 1u << k;
+        gathered += lit * sets;
+        gathered_w += sets;
+        if (sets >= LIGHTING_LATTICE_READY_SETS) {
+            settled += w * lit;
+            settled_w += w;
+        }
+    }
+    // A corner under the lattice handover leans on the settled corners.
+    // Those count as that many sets, and the weight fades as the corner's
+    // own sets catch up. The same blend the child used against its parent.
+    // With no settled corner, the sets-weighted stencil is the parent, so a
+    // wall that is still short of the handover still agrees with itself.
+    vec3 parent_rgb = settled_w > 0.0 ? settled / settled_w : vec3(0.0);
+    if (!(settled_w > 0.0) && gathered_w > 0.0) {
+        parent_rgb = gathered / gathered_w;
+    }
+    bool have_parent = settled_w > 0.0 || gathered_w > 0.0;
+    vec3 sum = vec3(0.0);
+    float ws = 0.0;
+    float ev = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        if ((corner_on & (1u << k)) == 0u) {
+            continue;
+        }
+        float sets = corner_sets[k];
+        float w = corner_w[k];
+        vec3 lit = corner_lit[k];
+        if (have_parent && sets < LIGHTING_LATTICE_READY_SETS) {
+            float fade = 1.0 - sets / LIGHTING_LATTICE_READY_SETS;
+            float pn_eff = LIGHTING_LATTICE_READY_SETS * fade;
+            lit = (parent_rgb * pn_eff + lit * sets) / LIGHTING_LATTICE_READY_SETS;
+        }
+        sum += w * lit;
+        ws += w;
         ev += w * clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0);
     }
     lighting_sh_blend_trust = ws > 0.0 ? ev / ws : 0.0;
@@ -3250,16 +3300,54 @@ void lighting_sh_store_drain(uint gid) {
     }
 }
 // Compose loads this. The cache relight is what calls the neighbour walk.
-vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
-#ifdef GENOS_COMPOSE_NO_WALK
-    if (LIGHTING_SC_WRITES) {
-        lighting_sh_lattice_request(pos, n, claim);
-    }
+// The centre counts this many times. Face neighbours out to this many
+// cells count once. A miss adds nothing. Each sample is the trilinear blend.
+const float LIGHTING_LATTICE_CENTRE = 2.0;
+const uint LIGHTING_LATTICE_REACH = 6u;
+vec4 lighting_sh_lattice_at(vec3 pos, vec3 n) {
     uint ids[8];
     if (!lighting_sh_lattice_load(pos, n, ids)) {
         return vec4(0.0);
     }
     return lighting_sh_blend_ids(ids, pos, n);
+}
+vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
+#ifdef GENOS_COMPOSE_NO_WALK
+    if (LIGHTING_SC_WRITES) {
+        lighting_sh_lattice_request(pos, n, claim);
+    }
+    vec4 centre = lighting_sh_lattice_at(pos, n);
+    if (centre.w <= 0.0) {
+        return vec4(0.0);
+    }
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 t = vec3(0.0);
+    vec3 b = vec3(0.0);
+    if (ax == 0u) {
+        t = vec3(0.0, 1.0, 0.0);
+        b = vec3(0.0, 0.0, 1.0);
+    } else if (ax == 1u) {
+        t = vec3(1.0, 0.0, 0.0);
+        b = vec3(0.0, 0.0, 1.0);
+    } else {
+        t = vec3(1.0, 0.0, 0.0);
+        b = vec3(0.0, 1.0, 0.0);
+    }
+    vec3 sum = centre.rgb * LIGHTING_LATTICE_CENTRE;
+    float w = LIGHTING_LATTICE_CENTRE;
+    float step_m = LIGHTING_SH_CELL;
+    [[dont_unroll]] for (uint s = 1u; s <= LIGHTING_LATTICE_REACH; s++) {
+        float d = float(s) * step_m;
+        vec3 ring[4] = vec3[4](pos + t * d, pos - t * d, pos + b * d, pos - b * d);
+        [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
+            vec4 nb = lighting_sh_lattice_at(ring[i], n);
+            if (nb.w > 0.0) {
+                sum += nb.rgb;
+                w += 1.0;
+            }
+        }
+    }
+    return vec4(sum / w, centre.w);
 #else
     return lighting_sh_read(pos, n, claim);
 #endif
@@ -4061,8 +4149,7 @@ const float LIGHTING_FINE_SCORE_NEAR = 0.25;
 const float LIGHTING_FINE_CHG_CAP = 4.0;
 const float LIGHTING_FINE_PLANE_EPS = 1.0e-3;
 const float LIGHTING_FINE_HALF = 0.5;
-// A texel under this many sets outranks one that already has them.
-const float LIGHTING_FINE_READY_SETS = 4.0;
+// A texel under LIGHTING_FINE_READY_SETS outranks one that already has them.
 // Per-set luminance fraction when a texel has no estimator yet. The wide
 // regulariser uses the same 30% for an unestimated texel.
 const float LIGHTING_FINE_PRIOR_SIGMA = 0.3;
