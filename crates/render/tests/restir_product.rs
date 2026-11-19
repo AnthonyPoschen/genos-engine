@@ -213,6 +213,10 @@ fn the_tail_draw_uses_the_finished_weight_sum() {
     );
     assert!(direct.contains("const float RESTIR_TAIL_EPS = 1.0e-6;"));
     assert!(direct.contains("acc >= mark"));
+    assert!(
+        direct.contains("now_tail != was_tail"),
+        "a lamp that crosses the cutoff must leave the tail history"
+    );
 }
 
 fn assert_no_labelled_exact(counts: &LampPickCounts, what: &str) {

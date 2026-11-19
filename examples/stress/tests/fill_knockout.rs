@@ -290,14 +290,11 @@ const ENERGY_FRAMES: usize = 400;
 /// is 127.81 / 107.33. This floor measured 127.74 / 107.35. The 1-in-10 floor
 /// that kept replacing the cell mean was 174.91 / 174.73.
 ///
-/// The mid ceiling used to be the exclusive end 113. That fit the shared-u
-/// tail walk, which prefers the early weak lamps. The inverse-CDF draw is the
-/// probability `tail_sum / w` assumes. Four lavapipe runs of that draw were
-/// mid 112.37, 113.00, 113.07, and 114.00 (all 131.47 to 132.48). The ceiling
-/// is the exclusive end 116: 8% above the path-reference mid 107.33
-/// (107.33 * 1.08 = 115.9) and still far from the wash at 174.73.
+/// The exclusive mid end stays 113. The path-reference mid is 107.33. A tail
+/// history that keeps a lamp after it crosses into the exact sum sits above
+/// that, and the bound does not move to follow it.
 const ENERGY_ALL_MAX: f64 = 136.0;
-const ENERGY_MID_MAX: f64 = 116.0;
+const ENERGY_MID_MAX: f64 = 113.0;
 const ENERGY_ALL_MIN: f64 = 120.0;
 const ENERGY_MID_MIN: f64 = 101.0;
 

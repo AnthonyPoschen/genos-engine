@@ -128,6 +128,7 @@ void restir_tail_change_weight(vec3 origin, vec3 n, bool two_sided, float cutoff
     uint bits_at = restir_words[38u];
     float sum_now = 0.0;
     float sum_was = 0.0;
+    bool crossed = false;
     [[dont_unroll]] for (uint lamp = 0u; lamp < nlamps; lamp++) {
         float now = restir_record_weight(base + lamp * 8u, origin, n, two_sided);
         float was = now;
@@ -135,12 +136,26 @@ void restir_tail_change_weight(vec3 origin, vec3 n, bool two_sided, float cutoff
         if (((word >> (lamp & 31u)) & 1u) != 0u) {
             was = restir_record_weight(prev_base + lamp * RESTIR_PREV_STRIDE, origin, n, two_sided);
         }
-        if (now + RESTIR_TAIL_EPS < cutoff) {
+        // A lamp on one side of the cutoff and the other side last record is
+        // a different integrand. The exact sum already has a lamp that
+        // crossed upward. A scalar ratio cannot take that lamp back out of
+        // the stored tail, so the history drops instead of counting it twice.
+        bool now_tail = now + RESTIR_TAIL_EPS < cutoff;
+        bool was_tail = was + RESTIR_TAIL_EPS < cutoff;
+        if (now_tail != was_tail) {
+            crossed = true;
+        }
+        if (now_tail) {
             sum_now += now;
         }
-        if (was + RESTIR_TAIL_EPS < cutoff) {
+        if (was_tail) {
             sum_was += was;
         }
+    }
+    if (crossed) {
+        ratio = 0.0;
+        confidence = 0.0;
+        return;
     }
     bool now_on = sum_now > 0.0;
     bool was_on = sum_was > 0.0;
