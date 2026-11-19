@@ -38,6 +38,23 @@ Every lamp that meaningfully reaches a pixel gets one exact shadow ray. Meaningf
 
 The knockout that removes the exact path stays. With that path removed, the pixel is the reservoir again, so the moving-lamp wall still grains.
 
+## Static frame cost
+
+A frame spends the same rays whether or not something moved. The one history rule already adopts a fresh ray, a neighbour, or a parent when the stored mean is junk, and it shortens the count when a ray disagrees. That covers a mover, a lamp that moved, and the opening. Nothing else spends rays, or grows a pool, because something changed.
+
+The ray budget stays the fixed floor plus the fixed ranked burst.
+
+Removed because that blend already covers them:
+
+- Mover detection, the rays spent because a mover is changing a cell, and any burst budget that grows while something moves.
+- Reach notes, and the separate band that shortens a mover cell on its own.
+- Change-tracking that marks a cell hot, and the opening and settle paths that replace a mean.
+- Allocator bumps that add rays or slots when an object moves.
+
+## Follow-up
+
+Not this change. The next stage is a sparse cascade: surface samples are level 0, coarse world cells are the upper levels, and the penumbra condition sets the spacing. The removed radiance cascades of GI v1 stay removed. This note does not bring that system back.
+
 ## Networking
 
 - Replicated state: none. Cells, the exact lamp sum, and the stochastic remainder stay on the machine that shades.
