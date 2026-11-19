@@ -251,6 +251,9 @@ void main() {
     bool restir_pix = ((pc.lamp.y >> 21u) & 1u) != 0u
         && ((pc.lamp.y >> 18u) & 7u) == 0u
         && idx < pixels;
+    // One to RESTIR_EXACT_LIT reaching point lamps are summed in this loop,
+    // one shadow ray each. The reservoir is not added on top.
+    bool restir_few = false;
     if (restir_pix) {
         lamp_new = false;
     }
@@ -319,6 +322,9 @@ void main() {
     if (view_only != LAMP_ALL) {
         restir_pix = false;
         lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
+    }
+    if (restir_pix && restir_few_lamps(origin, n, two_sided)) {
+        restir_few = true;
     }
 #endif
     uint chosen_k[4] = uint[4](0u, 0u, 0u, 0u);
@@ -517,7 +523,7 @@ void main() {
 #ifdef GENOS_RESTIR_DI
         // The reservoir replaces near point lamps. Skip the load. The sun
         // (k < suns) and the flame (k == suns + near) stay in this loop.
-        if (restir_pix && k >= list.suns.y && k < list.suns.y + list.near.y) {
+        if (restir_pix && !restir_few && k >= list.suns.y && k < list.suns.y + list.near.y) {
             continue;
         }
 #endif
@@ -628,9 +634,9 @@ void main() {
             vec3 add = (!lamp_new && exact) ? light : light * scale;
             e += add;
 #ifdef GENOS_RESTIR_DI
-            // Near point lamp actually added on a ReSTIR pixel. The skip at the
-            // top of this loop keeps the count at 0. Sun and flame stay out of
-            // this word.
+            // Near point lamp added on a ReSTIR pixel. Many-lamp pixels skip
+            // the load, so this stays 0 there. One to RESTIR_EXACT_LIT lamps
+            // are the exact sum and do count. Sun and flame stay out.
             if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y && lamp_pick_diag()) {
                 atomicAdd(restir_words[RESTIR_DIAG_POINT_ADD], 1u);
             }
@@ -672,7 +678,7 @@ void main() {
     bool restir_sampled = false;
     float restir_luma = 0.0;
     bool restir_vis = false;
-    if (restir_pix && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
+    if (restir_pix && !restir_few && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
         && restir_lamp < restir_words[0u]) {
         restir_sampled = true;
         if (lamp_pick_diag()) {
@@ -786,7 +792,7 @@ void main() {
     // frame's lobe leaves the picture on one lamp. The noise gate has its own
     // mean and does not read this one. A bounce-only frame does not write it
     // into the picture and does not fold a zero into the stored mean.
-    if (restir_pix && lamp_pix) {
+    if (restir_pix && !restir_few && lamp_pix) {
         uint mean_px = 0u;
         float z_ignore = 0.0;
         uint mean_prev = 0u;

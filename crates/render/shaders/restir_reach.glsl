@@ -138,4 +138,33 @@ void restir_change_weight(vec3 p, vec3 n, bool two_sided, out float ratio, out f
     confidence = min(sum_now, sum_was) / max(sum_now, sum_was);
 }
 
+// A pixel this many point lamps reach is summed exactly: one shadow ray each,
+// the same way the sun is traced. More than this stays on the reservoir.
+// The count stops at one past the limit, so a many-lamp cell does not walk
+// the rest of its list.
+const uint RESTIR_EXACT_LIT = 4u;
+
+uint restir_point_reach(vec3 origin, vec3 n, bool two_sided) {
+    LampList list = lamps_at(origin);
+    uint hit = 0u;
+    uint begin = list.suns.y;
+    uint end = begin + list.near.y;
+    [[dont_unroll]] for (uint k = begin; k < end; k++) {
+        vec3 target;
+        vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
+        if (light.r + light.g + light.b > 0.0) {
+            hit += 1u;
+            if (hit > RESTIR_EXACT_LIT) {
+                return hit;
+            }
+        }
+    }
+    return hit;
+}
+
+bool restir_few_lamps(vec3 origin, vec3 n, bool two_sided) {
+    uint hit = restir_point_reach(origin, n, two_sided);
+    return hit >= 1u && hit <= RESTIR_EXACT_LIT;
+}
+
 #endif
