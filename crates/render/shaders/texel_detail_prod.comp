@@ -252,13 +252,13 @@ const float PROD_MOVER_WORD = 300000.0;
 // Head w below this is the world mode. 100000 is the attach-movers slot.
 const float PROD_ATTACH_MOD = 100000.0;
 const float PROD_MOVER_RADIUS = 2.0;
-const uint PROD_MOVER_POOL_CAP = 32u;
+const uint PROD_MOVER_POOL_CAP = 1536u;
 const uint PROD_MOVER_OID = 1u;
-// Byte offsets for a 32-texel movers_gpu SSBO (mover_cache.rs).
+// Byte offsets for a 1536-texel movers_gpu SSBO (mover_cache.rs).
 const uint PROD_MOVER_TABLE_BYTES = 64u;
 const uint PROD_MOVER_POOL_BYTES = 262208u;
-const uint PROD_MOVER_FILL_BYTES = 264256u;
-const uint PROD_MOVER_PRES_BYTES = 266304u;
+const uint PROD_MOVER_FILL_BYTES = 360512u;
+const uint PROD_MOVER_PRES_BYTES = 362560u;
 
 #if !defined(PROD_READONLY) && !defined(PROD_SLIDE_ONLY) && !defined(PROD_COMPOSE_LATTICE)
 void prod_lamp_dark(uint cell);
@@ -465,8 +465,8 @@ void prod_mover_gpu_ensure() {
 const float PROD_MOVER_FULL_SETS = 8.0;
 const float PROD_MOVER_WARM_SETS = 2.0;
 
-void prod_mover_plant_pool_texel() {
-    uint at = lighting_mover_pool_off();
+void prod_mover_plant_one(uint tex) {
+    uint at = lighting_mover_pool_off() + tex * 16u;
     movers_gpu.header[at + 0u] = floatBitsToUint(0.0);
     movers_gpu.header[at + 1u] = floatBitsToUint(1.0);
     movers_gpu.header[at + 2u] = floatBitsToUint(0.0);
@@ -485,13 +485,43 @@ void prod_mover_plant_pool_texel() {
     movers_gpu.header[at + 15u] = 0u;
 }
 
-void prod_mover_write_record(vec3 centre, vec2 yaw) {
+void prod_mover_plant_pool_texel() {
+    // Lookup refuses a texel whose object id is not already stored, so the
+    // index cannot be discovered by a lookup before the plant. Fill every
+    // texel the record owns. A one-texel record stays the old texel-0 plant.
+    uint slot = lighting_mover_find_slot(PROD_MOVER_OID);
+    uint count = 1u;
+    if (slot != ~0u) {
+        count = lighting_mover_texel_count(slot);
+    }
+    if (count == 0u || count > PROD_MOVER_POOL_CAP) {
+        count = 1u;
+    }
+    for (uint tex = 0u; tex < count; tex++) {
+        prod_mover_plant_one(tex);
+    }
+}
+
+void prod_mover_write_record_sized(vec3 centre, vec2 yaw, float he, bool grid) {
     uint slot = lighting_mover_table_hash(PROD_MOVER_OID);
     uint at = lighting_mover_table_off() + slot * 16u;
     movers_gpu.header[at + 0u] = PROD_MOVER_OID;
     movers_gpu.header[at + 1u] = 0u;
     movers_gpu.header[at + 2u] = 0u;
-    movers_gpu.header[at + 3u] = 1u;
+    // The face grid's +Y centre is not texel 0. A one-texel record makes the
+    // lookup miss and the slide reads the world lattice. The grid has to
+    // cover that index, and the half extents stay the box: the claim guard
+    // uses them to decide the hit is on the mover.
+    float face = he;
+    uint count = 1u;
+    if (grid) {
+        uint steps = max(uint(floor((LIGHTING_MOVER_FACE_SPAN * max(he, LIGHTING_SC_TEXEL)) / LIGHTING_SC_TEXEL)), 1u);
+        uint cells = 6u * steps * steps;
+        if (cells <= PROD_MOVER_POOL_CAP) {
+            count = cells;
+        }
+    }
+    movers_gpu.header[at + 3u] = count;
     movers_gpu.header[at + 4u] = floatBitsToUint(centre.x);
     movers_gpu.header[at + 5u] = floatBitsToUint(centre.y);
     movers_gpu.header[at + 6u] = floatBitsToUint(centre.z);
@@ -500,9 +530,9 @@ void prod_mover_write_record(vec3 centre, vec2 yaw) {
     movers_gpu.header[at + 9u] = floatBitsToUint(centre.y);
     movers_gpu.header[at + 10u] = floatBitsToUint(centre.z);
     movers_gpu.header[at + 11u] = floatBitsToUint(yaw.x);
-    movers_gpu.header[at + 12u] = floatBitsToUint(1.0);
-    movers_gpu.header[at + 13u] = floatBitsToUint(1.0);
-    movers_gpu.header[at + 14u] = floatBitsToUint(1.0);
+    movers_gpu.header[at + 12u] = floatBitsToUint(face);
+    movers_gpu.header[at + 13u] = floatBitsToUint(face);
+    movers_gpu.header[at + 14u] = floatBitsToUint(face);
     movers_gpu.header[at + 15u] = floatBitsToUint(yaw.y);
     movers_gpu.header[12] = 1u;
     // Presence list is out of compose (GENOS_COMPOSE_NO_WALK). The fixture
@@ -510,7 +540,11 @@ void prod_mover_write_record(vec3 centre, vec2 yaw) {
     movers_gpu.header[PROD_MOVER_PRES_BYTES / 4u] = slot;
 }
 
-void prod_mover_place(vec3 centre, vec2 yaw) {
+void prod_mover_write_record(vec3 centre, vec2 yaw) {
+    prod_mover_write_record_sized(centre, yaw, 1.0, false);
+}
+
+void prod_mover_place_sized(vec3 centre, vec2 yaw, float he, bool grid) {
     uint at = lighting_change_at();
     float mode = mod(work.v[at].w, PROD_ATTACH_MOD);
     work.v[at].w = mode + PROD_MOVER_WORD;
@@ -520,8 +554,16 @@ void prod_mover_place(vec3 centre, vec2 yaw) {
     work.v[m + 2u] = vec4(1.0, 1.0, 1.0, 0.0);
     work.v[m + 3u] = vec4(yaw, 0.0, 0.0);
     prod_mover_gpu_ensure();
+    prod_mover_write_record_sized(centre, yaw, he, grid);
     prod_mover_plant_pool_texel();
-    prod_mover_write_record(centre, yaw);
+}
+
+void prod_mover_place(vec3 centre, vec2 yaw) {
+    prod_mover_place_sized(centre, yaw, 1.0, false);
+}
+
+void prod_mover_place_grid(vec3 centre, vec2 yaw) {
+    prod_mover_place_sized(centre, yaw, 1.0, true);
 }
 
 void prod_mover(vec3 pos) {
@@ -619,7 +661,7 @@ vec3 prod_slide_pos(uint rel) {
         prod_head(1u);
         gstats.ctrl_bounce = 2u;
         vec3 hit_pos = vec3(PROD_SLIDE_HIT, 0.0, PROD_SLIDE_HIT);
-        prod_mover(hit_pos);
+        prod_mover_place_grid(hit_pos - vec3(0.0, 1.0, 0.0), vec2(1.0, 0.0));
         gbuf.words[5] = PROD_MOVER_OID;
         return hit_pos;
     }
@@ -652,7 +694,7 @@ vec3 prod_slide_pos(uint rel) {
         // does not take the pool path.
         gbuf.words[5] = 0u;
     } else {
-        prod_mover(pos);
+        prod_mover_place_grid(pos - vec3(0.0, 1.0, 0.0), vec2(1.0, 0.0));
         // After: pool read via G-buffer object id (compose's production path).
         gbuf.words[5] = PROD_MOVER_OID;
     }
@@ -698,7 +740,7 @@ void prod_slide_note(uint rel, vec3 shown) {
             cache.v[3u * floor_slot + 2u] = vec4(PROD_RED, PROD_CELL_N);
             cache.v[LIGHTING_SC_OBJ_AT + floor_slot] = vec4(0.0);
         }
-        prod_mover_place(box, vec2(1.0, 0.0));
+        prod_mover_place_grid(box, vec2(1.0, 0.0));
         work.v[at].x = 1.0;
         work.v[at].y = 0.0;
         uint ch = at + LIGHTING_CHANGE_HEAD;
@@ -915,7 +957,7 @@ void prod_compose_lattice_run() {
         cache.v[LIGHTING_SC_OBJ_AT + blue] = vec4(0.0);
         prod_compose_lattice_plant(blue, outside, n);
     }
-    prod_mover_place(box, vec2(1.0, 0.0));
+    prod_mover_place_grid(box, vec2(1.0, 0.0));
     float lattice_ok = 0.0;
     float warm_ok = 0.0;
     if (blue != ~0u) {
