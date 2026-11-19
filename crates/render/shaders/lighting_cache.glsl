@@ -3301,7 +3301,8 @@ void lighting_sh_store_drain(uint gid) {
 }
 // Compose loads this. The cache relight is what calls the neighbour walk.
 // The centre counts this many times. Face neighbours out to this many
-// cells count once. A miss adds nothing. Each sample is the trilinear blend.
+// cells count once. A miss adds nothing. A missing centre shows the nearest
+// ring that still has a sample. Each sample is the trilinear blend.
 const float LIGHTING_LATTICE_CENTRE = 2.0;
 const uint LIGHTING_LATTICE_REACH = 6u;
 vec4 lighting_sh_lattice_at(vec3 pos, vec3 n) {
@@ -3317,9 +3318,10 @@ vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
         lighting_sh_lattice_request(pos, n, claim);
     }
     vec4 centre = lighting_sh_lattice_at(pos, n);
-    if (centre.w <= 0.0) {
-        return vec4(0.0);
-    }
+    // Child weight is sets/full, captured before the neighbour reads
+    // overwrite it. Zero sets leaves the parent in full. A missing centre
+    // is not black while any ring still has a sample.
+    float trust = centre.w > 0.0 ? clamp(lighting_sh_blend_trust, 0.0, 1.0) : 0.0;
     uint ax = lighting_axis(n) >> 1u;
     vec3 t = vec3(0.0);
     vec3 b = vec3(0.0);
@@ -3333,21 +3335,47 @@ vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
         t = vec3(1.0, 0.0, 0.0);
         b = vec3(0.0, 1.0, 0.0);
     }
-    vec3 sum = centre.rgb * LIGHTING_LATTICE_CENTRE;
-    float w = LIGHTING_LATTICE_CENTRE;
+    vec3 sum = vec3(0.0);
+    float w = 0.0;
+    if (centre.w > 0.0) {
+        sum = centre.rgb * LIGHTING_LATTICE_CENTRE;
+        w = LIGHTING_LATTICE_CENTRE;
+    }
+    vec4 parent = vec4(0.0);
     float step_m = LIGHTING_SH_CELL;
     [[dont_unroll]] for (uint s = 1u; s <= LIGHTING_LATTICE_REACH; s++) {
         float d = float(s) * step_m;
         vec3 ring[4] = vec3[4](pos + t * d, pos - t * d, pos + b * d, pos - b * d);
+        vec3 level = vec3(0.0);
+        float level_w = 0.0;
         [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
             vec4 nb = lighting_sh_lattice_at(ring[i], n);
             if (nb.w > 0.0) {
+                level += nb.rgb;
+                level_w += 1.0;
                 sum += nb.rgb;
                 w += 1.0;
             }
         }
+        // The nearest ring that passes the leak gates is the parent. A ring
+        // that fails is skipped, so the next one out is the ancestor.
+        if (parent.w <= 0.0 && level_w > 0.0) {
+            parent = vec4(level / level_w, 1.0);
+        }
     }
-    return vec4(sum / w, centre.w);
+    if (w <= 0.0) {
+        return vec4(0.0);
+    }
+    vec3 spatial = sum / w;
+    vec3 shown = spatial;
+    if (parent.w > 0.0 && trust < 1.0) {
+        shown = mix(parent.rgb, spatial, trust);
+    }
+    float out_w = centre.w;
+    if (!(out_w > LIGHTING_CACHE_HAS_W)) {
+        out_w = 1.0;
+    }
+    return vec4(shown, out_w);
 #else
     return lighting_sh_read(pos, n, claim);
 #endif

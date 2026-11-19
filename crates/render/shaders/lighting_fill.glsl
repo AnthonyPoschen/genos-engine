@@ -1,6 +1,7 @@
 // Stages F2, F3, and F4a. The world cache is the only store. A cache round traces
 // one floor ray for each live cell every 10 frames, on every preset, plus the
-// ranked burst. That burst is the preset burst plus the rays the old
+// ranked burst. A cell with no shown mean takes that floor ray the frame it
+// is visible, then joins the same period. That burst is the preset burst plus the rays the old
 // per-preset floor no longer spends, split equally across the four screen
 // quarters, plus an off-screen share, so the near floor cannot take the back
 // wall's rays. A mover is due on that same 1-in-10 floor. It does not
@@ -487,9 +488,13 @@ void lighting_fill_visit(uint slot) {
             ckeys.key[lighting_fill_tile_at() + c] = packed;
         }
     }
-    // Slot index, so the same cell is due again every period. A mover uses
-    // this floor too. Nothing is due early because an object moved.
-    if (rate != 0u && (slot % rate) == (lighting_round() % rate)) {
+    // Slot index, so the same cell is due again every period. A cell with no
+    // shown mean is due the frame it is visible, so the first look is not a
+    // black square waiting on the period. A mover uses this floor too.
+    // Nothing else is due early because an object moved.
+    float shown_w = cache.v[3u * slot + 2u].w;
+    bool fresh = shown_w < FILL_HALF;
+    if (rate != 0u && (fresh || (slot % rate) == (lighting_round() % rate))) {
         uint i = atomicAdd(ckeys.key[lighting_fill_header_at()], 1u);
         if (i < lighting_fill_rays_max()) {
             ckeys.key[lighting_fill_pick_at() + i] = slot;
@@ -992,6 +997,18 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         // cap the blend, and nothing replaces the mean outright.
         bool sample_ok = lighting_history_usable(e);
         bool history_ok = old.w >= FILL_HALF && lighting_history_usable(old.rgb);
+        // A zero ray is not a mean. It is adopted only when the surface is
+        // already dark, or when this commit averaged a full set of rays and
+        // they agreed on dark. One empty sample leaves the cell empty so the
+        // parent shows through.
+        float ray_l = dot(max(e, vec3(0.0)), LIGHTING_SVGF_LW);
+        float mean_l0 = dot(max(old.rgb, vec3(0.0)), LIGHTING_SVGF_LW);
+        bool ray_dark = ray_l <= LIGHTING_HISTORY_NOISE;
+        bool really_dark = history_ok && mean_l0 <= LIGHTING_HISTORY_NOISE;
+        bool confirmed_dark = ray_dark && n >= LIGHTING_LATTICE_READY_SETS;
+        if (ray_dark && !really_dark && !confirmed_dark) {
+            sample_ok = false;
+        }
         if (!history_ok && sample_ok) {
             sample_t = 0.0;
             blend = 1.0;

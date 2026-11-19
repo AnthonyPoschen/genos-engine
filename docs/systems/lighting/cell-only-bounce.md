@@ -32,6 +32,8 @@ Light does not pass through a surface, and it does not land where it cannot.
 
 A parent cell is refused when it is stale, when its normal faces the opposite way, or when it sits more than half a cell off the surface plane. The lattice read keeps the same gates it already has: stale, back-facing, and more than half a cell off the plane. A lattice corner with fewer than 64 sets leans on the settled corners by that same sets blend. The texel handover stays at four.
 
+A pixel is black only when no level has data. The child's share is its sets over a full cell, so a cell with no sets shows the parent in full. When the leak gates refuse that parent, the read walks to the next face ring that still has a sample. A cell is rayed on the frame it becomes visible. A zero-radiance ray is adopted only when the surface is already dark, or when a full set of rays agreed on dark. One empty sample does not write a black mean.
+
 ## Exact lamps
 
 Every lamp that meaningfully reaches a pixel gets one exact shadow ray. Meaningful is an importance cutoff on the light tree, not a count of lamps. Lamps below that cutoff are the weak remainder. That remainder stays one stochastic sample and keeps its history. It is not a second full sum on top of the exact lamps.
@@ -42,7 +44,7 @@ The knockout that removes the exact path stays. With that path removed, the pixe
 
 A frame spends the same rays whether or not something moved. The one history rule already adopts a fresh ray, a neighbour, or a parent when the stored mean is junk, and it shortens the count when a ray disagrees. That covers a mover, a lamp that moved, and the opening. Nothing else spends rays, or grows a pool, because something changed.
 
-The ray budget stays the fixed 1-in-10 floor plus the fixed ranked burst. High's burst is 400000 and a cell may take 64 of those rays, so the rays the screen filter used to spend reach the far cells as well as the floor. The picture weights that cell twice and each face neighbour out to six cells once.
+The ray budget stays the fixed 1-in-10 floor plus the fixed ranked burst. A cell that has no shown mean takes one floor ray on the frame it is visible, and then joins that same period. High's burst is 400000 and a cell may take 64 of those rays, so the rays the screen filter used to spend reach the far cells as well as the floor. The picture weights that cell twice and each face neighbour out to six cells once.
 
 Removed because that blend already covers them:
 
