@@ -38,7 +38,6 @@
 use std::io::Write;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -936,24 +935,26 @@ fn duration_ms(gap: Duration) -> f64 {
     gap.as_secs_f64() * 1000.0
 }
 
+/// Pause until `duration` has passed.
+///
+/// The seat is dispatched on either side of this pause, and the gap has to
+/// stay inside the ping budget. A condvar timeout is coalesced on macOS, so a
+/// 16 ms slice returned after that budget and the idle shutdown missed the
+/// ping. This waits on the deadline instead.
 fn wait_for(duration: Duration) {
     if duration.is_zero() {
         return;
     }
     let deadline = Instant::now() + duration;
-    let pair = (Mutex::new(()), Condvar::new());
     while Instant::now() < deadline {
-        let guard = match pair.0.lock() {
-            Ok(guard) => guard,
-            Err(poison) => poison.into_inner(),
-        };
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let _ = pair.1.wait_timeout(guard, remaining);
+        core::hint::spin_loop();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     struct Scripted {
