@@ -23,19 +23,21 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_sc_display = true;
     uint pixel = p.y * pc.dims.x + p.x;
     lighting_px_object_id = (p.x != ~0u && pixel < pc.dims.x * pc.dims.y) ? gbuf_object_id(pixel) : 0u;
-    // Bounce is the 25 cm SH lattice at the true normal. The 12.5 cm texel,
-    // its trust mix, and the screen wavelet are not this read. The claim is
-    // the one cell the lattice blends. Without it the corners stay empty and
-    // the picture never leaves the first frame.
-    if (LIGHTING_SC_WRITES) {
-        lighting_cache_find_sized(pos, n, true, LIGHTING_SC_HIT, pos);
-    }
     // The picture reads the published level-0 merge. Maintenance, which does
     // not define GENOS_LEVEL0_PICTURE, still requests the lattice that the
     // publish pass reads. A hash walk in this compile faults lavapipe.
+    // The published centre is the bounce. Claiming again allocates a lattice
+    // corner, and publish no longer reads those corners. An empty word still
+    // claims, so a new surface gets a cell.
 #ifdef GENOS_LEVEL0_PICTURE
     vec4 world = lighting_gi_on() ? lighting_cascade_published(pixel) : vec4(0.0);
+    if (LIGHTING_SC_WRITES && !(world.w > LIGHTING_CACHE_HAS_W)) {
+        lighting_cache_find_sized(pos, n, true, LIGHTING_SC_HIT, pos);
+    }
 #else
+    if (LIGHTING_SC_WRITES) {
+        lighting_cache_find_sized(pos, n, true, LIGHTING_SC_HIT, pos);
+    }
     vec4 world = lighting_sh_compose_lattice(pos, n, false);
 #endif
     lighting_px_object_id = 0u;

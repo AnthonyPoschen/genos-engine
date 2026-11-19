@@ -159,6 +159,10 @@ fn the_picture_does_not_walk_a_coarser_parent() {
     assert!(indirect.contains("lighting_sh_compose_lattice(pos, n, false)"));
     assert!(indirect.contains("lighting_cascade_published(pixel)"));
     assert!(
+        indirect.contains("!(world.w > LIGHTING_CACHE_HAS_W)"),
+        "a published centre skips the picture claim"
+    );
+    assert!(
         !indirect.contains("coarse.w"),
         "the picture does not walk a coarser parent"
     );
