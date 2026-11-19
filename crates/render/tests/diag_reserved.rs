@@ -164,7 +164,7 @@ fn restir_counters_stay_off_compact_diag_words() {
             "occupied set missed diag[{index}]; the scan no longer sees both compile modes"
         );
     }
-    let live = SHADERS[4].1;
+    let live = SHADERS[3].1;
     let direct = SHADERS[1].1;
     let compact = SHADERS[2].1;
     assert!(compact.contains("lighting_dg(hinted ? 5u : 6u, 1u);"));

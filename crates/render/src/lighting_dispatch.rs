@@ -840,7 +840,7 @@ mod probe_still_tests {
             .filter(|(pass, _, _)| *pass == 8)
             .collect();
         assert!(picture.is_empty(), "the screen wavelet is not a pass");
-        assert!(screen_groups.atrous_stages.is_empty());
+        assert_eq!(screen_groups.atrous_stages, Vec::<u32>::new());
         let mut hash_settings = high.clone();
         hash_settings
             .set_key("denoise_launch", "hash")
