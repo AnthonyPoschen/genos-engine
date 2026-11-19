@@ -122,10 +122,10 @@ float lighting_fill_f(uint i) {
 bool lighting_ray_fill_on() {
     return lighting_world_mode() == 3u && lighting_fill_u(0) > 0u;
 }
-// Word 32 is only an enable. 0 leaves the floor off. Any other value is one
-// ray every 10 frames, on every preset. The old 1, 2, and 4 divisors are not
-// a rate. The rays they used to spend are in the ranked burst.
-const uint LIGHTING_FILL_FLOOR_PERIOD = 10u;
+// Word 32 is only an enable. 0 leaves coverage off. Any other value gives
+// every resident cell one ray every two frames. The 1-in-10 wait is gone.
+// The ranked burst stays the preset count and does not grow with the live set.
+const uint LIGHTING_FILL_FLOOR_PERIOD = 2u;
 uint lighting_fill_rate() {
     if (lighting_fill_u(32) == 0u) {
         return 0u;

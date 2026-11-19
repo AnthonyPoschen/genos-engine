@@ -2007,7 +2007,7 @@ impl LightingSettings {
             }
             "surface_cache.fill_floor_rate" => {
                 eprintln!(
-                    "warning: surface_cache.fill_floor_rate is removed; every preset uses one floor ray every {FILL_FLOOR_PERIOD} frames (alias ignored for one release)"
+                    "warning: surface_cache.fill_floor_rate is removed; every resident cell is due every two frames and the ranked burst stays the preset count (alias ignored for one release)"
                 );
             }
             "surface_cache.fill_burst" => self.surface_cache.fill.burst = num_u32(value)?,

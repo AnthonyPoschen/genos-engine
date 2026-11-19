@@ -3708,6 +3708,10 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // world cell the rays deposit into.
     if (e.w < 0.5 && (fill_any || fill_parent || ((pc.params.z >> 7u) & 1u) != 0u)) {
         float size = cache.v[3u * slot + 1u].w;
+        // A bounce that stops on an empty texel reads the world cell the rays
+        // deposit into. The picture does not use this swap: it loads the
+        // level-0 merge, and a coarser sample shows only when the nearer one
+        // is missing.
         if (lighting_world_mode() == 3u) {
             vec4 up = lighting_sc_parent(pos, n, hsize);
             if (up.w > 0.0) {

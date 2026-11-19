@@ -161,16 +161,7 @@ void main() {
         }
     }
     atomicAdd(reach_hot_count, hot);
-    if (id == 0u) {
-        vec4 head = work.v[lighting_change_at()];
-        if (head.y <= LIGHTING_CHANGES_DROPPED && tw > 0u) {
-            uint n = min(uint(head.x), LIGHTING_CHANGES);
-            for (uint i = 0u; i < n; i++) {
-                vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + i];
-                reach_disc(b.xyz, b.w);
-            }
-        }
-    }
+    // A mover is a new level-0 sample. The change-list disc is not a mark.
     barrier();
     for (uint i = id; i < LIGHTING_REACH_CHANGE_WORDS; i += 64u) {
         ckeys.key[change_at + i] = 0u;

@@ -1700,16 +1700,9 @@ impl Gpu {
         {
             let mut old = std::mem::replace(&mut self.lighting.mover_buf, Buffer::empty());
             self.destroy_buffer(&mut old);
-            let pool = settings.surface_cache.mover_texels;
-            let bytes = if pool == 0 {
-                256
-            } else {
-                crate::mover_cache::mover_gpu_bytes(pool)
-            };
-            self.lighting.mover_buf = self.make_buffer(bytes, 0x20 | 0x2, Memory::Upload)?;
-            if pool > 0 {
-                self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
-            }
+            // The mover texel pool is not part of the cascade. Level 0 is the
+            // mover's surface in the G-buffer. The buffer stays a stand-in.
+            self.lighting.mover_buf = self.make_buffer(256, 0x20 | 0x2, Memory::Upload)?;
             let packed = self.lighting.mover_cache.pack_gpu();
             let cap = usize::try_from(self.lighting.mover_buf.size).unwrap_or(0);
             let n = packed.len().min(cap);
@@ -4888,9 +4881,7 @@ impl Gpu {
                     self.lighting.mesh_poses.len()
                 );
             }
-            if self.lighting.settings.surface_cache.attach_movers {
-                block[3] += 100000.0;
-            }
+            // attach_movers stays a setting. The pool it used to arm is gone.
         }
         if had {
             // Last frame's camera (scene_data.glsl): eye at byte 48, the basis at 528.
@@ -5005,24 +4996,11 @@ impl Gpu {
                 } else {
                     fill.frame_dt
                 };
-                let floor_rate = if fill.floor_rays == 0 {
-                    0
-                } else {
-                    genos_scene::FILL_FLOOR_PERIOD
-                };
-                // The ranked burst is the preset burst plus the rays the
-                // 1-in-10 floor no longer spends. The round stays about one
-                // ray per live cell plus the preset burst. `live` is the
-                // previous frame's count.
-                let burst = if fill.floor_rays == 0 {
-                    fill.burst
-                } else {
-                    genos_scene::fill_scaled_burst(
-                        self.lighting.live,
-                        self.lighting.settings.preset,
-                        fill.burst,
-                    )
-                };
+                // The 1-in-10 wait is gone. Word 32 only enables coverage, and
+                // the shader period is two frames. The ranked burst stays the
+                // preset count. It does not grow with the live-cell count.
+                let floor_rate = 1u32;
+                let burst = fill.burst;
                 let fill_words = [
                     fill.budget,
                     fill.tile.max(1),
@@ -6486,10 +6464,6 @@ impl Gpu {
             if !want.contains(&id) {
                 self.lighting.mover_cache.remove(id);
             }
-        }
-        let pool = self.lighting.settings.surface_cache.mover_texels;
-        if pool > 0 && self.lighting.mover_cache.pool_cap() != pool {
-            self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
         }
         for m in records {
             let id = m[1][3].to_bits();

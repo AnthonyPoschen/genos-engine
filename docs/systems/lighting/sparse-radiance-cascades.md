@@ -36,13 +36,13 @@ Direct light stays exact. The sun and every lamp inside the importance cutoff ke
 
 ## What this conversion deletes
 
-These exist because the picture reads the 25 cm cell directly. Level 0 makes them redundant, and the conversion deletes them rather than leaving a second path:
+These existed because the picture read the 25 cm cell directly. They are not a second path:
 
-- The child/parent replace that swaps a coarse cell for a fine one instead of merging by transmittance.
-- The 1-in-10 floor. Level 0 is rebuilt every frame, so a cell does not wait a period to be seen.
-- Burst budgets that grow or shrink with what moved. The upper levels keep a fixed ray count.
-- The leftover mover texel pool.
-- The reach change-list walk. A mover is a new level-0 sample, not a marked cell.
+- The picture's child/parent replace. A coarser sample shows through the merge, and only when the nearer sample is missing. A bounce ray that hits an empty texel still reads the world cell the rays deposit into.
+- The 1-in-10 wait. Every resident cell is due every two frames. Level 0 is rebuilt every frame.
+- The live-scaled burst. The upper levels keep the preset burst, a fixed ray count.
+- The mover texel pool. A mover's surface is the G-buffer sample.
+- The reach change-list disc. A direct-shade step and a wide cell still mark a tile. A mover sphere does not.
 
 ## Departures
 
