@@ -49,7 +49,7 @@ These exist because the picture reads the 25 cm cell directly. Level 0 makes the
 - The papers trace a cascade volume. This conversion reuses the existing world-cell hash and the existing software tracer. There is no hardware ray query.
 - Level 0 is a screen-density hash rebuilt from the G-buffer, not a probe brick stored across frames.
 - SH-L1 is the directional store. The papers' higher-order angular basis is not this conversion.
-- The importance cutoff stays the exact/tail split it already is. Distant lamps join the upper levels. They are not traced as extra exact lights.
+- The importance cutoff stays the exact/tail split it already is. A cache ray is not a product pixel (`idx < pixels` is false), so the upper-level shade sums every lamp, distant ones included. The per-pixel tail stays the direct remainder. Removing it would drop hall energy or count the same light twice. Distant lamps are not traced as extra exact lights.
 - Lamp area sampling for a soft penumbra is deferred.
 - The finest bounce cell, 25 cm, keeps the full trace from the ray epsilon out to 200 m. The papers start level 0 near 1 m. A cell at least twice that size has a shell from `2^level` to `2^(level+1)`, and the last shell runs out to 200 m. Applying that shell to the cells the picture still reads raised wall splotch from 0.049 to 0.084, so the trace stays the full range until the merge sums the shells.
 - The merge's nearer term is that full integral. Beta is 0 while it exists, and the parent shows only when the nearer sample is missing. Adding the parent on top of the full integral would count the same light twice.

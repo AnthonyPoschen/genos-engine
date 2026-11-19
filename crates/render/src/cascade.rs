@@ -233,6 +233,10 @@ mod tests {
             direct.contains("lighting_cascade_insert(pos, n)"),
             "the g-buffer pass inserts the surface sample"
         );
+        assert!(
+            direct.contains("&& idx < pixels;"),
+            "a cache ray is not a product pixel, so distant lamps stay in the cell"
+        );
         let trace = include_str!("../shaders/lighting_trace.comp");
         assert!(
             trace.contains("CASCADE_TRACE_NEAR"),
