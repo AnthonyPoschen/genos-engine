@@ -18,6 +18,130 @@ layout(std430, set = 0, binding = 19) buffer RestirWords {
     uint restir_words[];
 };
 #include "restir_reach.glsl"
+// A reaching lamp is exact when its unshadowed weight is at least the mean
+// times (n - 1) / n, which is sum * (n - 1) / n^2. One lamp is exact. Equal
+// lamps are all exact. A lamp under the cutoff is the tail. This stays out of
+// the spatial shader: that pass still uses restir_few_lamps.
+struct RestirCut {
+    float cutoff;
+    float tail_sum;
+    uint tail_k;
+    float tail_w;
+    uint tail_lamp;
+};
+
+float restir_point_weight(LampList list, uint k, vec3 origin, vec3 n, bool two_sided) {
+    vec3 target;
+    vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
+    return light.r + light.g + light.b;
+}
+
+RestirCut restir_importance(LampList list, uint count, vec3 origin, vec3 n, bool two_sided, float u) {
+    RestirCut cut;
+    cut.cutoff = 0.0;
+    cut.tail_sum = 0.0;
+    cut.tail_k = ~0u;
+    cut.tail_w = 0.0;
+    cut.tail_lamp = ~0u;
+    uint begin = list.suns.y;
+    uint end = begin + list.near.y;
+    if (end > count) {
+        end = count;
+    }
+    float sum = 0.0;
+    uint lit = 0u;
+    [[dont_unroll]] for (uint k = begin; k < end; k++) {
+        float w = restir_point_weight(list, k, origin, n, two_sided);
+        if (w > 0.0) {
+            sum += w;
+            lit += 1u;
+        }
+    }
+    if (lit > 1u) {
+        cut.cutoff = sum * float(lit - 1u) / float(lit * lit);
+    }
+    float run = 0.0;
+    [[dont_unroll]] for (uint k = begin; k < end; k++) {
+        float w = restir_point_weight(list, k, origin, n, two_sided);
+        if (!(w > 0.0) || !(w + 1.0e-6 < cut.cutoff)) {
+            continue;
+        }
+        run += w;
+        if (u * run < w) {
+            cut.tail_k = k;
+            cut.tail_w = w;
+            cut.tail_lamp = lamp_list_index(list, k);
+        }
+    }
+    cut.tail_sum = run;
+    return cut;
+}
+
+uint restir_record_for_scene(uint scene_id) {
+    uint nlamps = restir_words[0u];
+    uint base = restir_words[1u];
+    [[dont_unroll]] for (uint lamp = 0u; lamp < nlamps; lamp++) {
+        if (restir_words[base + lamp * 8u + 7u] == scene_id) {
+            return lamp;
+        }
+    }
+    return ~0u;
+}
+
+float restir_record_weight(uint at, vec3 origin, vec3 n, bool two_sided) {
+    Lamp lamp = restir_lamp_record(at);
+    vec3 target;
+    vec3 light = lamp_light(lamp, origin, n, two_sided, target);
+    return light.r + light.g + light.b;
+}
+
+// The tail's mean is not the full lamp sum. A lamp at or above the cutoff is
+// already in the exact sum, so its move must not scale or shorten the tail.
+void restir_tail_change_weight(vec3 origin, vec3 n, bool two_sided, float cutoff, out float ratio, out float confidence) {
+    ratio = 1.0;
+    confidence = 1.0;
+    if (RESTIR_KEEP_MOVE == 0u) {
+        ratio = 0.0;
+        confidence = 0.0;
+        return;
+    }
+    if (restir_words[39u] == 0u) {
+        return;
+    }
+    uint nlamps = restir_words[0u];
+    uint base = restir_words[1u];
+    uint prev_base = restir_words[37u];
+    uint bits_at = restir_words[38u];
+    float sum_now = 0.0;
+    float sum_was = 0.0;
+    [[dont_unroll]] for (uint lamp = 0u; lamp < nlamps; lamp++) {
+        float now = restir_record_weight(base + lamp * 8u, origin, n, two_sided);
+        float was = now;
+        uint word = restir_words[bits_at + (lamp >> 5u)];
+        if (((word >> (lamp & 31u)) & 1u) != 0u) {
+            was = restir_record_weight(prev_base + lamp * RESTIR_PREV_STRIDE, origin, n, two_sided);
+        }
+        if (now + 1.0e-6 < cutoff) {
+            sum_now += now;
+        }
+        if (was + 1.0e-6 < cutoff) {
+            sum_was += was;
+        }
+    }
+    bool now_on = sum_now > 0.0;
+    bool was_on = sum_was > 0.0;
+    if (now_on == was_on && !now_on) {
+        return;
+    }
+    if (!now_on || !was_on) {
+        ratio = 0.0;
+        confidence = 0.0;
+        return;
+    }
+    ratio = sum_now / sum_was;
+    confidence = min(sum_now, sum_was) / max(sum_now, sum_was);
+}
+
 // Near point lamps actually added on a ReSTIR pixel. Header word, same slot
 // the history counts use. Compact keeps gstats.diag[13] for an on-screen
 // surface-cache entry when LIGHTING_DIAG is on.
@@ -251,8 +375,9 @@ void main() {
     bool restir_pix = ((pc.lamp.y >> 21u) & 1u) != 0u
         && ((pc.lamp.y >> 18u) & 7u) == 0u
         && idx < pixels;
-    // One to RESTIR_EXACT_LIT reaching point lamps are summed in this loop,
-    // one shadow ray each. The reservoir is not added on top.
+    // Lamps at or above the importance cutoff are summed in this loop, one
+    // shadow ray each. The reservoir is not added on top. The tail is one
+    // weighted sample.
     bool restir_few = false;
     if (restir_pix) {
         lamp_new = false;
@@ -504,6 +629,22 @@ void main() {
             restir_scene = restir_words[restir_words[1u] + restir_lamp * 8u + 7u];
         }
     }
+    RestirCut restir_cut;
+    restir_cut.cutoff = 0.0;
+    restir_cut.tail_sum = 0.0;
+    restir_cut.tail_k = ~0u;
+    restir_cut.tail_w = 0.0;
+    restir_cut.tail_lamp = ~0u;
+    bool restir_plan = restir_pix && RESTIR_EXACT_LIT != 0u;
+    if (restir_plan) {
+        float cut_u = lighting_unit(lighting_hash(idx ^ (lighting_frame() * 0x9e3779b9u)));
+        restir_cut = restir_importance(list, count, origin, n, two_sided, cut_u);
+    }
+    vec3 tail_e = vec3(0.0);
+    vec3 tail_spec = vec3(0.0);
+    bool tail_took = false;
+    bool tail_vis = false;
+    float tail_luma = 0.0;
 #endif
     bool exact = !pick || lit <= LIGHTING_CACHE_PICKS;
     float step = total / float(LIGHTING_CACHE_PICKS);
@@ -531,7 +672,7 @@ void main() {
 #ifdef GENOS_RESTIR_DI
         // The reservoir replaces near point lamps. Skip the load. The sun
         // (k < suns) and the flame (k == suns + near) stay in this loop.
-        if (restir_pix && !restir_few && k >= list.suns.y && k < list.suns.y + list.near.y) {
+        if (restir_pix && !restir_few && !restir_plan && k >= list.suns.y && k < list.suns.y + list.near.y) {
             continue;
         }
 #endif
@@ -603,6 +744,23 @@ void main() {
             take = times > 0.0;
             scale = times * step / w;
         }
+#ifdef GENOS_RESTIR_DI
+        // Under the cutoff this lamp is the tail. One weighted sample, not
+        // the exact sum. Equals stay on the exact side.
+        bool tail_sample = restir_plan && !sun_lamp
+            && k >= list.suns.y && k < list.suns.y + list.near.y
+            && w + 1.0e-6 < restir_cut.cutoff;
+        if (tail_sample) {
+            if (k != restir_cut.tail_k) {
+                continue;
+            }
+            scale = restir_cut.tail_sum / w;
+            take = true;
+            times = 1.0;
+            tail_took = true;
+            tail_luma = w;
+        }
+#endif
         // S74A: hits (not pixels) reuse a static lamp's shadow (lighting_cache.glsl).
         // Shadows off skips the trace and the cell. Hard traces every time.
         bool shadow_lit = false;
@@ -640,11 +798,20 @@ void main() {
         }
         if (shadow_lit) {
             vec3 add = (!lamp_new && exact) ? light : light * scale;
+#ifdef GENOS_RESTIR_DI
+            // The exact branch ignores `scale`. The tail is the one sample
+            // that still carries tail_sum / w.
+            if (tail_sample) {
+                add = light * scale;
+                tail_vis = true;
+                tail_e = add;
+            }
+#endif
             e += add;
 #ifdef GENOS_RESTIR_DI
-            // Near point lamp added on a ReSTIR pixel. Many-lamp pixels skip
-            // the load, so this stays 0 there. One to RESTIR_EXACT_LIT lamps
-            // are the exact sum and do count. Sun and flame stay out.
+            // Near point lamp added on a ReSTIR pixel. The reservoir path
+            // skips the load, so this stays 0 there. Cutoff lamps and the
+            // one tail sample do count. Sun and flame stay out.
             if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y && lamp_pick_diag()) {
                 atomicAdd(restir_words[RESTIR_DIAG_POINT_ADD], 1u);
             }
@@ -667,7 +834,13 @@ void main() {
                 float vdh = dot(view, halfv);
                 // add already includes n·l. pbr_eval is f without that factor:
                 // (1 − F) · base · (1 − metallic) / π + F · D · V, mixed by metallic.
-                spec += pbr_eval(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * add;
+                vec3 spec_add = pbr_eval(base, metal, rough, ndl, ndv, ndh, ncross, vdh) * add;
+                spec += spec_add;
+#ifdef GENOS_RESTIR_DI
+                if (tail_sample) {
+                    tail_spec = spec_add;
+                }
+#endif
             }
             if (k < list.suns.y) {
                 e_sun += add;
@@ -686,7 +859,7 @@ void main() {
     bool restir_sampled = false;
     float restir_luma = 0.0;
     bool restir_vis = false;
-    if (restir_pix && !restir_few && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
+    if (restir_pix && !restir_few && !restir_plan && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
         && restir_lamp < restir_words[0u]) {
         restir_sampled = true;
         if (lamp_pick_diag()) {
@@ -739,6 +912,18 @@ void main() {
                     spec += spec_restir;
                 }
             }
+        }
+    }
+    if (restir_plan && tail_took) {
+        e_restir = tail_e;
+        spec_restir = tail_spec;
+        restir_sampled = true;
+        restir_luma = tail_luma;
+        restir_vis = tail_vis;
+        uint tail_record = restir_record_for_scene(restir_cut.tail_lamp);
+        if (tail_record != ~0u) {
+            restir_lamp = tail_record;
+            restir_scene = restir_cut.tail_lamp;
         }
     }
 #endif
@@ -800,7 +985,7 @@ void main() {
     // frame's lobe leaves the picture on one lamp. The noise gate has its own
     // mean and does not read this one. A bounce-only frame does not write it
     // into the picture and does not fold a zero into the stored mean.
-    if (restir_pix && !restir_few && lamp_pix) {
+    if (restir_pix && lamp_pix && (((!restir_few && !restir_plan) || tail_took))) {
         uint mean_px = 0u;
         float z_ignore = 0.0;
         uint mean_prev = 0u;
@@ -871,7 +1056,11 @@ void main() {
         if (changed_here && mean_prev > 0u && !mean_dropped) {
             float ratio = 1.0;
             float confidence = 1.0;
-            restir_change_weight(origin, n, two_sided, ratio, confidence);
+            if (tail_took) {
+                restir_tail_change_weight(origin, n, two_sided, restir_cut.cutoff, ratio, confidence);
+            } else {
+                restir_change_weight(origin, n, two_sided, ratio, confidence);
+            }
             if (!(confidence > 0.0) || !(ratio > 0.0)) {
                 mean_dropped = true;
                 atomicAdd(gstats.diag[LIGHTING_RESET_MEAN], 1u);

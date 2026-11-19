@@ -1,4 +1,7 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Floor and hall residual of the 5-lamp hall, split into direct and bounce.
 //!
@@ -165,8 +168,10 @@ fn edge_line(src: &[f64], w: usize, h: usize) -> Vec<bool> {
     let mut high = vec![false; w * h];
     for y in 1..height - 1 {
         for x in 1..width - 1 {
-            let dx = sample_at(&soft, width, height, x + 1, y) - sample_at(&soft, width, height, x - 1, y);
-            let dy = sample_at(&soft, width, height, x, y + 1) - sample_at(&soft, width, height, x, y - 1);
+            let dx = sample_at(&soft, width, height, x + 1, y)
+                - sample_at(&soft, width, height, x - 1, y);
+            let dy = sample_at(&soft, width, height, x, y + 1)
+                - sample_at(&soft, width, height, x, y - 1);
             let mag = (dx * dx + dy * dy).sqrt() * 0.5;
             let local = soft[clamp_index(y, height) * w + clamp_index(x, width)].max(0.02);
             high[clamp_index(y, height) * w + clamp_index(x, width)] = mag > 0.22 * local;
@@ -260,7 +265,12 @@ fn salt_field(w: usize, h: usize) -> Vec<f64> {
 
 fn blob_field(w: usize, h: usize) -> Vec<f64> {
     let mut field = filled(w, h, 0.18);
-    let bumps = [(24.0, 20.0, 0.45, 7.0), (60.0, 40.0, 0.3, 9.0), (40.0, 48.0, 0.55, 6.0), (70.0, 16.0, 0.2, 8.0)];
+    let bumps = [
+        (24.0, 20.0, 0.45, 7.0),
+        (60.0, 40.0, 0.3, 9.0),
+        (40.0, 48.0, 0.55, 6.0),
+        (70.0, 16.0, 0.2, 8.0),
+    ];
     for y in 0..h {
         for x in 0..w {
             let mut add = 0.0;
@@ -292,8 +302,16 @@ fn a_flat_field_is_under_the_bars() {
     let (w, h) = (96usize, 64usize);
     let keep = vec![true; w * h];
     let got = residual_of(&filled(w, h, 0.4), &keep, w, h);
-    assert!(got.speckle < FLOOR_SPECKLE_BAR, "flat speckle {}", got.speckle);
-    assert!(got.splotch < FLOOR_SPLOTCH_BAR, "flat splotch {}", got.splotch);
+    assert!(
+        got.speckle < FLOOR_SPECKLE_BAR,
+        "flat speckle {}",
+        got.speckle
+    );
+    assert!(
+        got.splotch < FLOOR_SPLOTCH_BAR,
+        "flat splotch {}",
+        got.splotch
+    );
 }
 
 #[test]
@@ -302,10 +320,26 @@ fn salt_is_speckle_and_a_soft_blob_is_splotch() {
     let keep = vec![true; w * h];
     let salt = residual_of(&salt_field(w, h), &keep, w, h);
     let blob = residual_of(&blob_field(w, h), &keep, w, h);
-    assert!(salt.speckle > FLOOR_SPECKLE_BAR, "salt speckle {}", salt.speckle);
-    assert!(blob.speckle < FLOOR_SPECKLE_BAR, "blob speckle {}", blob.speckle);
-    assert!(blob.splotch > FLOOR_SPLOTCH_BAR, "blob splotch {}", blob.splotch);
-    assert!(salt.splotch < FLOOR_SPLOTCH_BAR, "salt splotch {}", salt.splotch);
+    assert!(
+        salt.speckle > FLOOR_SPECKLE_BAR,
+        "salt speckle {}",
+        salt.speckle
+    );
+    assert!(
+        blob.speckle < FLOOR_SPECKLE_BAR,
+        "blob speckle {}",
+        blob.speckle
+    );
+    assert!(
+        blob.splotch > FLOOR_SPLOTCH_BAR,
+        "blob splotch {}",
+        blob.splotch
+    );
+    assert!(
+        salt.splotch < FLOOR_SPLOTCH_BAR,
+        "salt splotch {}",
+        salt.splotch
+    );
 }
 
 #[test]
@@ -313,10 +347,26 @@ fn a_crisp_step_is_not_speckle_or_splotch() {
     let (w, h) = (96usize, 64usize);
     let keep = vec![true; w * h];
     let got = residual_of(&step_field(w, h), &keep, w, h);
-    assert!(got.speckle_n > 100, "step kept {} speckle pixels", got.speckle_n);
-    assert!(got.splotch_n > 100, "step kept {} splotch pixels", got.splotch_n);
-    assert!(got.speckle < FLOOR_SPECKLE_BAR, "step speckle {}", got.speckle);
-    assert!(got.splotch < FLOOR_SPLOTCH_BAR, "step splotch {}", got.splotch);
+    assert!(
+        got.speckle_n > 100,
+        "step kept {} speckle pixels",
+        got.speckle_n
+    );
+    assert!(
+        got.splotch_n > 100,
+        "step kept {} splotch pixels",
+        got.splotch_n
+    );
+    assert!(
+        got.speckle < FLOOR_SPECKLE_BAR,
+        "step speckle {}",
+        got.speckle
+    );
+    assert!(
+        got.splotch < FLOOR_SPLOTCH_BAR,
+        "step splotch {}",
+        got.splotch
+    );
 }
 
 #[expect(
@@ -325,13 +375,19 @@ fn a_crisp_step_is_not_speckle_or_splotch() {
 )]
 fn open() -> (MutexGuard, genos_window::Lifecycle<Renderer>) {
     static GPU: Mutex<()> = Mutex::new(());
-    let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = GPU
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::env::set_var("GENOS_GPU_TIMES", "1");
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let frame = window.pump();
     let (renderer, permit) =
-        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 type MutexGuard = std::sync::MutexGuard<'static, ()>;
@@ -358,7 +414,12 @@ fn hall() -> (Stage, Camera) {
     (stage, camera)
 }
 
-fn draw(window: &mut Window, renderer: &mut Renderer, world: &genos_render::World, camera: &Camera) -> Vec<u8> {
+fn draw(
+    window: &mut Window,
+    renderer: &mut Renderer,
+    world: &genos_render::World,
+    camera: &Camera,
+) -> Vec<u8> {
     let _ = window.pump();
     renderer
         .draw(world, camera, true)
@@ -435,23 +496,22 @@ fn pass_line(ms: &[f64]) -> String {
     line
 }
 
-/// The open floor's direct light and the hall's bounce sit over the cell-only
-/// bars, so the below-bar gate fails on this head. A later commit flips these
-/// asserts once the picture is under them.
+/// Floor direct speckle is under the bar once every meaningful lamp is an
+/// exact shadow ray. Bounce splotch stays over the bar until the cell blend
+/// replaces the screen filter, so that half of the gate still fails closed.
 ///
-/// Lavapipe, 320 by 180, 40 warmup frames, high, 5-lamp hall, before the
-/// cell-only change (41aee041). Two runs:
-/// floor direct speckle 0.1008 both times,
-/// floor bounce splotch 0.0445 and 0.0493,
-/// wall direct speckle 0.0266 both times,
-/// wall bounce splotch 0.0529 and 0.0551.
-/// One collected frame: compact 28.8 to 31.0, direct 26.1 to 29.0,
-/// cache 10.5 to 11.9, compose 1.0 to 1.3, atrous 302.9 to 352.8,
-/// `cache_rays` 10.1 to 11.3, `hit_light` 0.3, shadows 18.0 to 18.8.
-/// Lighting total about 400 to 453 ms. The screen filter is about three
-/// quarters of that. These milliseconds are not a 4070 frame time.
+/// Lavapipe, 320 by 180, 40 warmup frames, high, 5-lamp hall.
+/// Before, at 41aee041: floor direct speckle 0.1008, floor bounce splotch
+/// 0.0445 and 0.0493, wall direct speckle 0.0266, wall bounce splotch
+/// 0.0529 and 0.0551.
+/// After the cutoff: floor direct speckle 0.0145, floor bounce splotch
+/// 0.0454, wall direct speckle 0.0185, wall bounce splotch 0.0508.
+/// One collected frame after: compact 33.4, direct 23.1, cache 10.0,
+/// compose 1.0, atrous 308.5, `cache_rays` 14.7, `hit_light` 0.3,
+/// shadows 16.4. Lighting total 407 ms. These milliseconds are not a
+/// 4070 frame time.
 #[test]
-fn floor_and_hall_residuals_miss_the_cell_only_bar() {
+fn floor_speckle_is_under_the_bar_and_splotch_is_not() {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
@@ -500,8 +560,8 @@ fn floor_and_hall_residuals_miss_the_cell_only_bar() {
         floor_direct.speckle_n
     );
     assert!(
-        floor_direct.speckle > FLOOR_SPECKLE_BAR,
-        "residual gate: floor direct speckle {:.4} is not over the bar {FLOOR_SPECKLE_BAR}",
+        floor_direct.speckle < FLOOR_SPECKLE_BAR,
+        "residual gate: floor direct speckle {:.4} is not under the bar {FLOOR_SPECKLE_BAR}",
         floor_direct.speckle
     );
     assert!(

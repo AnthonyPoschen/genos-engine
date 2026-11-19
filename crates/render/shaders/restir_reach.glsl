@@ -99,11 +99,10 @@ float restir_lamp_luma(Lamp lamp, vec3 origin, vec3 n, bool two_sided) {
     return dot(light, RESTIR_REACH_LUMA);
 }
 
-// A pixel this many point lamps reach is summed exactly: one shadow ray each,
-// the same way the sun is traced. More than this stays on the reservoir.
-// The count stops at one past the limit, so a many-lamp cell does not walk
-// the rest of its list. Specialization constant 0. Shipping pipelines pass 4.
-// The moving-lamp wall gate sets it to 0 when `moving_lamp_wall` is knocked out.
+// Nonzero: every lamp at or above the importance cutoff gets one shadow ray.
+// The value is not a lamp count. Shipping pipelines pass 4. Zero is the
+// knockout: the pixel stays on the reservoir. The moving-lamp wall gate sets
+// this to 0 when `moving_lamp_wall` is knocked out.
 layout(constant_id = 0) const uint RESTIR_EXACT_LIT = 4u;
 // Specialization constant 2. Constant 1 is the cache slot count. Shipping
 // pipelines pass 1, so a changed ball keeps history. The same knockout
@@ -175,6 +174,9 @@ uint restir_point_reach(vec3 origin, vec3 n, bool two_sided) {
     return hit;
 }
 
+// Spatial reuse stays off for a short exact sum, the same count the
+// specialization still carries. The shade's cutoff is separate: it does not
+// use this cap.
 bool restir_few_lamps(vec3 origin, vec3 n, bool two_sided) {
     uint hit = restir_point_reach(origin, n, two_sided);
     return hit >= 1u && hit <= RESTIR_EXACT_LIT;
