@@ -470,6 +470,6 @@ fn a_refine_child_inherits_the_parent_mean_at_one_set() {
     );
     assert!(
         fill.contains("return LIGHTING_FILL_FLOOR_PERIOD"),
-        "a live floor is one ray every 10 frames"
+        "a live floor is one ray every two frames"
     );
 }

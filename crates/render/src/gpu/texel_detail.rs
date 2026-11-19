@@ -29,8 +29,6 @@ const OUT_FLOATS: usize = 8 + 37 * 17 + 40 + 32 + 109;
 const PC_BYTES: u32 = 48;
 const HEAD_WORDS: usize = 8;
 const HEAD_VARIANTS: usize = 3;
-/// Small mover pool for the production fixture (binding 15).
-const MOVER_POOL_CAP: u32 = 1536;
 
 pub(super) struct Pipe {
     scene: Buffer,
@@ -41,7 +39,6 @@ pub(super) struct Pipe {
     keys: Buffer,
     cache: Buffer,
     stats: Buffer,
-    movers: Buffer,
     desc_layout: Handle,
     desc_pool: Handle,
     set: Handle,
@@ -267,7 +264,6 @@ impl Gpu {
         self.destroy_buffer(&mut pipe.keys);
         self.destroy_buffer(&mut pipe.cache);
         self.destroy_buffer(&mut pipe.stats);
-        self.destroy_buffer(&mut pipe.movers);
     }
 
     fn create_texel_detail_pipe(&mut self, code: &[u8]) -> Result<Pipe, String> {
@@ -281,11 +277,6 @@ impl Gpu {
         let keys = self.make_buffer(ckeys_bytes(), 0x20, Memory::Readback)?;
         let cache = self.make_buffer(CACHE_BYTES, 0x20, Memory::Readback)?;
         let stats = self.make_buffer(4096, 0x20, Memory::Readback)?;
-        let movers = self.make_buffer(
-            crate::mover_cache::mover_gpu_bytes(MOVER_POOL_CAP),
-            0x20,
-            Memory::Readback,
-        )?;
         #[repr(C)]
         struct Binding {
             binding: u32,
@@ -302,7 +293,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bind_at = [0, 5, 6, 7, 8, 9, 10, 11, 15];
+        let bind_at = [0, 5, 6, 7, 8, 9, 10, 11];
         let bindings: Vec<Binding> = bind_at
             .into_iter()
             .map(|binding| Binding {
@@ -493,7 +484,6 @@ impl Gpu {
             keys,
             cache,
             stats,
-            movers,
             desc_layout,
             desc_pool,
             set,
@@ -536,9 +526,8 @@ impl Gpu {
             &pipe.keys,
             &pipe.cache,
             &pipe.stats,
-            &pipe.movers,
         ];
-        let bind_at = [0, 5, 6, 7, 8, 9, 10, 11, 15];
+        let bind_at = [0, 5, 6, 7, 8, 9, 10, 11];
         let infos: Vec<BufInfo> = buffers
             .iter()
             .map(|buffer| BufInfo {
@@ -706,7 +695,6 @@ impl Gpu {
                 (state.keys.memory, state.keys.size),
                 (state.cache.memory, state.cache.size),
                 (state.stats.memory, state.stats.size),
-                (state.movers.memory, state.movers.size),
             ]
         };
         for (memory, size) in zeros {

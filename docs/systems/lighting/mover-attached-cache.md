@@ -1,6 +1,6 @@
 # Object-attached mover lighting cache
 
-Status: **GPU path live** (Stages A–I + #286 pool port; Stage J lavapipe numbers in the PR).
+Status: **removed**. The texel pool, its struct, its buffer, and its shader are gone. A mover is a level-0 G-buffer sample.
 
 ## Intent
 

@@ -287,7 +287,7 @@ const ENERGY_FRAMES: usize = 400;
 /// Whole-frame and mid-third mean sRGB luma (Rec.709 weights on the 8-bit
 /// codes). Lavapipe hall, 320×180, 1/60, frozen sun, still boxes, three moving
 /// lamps, frame 400. The every-frame floor, the path reference for this pose,
-/// is 127.81 / 107.33. This floor measured 127.74 / 107.35. The 1-in-10 floor
+/// is 127.81 / 107.33. This floor measured 127.74 / 107.35. The old sparse floor
 /// that kept replacing the cell mean was 174.91 / 174.73.
 ///
 /// The exclusive mid end stays 113. The path-reference mid is 107.33. A tail
@@ -328,7 +328,7 @@ fn code_luma(bgra: &[u8], width: usize, height: usize) -> (f64, f64) {
     )
 }
 
-/// A cell the 1-in-10 floor skips still disagrees with the next sample, and
+/// A cell the coverage ray skips still disagrees with the next sample, and
 /// the allocator value stays at 1. Replacing the mean with that sample makes
 /// the bounce read one ray, and by frame 400 the hall is near-white. Frame 40
 /// against the path reference does not see it. The lamps move, which is the

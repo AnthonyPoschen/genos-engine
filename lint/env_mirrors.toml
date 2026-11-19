@@ -1857,6 +1857,11 @@ kind = "build"
 detail = "glslang -D for every compose compile; the neighbour walk stays in the cache relight and is not a process environment variable"
 
 [[var]]
+name = "GENOS_LEVEL0_PICTURE"
+kind = "build"
+detail = "glslang -D for picture and sun compose; the picture loads the published level-0 word and is not a process environment variable"
+
+[[var]]
 name = "GENOS_COMPOSE_SC_WRITES"
 kind = "override"
 detail = "read-only compose is primary; 1 sets compose spec constant 0 so compose writes the cache again (A/B kill switch)"

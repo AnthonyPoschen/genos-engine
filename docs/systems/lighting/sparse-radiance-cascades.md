@@ -41,7 +41,7 @@ These existed because the picture read the 25 cm cell directly. They are not a s
 - The picture's child/parent replace. A coarser sample shows through the merge, and only when the nearer sample is missing. A bounce ray that hits an empty texel still reads the world cell the rays deposit into.
 - The 1-in-10 wait. Every resident cell is due every two frames. Level 0 is rebuilt every frame.
 - The live-scaled burst. The upper levels keep the preset burst, a fixed ray count.
-- The mover texel pool. A mover's surface is the G-buffer sample.
+- The mover texel pool, its struct, its buffer, and its shader. A mover's surface is the G-buffer sample.
 - The reach change-list disc. A direct-shade step and a wide cell still mark a tile. A mover sphere does not.
 
 ## Departures

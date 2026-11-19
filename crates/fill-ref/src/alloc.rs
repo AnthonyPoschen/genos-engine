@@ -14,7 +14,7 @@ use crate::sched::{closeness, remaining_error, Tunables};
 use crate::water::bucket;
 
 /// One floor ray per live cell every this many frames.
-pub const FLOOR_PERIOD: u32 = 10;
+pub const FLOOR_PERIOD: u32 = 2;
 
 /// A disagreement past this many standard deviations raises the cell.
 const DISAGREE_SIGMA: f32 = 2.0;
@@ -170,17 +170,14 @@ pub fn apply_agreement(value: f32, sample: f32, mean: f32, variance: f32, rays: 
     }
 }
 
-/// `ceil(live / 10)` floor rays, and a burst that keeps the old round size.
-/// `legacy_divisor` is the preset's old floor (High 1, Medium 2, Low 4).
+/// `ceil(live / 2)` coverage rays. The burst stays the preset count.
 #[must_use]
-pub fn split_floor_and_burst(live_cells: u32, legacy_divisor: u32, burst: u32) -> (u32, u32) {
-    let old = live_cells.div_ceil(legacy_divisor.max(1));
-    let floor = live_cells.div_ceil(FLOOR_PERIOD);
-    (floor, burst.saturating_add(old.saturating_sub(floor)))
+pub fn split_floor_and_burst(live_cells: u32, _legacy_divisor: u32, burst: u32) -> (u32, u32) {
+    (live_cells.div_ceil(FLOOR_PERIOD), burst)
 }
 
-/// The burst does not shrink because a mover took rays. The floor is the
-/// 1-in-10 rotation and the burst is the preset burst.
+/// The burst does not shrink because a mover took rays. The burst is the
+/// preset count.
 #[must_use]
 pub fn burst_after_mover_rays(burst: u32, _mover_rays: u32) -> u32 {
     burst
@@ -378,8 +375,9 @@ mod tests {
         high.lambda = 0.0;
         let grants = allocate(&[low, mid, high], 1, &tun, 0);
         let top = grants.iter().find(|g| g.id == 3).map(|g| g.rays);
-        // Frame 0's floor ray is index 0. The burst still goes to the highest value.
-        assert_eq!(top, Some(1));
+        // Frame 0 covers the even slots. The highest value is one of them, so
+        // it holds that coverage ray plus the burst. The odd slot gets neither.
+        assert_eq!(top, Some(2));
         assert_eq!(grants.iter().find(|g| g.id == 1).map(|g| g.rays), Some(1));
         assert_eq!(grants.iter().find(|g| g.id == 2).map(|g| g.rays), Some(0));
     }
@@ -400,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn the_floor_rotates_every_tenth_frame() {
+    fn the_floor_rotates_every_second_frame() {
         let mut tun = Tunables::high();
         tun.burst = 0;
         let cells: Vec<_> = (0..40u32)
@@ -408,26 +406,25 @@ mod tests {
             .collect();
         let first = allocate(&cells, tun.budget, &tun, 0);
         let next = allocate(&cells, tun.budget, &tun, 1);
-        assert_eq!(first.iter().map(|g| g.rays).sum::<u32>(), 4);
-        assert_eq!(next.iter().map(|g| g.rays).sum::<u32>(), 4);
+        assert_eq!(first.iter().map(|g| g.rays).sum::<u32>(), 20);
+        assert_eq!(next.iter().map(|g| g.rays).sum::<u32>(), 20);
         assert!(first
             .iter()
             .enumerate()
-            .all(|(i, g)| g.rays == u32::from(i % 10 == 0)));
+            .all(|(i, g)| g.rays == u32::from(i % 2 == 0)));
         assert!(next
             .iter()
             .enumerate()
-            .all(|(i, g)| g.rays == u32::from(i % 10 == 1)));
+            .all(|(i, g)| g.rays == u32::from(i % 2 == 1)));
         let (floor, burst) = split_floor_and_burst(40, 2, 0);
-        assert_eq!((floor, burst), (4, 16));
+        assert_eq!((floor, burst), (20, 0));
     }
 
     #[test]
     fn a_mover_does_not_shrink_the_burst() {
         let (floor, burst) = split_floor_and_burst(1000, 1, 25_000);
-        assert_eq!(floor, 100);
-        assert_eq!(burst, 25_900);
-        assert_eq!(floor + burst, 1000 + 25_000);
+        assert_eq!(floor, 500);
+        assert_eq!(burst, 25_000);
         let mover = 80u32;
         let spent = burst_after_mover_rays(burst, mover);
         assert_eq!(spent, burst);
@@ -526,18 +523,16 @@ mod tests {
     }
 
     #[test]
-    fn the_floor_is_ceil_live_over_ten_and_the_burst_keeps_the_old_total() {
+    fn the_floor_is_ceil_live_over_two_and_the_burst_stays_the_preset() {
         let (floor, burst) = split_floor_and_burst(1000, 1, 0);
-        assert_eq!(floor, 100);
-        assert_eq!(burst, 900);
-        assert_eq!(floor + burst, 1000);
+        assert_eq!(floor, 500);
+        assert_eq!(burst, 0);
         let (quarter, extra) = split_floor_and_burst(1000, 4, 32);
-        assert_eq!(quarter, 100);
-        assert_eq!(extra, 182);
-        assert_eq!(quarter + extra, 250 + 32);
+        assert_eq!(quarter, 500);
+        assert_eq!(extra, 32);
         let (odd, rest) = split_floor_and_burst(5, 2, 0);
-        assert_eq!(odd, 1);
-        assert_eq!(rest, 2);
+        assert_eq!(odd, 3);
+        assert_eq!(rest, 0);
     }
 
     #[test]

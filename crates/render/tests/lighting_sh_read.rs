@@ -355,25 +355,9 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
         "compose does not add a second neighbour gather"
     );
     assert!(!indirect.contains("lighting_probe_irradiance"));
-    let coarse = function_body(&probe, "vec4 lighting_coarse_world(vec3 pos, vec3 n)");
-    assert_eq!(
-        coarse.matches("lighting_coarse_bilerp").count(),
-        2,
-        "two size steps, the parent and the coarser cell"
-    );
-    let slot = function_body(
-        &probe,
-        "void lighting_coarse_add(vec3 q, vec3 n, float size, float bil, inout vec3 sum, inout float wsum)",
-    );
-    assert!(slot.contains("lighting_cache_find_sized"));
-    assert!(slot.contains("lighting_sc_stale"));
-    assert!(slot.contains("lighting_sh_tilt"));
-    assert!(slot.contains("dot(cache.v[3u * s + 1u].xyz, n) <= 0.0"));
-    assert!(slot.contains("LIGHTING_CELL_HALF * size"));
-    assert!(!slot.contains("lighting_sh_read"));
-    assert!(!slot.contains("lighting_probe_irradiance"));
-    assert!(!coarse.contains("lighting_sh_read"));
-    assert!(!coarse.contains("lighting_probe_irradiance"));
+    assert!(!probe.contains("lighting_coarse_world"));
+    assert!(!probe.contains("lighting_coarse_bilerp"));
+    assert!(!probe.contains("lighting_coarse_add"));
 }
 
 #[test]
@@ -465,7 +449,9 @@ fn the_sparse_handover_mixes_a_coarse_key_with_the_seed() {
     let text = cache_shader();
     assert!(text.contains("const float LIGHTING_SC_HANDOVER = 16.0;"));
     assert!(text.contains("const float LIGHTING_SC_HANDOVER_K = 2.0;"));
-    assert!(text.contains("lighting_sc_set_seed(slot, hc, 0.25,"));
+    assert!(text.contains(
+        "lighting_sc_seed_publish(slot, k, hc, 0.25, lighting_hit_sunfrac, true);"
+    ));
     let shown = function_body(&text, "vec4 lighting_sc_shown(uint slot)");
     precedes(shown, "prior = sp.rgb * ck;", "prior += sd.rgb * sd.w;");
     precedes(shown, "pc = ck;", "pc += sd.w;");
@@ -483,7 +469,7 @@ fn the_sparse_handover_mixes_a_coarse_key_with_the_seed() {
         &text,
         "void lighting_sc_set_seed(uint slot, vec3 rgb, float conf, float sunfrac)",
     );
-    assert!(seed_store.contains("clamp(conf, 0.05, 1.0)"));
+    assert!(seed_store.contains("clamp(conf, LIGHTING_SC_SEED_FLOOR, 1.0)"));
 
     let n = 1.0_f32;
     let fade = (1.0 - n / HANDOVER).clamp(0.0, 1.0);
@@ -555,13 +541,6 @@ fn the_sparse_handover_mixes_a_coarse_key_with_the_seed() {
     assert!((ck - 1.0e-3).abs() <= 1.0e-8, "confidence floor, got {ck}");
 }
 
-
-/// `growing_wrc` in `lighting_compact.comp`: a cell under the cap stays on the
-/// relight list when something has read it since its last update, or within
-/// `LIGHTING_SC_READ_SLACK` frames.
-fn growing_wrc(samples: f32, last: i32, updated: i32, frame: i32) -> bool {
-    samples < 128.0 - 0.5 && (last - updated > 0 || frame - last <= 2)
-}
 
 /// Dark-fill blend (`lighting_cache.comp`): while `t` is under half the cap,
 /// sample k's share is `1 - (t / (t + add))^3`. The first sample is the mean.
@@ -644,8 +623,12 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
         "probe and cache rays reach the cache through the ray-hit read"
     );
     let compact = shader("lighting_compact.comp");
+    assert!(
+        !compact.contains("growing_wrc"),
+        "mode 3 does not keep the old refresh walk"
+    );
     assert!(compact.contains(
-        "bool growing_wrc = t < LIGHTING_WRC_CAP - 0.5 && (int(last - updated) > 0 || int(lighting_frame() - last) <= int(LIGHTING_SC_READ_SLACK));"
+        "World mode 3 due lists, settle-every-cell, and the old refresh walks"
     ));
     let relight = shader("lighting_cache.comp");
     assert!(relight.contains("wa = 1.0 - pow(t / (t + add), 3.0);"));
@@ -666,15 +649,6 @@ fn the_axis_seed_does_not_reach_a_slanted_ray_and_an_empty_read_does_not_claim()
     assert_ne!(hit, seed_owner);
     assert_ne!(hit, seed_bilinear);
 
-    let frame = 300;
-    assert!(
-        growing_wrc(20.0, frame, 280, frame),
-        "a stamp this frame keeps the cell on the relight list"
-    );
-    assert!(
-        !growing_wrc(20.0, 280, 280, frame),
-        "a cell not read since its relight, and quiet for more than the slack, leaves that list"
-    );
     let rising = [0.2_f32, 0.4, 0.6, 0.8, 1.0];
     let early = dark_fill(&rising[..2]);
     let kept = dark_fill(&rising);
@@ -760,7 +734,7 @@ fn the_neighbour_seed_does_not_write_the_cell_or_keep_the_other_seeds() {
         "the rejection must not read the quarter scratch"
     );
     assert!(screen.contains(
-        "if (!detail_kept && own_sets < LIGHTING_SC_SET_HALF && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u)"
+        "if (!detail_kept && own_sets < LIGHTING_SC_SET_HALF && mode == 3u && (lighting_sc_flags() & 33554432u) == 0u && !fine_prior)"
     ));
     assert!(
         screen.contains("float own_sets = floor(max(cache.v[3u * slot + 2u].w, 0.0));"),

@@ -1,11 +1,9 @@
 // Stages F2, F3, and F4a. The world cache is the only store. A cache round traces
-// one floor ray for each live cell every 10 frames, on every preset, plus the
-// ranked burst. A cell with no shown mean takes that floor ray the frame it
-// is visible, then joins the same period. That burst is the preset burst plus the rays the old
-// per-preset floor no longer spends, split equally across the four screen
-// quarters, plus an off-screen share, so the near floor cannot take the back
-// wall's rays. A mover is due on that same 1-in-10 floor. It does not
-// take rays out of the burst.
+// one coverage ray for each live cell every two frames, on every preset, plus
+// the preset burst. A cell with no shown mean takes that ray the frame it
+// is visible, then joins the same period. The burst stays the preset count,
+// split equally across the four screen quarters, plus an off-screen share, so
+// the near floor cannot take the back wall's rays. A mover uses the same ray.
 // Word 0 stays a positive enable; the plan writes the traced count. F4a writes a
 // low-confidence seed into other cells of the same screen tile. The seed is not
 // an own sample and it does not add a ray. Ring sharing is not this stage.
@@ -20,7 +18,7 @@
 // 22 share (0 off, 1 tile), 23 min hit, 24 own cap, 25 plane, 26 normal,
 // 27 weight cap, 28 cosine floor, 29 seed confidence, 30 receivers,
 // 31 share handover, in own rays. 0 means the warmup count (word 12).
-// 32 floor enable (0 off; any other value is one ray every 10 frames), 33 burst.
+// 32 coverage enable (0 off; any other value is one ray every two frames), 33 burst.
 
 const float FILL_EPS = 1.0e-6;
 const float FILL_HALF = 0.5;
@@ -355,7 +353,7 @@ float lighting_fill_check_u(uint slot) {
 }
 
 // Off-screen cells stay in the same ranking, below an on-screen cell of the
-// same value and distance. The 1-in-10 floor still reaches both. The burst
+// same value and distance. The two-frame coverage ray still reaches both. The burst
 // itself is split: four screen quarters share the on-screen part equally, and
 // the off-screen part is offscreen_floor of the burst. Closeness inside one
 // quarter was spending the whole burst on the near floor.
@@ -763,8 +761,7 @@ void lighting_fill_dispatch() {
     // One thread. The value histogram is already in memory. Emitting the burst
     // is a later parallel dispatch. This function does not walk tiles or slots.
     uint max_picks = clamp(lighting_fill_u(17), 1u, 64u);
-    // The floor is one ray in ten. The burst is the preset burst. A mover
-    // does not take either one down.
+    // Coverage is one ray every two frames. The burst is the preset count.
     uint burst = lighting_fill_u(33);
     gstats.diag[LIGHTING_DIAG_MOVER_RAYS] = 0u;
     // Off-screen takes its own share. The rest is split across the four

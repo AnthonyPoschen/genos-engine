@@ -37,12 +37,12 @@ pub use hdr::{
     HDR_ENV_MIRRORS,
 };
 pub use lighting::{
-    check_lighting_arg, fill_legacy_divisor, fill_scaled_burst, lighting_arg_time_of_day,
+    check_lighting_arg, lighting_arg_time_of_day,
     lighting_env, lighting_env_flag, lighting_env_os, lighting_flag_needs_value,
     parse_lighting_toggles, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
     DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings,
     LightingExperimentSettings, LightingPreset, LightingSettings, ProbeSettings, ShadowFilter,
-    ShadowSettings, SurfaceCacheBlend, SurfaceCacheSettings, WorldCacheSettings, FILL_FLOOR_PERIOD,
+    ShadowSettings, SurfaceCacheBlend, SurfaceCacheSettings, WorldCacheSettings,
     LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW, LAMP_PICK_CANDIDATES_MEDIUM,
     LAMP_PICK_SPATIAL_RADIUS, LIGHTING_BOUNCES_UNLIMITED, LIGHTING_DEFAULT_SC_FLAGS,
     LIGHTING_TOGGLE_BOUNCE_ONLY, LIGHTING_TOGGLE_CELLS_ONLY, LIGHTING_TOGGLE_DIRECT_ONLY,

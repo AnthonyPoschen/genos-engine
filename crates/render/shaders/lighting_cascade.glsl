@@ -17,6 +17,7 @@ const float CASCADE_RING_NEAR = 1.0;
 const uint CASCADE_RING_MAX = 6u;
 const float CASCADE_OVERLAP = 0.1;
 const float CASCADE_CELL_CENTRE = 0.5;
+const float CASCADE_PARENT_SCALE = 2.0;
 
 uint lighting_cascade_base() {
     return lighting_reach_base()
@@ -174,7 +175,7 @@ vec4 lighting_cascade_trilinear(vec3 pos, vec3 n, float size) {
 // the parent in full. Black only when neither has data.
 vec4 lighting_cascade_merge(vec3 pos, vec3 n) {
     vec4 near = lighting_sh_compose_shown(pos, n);
-    vec4 far = lighting_cascade_trilinear(pos, n, LIGHTING_SC_HIT * 2.0);
+    vec4 far = lighting_cascade_trilinear(pos, n, LIGHTING_SC_HIT * CASCADE_PARENT_SCALE);
     float beta = near.w > LIGHTING_CACHE_HAS_W ? 0.0 : 1.0;
     vec3 near_rgb = near.w > LIGHTING_CACHE_HAS_W ? max(near.rgb, vec3(0.0)) : vec3(0.0);
     vec3 far_rgb = far.w > LIGHTING_CACHE_HAS_W ? max(far.rgb, vec3(0.0)) : vec3(0.0);

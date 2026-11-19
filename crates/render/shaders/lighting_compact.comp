@@ -65,9 +65,6 @@ void main() {
     if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u || !(cache.v[3u * slot + 1u].w > 0.0)) {
         return;
     }
-    if (lighting_sc_drop_stale_mover_world(slot)) {
-        return;
-    }
     // One thread per slot. The offer word and the seed election were published
     // by the previous frame's readers. Rays and the cache pass run after this.
     lighting_sc_offer_apply(slot);

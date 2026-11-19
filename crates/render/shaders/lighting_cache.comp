@@ -59,19 +59,6 @@ void main() {
     if (gid >= LIGHTING_CACHE_BATCH) {
         return;
     }
-    // Stage H: mover texels share the batch budget. Deposit world-direction
-    // lighting from the lattice (no new path-trace; counts as CACHE_RAYS).
-    if (lighting_sc_local_on() && gid < lighting_mover_fill_count()) {
-        uint tex = lighting_mover_fill_texel(gid);
-        vec3 wn;
-        vec3 wp = lighting_mover_texel_world(tex, wn);
-        vec4 irr = lighting_sh_compose_lattice(wp, wn, false);
-        if (irr.w > LIGHTING_CACHE_HAS_W) {
-            lighting_mover_deposit(tex, irr.rgb, 1.0);
-        }
-        atomicAdd(gstats.rays, LIGHTING_CACHE_RAYS);
-        return;
-    }
     // S70A: dense (indirect) dispatch over the live entries only.
     uint j = gid;
     if (lighting_dense()) {

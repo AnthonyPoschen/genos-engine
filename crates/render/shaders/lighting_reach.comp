@@ -1,10 +1,8 @@
 #version 450
-// One group. Marks the screen tiles a mover's before and after bounds cover,
-// any tile whose direct shade stepped, and any tile a world cell's bounce
-// noted. It runs after direct and the cache in the same frame, so those notes
-// are in the mask the wavelet and compose read. The bounds are this frame's
-// change-list spheres (before and after). #288's mover table has the current
-// sphere only; replacing this read waits on swept/before–after in the table.
+// One group. Marks any tile whose direct shade stepped, and any tile a world
+// cell's bounce noted. It runs after direct and the cache in the same frame,
+// so those notes are in the mask the wavelet and compose read. The change-list
+// disc is gone: a mover is a level-0 sample, not a reach mark.
 // A clipped, off-screen, or screen-filling mover footprint is not marked as
 // local: the host unholds the picture. A hot cell whose bounds are behind
 // the camera, on it, or half the picture sets the same unhold from the last
@@ -41,58 +39,6 @@ void reach_mark_tile(uint tx, uint ty) {
                 // bitset read in that shader does not fit under 248_000.
                 lighting_compose_mark_block_reason((p.y >> 3u) * bw + (p.x >> 3u), true);
             }
-        }
-    }
-}
-
-void reach_disc(vec3 centre, float rad) {
-    vec3 rel = centre - scene.eye.xyz;
-    vec3 fwd = scene.view_forward.xyz;
-    float z = dot(rel, fwd);
-    if (z < -rad) {
-        return;
-    }
-    float t = max(scene.view_right.w, REACH_TAN_FLOOR);
-    float aspect = max(scene.view_forward.w, REACH_TAN_FLOOR);
-    float zc = max(z, REACH_NEAR_Z);
-    float ndc_x = 0.0;
-    float ndc_y = 0.0;
-    if (z > REACH_NDC_Z) {
-        ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
-        ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
-    }
-    float px = (ndc_x + 1.0) * REACH_HALF * float(pc.dims.x);
-    float py = (1.0 - ndc_y) * REACH_HALF * float(pc.dims.y);
-    float pry = (rad / zc) / t * (REACH_HALF * float(pc.dims.y));
-    float prx = (rad / zc) / (t * aspect) * (REACH_HALF * float(pc.dims.x));
-    float pr = max(prx, pry);
-    if (z <= REACH_NEAR_Z) {
-        pr = max(pr, float(pc.dims.x + pc.dims.y));
-    }
-    int x0 = int(floor((px - pr) / REACH_TILE));
-    int y0 = int(floor((py - pr) / REACH_TILE));
-    int x1 = int(floor((px + pr) / REACH_TILE));
-    int y1 = int(floor((py + pr) / REACH_TILE));
-    uint tw = reach_tw();
-    uint th = (pc.dims.y + 31u) / 32u;
-    if (x0 < 0) {
-        x0 = 0;
-    }
-    if (y0 < 0) {
-        y0 = 0;
-    }
-    if (x1 >= int(tw)) {
-        x1 = int(tw) - 1;
-    }
-    if (y1 >= int(th)) {
-        y1 = int(th) - 1;
-    }
-    for (int y = y0; y <= y1; y++) {
-        for (int x = x0; x <= x1; x++) {
-            reach_mark_tile(uint(x), uint(y));
-            // The cell residual note is gone. The disc is the hot mark the
-            // mask gate reads, and it drops when the change list drops.
-            atomicAdd(reach_hot_count, 1u);
         }
     }
 }
