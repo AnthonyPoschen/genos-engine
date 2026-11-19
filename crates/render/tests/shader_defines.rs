@@ -101,23 +101,6 @@ const PRODUCTION: &[ShaderCompile] = &[
         flags: &["-DGENOS_RESTIR_DI"],
     },
     ShaderCompile {
-        label: "atrous",
-        compiler: "glslc",
-        src: "shaders/lighting_atrous.comp",
-        flags: &[],
-    },
-    ShaderCompile {
-        label: "atrous plain",
-        compiler: "glslangValidator",
-        src: "shaders/lighting_atrous.comp",
-        flags: &[
-            "-V",
-            "--target-env",
-            "vulkan1.0",
-            "-DLIGHTING_DENOISE_PLAIN",
-        ],
-    },
-    ShaderCompile {
         label: "restir live",
         compiler: "glslangValidator",
         src: "shaders/restir_live.comp",

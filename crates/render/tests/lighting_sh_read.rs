@@ -345,11 +345,11 @@ fn a_slanted_screen_read_uses_the_neighbour_blend_and_an_empty_read_keeps_the_pr
         &probe,
         "vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n)",
     );
-    assert!(indirect.contains("lighting_world_irradiance(pos, n)"));
+    assert!(indirect.contains("lighting_sh_compose_lattice(pos, n, false)"));
     assert!(indirect.contains("return max(world.rgb, vec3(0.0));"));
-    assert!(indirect.contains("lighting_coarse_world(pos, n)"));
-    assert!(indirect.contains("if (!(coarse.w > LIGHTING_CACHE_HAS_W))"));
-    assert!(indirect.contains("mix(coarse.rgb, max(world.rgb, vec3(0.0)), trust)"));
+    assert!(!indirect.contains("lighting_world_irradiance(pos, n)"));
+    assert!(!indirect.contains("lighting_coarse_world(pos, n)"));
+    assert!(!indirect.contains("mix(coarse.rgb, max(world.rgb, vec3(0.0)), trust)"));
     assert!(
         !indirect.contains("lighting_sh_read"),
         "compose does not add a second neighbour gather"

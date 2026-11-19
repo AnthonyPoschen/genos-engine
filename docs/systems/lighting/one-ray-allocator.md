@@ -39,7 +39,7 @@ Live on world mode 3 unless noted. One line: what it decides, where.
 15. `lighting_lamp_noted` is true for 120 frames after any ring entry, ignoring who the lamp can reach. The settle streak and the drain flag in `lighting_write_args` feed the same switch. `lighting_cache.glsl`
 16. `lighting_lamp_delta` measures the light change at a point. Callers only test "any". `lighting_cache.glsl`
 17. `lighting_shadow_epochs` decides which lamps drop their cached shadow and texel direct light. `lighting_cache.glsl`
-18. `lighting_atrous.comp` denoises dirty pages, or the whole cache once the dirty fraction is high.
+18. The screen wavelet and the hash wavelet are removed. Bounce is the 25 cm cell, so the picture does not filter it.
 19. `lighting_direct.comp` skips a shadow ray on a quiet pixel whose signature matches.
 20. `restir_live.comp` picks the pixel's direct sample (temporal and spatial). Header word 39 cuts history.
 21. `lighting_direct.comp` `cache_pick` chooses which lamps a cache ray shadows.

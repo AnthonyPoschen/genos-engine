@@ -508,8 +508,13 @@ fn pass_line(ms: &[f64]) -> String {
 /// 0.0454, wall direct speckle 0.0185, wall bounce splotch 0.0508.
 /// One collected frame after: compact 33.4, direct 23.1, cache 10.0,
 /// compose 1.0, atrous 308.5, `cache_rays` 14.7, `hit_light` 0.3,
-/// shadows 16.4. Lighting total 407 ms. These milliseconds are not a
-/// 4070 frame time.
+/// shadows 16.4. Lighting total 407 ms.
+/// After the lattice read, with the wavelet gone: floor direct speckle
+/// 0.0145, floor bounce splotch 0.0964, wall direct speckle 0.0185,
+/// wall bounce splotch 0.0767. One collected frame: compact 19.4, direct
+/// 15.9, cache 5.5, compose 0.6, atrous 0.0, `cache_rays` 14.4,
+/// `hit_light` 0.2, shadows 9.2. Lighting total 65.2 ms. These
+/// milliseconds are not a 4070 frame time. Splotch is still over 0.04.
 #[test]
 fn floor_speckle_is_under_the_bar_and_splotch_is_not() {
     let (_gpu, mut owner) = open();

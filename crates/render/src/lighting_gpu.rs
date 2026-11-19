@@ -1149,7 +1149,7 @@ impl Gpu {
             LIGHTING_FILTER_SPV,
             LIGHTING_CACHE_SPV,
             LIGHTING_COMPOSE_SPV,
-            LIGHTING_ATROUS_SPV,
+            LIGHTING_PLACE_SPV,
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
@@ -1177,20 +1177,6 @@ impl Gpu {
             )?;
             self.note_pipeline_time("sh-drain", start);
         }
-        let start = Instant::now();
-        self.lighting.atrous_plain = self.make_compute_pipe(
-            LIGHTING_ATROUS_PLAIN_SPV,
-            self.lighting.layout,
-            "atrous-plain",
-        )?;
-        self.note_pipeline_time("atrous-plain", start);
-        let start = Instant::now();
-        self.lighting.screen_pipe = self.make_compute_pipe(
-            LIGHTING_SCREEN_SPV,
-            self.lighting.layout,
-            "screen-denoise",
-        )?;
-        self.note_pipeline_time("screen-denoise", start);
         let start = Instant::now();
         self.lighting.reach_pipe = self.make_compute_pipe(
             LIGHTING_REACH_SPV,
@@ -5676,10 +5662,6 @@ impl Gpu {
                     }
                 } else if pass == 7 && hdr_compose {
                     self.lighting.compose_hdr_pipe
-                } else if pass == 8 && self.lighting.settings.denoiser.screen {
-                    self.lighting.screen_pipe
-                } else if pass == 8 && self.lighting.settings.denoiser.plain() {
-                    self.lighting.atrous_plain
                 } else {
                     self.lighting.pipes[pass]
                 };
@@ -7246,7 +7228,7 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_CACHE_SLOTS, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
+        LIGHTING_CACHE_SLOTS, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
         LIGHTING_COMPOSE_SPV, LIGHTING_SH_DRAIN_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
     };
 
@@ -7307,21 +7289,6 @@ mod sun_step {
         assert!(check_lighting_sun_arg("--lighting-debug", None).is_ok());
         assert!(check_lighting_sun_arg("--lighting-debug=1", None).is_err());
         assert!(check_lighting_sun_arg("--scale", None).is_ok());
-    }
-
-    /// The instance is Vulkan 1.0. SPIR-V 1.6 is what NVIDIA reports as
-    /// `NVVM compilation failed: 3`, and the failed compile corrupts the
-    /// driver heap (`corrupted size vs. prev_size` at exit).
-    #[test]
-    fn plain_atrous_spirv_matches_the_vulkan_1_0_instance() {
-        assert!(LIGHTING_ATROUS_PLAIN_SPV.len() >= 8);
-        let version = u32::from_le_bytes([
-            LIGHTING_ATROUS_PLAIN_SPV[4],
-            LIGHTING_ATROUS_PLAIN_SPV[5],
-            LIGHTING_ATROUS_PLAIN_SPV[6],
-            LIGHTING_ATROUS_PLAIN_SPV[7],
-        ]);
-        assert_eq!(version, 0x0001_0000, "SPIR-V {version:#x}");
     }
 
     /// The picture compose stays the GI shader. The sun compose is that pass

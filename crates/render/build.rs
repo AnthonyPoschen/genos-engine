@@ -151,40 +151,15 @@ fn compile_media_modules(out: &std::path::Path) -> MediaModules {
 }
 
 struct DenoiseModules {
-    screen: PathBuf,
-    atrous_plain: PathBuf,
     reach: PathBuf,
 }
 
 fn compile_denoise_modules(out: &std::path::Path) -> DenoiseModules {
-    // High's a-trous. Adaptive is compiled out of the hash pipeline (S79).
-    // The screen launch calls that kernel with the adaptive bit clear: high
-    // does not set it, and the branch is the same test the plain pipeline
-    // compiles out. glslc does not take -D. glslangValidator --target-env
-    // vulkan1.3 emits SPIR-V 1.6. The instance is Vulkan 1.0 (API_VERSION in
-    // gpu.rs). A 1.6 module is illegal there: validation reports
-    // VUID-VkShaderModuleCreateInfo-pCode-08737, and the NVIDIA compiler logs
-    // "NVVM compilation failed: 3" (IR version mismatch) and can smash the
-    // process heap, which glibc reports at exit as corrupted size vs. prev_size.
-    // vulkan1.0 keeps this kernel on SPIR-V 1.0, the same version as glslc.
-    let screen = compile(
-        "shaders/lighting_screen.comp",
-        &out.join("lighting_screen.comp.spv"),
-    );
-    let atrous_plain = compile_define(
-        "shaders/lighting_atrous.comp",
-        &out.join("lighting_atrous_plain.comp.spv"),
-        "LIGHTING_DENOISE_PLAIN",
-    );
     let reach = compile(
         "shaders/lighting_reach.comp",
         &out.join("lighting_reach.comp.spv"),
     );
-    DenoiseModules {
-        screen,
-        atrous_plain,
-        reach,
-    }
+    DenoiseModules { reach }
 }
 
 fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
@@ -199,7 +174,6 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         ("LIGHTING_FILTER_SPV", "lighting_noop.comp"),
         ("LIGHTING_CACHE_SPV", "lighting_cache.comp"),
         ("LIGHTING_COMPOSE_SPV", "lighting_compose.comp"),
-        ("LIGHTING_ATROUS_SPV", "lighting_atrous.comp"),
         // Compiled into the binary. The pipeline is created the first time a
         // small sun step asks for it, not at startup, so the nine lighting
         // pipelines and their compile stay the lighting set.
@@ -263,14 +237,6 @@ fn write_shader_glue(
             path.display()
         ));
     }
-    glue_text.push_str(&format!(
-        "pub static LIGHTING_ATROUS_PLAIN_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        denoise.atrous_plain.display()
-    ));
-    glue_text.push_str(&format!(
-        "pub static LIGHTING_SCREEN_SPV: &[u8] = include_bytes!(\"{}\");\n",
-        denoise.screen.display()
-    ));
     glue_text.push_str(&format!(
         "pub static LIGHTING_REACH_SPV: &[u8] = include_bytes!(\"{}\");\n",
         denoise.reach.display()
@@ -425,7 +391,6 @@ fn rerun_shader_pieces() {
         "lighting_cache_slots.glsl",
         "lighting_lamp_pick.glsl",
         "lighting_sun_compose.comp",
-        "lighting_screen.comp",
         "media.glsl",
         "media_check.comp",
         "froxel_common.glsl",
@@ -764,11 +729,6 @@ fn compile_args(src: &str, dest: &std::path::Path, extra: &[&str]) -> PathBuf {
         panic!("glslc failed for {src} {extra:?}");
     }
     dest.to_path_buf()
-}
-
-/// glslc's wrapper does not forward `-D`. The plain a-trous kernel needs the macro.
-fn compile_define(src: &str, dest: &std::path::Path, define: &str) -> PathBuf {
-    compile_defines(src, dest, &[define])
 }
 
 fn compile_defines(src: &str, dest: &std::path::Path, defines: &[&str]) -> PathBuf {

@@ -467,12 +467,7 @@ void lighting_fill_visit(uint slot) {
     uint seen_x;
     uint seen_y;
     bool seen = lighting_fill_pixel(p, seen_x, seen_y);
-    // Children of an off-screen parent only. On-screen texels are the ones
-    // compose claims; spawning them here filled the near field and the burst
-    // never reached the back of the hall.
-    if (size >= base && !seen) {
-        lighting_fine_spawn(slot);
-    }
+    // The 12.5 cm child is not spawned. The 25 cm cell is the finest bounce.
     // The 12.5 cm texel does not claim the 25 cm parent. That claim recreated
     // cells the leash had just coarsened, so the same surfaces were wiped
     // every frame. Compose reads the texel, which takes its own floor ray.

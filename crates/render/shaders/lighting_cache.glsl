@@ -812,9 +812,10 @@ float lighting_cell_size(vec3 pos) {
 }
 float lighting_cell_size_d(float d) {
     float level = clamp(floor(log2(max(d / 8.0, 1.0))), 0.0, 6.0);
-    // Surface cache (mode 3): one texel size, whatever the distance.
+    // Surface cache (mode 3): the 25 cm world cell is the finest bounce.
+    // The 12.5 cm texel is not a bounce store. Shadow cells keep that size.
     if (lighting_world_mode() == 3u) {
-        return LIGHTING_SC_TEXEL;
+        return LIGHTING_SC_HIT;
     }
     return 0.25 * exp2(level);
 }
@@ -5098,6 +5099,12 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     }
     if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
+    }
+    // Mode 3 bounce is the 25 cm SH lattice. The texel gather and its trust
+    // mix are not the picture and not the ray read.
+    if (mode == 3u) {
+        lighting_px_shade = 1u;
+        return lighting_sh_compose_lattice(pos, n, false);
     }
     return lighting_world_irradiance_in(pos, n, pos, om != ~0u);
 }
