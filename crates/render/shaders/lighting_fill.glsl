@@ -1076,6 +1076,9 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
     float sample_add = n > 0.0 ? max(floor(n / float(LIGHTING_CACHE_RAYS)), 1.0) : 0.0;
     float blend = clamp(k, 0.0, 1.0);
     bool accept = true;
+    // A junk mean is replaced. mix() with a non-finite old colour is still
+    // non-finite when the weight is 1, because NaN * 0 stays NaN.
+    bool adopt = false;
     vec3 ray_e = e;
     if (cell && n > 0.0) {
         // One rule. A junk mean adopts a usable ray with a short count.
@@ -1090,6 +1093,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
             sample_t = 0.0;
             blend = 1.0;
             accept = true;
+            adopt = true;
             ray_e = e;
         } else if (!sample_ok) {
             accept = false;
@@ -1153,7 +1157,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         cache.v[LIGHTING_SC_EST_AT + 2u * slot] = vec4(sm, var);
         b = vec4(vb, inc, k, b.w);
     } else if (cell) {
-        mean = (accept && old.w < FILL_HALF) ? ray_e : mix(old.rgb, ray_e, blend);
+        mean = (accept && (adopt || old.w < FILL_HALF)) ? ray_e : mix(old.rgb, ray_e, blend);
         // An empty cell has one ray. A verified neighbour on the same side
         // replaces it. A mature cell is left alone: copying every frame
         // oscillates. A neighbour that itself borrowed stays out.
@@ -1184,7 +1188,7 @@ void lighting_fill_commit(uint slot, vec3 e, float n, vec3 lk_mean, vec3 shx, ve
         vec3 nx = shx * (wr * LIGHTING_SH_Y1);
         vec3 ny = shy * (wr * LIGHTING_SH_Y1);
         vec3 nz = shz * (wr * LIGHTING_SH_Y1);
-        if (old.w >= LIGHTING_CACHE_HAS_W) {
+        if (old.w >= LIGHTING_CACHE_HAS_W && !adopt) {
             vec3 o0;
             vec3 ox;
             vec3 oy;
