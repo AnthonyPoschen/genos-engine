@@ -379,10 +379,20 @@ fn a_moving_point_lamp_does_not_grain_a_flat_wall() {
         place(&mut world, frame);
         move_exact.push(grab(window, renderer, &world, &camera));
     }
+    grade_wall(&wall, &still_frames, &move_frames, &still_exact, &move_exact);
+}
+
+fn grade_wall(
+    wall: &Rect,
+    still_frames: &[Vec<f64>],
+    move_frames: &[Vec<f64>],
+    still_exact: &[f64],
+    move_exact: &[Vec<f64>],
+) {
     let still_live = still_frames.last().expect("still frame");
-    let still_err = sub(still_live, &still_exact);
-    let still_mean = patch_mean(still_live, WIDTH, &wall);
-    let exact_mean = patch_mean(&still_exact, WIDTH, &wall);
+    let still_err = sub(still_live, still_exact);
+    let still_mean = patch_mean(still_live, WIDTH, wall);
+    let exact_mean = patch_mean(still_exact, WIDTH, wall);
     assert!(
         still_mean > 0.02 && exact_mean > 0.02,
         "the wall is dark: live {still_mean:.4} exact {exact_mean:.4}"
@@ -390,31 +400,28 @@ fn a_moving_point_lamp_does_not_grain_a_flat_wall() {
     let mut still_step = Vec::new();
     let mut earlier = still_frames.first().expect("still pair");
     for frame in still_frames.iter().skip(1) {
-        still_step.push(spatial_var(&sub(frame, earlier), WIDTH, &wall));
+        still_step.push(spatial_var(&sub(frame, earlier), WIDTH, wall));
         earlier = frame;
     }
     let still = Grain {
-        spatial: spatial_var(&still_err, WIDTH, &wall),
+        spatial: spatial_var(&still_err, WIDTH, wall),
         temporal: mean_of(&still_step),
     };
     let mut move_spatial = Vec::new();
     let mut move_temporal = Vec::new();
     let mut move_grain = Vec::new();
-    let still_grain = grain8(&abs_luma(&still_err), WIDTH, &wall);
+    let still_grain = grain8(&abs_luma(&still_err), WIDTH, wall);
     let mut prev_err = still_err;
-    for (index, (live, exact)) in move_frames.iter().zip(&move_exact).enumerate() {
+    for (index, (live, exact)) in move_frames.iter().zip(move_exact).enumerate() {
         let err = sub(live, exact);
-        let spatial = spatial_var(&err, WIDTH, &wall);
-        let temporal = spatial_var(&sub(&err, &prev_err), WIDTH, &wall);
-        let grain = grain8(&abs_luma(&err), WIDTH, &wall);
+        let spatial = spatial_var(&err, WIDTH, wall);
+        let temporal = spatial_var(&sub(&err, &prev_err), WIDTH, wall);
+        let grain = grain8(&abs_luma(&err), WIDTH, wall);
+        let frame = index + 1;
+        let live_mean = patch_mean(live, WIDTH, wall);
+        let exact_frame = patch_mean(exact, WIDTH, wall);
         eprintln!(
-            "moving-lamp frame {}: error spatial {:.6e} temporal {:.6e} grain8 {:.3} live {:.4} exact {:.4}",
-            index + 1,
-            spatial,
-            temporal,
-            grain,
-            patch_mean(live, WIDTH, &wall),
-            patch_mean(exact, WIDTH, &wall)
+            "moving-lamp frame {frame}: error spatial {spatial:.6e} temporal {temporal:.6e} grain8 {grain:.3} live {live_mean:.4} exact {exact_frame:.4}"
         );
         move_spatial.push(spatial);
         move_temporal.push(temporal);
@@ -426,32 +433,26 @@ fn a_moving_point_lamp_does_not_grain_a_flat_wall() {
         temporal: mean_of(&move_temporal),
     };
     let moving_grain = mean_of(&move_grain);
+    let still_spatial = still.spatial;
+    let still_temporal = still.temporal;
+    let moving_spatial = moving.spatial;
+    let moving_temporal = moving.temporal;
     eprintln!(
-        "moving-lamp grain: still spatial {:.6e} temporal {:.6e} grain8 {:.3}; moving spatial {:.6e} temporal {:.6e} grain8 {:.3}; wall {:.4}",
-        still.spatial, still.temporal, still_grain, moving.spatial, moving.temporal, moving_grain, still_mean
+        "moving-lamp grain: still spatial {still_spatial:.6e} temporal {still_temporal:.6e} grain8 {still_grain:.3}; moving spatial {moving_spatial:.6e} temporal {moving_temporal:.6e} grain8 {moving_grain:.3}; wall {still_mean:.4}"
     );
-    let spatial_limit = still.spatial * GRAIN_RATIO + GRAIN_FLOOR;
-    let temporal_limit = still.temporal * GRAIN_RATIO + GRAIN_FLOOR;
+    let spatial_limit = still_spatial * GRAIN_RATIO + GRAIN_FLOOR;
+    let temporal_limit = still_temporal * GRAIN_RATIO + GRAIN_FLOOR;
     let grain_limit = still_grain * GRAIN_RATIO + 0.05;
     assert!(
-        moving.spatial <= spatial_limit,
-        "wall luma variance {:.6e} above the still lamp {:.6e} (limit {:.6e})",
-        moving.spatial,
-        still.spatial,
-        spatial_limit
+        moving_spatial <= spatial_limit,
+        "wall luma variance {moving_spatial:.6e} above the still lamp {still_spatial:.6e} (limit {spatial_limit:.6e})"
     );
     assert!(
-        moving.temporal <= temporal_limit,
-        "frame-to-frame residual {:.6e} above the still lamp {:.6e} (limit {:.6e})",
-        moving.temporal,
-        still.temporal,
-        temporal_limit
+        moving_temporal <= temporal_limit,
+        "frame-to-frame residual {moving_temporal:.6e} above the still lamp {still_temporal:.6e} (limit {temporal_limit:.6e})"
     );
     assert!(
         moving_grain <= grain_limit,
-        "8-bit error grain {:.3} above the still lamp {:.3} (limit {:.3})",
-        moving_grain,
-        still_grain,
-        grain_limit
+        "8-bit error grain {moving_grain:.3} above the still lamp {still_grain:.3} (limit {grain_limit:.3})"
     );
 }
