@@ -97,6 +97,63 @@ void lighting_cascade_insert_ring(vec3 pos, vec3 n, uint ring) {
     }
 }
 
+// Finest cell keeps the whole trace. A coarser cell (size above the 25 cm
+// bounce cell) owns one shell, t from 2^level to 2^(level+1). The last shell
+// runs out to the far trace. Contact stays at the ray epsilon until the merge
+// adds those shells: clipping the 25 cm cell would drop the hall.
+const float CASCADE_TRACE_NEAR = 1.0e-4;
+const float CASCADE_TRACE_FAR = 200.0;
+const float CASCADE_INTERVAL_MAX = 6.0;
+const float CASCADE_INTERVAL_ROUND = 0.5;
+
+void lighting_cascade_interval(float size, out float t0, out float t1) {
+    t0 = CASCADE_TRACE_NEAR;
+    t1 = CASCADE_TRACE_FAR;
+    float ratio = max(size, LIGHTING_SC_HIT) / LIGHTING_SC_HIT;
+    float level = floor(log2(max(ratio, 1.0)) + CASCADE_INTERVAL_ROUND);
+    if (level < 1.0) {
+        return;
+    }
+    level = min(level, CASCADE_INTERVAL_MAX);
+    t0 = exp2(level);
+    t1 = level >= CASCADE_INTERVAL_MAX ? CASCADE_TRACE_FAR : exp2(level + 1.0);
+}
+
+uint lighting_cascade_ray_slot(uint ray) {
+    if (ray < lighting_probe_rays()) {
+        return ~0u;
+    }
+    uint r = ray - lighting_probe_rays();
+    if (lighting_ray_fill_on()) {
+        if (r >= lighting_fill_traced()) {
+            return ~0u;
+        }
+        uint slot = ckeys.key[lighting_fill_pick_at() + r];
+        return slot < LIGHTING_CACHE_SLOTS ? slot : ~0u;
+    }
+    uint entry = r / LIGHTING_CACHE_RAYS;
+    if (lighting_world_mode() == 3u
+        && entry >= lighting_grad_first()
+        && entry < LIGHTING_CACHE_BATCH - LIGHTING_WRC_SCOUT_ENTRIES) {
+        uint ci = r - lighting_grad_first() * LIGHTING_CACHE_RAYS;
+        if (ci >= lighting_grad_count()) {
+            return ~0u;
+        }
+        return ckeys.key[LIGHTING_GRAD_LIST_AT + ci];
+    }
+    return lighting_cache_batch_slot(entry);
+}
+
+void lighting_cascade_ray_range(uint ray, out float t0, out float t1) {
+    t0 = CASCADE_TRACE_NEAR;
+    t1 = CASCADE_TRACE_FAR;
+    uint slot = lighting_cascade_ray_slot(ray);
+    if (slot == ~0u || slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    lighting_cascade_interval(cache.v[3u * slot + 1u].w, t0, t1);
+}
+
 void lighting_cascade_insert(vec3 pos, vec3 n) {
     float cheb = lighting_cascade_cheb(pos);
     uint ring = lighting_cascade_ring(cheb);

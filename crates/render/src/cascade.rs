@@ -70,6 +70,39 @@ pub fn cell_size(ring: u32) -> f32 {
     PROJ * RING_NEAR * scale_of(ring)
 }
 
+/// Finest bounce cell. Matches `LIGHTING_SC_HIT`. A cell this size keeps the
+/// full trace.
+pub const FINE: f32 = 0.25;
+/// Trace start for the finest cell. Contact, not a 1 m shell.
+pub const TRACE_NEAR: f32 = 1.0e-4;
+/// Far end of the last shell, and of the finest cell.
+pub const TRACE_FAR: f32 = 200.0;
+/// Last upper-level index. Its shell runs out to [`TRACE_FAR`].
+pub const INTERVAL_MAX: f32 = 6.0;
+
+/// Ray interval for a world cell of `size` metres.
+///
+/// The 25 cm cell returns the full trace. A coarser cell returns
+/// `[2^level, 2^(level+1)]`, and level 6 returns `[64, 200]`.
+pub fn interval(size: f32) -> (f32, f32) {
+    if !(size > 0.0) {
+        return (TRACE_NEAR, TRACE_FAR);
+    }
+    let ratio = (size / FINE).max(1.0);
+    let level = (ratio.log2() + 0.5).floor();
+    if level < 1.0 {
+        return (TRACE_NEAR, TRACE_FAR);
+    }
+    let level = level.min(INTERVAL_MAX);
+    let near = 2.0_f32.powf(level);
+    let far = if level >= INTERVAL_MAX {
+        TRACE_FAR
+    } else {
+        2.0_f32.powf(level + 1.0)
+    };
+    (near, far)
+}
+
 /// Weight of the next ring. Zero until the outer tenth of this ring.
 pub fn overlap_blend(cheb: f32) -> f32 {
     let level = log_ring(cheb);
@@ -86,7 +119,10 @@ pub fn overlap_blend(cheb: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{cell_size, chebyshev, overlap_blend, ring, OVERLAP, PROJ, RING_MAX, RING_NEAR};
+    use super::{
+        cell_size, chebyshev, interval, overlap_blend, ring, FINE, OVERLAP, PROJ, RING_MAX, RING_NEAR,
+        TRACE_FAR, TRACE_NEAR,
+    };
 
     #[test]
     fn chebyshev_is_the_longest_axis() {
@@ -127,6 +163,18 @@ mod tests {
     }
 
     #[test]
+    fn the_finest_cell_keeps_the_full_trace_and_a_coarser_cell_owns_one_shell() {
+        assert_eq!(interval(FINE), (TRACE_NEAR, TRACE_FAR));
+        assert_eq!(interval(0.0), (TRACE_NEAR, TRACE_FAR));
+        assert_eq!(interval(0.5), (2.0, 4.0));
+        assert_eq!(interval(1.0), (4.0, 8.0));
+        assert_eq!(interval(2.0), (8.0, 16.0));
+        assert_eq!(interval(4.0), (16.0, 32.0));
+        assert_eq!(interval(8.0), (32.0, 64.0));
+        assert_eq!(interval(16.0), (64.0, TRACE_FAR));
+    }
+
+    #[test]
     fn the_shader_uses_this_ring_rule() {
         let shader = include_str!("../shaders/lighting_cascade.glsl");
         assert!(shader.contains("const float CASCADE_PROJ = 0.05;"), "{shader}");
@@ -142,6 +190,12 @@ mod tests {
             direct.contains("lighting_cascade_insert(pos, n)"),
             "the g-buffer pass inserts the surface sample"
         );
+        let trace = include_str!("../shaders/lighting_trace.comp");
+        assert!(
+            trace.contains("lighting_cascade_ray_range(ray, t0, t1)"),
+            "cache rays take the cell interval"
+        );
+        assert!(shader.contains("level < 1.0"));
         let probe = include_str!("../shaders/lighting_screen_probe.glsl");
         assert!(
             !probe.contains("lighting_cascade_insert"),

@@ -61,7 +61,10 @@ void main() {
         return;
     }
     SceneHit hit;
-    if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
+    float t0;
+    float t1;
+    lighting_cascade_ray_range(ray, t0, t1);
+    if (!trace_ray(origin, dir, t0, t1, hit)) {
         vec4 miss = lighting_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
         work.v[at] = miss;
         lighting_fill_stash(ray, miss.x, 0u);

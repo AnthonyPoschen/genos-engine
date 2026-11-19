@@ -51,6 +51,7 @@ These exist because the picture reads the 25 cm cell directly. Level 0 makes the
 - SH-L1 is the directional store. The papers' higher-order angular basis is not this conversion.
 - The importance cutoff stays the exact/tail split it already is. Distant lamps join the upper levels. They are not traced as extra exact lights.
 - Lamp area sampling for a soft penumbra is deferred.
+- The finest bounce cell, 25 cm, keeps the full trace from the ray epsilon out to 200 m. The papers start level 0 near 1 m. Clipping that cell to one shell drops contact and far bounce, because coarser cells are not traced yet. A cell larger than 25 cm owns the shell from `2^level` to `2^(level+1)`, and the last shell runs out to 200 m.
 
 ## After the conversion
 
