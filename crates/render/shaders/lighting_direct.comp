@@ -251,6 +251,9 @@ void main() {
     bool restir_pix = ((pc.lamp.y >> 21u) & 1u) != 0u
         && ((pc.lamp.y >> 18u) & 7u) == 0u
         && idx < pixels;
+    // One to RESTIR_EXACT_LIT reaching point lamps are summed in this loop,
+    // one shadow ray each. The reservoir is not added on top.
+    bool restir_few = false;
     if (restir_pix) {
         lamp_new = false;
     }
@@ -319,6 +322,9 @@ void main() {
     if (view_only != LAMP_ALL) {
         restir_pix = false;
         lamp_new = (lamp_pix || lamp_hit) && tdl == ~0u;
+    }
+    if (restir_pix && restir_few_lamps(origin, n, two_sided)) {
+        restir_few = true;
     }
 #endif
     uint chosen_k[4] = uint[4](0u, 0u, 0u, 0u);
@@ -415,6 +421,14 @@ void main() {
         } else if (reuse_pix && !shade_exact) {
             lamp_res_store(idx, lamp_res_slot_now(), lamp_res_empty());
             lamp_geo_store(idx, lamp_res_slot_now(), uvec4(0u));
+        }
+        // A hit with at most eight reaching point lamps sums every one of
+        // them. chosen_k holds four, so the sum cannot go through that list.
+        // More than eight keeps the one systematic sample below. Pixels do
+        // not reach this: ReSTIR cleared lamp_new, and a few-lamp pixel
+        // already summed in the shade loop.
+        if (lamp_hit && !shade_exact && point_lit > 0u && point_lit <= LAMP_PICK_EXACT_LIT) {
+            shade_exact = true;
         }
         if (!shade_exact && chosen_n == 0u && point_lit > 0u) {
             uint use_rays = lamp_pick_rays();
@@ -517,7 +531,7 @@ void main() {
 #ifdef GENOS_RESTIR_DI
         // The reservoir replaces near point lamps. Skip the load. The sun
         // (k < suns) and the flame (k == suns + near) stay in this loop.
-        if (restir_pix && k >= list.suns.y && k < list.suns.y + list.near.y) {
+        if (restir_pix && !restir_few && k >= list.suns.y && k < list.suns.y + list.near.y) {
             continue;
         }
 #endif
@@ -628,9 +642,9 @@ void main() {
             vec3 add = (!lamp_new && exact) ? light : light * scale;
             e += add;
 #ifdef GENOS_RESTIR_DI
-            // Near point lamp actually added on a ReSTIR pixel. The skip at the
-            // top of this loop keeps the count at 0. Sun and flame stay out of
-            // this word.
+            // Near point lamp added on a ReSTIR pixel. Many-lamp pixels skip
+            // the load, so this stays 0 there. One to RESTIR_EXACT_LIT lamps
+            // are the exact sum and do count. Sun and flame stay out.
             if (restir_pix && !sun_lamp && k < list.suns.y + list.near.y && lamp_pick_diag()) {
                 atomicAdd(restir_words[RESTIR_DIAG_POINT_ADD], 1u);
             }
@@ -664,15 +678,15 @@ void main() {
     // One reservoir sample: p(y) * V(y) * W, W = w_sum / (M * p_hat).
     // The graded colour is the mean of the unbiased sample. The raw sample
     // is one frame of that mean. Bitterli shows the current sample; a still
-    // surface keeps the mean so the picture can converge. A lamp change, a
-    // failed reprojection, or a change in this sample's visibility or
-    // unshadowed target drops it. The sun and the flame stay in e.
+    // surface keeps the mean so the picture can converge. A failed
+    // reprojection or a visibility flip drops it. A lamp move reweights it.
+    // The sun and the flame stay in e.
     vec3 e_restir = vec3(0.0);
     vec3 spec_restir = vec3(0.0);
     bool restir_sampled = false;
     float restir_luma = 0.0;
     bool restir_vis = false;
-    if (restir_pix && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
+    if (restir_pix && !restir_few && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
         && restir_lamp < restir_words[0u]) {
         restir_sampled = true;
         if (lamp_pick_diag()) {
@@ -772,13 +786,12 @@ void main() {
     // buffer. The shadow ray above re-traces the stored sample when the
     // reservoir kept that lamp. A different lamp traces the stored one once.
     // History uses lamp_pick_reproject (0.02 / 0.05 m / 0.9), one pixel, and
-    // drops when the reservoir resets (word 15). A changed lamp shortens it
-    // to RESTIR_CHANGE_FADE where that lamp's previous or current ball reaches
-    // the shaded origin, the same cap on the side it left and the side it
-    // still covers. The re-traced sample's visibility flip still clears it,
-    // and 8 log codes still clear it. The 12-bit unshadowed-target clear runs
-    // only where neither ball reaches, so a slow move does not defeat the fade.
-    // That check runs before the cap, so a frozen mean still drops. At
+    // drops when the reservoir resets (word 15). A changed lamp keeps the
+    // colour and multiplies it by p-hat now over p-hat then. The count scales
+    // with that same change, on the side the lamp left and the side it still
+    // covers. A visibility flip clears it. So does a sum that appears or
+    // vanishes. The 12-bit unshadowed-target clear runs only where neither
+    // ball reaches, so a slow move does not drop a frozen mean. At
     // RESTIR_MEAN_CAP the colour otherwise stays, so a still surface stops
     // moving. The mean of one fixed integrand stays unbiased: temporal
     // correlation changes the variance. Mixing two visibilities was the bias.
@@ -787,7 +800,7 @@ void main() {
     // frame's lobe leaves the picture on one lamp. The noise gate has its own
     // mean and does not read this one. A bounce-only frame does not write it
     // into the picture and does not fold a zero into the stored mean.
-    if (restir_pix && lamp_pix) {
+    if (restir_pix && !restir_few && lamp_pix) {
         uint mean_px = 0u;
         float z_ignore = 0.0;
         uint mean_prev = 0u;
@@ -813,10 +826,9 @@ void main() {
         } else if (restir_words[15u] == 0u) {
             atomicAdd(gstats.diag[LIGHTING_RESET_DIRECT_MISS], 1u);
         }
-        // A one-step luma change and a visibility flip do not zero the mean.
-        // A failed reprojection above already dropped a different surface.
+        // A visibility flip clears the mean. A failed reprojection above
+        // already dropped a different surface. A lamp move does not.
         bool mean_dropped = false;
-        uint luma_steps = 0u;
         if (mean_prev > 0u) {
             uint old_lamp = prev_pack & 0xffffu;
             bool old_vis = (prev_pack & 0x10000u) != 0u;
@@ -831,9 +843,7 @@ void main() {
                     // A different lamp from the one stored. One shadow ray,
                     // and only when that lamp still reaches this point.
                     uint la = restir_words[1u] + old_lamp * 8u;
-                    Lamp old_l;
-                    old_l.pos = vec4(uintBitsToFloat(restir_words[la]), uintBitsToFloat(restir_words[la + 1u]), uintBitsToFloat(restir_words[la + 2u]), 0.0);
-                    old_l.color = vec4(uintBitsToFloat(restir_words[la + 4u]), uintBitsToFloat(restir_words[la + 5u]), uintBitsToFloat(restir_words[la + 6u]), uintBitsToFloat(restir_words[la + 3u]));
+                    Lamp old_l = restir_lamp_record(la);
                     vec3 old_target;
                     vec3 old_light = lamp_light(old_l, origin, n, two_sided, old_target);
                     luma_now = old_light.r + old_light.g + old_light.b;
@@ -848,25 +858,9 @@ void main() {
                         }
                     }
                 }
-                uint q_now = restir_mean_quant(luma_now);
-                luma_steps = q_now > old_q ? q_now - old_q : old_q - q_now;
-                // A slow move is one or two codes and keeps the fade. A jump
-                // of RESTIR_CHANGE_DROP_STEPS (about 9%) is a different
-                // integrand, the same bar as a visibility flip.
-                bool big_move = changed_here && luma_steps >= RESTIR_CHANGE_DROP_STEPS;
-                // A mover flips visibility as it crosses. That shortens the
-                // mean to the fade cap. Zeroing it every frame was the pop.
-                bool mover_here = lighting_near_change(pos);
-                if (mover_here && (vis_now != old_vis || big_move)) {
-                    uint cap = RESTIR_CHANGE_FADE;
-                    if (luma_steps > 1u) {
-                        cap = max(RESTIR_CHANGE_FADE / luma_steps, 1u);
-                    }
-                    if (mean_prev > cap) {
-                        atomicAdd(gstats.diag[LIGHTING_RESET_FADE], 1u);
-                        mean_prev = cap;
-                    }
-                } else if (vis_now != old_vis || (!changed_here && restir_mean_target_moved(old_q, luma_now)) || big_move) {
+                // Outside every changed ball, one quant step is a different
+                // integrand. Inside a ball the weight below tracks the move.
+                if (vis_now != old_vis || (!changed_here && restir_mean_target_moved(old_q, luma_now))) {
                     mean_dropped = true;
                     atomicAdd(gstats.diag[LIGHTING_RESET_MEAN], 1u);
                     mean_prev = 0u;
@@ -874,17 +868,28 @@ void main() {
                 }
             }
         }
-        if (changed_here && mean_prev > 0u) {
-            // Same 12 on the side the lamp left and the side it still covers.
-            // A 2-sample cap there drops the other lamps' converged mean and
-            // salts the wake. The 8-code clear above is the hard drop.
-            uint cap = RESTIR_CHANGE_FADE;
-            if (luma_steps > 1u) {
-                cap = max(RESTIR_CHANGE_FADE / luma_steps, 1u);
-            }
-            if (mean_prev > cap) {
-                atomicAdd(gstats.diag[LIGHTING_RESET_FADE], 1u);
-                mean_prev = cap;
+        if (changed_here && mean_prev > 0u && !mean_dropped) {
+            float ratio = 1.0;
+            float confidence = 1.0;
+            restir_change_weight(origin, n, two_sided, ratio, confidence);
+            if (!(confidence > 0.0) || !(ratio > 0.0)) {
+                mean_dropped = true;
+                atomicAdd(gstats.diag[LIGHTING_RESET_MEAN], 1u);
+                mean_prev = 0u;
+                mean_e = drawn;
+            } else {
+                mean_e *= ratio;
+                float delta = 1.0 - confidence;
+                if (delta > 0.0) {
+                    uint fit = uint(min(1.0 / delta, float(mean_prev)));
+                    if (fit < 1u) {
+                        fit = 1u;
+                    }
+                    if (mean_prev > fit) {
+                        atomicAdd(gstats.diag[LIGHTING_RESET_FADE], 1u);
+                        mean_prev = fit;
+                    }
+                }
             }
         }
         vec3 e_mean = drawn;

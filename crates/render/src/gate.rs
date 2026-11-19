@@ -19,6 +19,15 @@ pub const DIRECT_IN_COMPOSE: &str = "direct_in_compose";
 /// Include bounce (indirect) light in the presented compose.
 pub const BOUNCE_IN_COMPOSE: &str = "bounce_in_compose";
 
+/// A moving point lamp keeps a smooth wall.
+///
+/// Shipping pipelines specialize constant 0 to 4 (one to four lamps
+/// are the exact sum) and constant 2 to 1 (a changed ball keeps history and
+/// reweights it). Constant 1 is the cache slot count. Knocking this out sets
+/// 0 and 2 to 0: the pixel takes the reservoir, and a changed ball drops
+/// that history. The presented wall grains.
+pub const MOVING_LAMP_WALL: &str = "moving_lamp_wall";
+
 /// True when the named production guard is in force.
 #[must_use]
 #[inline]
@@ -64,6 +73,7 @@ mod tests {
         assert!(super::guard(super::CACHE_FILL));
         assert!(super::guard(super::DIRECT_IN_COMPOSE));
         assert!(super::guard(super::BOUNCE_IN_COMPOSE));
+        assert!(super::guard(super::MOVING_LAMP_WALL));
         assert!(super::guard("unknown_guard"));
     }
 }

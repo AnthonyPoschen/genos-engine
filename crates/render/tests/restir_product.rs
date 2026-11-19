@@ -156,7 +156,23 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(reach.contains("!(range > 0.0)"));
     assert!(reach.contains("bool restir_changed_reaches"));
     assert!(direct.contains("restir_changed_reaches(origin)"));
-    assert!(direct.contains("luma_steps >= RESTIR_CHANGE_DROP_STEPS"));
+    assert!(direct.contains("restir_change_weight(origin, n, two_sided, ratio, confidence)"));
+    assert!(live.contains(
+        "restir_change_weight(pos + nrm * RESTIR_ORIGIN_LIFT, nrm, sided, ratio, confidence)"
+    ));
+    assert!(!direct.contains("RESTIR_CHANGE_DROP_STEPS"));
+    assert!(!direct.contains("RESTIR_CHANGE_FADE"));
+    assert!(!reach.contains("RESTIR_CHANGE_DROP_STEPS"));
+    assert!(!reach.contains("RESTIR_CHANGE_FADE"));
+    assert!(reach.contains("const uint RESTIR_PREV_STRIDE = 8u;"));
+    assert!(reach.contains("layout(constant_id = 0) const uint RESTIR_EXACT_LIT = 4u;"));
+    assert!(reach.contains("layout(constant_id = 2) const uint RESTIR_KEEP_MOVE = 1u;"));
+    assert!(reach.contains("RESTIR_KEEP_MOVE == 0u"));
+    assert!(direct.contains("restir_pix && !restir_few"));
+    assert!(direct.contains(
+        "lamp_hit && !shade_exact && point_lit > 0u && point_lit <= LAMP_PICK_EXACT_LIT"
+    ));
+    assert!(live.contains("!restir_pixel_few(pixel)"));
     assert!(!direct.contains("RESTIR_CHANGE_LEAVE"));
     assert!(!reach.contains("RESTIR_CHANGE_LEAVE"));
     assert!(!direct.contains("restir_words[39u] == 0u"));
@@ -211,12 +227,23 @@ fn assert_lamp_counts(window: &mut Window, renderer: &mut Renderer, camera: &Cam
         draw(window, renderer, &world, camera);
         draw(window, renderer, &world, camera);
         let counts = renderer.lighting_lamp_pick_counts();
-        assert_quiet(&counts, &format!("{count} lamps"));
-        if count > 0 {
-            assert!(
-                counts.restir > 0,
-                "{count} lamps did not shade a reservoir sample ({counts:?})"
+        if count > 0 && count <= 4 {
+            assert_eq!(
+                counts.exact, 0,
+                "{count} lamps fell back to the labelled exact sum ({counts:?})"
             );
+            assert!(
+                counts.restir_point_adds > 0,
+                "{count} lamps did not sum the reaching lamps ({counts:?})"
+            );
+        } else {
+            assert_quiet(&counts, &format!("{count} lamps"));
+            if count > 0 {
+                assert!(
+                    counts.restir > 0,
+                    "{count} lamps did not shade a reservoir sample ({counts:?})"
+                );
+            }
         }
     }
     let built = names(renderer);
@@ -390,9 +417,10 @@ fn assert_exact_gate(window: &mut Window, renderer: &mut Renderer, lit: &World, 
 
 /// `restir_di` off is the labelled exact sum and builds no ReSTIR pipeline.
 /// Flag on, product shade, every lamp
-/// count leaves `exact` at 0 and adds no near point lamp in the direct loop.
-/// One, eight (the exact-sum count), and thirty-two lamps count a reservoir
-/// sample. The labelled exact gate still sums and does not take that loop.
+/// count above four leaves `exact` at 0 and adds no near point lamp in the
+/// direct loop. One lamp sums in that loop. Eight and thirty-two lamps count
+/// a reservoir sample. The labelled exact gate still sums and does not take
+/// that loop.
 /// A still view keeps live history. A yaw keeps some and rejects some. A
 /// coplanar lift keeps more surfaced pixels than it rejects. A facing wall
 /// rejects more than it keeps, and the lamps sit behind that face so the

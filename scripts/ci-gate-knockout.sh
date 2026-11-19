@@ -6,9 +6,11 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
+# binary:test:guard
 tests=(
-  "the_direct_light_is_in_the_presented_frame:${DIRECT_GUARD:-direct_in_compose}"
-  "the_bounce_adds_light_to_the_presented_frame:${BOUNCE_GUARD:-bounce_in_compose}"
+  "gate_presented:the_direct_light_is_in_the_presented_frame:${DIRECT_GUARD:-direct_in_compose}"
+  "gate_presented:the_bounce_adds_light_to_the_presented_frame:${BOUNCE_GUARD:-bounce_in_compose}"
+  "restir_moving_grain:a_moving_point_lamp_does_not_grain_a_flat_wall:${WALL_GUARD:-moving_lamp_wall}"
 )
 
 # The knockout feature must stay test-only, and it is never a default.
@@ -32,14 +34,17 @@ fi
 
 echo "==> presented-frame gates, guards on"
 cargo test -p genos-render --test gate_presented -- --test-threads=1 --nocapture
+cargo test -p genos-render --test restir_moving_grain -- --test-threads=1 --nocapture
 
 for entry in "${tests[@]}"; do
-  name=${entry%%:*}
-  guard=${entry##*:}
+  binary=${entry%%:*}
+  rest=${entry#*:}
+  name=${rest%%:*}
+  guard=${rest##*:}
   echo "==> knockout ${guard} on ${name} (must go red)"
   log=$(mktemp)
   set +e
-  GENOS_KNOCKOUT="$guard" cargo test -p genos-render --features knockout --test gate_presented \
+  GENOS_KNOCKOUT="$guard" cargo test -p genos-render --features knockout --test "$binary" \
     "$name" -- --test-threads=1 --exact 2>&1 | tee "$log"
   status=${PIPESTATUS[0]}
   set -e
