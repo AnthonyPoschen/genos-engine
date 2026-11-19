@@ -179,12 +179,11 @@ pub fn split_floor_and_burst(live_cells: u32, legacy_divisor: u32, burst: u32) -
     (floor, burst.saturating_add(old.saturating_sub(floor)))
 }
 
-/// Mover rays are already inside the floor count. The part past the 1/10
-/// share comes out of the burst.
+/// The burst does not shrink because a mover took rays. The floor is the
+/// 1-in-10 rotation and the burst is the preset burst.
 #[must_use]
-pub fn burst_after_mover_rays(burst: u32, mover_rays: u32) -> u32 {
-    let extra = mover_rays - mover_rays / FLOOR_PERIOD;
-    burst.saturating_sub(extra)
+pub fn burst_after_mover_rays(burst: u32, _mover_rays: u32) -> u32 {
+    burst
 }
 
 /// Floor rays follow the slot rotation. Burst rays go to the highest rank.
@@ -424,16 +423,15 @@ mod tests {
     }
 
     #[test]
-    fn mover_rays_come_out_of_the_same_budget() {
+    fn a_mover_does_not_shrink_the_burst() {
         let (floor, burst) = split_floor_and_burst(1000, 1, 25_000);
         assert_eq!(floor, 100);
         assert_eq!(burst, 25_900);
         assert_eq!(floor + burst, 1000 + 25_000);
         let mover = 80u32;
         let spent = burst_after_mover_rays(burst, mover);
-        let extra = mover - mover / FLOOR_PERIOD;
-        assert_eq!(spent, burst - extra);
-        assert_eq!(floor + spent + extra, floor + burst);
+        assert_eq!(spent, burst);
+        assert_eq!(floor + spent, floor + burst);
     }
 
     #[test]

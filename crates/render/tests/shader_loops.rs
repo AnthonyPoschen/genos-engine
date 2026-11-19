@@ -461,8 +461,8 @@ fn a_refine_child_inherits_the_parent_mean_at_one_set() {
         "the burst is split across the screen quarters"
     );
     assert!(
-        visit.contains("size >= base && !seen"),
-        "on-screen parents do not spawn a second near-field set"
+        !visit.contains("lighting_fine_spawn"),
+        "the 12.5 cm child is not spawned"
     );
     assert!(
         !fill.contains("w == 1u || w == 2u || w == 4u"),

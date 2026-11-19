@@ -286,10 +286,13 @@ fn the_presented_frame_moves_when_the_cache_fills() {
 const ENERGY_FRAMES: usize = 400;
 /// Whole-frame and mid-third mean sRGB luma (Rec.709 weights on the 8-bit
 /// codes). Lavapipe hall, 320×180, 1/60, frozen sun, still boxes, three moving
-/// lamps, frame 400. The every-frame floor is 127.81 / 107.33. This floor
-/// measured 127.74 / 107.35. The 1-in-10 floor that kept replacing the cell
-/// mean was 174.91 / 174.73. A few percent of the every-frame hall; the
-/// washout and the stalled mean both fall outside.
+/// lamps, frame 400. The every-frame floor, the path reference for this pose,
+/// is 127.81 / 107.33. This floor measured 127.74 / 107.35. The 1-in-10 floor
+/// that kept replacing the cell mean was 174.91 / 174.73.
+///
+/// The exclusive mid end stays 113. The path-reference mid is 107.33. A tail
+/// history that keeps a lamp after it crosses into the exact sum sits above
+/// that, and the bound does not move to follow it.
 const ENERGY_ALL_MAX: f64 = 136.0;
 const ENERGY_MID_MAX: f64 = 113.0;
 const ENERGY_ALL_MIN: f64 = 120.0;

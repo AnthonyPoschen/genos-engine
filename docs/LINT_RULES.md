@@ -227,7 +227,6 @@ Delete the casts, then lower that file's count in `lint/lossy-cast-baseline.txt`
 | `crates/render/shaders/gbuffer.frag` | 14 |
 | `crates/render/shaders/lighting_trace.comp` | 12 |
 | `crates/render/shaders/lighting_filter.comp` | 11 |
-| `crates/render/shaders/lighting_screen.comp` | 10 |
 | `crates/render/shaders/material_atlas.glsl` | 10 |
 | `crates/render/shaders/overlay.frag` | 10 |
 | `crates/render/shaders/lighting_place.comp` | 8 |
@@ -236,7 +235,6 @@ Delete the casts, then lower that file's count in `lint/lossy-cast-baseline.txt`
 | `crates/render/shaders/dither.glsl` | 4 |
 | `crates/render/shaders/lighting_check.comp` | 4 |
 | `crates/render/shaders/wire.frag` | 3 |
-| `crates/render/shaders/lighting_atrous.comp` | 1 |
 | `crates/render/shaders/transmit.comp` | 1 |
 
 Bad shader (the check fails this):

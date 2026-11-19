@@ -94,12 +94,6 @@ const LIGHTING_FILL_WALK: u32 = 8;
 /// Shader `LIGHTING_SCENE_CHANGED_MARK`. Added to the change count's fraction
 /// when the host scene hash changed this frame.
 const LIGHTING_SCENE_CHANGED_MARK: f32 = 0.25;
-/// Host `prepare_fill` measured-change weight when `still == 0` (scene hash moved).
-const LIGHTING_MOVER_FILL_SCENE_CHANGE: f32 = LIGHTING_SCENE_CHANGED_MARK;
-/// Host `prepare_fill` metres-moved weight while any hitch record is live this sync.
-const LIGHTING_MOVER_FILL_MOVED_M: f32 = 0.05;
-/// Host `prepare_fill` eye-distance stand-in until per-mover camera range is wired.
-const LIGHTING_MOVER_FILL_DISTANCE_M: f32 = 3.0;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
 fn lighting_compose_at() -> u64 {
@@ -1149,7 +1143,7 @@ impl Gpu {
             LIGHTING_FILTER_SPV,
             LIGHTING_CACHE_SPV,
             LIGHTING_COMPOSE_SPV,
-            LIGHTING_ATROUS_SPV,
+            LIGHTING_PLACE_SPV,
         ];
         for (k, code) in codes.iter().enumerate() {
             let start = Instant::now();
@@ -1177,20 +1171,6 @@ impl Gpu {
             )?;
             self.note_pipeline_time("sh-drain", start);
         }
-        let start = Instant::now();
-        self.lighting.atrous_plain = self.make_compute_pipe(
-            LIGHTING_ATROUS_PLAIN_SPV,
-            self.lighting.layout,
-            "atrous-plain",
-        )?;
-        self.note_pipeline_time("atrous-plain", start);
-        let start = Instant::now();
-        self.lighting.screen_pipe = self.make_compute_pipe(
-            LIGHTING_SCREEN_SPV,
-            self.lighting.layout,
-            "screen-denoise",
-        )?;
-        self.note_pipeline_time("screen-denoise", start);
         let start = Instant::now();
         self.lighting.reach_pipe = self.make_compute_pipe(
             LIGHTING_REACH_SPV,
@@ -5676,10 +5656,6 @@ impl Gpu {
                     }
                 } else if pass == 7 && hdr_compose {
                     self.lighting.compose_hdr_pipe
-                } else if pass == 8 && self.lighting.settings.denoiser.screen {
-                    self.lighting.screen_pipe
-                } else if pass == 8 && self.lighting.settings.denoiser.plain() {
-                    self.lighting.atrous_plain
                 } else {
                     self.lighting.pipes[pass]
                 };
@@ -6482,28 +6458,11 @@ impl Gpu {
             };
             let _ = self.lighting.mover_cache.upsert(rec);
         }
-        self.lighting.mover_cache.rebalance_all();
-        // Stage H: rank mover texels into the shared fill list. The cache pass
-        // deposits world-direction lighting from the lattice (Far never listed).
-        // Knobs (named): measured scene change, metres moved, lamp-near, eye distance.
-        // `still > 0` means no host scene change — pass zeros so KEEP hitch
-        // leftovers do not spend the world fill budget (fill_knockout late).
+        // A move does not resize the pool and does not spend fill rays.
+        // The world-cell floor and the ranked burst are the ray budget.
         let budget = self.lighting.settings.surface_cache.ray_budget;
         let budget = if budget == 0 { 4096 } else { budget };
-        let (measured_change, distance_moved_m) = if self.lighting.still == 0 {
-            (LIGHTING_MOVER_FILL_SCENE_CHANGE, LIGHTING_MOVER_FILL_MOVED_M)
-        } else {
-            (0.0, 0.0)
-        };
-        let lamp_change_near = false;
-        let distance_m = LIGHTING_MOVER_FILL_DISTANCE_M;
-        let stats = self.lighting.mover_cache.prepare_fill(
-            budget,
-            measured_change,
-            distance_moved_m,
-            lamp_change_near,
-            distance_m,
-        );
+        let stats = self.lighting.mover_cache.prepare_fill(budget, 0.0, 0.0, false, 0.0);
         self.lighting.mover_fill_rays = stats.rays;
         self.upload_mover_cache();
     }
@@ -7246,7 +7205,7 @@ fn lighting_view_content_key(pack: &crate::pack::Pack) -> u64 {
 mod sun_step {
     use super::{
         check_lighting_sun_arg, lighting_sun_flag_needs_value, sun_step_small, Lighting,
-        LIGHTING_ATROUS_PLAIN_SPV, LIGHTING_CACHE_SLOTS, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
+        LIGHTING_CACHE_SLOTS, LIGHTING_COMPOSE_HDR_SPV, LIGHTING_COMPOSE_MAINT_SPV,
         LIGHTING_COMPOSE_SPV, LIGHTING_SH_DRAIN_SPV, SUN_COMPOSE_HDR_SPV, SUN_COMPOSE_SPV,
     };
 
@@ -7307,21 +7266,6 @@ mod sun_step {
         assert!(check_lighting_sun_arg("--lighting-debug", None).is_ok());
         assert!(check_lighting_sun_arg("--lighting-debug=1", None).is_err());
         assert!(check_lighting_sun_arg("--scale", None).is_ok());
-    }
-
-    /// The instance is Vulkan 1.0. SPIR-V 1.6 is what NVIDIA reports as
-    /// `NVVM compilation failed: 3`, and the failed compile corrupts the
-    /// driver heap (`corrupted size vs. prev_size` at exit).
-    #[test]
-    fn plain_atrous_spirv_matches_the_vulkan_1_0_instance() {
-        assert!(LIGHTING_ATROUS_PLAIN_SPV.len() >= 8);
-        let version = u32::from_le_bytes([
-            LIGHTING_ATROUS_PLAIN_SPV[4],
-            LIGHTING_ATROUS_PLAIN_SPV[5],
-            LIGHTING_ATROUS_PLAIN_SPV[6],
-            LIGHTING_ATROUS_PLAIN_SPV[7],
-        ]);
-        assert_eq!(version, 0x0001_0000, "SPIR-V {version:#x}");
     }
 
     /// The picture compose stays the GI shader. The sun compose is that pass

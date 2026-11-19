@@ -752,7 +752,7 @@ fn fill_budgets_follow_the_preset_and_round_trip() {
     assert_eq!(high.surface_cache.fill.tile, 8);
     assert_eq!(high.surface_cache.fill.warmup_rays, 16);
     assert_eq!(high.surface_cache.fill.check_rate, 9);
-    assert_eq!(high.surface_cache.fill.max_picks, 4);
+    assert_eq!(high.surface_cache.fill.max_picks, 64);
     let mut picks = high.clone();
     picks
         .set_key("surface_cache.fill_max_picks", "1000")

@@ -94,8 +94,12 @@ fn eight_zero_sets_are_not_resolved() {
     assert!(cache.contains("atomicAdd(gstats.diag[LIGHTING_DIAG_UNDER_TRUSTED], 1u);"));
     assert!(cache.contains("clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0)"));
     assert!(
-        cache.contains("y_own > LIGHTING_SC_LIT_LUMA"),
-        "a short lit texel is trust 1 from its own samples, not the shown field"
+        cache.contains("sc_trust = clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0);"),
+        "the child's weight is its own sets over a full count"
+    );
+    assert!(
+        !cache.contains("y_own > LIGHTING_SC_LIT_LUMA"),
+        "a short lit count must not snap to trust 1"
     );
     assert!(
         cache.contains("under_full"),

@@ -812,9 +812,10 @@ float lighting_cell_size(vec3 pos) {
 }
 float lighting_cell_size_d(float d) {
     float level = clamp(floor(log2(max(d / 8.0, 1.0))), 0.0, 6.0);
-    // Surface cache (mode 3): one texel size, whatever the distance.
+    // Surface cache (mode 3): the 25 cm world cell is the finest bounce.
+    // The 12.5 cm texel is not a bounce store. Shadow cells keep that size.
     if (lighting_world_mode() == 3u) {
-        return LIGHTING_SC_TEXEL;
+        return LIGHTING_SC_HIT;
     }
     return 0.25 * exp2(level);
 }
@@ -1200,10 +1201,17 @@ vec4 lighting_sc_parent(vec3 pos, vec3 n, float size) {
         if (s != ~0u) {
             vec4 v = cache.v[3u * s + 2u];
             if (v.w > 0.5) {
-                if (LIGHTING_SC_WRITES) {
-                    cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                // The other side of a thin wall, a cell off the surface, and
+                // a stale mean are not this pixel's parent.
+                vec3 cn = cache.v[3u * s + 1u].xyz;
+                float facing = dot(cn, n);
+                float plane = abs(dot(cache.v[3u * s].xyz - pos, n));
+                if (facing > 0.0 && plane <= LIGHTING_CELL_HALF * size && !lighting_sc_stale(s)) {
+                    if (LIGHTING_SC_WRITES) {
+                        cache.v[3u * s].w = uintBitsToFloat(lighting_frame());
+                    }
+                    return vec4(v.rgb, 1.0);
                 }
-                return vec4(v.rgb, 1.0);
             }
         }
     }
@@ -1922,11 +1930,6 @@ float lighting_sc_count(uint slot) {
         // S62D: WRC cells keep their history whatever the light does (they
         // track it with an EMA floor, lighting_cache.comp).
         return t;
-    }
-    bool mover;
-    // S76: under A-SVGF a nearby change only nominates a check; the history stays.
-    if (!lighting_sc_asvgf_on() && lighting_sc_local_change(slot, mover)) {
-        t = min(t, mover ? LIGHTING_SC_MOVING : lighting_sc_light_window());
     }
     return t;
 }
@@ -2988,6 +2991,11 @@ uint lighting_sh_lattice_find(uint key) {
 }
 // Loads of the eight corners. A missing id, or a corner the live gates leave
 // out, adds no weight. This is not a hash probe.
+// A corner under this many sets leans on the settled corners. The texel
+// handover stays at four. The lattice read waits longer: a 1-in-10 floor
+// cell is still noisy at four sets once the screen filter is gone.
+const float LIGHTING_LATTICE_READY_SETS = 64.0;
+const float LIGHTING_FINE_READY_SETS = 4.0;
 vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
     const float cs = LIGHTING_SH_CELL;
     uint ax;
@@ -2998,10 +3006,18 @@ vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
     lighting_sh_lattice_axes(p, n, ax, sgn, g0, an, inset);
     vec3 uv = p / cs - vec3(LIGHTING_CELL_HALF) - inset;
     vec3 fr = uv - floor(uv);
-    vec3 sum = vec3(0.0);
-    float ws = 0.0;
-    float ev = 0.0;
+    vec3 corner_lit[8];
+    float corner_w[8];
+    float corner_sets[8];
+    uint corner_on = 0u;
+    vec3 settled = vec3(0.0);
+    float settled_w = 0.0;
+    vec3 gathered = vec3(0.0);
+    float gathered_w = 0.0;
     [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        corner_w[k] = 0.0;
+        corner_sets[k] = 0.0;
+        corner_lit[k] = vec3(0.0);
         uint s = ids[k];
         if (s == ~0u || s >= LIGHTING_CACHE_SLOTS) {
             continue;
@@ -3029,10 +3045,47 @@ vec4 lighting_sh_blend_ids(uint ids[8], vec3 p, vec3 n) {
         if (v.w < LIGHTING_CACHE_HAS_W || lighting_sc_stale(s)) {
             continue;
         }
-        float w = tri * facing;
-        sum += w * lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
-        ws += w;
         float sets = floor(max(v.w, 0.0));
+        float w = tri * facing;
+        vec3 lit = lighting_sh_tilt(s, v.rgb, cn, n) * lighting_sc_sun_gain(s);
+        corner_lit[k] = lit;
+        corner_w[k] = w;
+        corner_sets[k] = sets;
+        corner_on |= 1u << k;
+        gathered += lit * sets;
+        gathered_w += sets;
+        if (sets >= LIGHTING_LATTICE_READY_SETS) {
+            settled += w * lit;
+            settled_w += w;
+        }
+    }
+    // A corner under the lattice handover leans on the settled corners.
+    // Those count as that many sets, and the weight fades as the corner's
+    // own sets catch up. The same blend the child used against its parent.
+    // With no settled corner, the sets-weighted stencil is the parent, so a
+    // wall that is still short of the handover still agrees with itself.
+    vec3 parent_rgb = settled_w > 0.0 ? settled / settled_w : vec3(0.0);
+    if (!(settled_w > 0.0) && gathered_w > 0.0) {
+        parent_rgb = gathered / gathered_w;
+    }
+    bool have_parent = settled_w > 0.0 || gathered_w > 0.0;
+    vec3 sum = vec3(0.0);
+    float ws = 0.0;
+    float ev = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < 8u; k++) {
+        if ((corner_on & (1u << k)) == 0u) {
+            continue;
+        }
+        float sets = corner_sets[k];
+        float w = corner_w[k];
+        vec3 lit = corner_lit[k];
+        if (have_parent && sets < LIGHTING_LATTICE_READY_SETS) {
+            float fade = 1.0 - sets / LIGHTING_LATTICE_READY_SETS;
+            float pn_eff = LIGHTING_LATTICE_READY_SETS * fade;
+            lit = (parent_rgb * pn_eff + lit * sets) / LIGHTING_LATTICE_READY_SETS;
+        }
+        sum += w * lit;
+        ws += w;
         ev += w * clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0);
     }
     lighting_sh_blend_trust = ws > 0.0 ? ev / ws : 0.0;
@@ -3247,16 +3300,82 @@ void lighting_sh_store_drain(uint gid) {
     }
 }
 // Compose loads this. The cache relight is what calls the neighbour walk.
-vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
-#ifdef GENOS_COMPOSE_NO_WALK
-    if (LIGHTING_SC_WRITES) {
-        lighting_sh_lattice_request(pos, n, claim);
-    }
+// The centre counts this many times. Face neighbours out to this many
+// cells count once. A miss adds nothing. A missing centre shows the nearest
+// ring that still has a sample. Each sample is the trilinear blend.
+const float LIGHTING_LATTICE_CENTRE = 2.0;
+const uint LIGHTING_LATTICE_REACH = 6u;
+vec4 lighting_sh_lattice_at(vec3 pos, vec3 n) {
     uint ids[8];
     if (!lighting_sh_lattice_load(pos, n, ids)) {
         return vec4(0.0);
     }
     return lighting_sh_blend_ids(ids, pos, n);
+}
+vec4 lighting_sh_compose_lattice(vec3 pos, vec3 n, bool claim) {
+#ifdef GENOS_COMPOSE_NO_WALK
+    if (LIGHTING_SC_WRITES) {
+        lighting_sh_lattice_request(pos, n, claim);
+    }
+    vec4 centre = lighting_sh_lattice_at(pos, n);
+    // Child weight is sets/full, captured before the neighbour reads
+    // overwrite it. Zero sets leaves the parent in full. A missing centre
+    // is not black while any ring still has a sample.
+    float trust = centre.w > 0.0 ? clamp(lighting_sh_blend_trust, 0.0, 1.0) : 0.0;
+    uint ax = lighting_axis(n) >> 1u;
+    vec3 t = vec3(0.0);
+    vec3 b = vec3(0.0);
+    if (ax == 0u) {
+        t = vec3(0.0, 1.0, 0.0);
+        b = vec3(0.0, 0.0, 1.0);
+    } else if (ax == 1u) {
+        t = vec3(1.0, 0.0, 0.0);
+        b = vec3(0.0, 0.0, 1.0);
+    } else {
+        t = vec3(1.0, 0.0, 0.0);
+        b = vec3(0.0, 1.0, 0.0);
+    }
+    vec3 sum = vec3(0.0);
+    float w = 0.0;
+    if (centre.w > 0.0) {
+        sum = centre.rgb * LIGHTING_LATTICE_CENTRE;
+        w = LIGHTING_LATTICE_CENTRE;
+    }
+    vec4 parent = vec4(0.0);
+    float step_m = LIGHTING_SH_CELL;
+    [[dont_unroll]] for (uint s = 1u; s <= LIGHTING_LATTICE_REACH; s++) {
+        float d = float(s) * step_m;
+        vec3 ring[4] = vec3[4](pos + t * d, pos - t * d, pos + b * d, pos - b * d);
+        vec3 level = vec3(0.0);
+        float level_w = 0.0;
+        [[dont_unroll]] for (uint i = 0u; i < 4u; i++) {
+            vec4 nb = lighting_sh_lattice_at(ring[i], n);
+            if (nb.w > 0.0) {
+                level += nb.rgb;
+                level_w += 1.0;
+                sum += nb.rgb;
+                w += 1.0;
+            }
+        }
+        // The nearest ring that passes the leak gates is the parent. A ring
+        // that fails is skipped, so the next one out is the ancestor.
+        if (parent.w <= 0.0 && level_w > 0.0) {
+            parent = vec4(level / level_w, 1.0);
+        }
+    }
+    if (w <= 0.0) {
+        return vec4(0.0);
+    }
+    vec3 spatial = sum / w;
+    vec3 shown = spatial;
+    if (parent.w > 0.0 && trust < 1.0) {
+        shown = mix(parent.rgb, spatial, trust);
+    }
+    float out_w = centre.w;
+    if (!(out_w > LIGHTING_CACHE_HAS_W)) {
+        out_w = 1.0;
+    }
+    return vec4(shown, out_w);
 #else
     return lighting_sh_read(pos, n, claim);
 #endif
@@ -4058,8 +4177,7 @@ const float LIGHTING_FINE_SCORE_NEAR = 0.25;
 const float LIGHTING_FINE_CHG_CAP = 4.0;
 const float LIGHTING_FINE_PLANE_EPS = 1.0e-3;
 const float LIGHTING_FINE_HALF = 0.5;
-// A texel under this many sets outranks one that already has them.
-const float LIGHTING_FINE_READY_SETS = 4.0;
+// A texel under LIGHTING_FINE_READY_SETS outranks one that already has them.
 // Per-set luminance fraction when a texel has no estimator yet. The wide
 // regulariser uses the same 30% for an unestimated texel.
 const float LIGHTING_FINE_PRIOR_SIGMA = 0.3;
@@ -5092,6 +5210,12 @@ vec4 lighting_world_irradiance(vec3 pos, vec3 n) {
     if (om == ~0u && mode == 3u && !LIGHTING_SC_KEEP_NEAR && (lighting_sc_flags() & 4194304u) != 0u && lighting_in_change(pos)) {
         return vec4(0.0);
     }
+    // Mode 3 bounce is the 25 cm SH lattice. The texel gather and its trust
+    // mix are not the picture and not the ray read.
+    if (mode == 3u) {
+        lighting_px_shade = 1u;
+        return lighting_sh_compose_lattice(pos, n, false);
+    }
     return lighting_world_irradiance_in(pos, n, pos, om != ~0u);
 }
 // Debug view "texels" (lighting_compose.comp mode 7): the size a pixel at pos facing n
@@ -5380,18 +5504,10 @@ vec4 lighting_world_irradiance_in(vec3 pos, vec3 n, vec3 wpos, bool obj) {
                 // samples outweigh it. A zero own-count used to leave trust
                 // at 0, so the pixel stayed on the coarse cell.
                 sc_trust = 1.0;
-            } else if (sets >= LIGHTING_SC_FULL_SETS - LIGHTING_SC_SET_HALF) {
-                // A full count, including a real zero, is the texel.
-                sc_trust = 1.0;
-            } else if (sets >= LIGHTING_SC_SET_HALF) {
-                // Own samples, not the shown field. The field can be a
-                // neighbour filter while the samples are black. A zero-set
-                // corner never reaches here, so an unclaimed centre stays
-                // on the coarse cell.
-                vec3 own_rgb = max(cache.v[3u * slot + 2u].rgb, vec3(0.0)) * lighting_sc_sun_gain(slot);
-                const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
-                float y_own = dot(own_rgb, lw);
-                sc_trust = y_own > LIGHTING_SC_LIT_LUMA ? 1.0 : 0.0;
+            } else {
+                // The child's weight grows with its own sets. A short lit
+                // count used to snap to trust 1, so the coarse cell popped out.
+                sc_trust = clamp(sets / LIGHTING_SC_FULL_SETS, 0.0, 1.0);
             }
         }
         if ((lighting_sc_flags() & 32u) != 0u) {
@@ -6715,11 +6831,6 @@ float lighting_history_value(uint slot, vec3 old_rgb, vec3 sample_rgb) {
         float rays = max(cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].w, 1.0);
         float noise = sqrt(variance / rays);
         noise = max(noise, LIGHTING_HISTORY_NOISE);
-        if (lighting_near_change(cache.v[3u * slot].xyz)) {
-            float spread = cache.v[LIGHTING_SC_EST_AT + 2u * slot + 1u].z;
-            float scale = max(max(sample_l, mean_l), LIGHTING_HISTORY_NOISE);
-            noise = spread > LIGHTING_HISTORY_NOISE ? max(sqrt(spread), scale) : scale;
-        }
         if (abs(sample_l - mean_l) > LIGHTING_HISTORY_SIGMA * noise) {
             float denom = max(max(abs(sample_l), abs(mean_l)), LIGHTING_HISTORY_NOISE);
             value = min(1.0, value + abs(sample_l - mean_l) / denom);
@@ -7228,9 +7339,9 @@ float lighting_shadow_get(vec3 o, vec3 n, uint li) {
     }
     uint tag;
     uint at = lighting_shadow_cell(o, n, li, tag);
-    // A mover at this point changes the shadow. Re-trace, and leave the
-    // cached bit for the frames after the mover has left.
-    if (lighting_near_change(o)) {
+    // A non-empty change list means some surface moved. The cached bit is
+    // for the frames after that list is empty. This is one header load.
+    if (lighting_reach_noting()) {
         return -1.0;
     }
     vec4 e = cache.v[at];

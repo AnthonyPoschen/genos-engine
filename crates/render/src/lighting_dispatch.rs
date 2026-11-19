@@ -512,7 +512,6 @@ pub(crate) fn light_groups(
         out.push(3, pixels.div_ceil(64), LIGHTING_MODE1, B_DIRECT);
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
         push_cache_resolve(&mut out, settings);
-        push_denoise(settings, w, h, slots, &mut out);
         push_picture(&mut out, settings, w.div_ceil(8), h.div_ceil(8));
     } else {
         gated(
@@ -534,42 +533,6 @@ pub(crate) fn light_groups(
             out.counts[B_DIRECT as usize].saturating_add(out.counts[B_HIT as usize]);
     }
     out
-}
-
-/// Screen wavelet: one 8×8 group per picture block. Hash wavelet: one group
-/// per 64 cache slots.
-///
-/// Screen stages: 0 stores the visible slot, 1 picks one pixel per cell and
-/// runs the hash variance, then one stage per wavelet iteration, then the
-/// push. The hash stages stay 0, the iterations, and 6.
-fn push_denoise(settings: &LightingSettings, w: u32, h: u32, slots: u32, out: &mut LightGroups) {
-    let iters = settings.denoiser.iterations;
-    let (gx, gy) = if settings.denoiser.screen {
-        (w.div_ceil(8).max(1), h.div_ceil(8).max(1))
-    } else {
-        (slots, 1)
-    };
-    if settings.denoiser.screen {
-        out.push(8, gx, gy, B_ATROUS);
-        out.atrous_stages.push(0);
-        out.push(8, gx, gy, B_ATROUS);
-        out.atrous_stages.push(1);
-        for i in 0..iters {
-            out.push(8, gx, gy, B_ATROUS);
-            out.atrous_stages.push(2 + i);
-        }
-        out.push(8, gx, gy, B_ATROUS);
-        out.atrous_stages.push(2 + iters);
-        return;
-    }
-    out.push(8, gx, gy, B_ATROUS);
-    out.atrous_stages.push(0);
-    for stage in 1..=iters {
-        out.push(8, gx, gy, B_ATROUS);
-        out.atrous_stages.push(stage);
-    }
-    out.push(8, gx, gy, B_ATROUS);
-    out.atrous_stages.push(6);
 }
 
 /// GI with screen probes and no surface cache. A still scene settles onto the
@@ -634,9 +597,9 @@ fn gated(
     if round && buckets.cache {
         push_cache_resolve(out, settings);
     }
-    if buckets.atrous {
-        push_denoise(settings, w, h, slots, out);
-    }
+    // The screen wavelet and the hash wavelet are not dispatched. Bounce is
+    // the world-cell lattice, so the picture does not filter it.
+    let _ = (buckets.atrous, slots);
     push_picture(
         out,
         settings,
@@ -761,7 +724,7 @@ mod probe_still_tests {
         assert!(one[B_DIRECT as usize] > 0);
         assert!(one[B_COMPOSE as usize] > 0);
         assert!(two[B_CACHE_RAYS as usize] > 0);
-        assert!(two[B_ATROUS as usize] > 0);
+        assert_eq!(two[B_ATROUS as usize], 0);
         assert!(two[B_HIT as usize] > 0);
         assert_eq!(two[B_PLACE as usize], 0);
         assert_eq!(two[B_TRACE as usize], 0);
@@ -849,7 +812,7 @@ mod probe_still_tests {
         let high = LightingSettings::preset(LightingPreset::High);
         let busy = groups(&high, false, true);
         assert!(busy.counts[B_CACHE_RAYS as usize] > 0);
-        assert!(busy.counts[B_ATROUS as usize] > 0);
+        assert_eq!(busy.counts[B_ATROUS as usize], 0);
         let quiet = groups(&high, true, false);
         assert_eq!(quiet.pixel_only, 0);
         assert_eq!(quiet.counts[B_DIRECT as usize], 1);
@@ -868,24 +831,16 @@ mod probe_still_tests {
     }
 
     #[test]
-    fn screen_denoise_launches_the_picture_and_hash_keeps_the_slots() {
-        let slots = (LIGHTING_CACHE_SLOTS as u32).div_ceil(64);
+    fn the_wavelet_is_not_dispatched() {
         let high = LightingSettings::preset(LightingPreset::High);
-        assert!(high.denoiser.screen, "high defaults to the screen launch");
         let screen_groups = groups(&high, false, true);
         let picture: Vec<_> = screen_groups
             .groups
             .iter()
             .filter(|(pass, _, _)| *pass == 8)
             .collect();
-        assert_eq!(picture.len(), 8, "gather, variance, five iterations, push");
-        assert_eq!(screen_groups.atrous_stages, vec![0, 1, 2, 3, 4, 5, 6, 7]);
-        for (pass, gx, gy) in &picture {
-            assert_eq!(*pass, 8);
-            assert_eq!(*gx, 320u32.div_ceil(8));
-            assert_eq!(*gy, 180u32.div_ceil(8));
-            assert_ne!(*gx, slots);
-        }
+        assert!(picture.is_empty(), "the screen wavelet is not a pass");
+        assert_eq!(screen_groups.atrous_stages, Vec::<u32>::new());
         let mut hash_settings = high.clone();
         hash_settings
             .set_key("denoise_launch", "hash")
@@ -896,27 +851,16 @@ mod probe_still_tests {
             .iter()
             .filter(|(pass, _, _)| *pass == 8)
             .collect();
-        assert_eq!(hash_atrous.len(), 7, "the launch key returns to hash slots");
-        assert_eq!(hash.atrous_stages, vec![0, 1, 2, 3, 4, 5, 6]);
-        for (_, gx, gy) in hash_atrous {
-            assert_eq!(*gx, slots);
-            assert_eq!(*gy, 1);
-        }
+        assert!(hash_atrous.is_empty(), "the hash wavelet is not a pass");
         let medium = groups(
             &LightingSettings::preset(LightingPreset::Medium),
             false,
             true,
         );
-        let medium_atrous: Vec<_> = medium
-            .groups
-            .iter()
-            .filter(|(pass, _, _)| *pass == 8)
-            .collect();
-        assert_eq!(medium_atrous.len(), 5, "variance, three iterations, push");
-        for (_, gx, gy) in medium_atrous {
-            assert_eq!(*gx, slots);
-            assert_eq!(*gy, 1);
-        }
+        assert!(
+            medium.groups.iter().all(|(pass, _, _)| *pass != 8),
+            "medium does not launch the wavelet"
+        );
         let bytes = pack_lighting_ctrl(&high, 0, 1.0, 0, 0);
         let bits = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
         assert_ne!(bits & CTRL_DENOISE_SCREEN, 0);

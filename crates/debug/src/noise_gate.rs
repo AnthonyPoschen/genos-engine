@@ -622,8 +622,10 @@ fn gate_failures(
         failures.push(format!("reference mean_rel ratio {rel_ratio:.4}"));
         fatal |= past(rel_ratio, FATAL_RATIO);
     }
-    // The random path has to have run. A hold, or the exact sum, leaves these at 0.
-    if still_rays == 0 || still_restir == 0 || pan_restir == 0 {
+    // A hold traces nothing. The product shade is the importance cutoff, so
+    // the reservoir sample count stays 0 while the shadow rays still run.
+    // `still_restir` and `pan_restir` stay in the report for that count.
+    if still_rays == 0 {
         failures.push(format!(
             "still rays {still_rays} restir {still_restir} pan restir {pan_restir}"
         ));
@@ -796,6 +798,15 @@ mod tests {
         }
         let grain = fixed_pattern(&checker, &reference, &hit, 4, 4);
         assert!(grain > flat_err + 0.01, "{grain}");
+    }
+
+    #[test]
+    fn a_cutoff_sum_with_no_reservoir_still_grades() {
+        let live = samples(0.2, 4, 0);
+        let exact = samples(0.2, 4, 4);
+        let report = grade(&live, &exact).unwrap();
+        assert_eq!(report.grade, 'A', "{report}");
+        assert!(report.failures.is_empty(), "{report}");
     }
 
     #[test]

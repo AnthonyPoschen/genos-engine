@@ -1,6 +1,21 @@
-#![cfg_attr(test, expect(clippy::disallowed_methods, reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::doc_markdown, reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"))]
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::disallowed_methods,
+        reason = "TODO(lint-2026-10-14): publish intent with the CLI argument, not set_var. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(
+        clippy::doc_markdown,
+        reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
+    )
+)]
+#![cfg_attr(
+    test,
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
 //! Product wiring for `restir_di`. The picture gates stay in `restir_di.rs`.
 //!
@@ -181,14 +196,45 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(pick.contains("const uint RESTIR_MEAN_CAP = 4096u;"));
 }
 
-fn assert_quiet(counts: &LampPickCounts, what: &str) {
+/// The tail lamp is one draw against the finished weight sum. Picking while
+/// that sum is still growing is not the probability `tail_sum / w` assumes.
+#[test]
+fn the_tail_draw_uses_the_finished_weight_sum() {
+    let direct = include_str!("../shaders/lighting_direct.comp");
+    let tail_sum_at = direct
+        .find("cut.tail_sum = run;")
+        .expect("finished tail sum");
+    let mark_at = direct
+        .find("float mark = u * run;")
+        .expect("inverse-CDF mark");
+    assert!(
+        tail_sum_at < mark_at,
+        "the tail draw must use the finished sum"
+    );
+    assert!(direct.contains("const float RESTIR_TAIL_EPS = 1.0e-6;"));
+    assert!(direct.contains("acc >= mark"));
+    assert!(
+        direct.contains("now_tail != was_tail"),
+        "a lamp that crosses the cutoff must leave the tail history"
+    );
+}
+
+fn assert_no_labelled_exact(counts: &LampPickCounts, what: &str) {
     assert_eq!(
         counts.exact, 0,
-        "{what} fell back to the exact sum ({counts:?})"
+        "{what} fell back to the labelled exact sum ({counts:?})"
+    );
+}
+
+fn assert_cutoff_sum(counts: &LampPickCounts, what: &str) {
+    assert_no_labelled_exact(counts, what);
+    assert!(
+        counts.restir_point_adds > 0,
+        "{what} did not sum the lamps at or above the cutoff ({counts:?})"
     );
     assert_eq!(
-        counts.restir_point_adds, 0,
-        "{what} added a near point lamp in the direct loop ({counts:?})"
+        counts.restir, 0,
+        "{what} added the reservoir on top of the cutoff sum ({counts:?})"
     );
 }
 
@@ -227,23 +273,15 @@ fn assert_lamp_counts(window: &mut Window, renderer: &mut Renderer, camera: &Cam
         draw(window, renderer, &world, camera);
         draw(window, renderer, &world, camera);
         let counts = renderer.lighting_lamp_pick_counts();
-        if count > 0 && count <= 4 {
-            assert_eq!(
-                counts.exact, 0,
-                "{count} lamps fell back to the labelled exact sum ({counts:?})"
-            );
-            assert!(
-                counts.restir_point_adds > 0,
-                "{count} lamps did not sum the reaching lamps ({counts:?})"
-            );
+        if count > 0 {
+            assert_cutoff_sum(&counts, &format!("{count} equal lamps"));
         } else {
-            assert_quiet(&counts, &format!("{count} lamps"));
-            if count > 0 {
-                assert!(
-                    counts.restir > 0,
-                    "{count} lamps did not shade a reservoir sample ({counts:?})"
-                );
-            }
+            assert_no_labelled_exact(&counts, "0 lamps");
+            assert_eq!(
+                (counts.restir, counts.restir_point_adds),
+                (0, 0),
+                "0 lamps shaded a point lamp ({counts:?})"
+            );
         }
     }
     let built = names(renderer);
@@ -268,8 +306,7 @@ fn assert_still(
         "stable accept {} reject {} exact {} restir {} point_adds {}",
         held.history_accepts, held.history_rejects, held.exact, held.restir, held.restir_point_adds
     );
-    assert_quiet(&held, "a still view");
-    assert!(held.restir > 0, "a still view dropped the reservoir ({held:?})");
+    assert_cutoff_sum(&held, "a still view");
     assert!(
         held.history_accepts > 0,
         "a still view kept no live history ({held:?})"
@@ -281,12 +318,7 @@ fn assert_still(
     held
 }
 
-fn assert_yaw(
-    window: &mut Window,
-    renderer: &mut Renderer,
-    lit: &World,
-    held: &LampPickCounts,
-) {
+fn assert_yaw(window: &mut Window, renderer: &mut Renderer, lit: &World, held: &LampPickCounts) {
     let turned = pose(0.7);
     draw(window, renderer, lit, &turned);
     let turn = renderer.lighting_lamp_pick_counts();
@@ -294,9 +326,11 @@ fn assert_yaw(
         "turn accept {} reject {} exact {} restir {} point_adds {}",
         turn.history_accepts, turn.history_rejects, turn.exact, turn.restir, turn.restir_point_adds
     );
-    assert_quiet(&turn, "a yaw");
-    assert!(turn.restir > 0, "a yaw dropped the reservoir ({turn:?})");
-    assert!(turn.history_accepts > 0, "a yaw kept no live history ({turn:?})");
+    assert_cutoff_sum(&turn, "a yaw");
+    assert!(
+        turn.history_accepts > 0,
+        "a yaw kept no live history ({turn:?})"
+    );
     assert!(
         turn.history_rejects > 0,
         "a yaw rejected no live history ({turn:?})"
@@ -329,7 +363,7 @@ fn assert_lift(
         mismatch.restir,
         mismatch.restir_point_adds
     );
-    assert_quiet(&mismatch, "a coplanar lift");
+    assert_cutoff_sum(&mismatch, "a coplanar lift");
     assert!(
         mismatch.history_accepts > mismatch.history_rejects,
         "a coplanar lift kept no more history than it rejected ({mismatch:?})"
@@ -369,7 +403,11 @@ fn assert_wall(window: &mut Window, renderer: &mut Renderer, mismatch: &LampPick
         surface.restir,
         surface.restir_point_adds
     );
-    assert_quiet(&surface, "a wall mismatch");
+    assert_no_labelled_exact(&surface, "a wall mismatch");
+    assert_eq!(
+        surface.restir_point_adds, 0,
+        "a facing wall summed a lamp that sits behind that face ({surface:?})"
+    );
     assert!(
         surface.history_rejects > surface.history_accepts,
         "a facing wall kept at least as much history as it rejected ({surface:?})"
@@ -416,11 +454,9 @@ fn assert_exact_gate(window: &mut Window, renderer: &mut Renderer, lit: &World, 
 }
 
 /// `restir_di` off is the labelled exact sum and builds no ReSTIR pipeline.
-/// Flag on, product shade, every lamp
-/// count above four leaves `exact` at 0 and adds no near point lamp in the
-/// direct loop. One lamp sums in that loop. Eight and thirty-two lamps count
-/// a reservoir sample. The labelled exact gate still sums and does not take
-/// that loop.
+/// Flag on, equal lamps at every count are at or above the importance cutoff,
+/// so the direct loop sums them and the reservoir sample count stays 0. The
+/// labelled exact gate still sums and does not take that loop.
 /// A still view keeps live history. A yaw keeps some and rejects some. A
 /// coplanar lift keeps more surfaced pixels than it rejects. A facing wall
 /// rejects more than it keeps, and the lamps sit behind that face so the
@@ -463,7 +499,8 @@ fn quiet_restir(mode: LampPickMode) -> LightingSettings {
     settings
 }
 
-/// `gi-1bounce` is mode Hits. A quiet frame used to return before the reservoir.
+/// `gi-1bounce` is mode Hits. A quiet frame used to return before the shade.
+/// Equal lamps are the cutoff sum, so the reservoir sample count stays 0.
 #[test]
 fn gi_1bounce_quiet_frames_read_the_reservoir() {
     let _diag = LampDiag;
@@ -480,24 +517,18 @@ fn gi_1bounce_quiet_frames_read_the_reservoir() {
     renderer.set_lighting_settings(quiet_restir(LampPickMode::Hits));
     draw(window, renderer, &world, &camera);
     let first = renderer.lighting_lamp_pick_counts();
-    assert!(
-        first.restir > 0,
-        "the first gi-1bounce frame did not read the reservoir ({first:?})"
-    );
+    assert_cutoff_sum(&first, "the first gi-1bounce frame");
     draw(window, renderer, &world, &camera);
     draw(window, renderer, &world, &camera);
     let quiet = renderer.lighting_lamp_pick_counts();
     eprintln!(
-        "gi-1bounce quiet exact {} restir {}",
-        quiet.exact, quiet.restir
+        "gi-1bounce quiet exact {} restir {} point_adds {}",
+        quiet.exact, quiet.restir, quiet.restir_point_adds
     );
-    assert_eq!(
-        quiet.exact, 0,
-        "a quiet gi-1bounce frame shaded the exact sum ({quiet:?})"
-    );
+    assert_cutoff_sum(&quiet, "a quiet gi-1bounce frame");
     assert!(
-        quiet.restir > 0,
-        "a quiet gi-1bounce frame skipped the reservoir ({quiet:?})"
+        quiet.pixels > 0,
+        "a quiet gi-1bounce frame traced no shadow rays ({quiet:?})"
     );
 }
 
@@ -526,10 +557,7 @@ fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
         draw(window, renderer, &world, &camera);
         let live = renderer.lighting_lamp_pick_counts();
         let failures = renderer.lighting_restir_prepare_failures();
-        assert!(
-            live.restir > 0,
-            "{mode:?} did not shade the reservoir ({live:?})"
-        );
+        assert_cutoff_sum(&live, &format!("{mode:?} before the failure"));
         renderer.force_restir_prepare_failure(true);
         draw(window, renderer, &world, &camera);
         let failed = renderer.lighting_lamp_pick_counts();
@@ -545,11 +573,15 @@ fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
             "{mode:?} did not count the forced failure"
         );
         assert_eq!(
-            failed.restir, 0,
-            "{mode:?} still counted a reservoir sample ({failed:?})"
+            (failed.restir, failed.restir_point_adds),
+            (0, 0),
+            "{mode:?} still shaded the cutoff or the reservoir ({failed:?})"
         );
+        // The cutoff sums every reaching lamp. The labelled fallback still
+        // honours max_lights, so its ray count can be lower. A hold of the
+        // previous colour would trace nothing.
         assert!(
-            failed.pixels > live.pixels,
+            failed.pixels > 0,
             "{mode:?} kept the previous colour instead of the labelled sum ({failed:?} vs {live:?})"
         );
         if mode == LampPickMode::Reuse {
@@ -569,10 +601,7 @@ fn a_failed_restir_prepare_is_labelled_and_does_not_hold() {
             again.exact, 0,
             "{mode:?} kept the exact hold into a restir frame ({again:?})"
         );
-        assert!(
-            again.restir > 0,
-            "{mode:?} did not read the reservoir after the failure ({again:?})"
-        );
+        assert_cutoff_sum(&again, &format!("{mode:?} after the failure"));
         if mode == LampPickMode::Hits {
             assert!(
                 failed.pixels > 0,

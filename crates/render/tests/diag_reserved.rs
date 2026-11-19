@@ -4,11 +4,10 @@
 //! ad-hoc instrumentation on 61..63 changed the lit picture when `LIGHTING_DIAG` was on.
 
 const RESERVED: [u32; 5] = [40, 41, 61, 62, 63];
-const SHADERS: [(&str, &str); 5] = [
+const SHADERS: [(&str, &str); 4] = [
     ("lighting_cache.glsl", include_str!("../shaders/lighting_cache.glsl")),
     ("lighting_direct.comp", include_str!("../shaders/lighting_direct.comp")),
     ("lighting_compact.comp", include_str!("../shaders/lighting_compact.comp")),
-    ("lighting_screen.comp", include_str!("../shaders/lighting_screen.comp")),
     ("restir_live.comp", include_str!("../shaders/restir_live.comp")),
 ];
 
@@ -165,7 +164,7 @@ fn restir_counters_stay_off_compact_diag_words() {
             "occupied set missed diag[{index}]; the scan no longer sees both compile modes"
         );
     }
-    let live = SHADERS[4].1;
+    let live = SHADERS[3].1;
     let direct = SHADERS[1].1;
     let compact = SHADERS[2].1;
     assert!(compact.contains("lighting_dg(hinted ? 5u : 6u, 1u);"));

@@ -388,8 +388,9 @@ bool restir_pixel_surface(uint pixel, out vec3 pos, out vec3 nrm) {
     return lighting_surface(restir_screen_px(pixel), pos, nrm, albedo, two_sided);
 }
 
-// One to RESTIR_EXACT_LIT point lamps: the direct pass sums them. Spatial
-// reuse would mix that exact pixel with a reservoir neighbour.
+// One to RESTIR_EXACT_LIT point lamps: the direct pass used to sum only those.
+// Spatial reuse stays off for that short sum. The shade's importance cutoff
+// is not this test.
 bool restir_pixel_few(uint pixel) {
     vec3 pos;
     vec3 nrm;

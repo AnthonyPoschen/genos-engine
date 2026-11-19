@@ -5,18 +5,12 @@
 // lighting_common.glsl first.
 // `p` stays in the signature so compose and the sun compose keep one call.
 //
-// A full-trust read is the fine world colour. Anything less mixes a found
-// coarser world-cache cell (two size steps, bilinear, stale and off-plane
-// cells left out), or a corner's SH irradiance when SH cells are on. A miss
-// keeps the fine colour and mixes nothing: black is not a stand-in for a
-// missing cell. Trust 0 with a found cell is that coarser colour, so the
-// first accepted texel does not pop from black to full luminance. One flat
-// cell would paint the grid the banner cut measures, so the corners blend.
-// This does not stamp the cell and it is not a second neighbour gather.
+// The displayed indirect is the 25 cm SH lattice at the true normal. The
+// 12.5 cm texel, its trust mix, and the screen wavelet are not this read.
+// A miss stays black: a missing cell is not a stand-in colour. This does
+// not stamp the cell and it is not a second neighbour gather.
 
 const float LIGHTING_COARSE_HALF = 0.5;
-// Same plane gate as lighting_sc_bilerp_cover. A step or a ledge is another surface.
-const float LIGHTING_COARSE_PLANE = 0.1;
 
 void lighting_coarse_add(vec3 q, vec3 n, float size, float bil, inout vec3 sum, inout float wsum) {
     if (!(bil > 0.0)) {
@@ -29,7 +23,12 @@ void lighting_coarse_add(vec3 q, vec3 n, float size, float bil, inout vec3 sum, 
     if (lighting_sc_stale(s)) {
         return;
     }
-    if (abs(dot(cache.v[3u * s].xyz - q, n)) > LIGHTING_COARSE_PLANE) {
+    // The far side of a thin wall, and a cell more than half its size off
+    // the surface, are not this corner.
+    if (dot(cache.v[3u * s + 1u].xyz, n) <= 0.0) {
+        return;
+    }
+    if (abs(dot(cache.v[3u * s].xyz - q, n)) > LIGHTING_CELL_HALF * size) {
         return;
     }
     vec4 v = cache.v[3u * s + 2u];
@@ -98,7 +97,14 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     lighting_sc_display = true;
     uint pixel = p.y * pc.dims.x + p.x;
     lighting_px_object_id = (p.x != ~0u && pixel < pc.dims.x * pc.dims.y) ? gbuf_object_id(pixel) : 0u;
-    vec4 world = lighting_world_irradiance(pos, n);
+    // Bounce is the 25 cm SH lattice at the true normal. The 12.5 cm texel,
+    // its trust mix, and the screen wavelet are not this read. The claim is
+    // the one cell the lattice blends. Without it the corners stay empty and
+    // the picture never leaves the first frame.
+    if (LIGHTING_SC_WRITES) {
+        lighting_cache_find_sized(pos, n, true, LIGHTING_SC_HIT, pos);
+    }
+    vec4 world = lighting_sh_compose_lattice(pos, n, false);
     lighting_px_object_id = 0u;
     lighting_px_world_w = world.w;
     lighting_sc_display = false;
@@ -109,24 +115,9 @@ vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n) {
     if (p.x == ~0u) {
         return vec3(0.0);
     }
-    float trust = clamp(world.w, 0.0, 1.0);
-    if (trust >= 1.0) {
-        // A full-trust black is a real zero, not a miss.
-        lighting_px_bounce_found = true;
-        return max(world.rgb, vec3(0.0));
+    if (!(world.w > LIGHTING_CACHE_HAS_W)) {
+        return vec3(0.0);
     }
-    vec4 coarse = lighting_coarse_world(pos, n);
-    // The doubled-size hash often misses. The 25 cm lattice is the filled
-    // coarser level maintenance already stored. Filled is a corner with
-    // sets, not a non-zero mean and not a higher count than this pixel.
-    // A miss is not black light.
-    if (!(coarse.w > LIGHTING_CACHE_HAS_W)) {
-        coarse = lighting_sh_compose_lattice(pos, n, false);
-        if (!(coarse.w > LIGHTING_CACHE_HAS_W)) {
-            return max(world.rgb, vec3(0.0));
-        }
-    }
-    // A coarser mix is not a resolved zero. Trust below 1 can still be a
-    // young texel, and holding pack(black) would freeze it.
-    return max(mix(coarse.rgb, max(world.rgb, vec3(0.0)), trust), vec3(0.0));
+    lighting_px_bounce_found = true;
+    return max(world.rgb, vec3(0.0));
 }

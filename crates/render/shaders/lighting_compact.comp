@@ -84,10 +84,6 @@ void main() {
             return;
         }
     }
-    // Near a change (params.z bit 5): a patch on or around an object that moved,
-    // came or went sees a different scene, so it is relit with the young (first),
-    // not when the sweep comes round (every live / batch rounds).
-    bool near = ((pc.params.z >> 5u) & 1u) != 0u && lighting_near_change(lighting_sc_texel_pos(slot));
     float t = cache.v[3u * slot + 2u].w;
     if (lighting_world_mode() == 3u) {
         lighting_sc_pool(slot);
@@ -102,6 +98,9 @@ void main() {
         // are removed. fill_budget 0 traces no cache rays.
         return;
     }
+    // Other modes: a patch around a moved object is relit with the young.
+    // World mode 3 returned above. It does not walk the change list.
+    bool near = ((pc.params.z >> 5u) & 1u) != 0u && lighting_near_change(lighting_sc_texel_pos(slot));
     uint m = lighting_sc_entries(slot, true);
     if (near || t < LIGHTING_CACHE_MATURE - 0.5) {
         uint at = atomicAdd(ckeys.key[2u * LIGHTING_CACHE_SLOTS + 1u], m);
