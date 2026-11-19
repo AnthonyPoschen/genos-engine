@@ -234,3 +234,45 @@ fn a_lit_region_has_no_cell_sized_black_square() {
     }
     assert!(saw_light, "the moving hall never lit");
 }
+
+/// A settled hall, then a moving camera. A new voxel has no ray of its own
+/// yet. The same frame must publish its ancestor, so no visible surface is
+/// left with an empty sample.
+#[test]
+fn a_moving_camera_has_no_empty_voxel() {
+    let (_guard, mut life) = open();
+    let window = &mut *life.window;
+    let renderer = &mut *life.device;
+    renderer.apply_lighting_preset("high").expect("high preset");
+    show(renderer);
+    renderer.reset_lighting_cache();
+    let (stage, mut camera) = hall(true);
+    let mut saw_light = false;
+    for frame in 0..24 {
+        let picture = draw(window, renderer, &stage.world, &camera);
+        let luma = luma_of(&picture);
+        let mean = luma.iter().sum::<f64>() / f64::from(u32::try_from(luma.len()).expect("len"));
+        if mean > LIT {
+            saw_light = true;
+        }
+        if frame + 1 == 24 {
+            let gaps = renderer.lighting_cascade_gaps();
+            assert!(
+                gaps == 0,
+                "settled frame has {gaps} visible surfaces with no data, mean {mean:.4}"
+            );
+        }
+    }
+    assert!(saw_light, "the hall never lit");
+    let mut yaw = -0.3554;
+    for frame in 0..8 {
+        yaw += 0.12;
+        camera.set_pose(Vec3::new(14.5, 1.7, 23.5), yaw, 0.08);
+        let _ = draw(window, renderer, &stage.world, &camera);
+        let gaps = renderer.lighting_cascade_gaps();
+        assert!(
+            gaps == 0,
+            "motion frame {frame} has {gaps} visible surfaces with no data"
+        );
+    }
+}

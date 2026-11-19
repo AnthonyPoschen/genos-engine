@@ -1551,6 +1551,10 @@ impl Tools {
                 "pixels",
                 num(f64::from(ctx.renderer.lighting_under_trusted_pixels())),
             )])),
+            "lighting_cascade_gaps" => reply(obj(vec![(
+                "pixels",
+                num(f64::from(ctx.renderer.lighting_cascade_gaps())),
+            )])),
             "lighting_fill_compact_work" => {
                 let work = ctx.renderer.lighting_fill_compact_work();
                 reply(obj(vec![

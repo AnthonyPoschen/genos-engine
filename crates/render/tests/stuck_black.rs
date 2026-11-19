@@ -105,8 +105,9 @@ fn eight_zero_sets_are_not_resolved() {
         cache.contains("under_full"),
         "a short lit count stays in the under-full probe"
     );
+    assert!(cache.contains("if (lighting_sc_display && mode == 3u && under_full)"));
     assert!(
-        !cache.contains("&& trust < 1.0"),
+        !cache.contains("under_full && trust"),
         "display trust must not decide the under-full count"
     );
     assert!(
@@ -135,14 +136,6 @@ fn eight_zero_sets_are_not_resolved() {
         "the empty-corner fallback keys off the own-sample count"
     );
 
-    let probe = include_str!("../shaders/lighting_screen_probe.glsl");
-    let indirect = function_body(
-        probe,
-        "vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n)",
-    );
-    assert!(indirect.contains("lighting_sh_compose_lattice(pos, n, false)"));
-    assert!(indirect.contains("if (!(coarse.w > LIGHTING_CACHE_HAS_W))"));
-
     let pop = function_body(cache, "vec4 lighting_sc_debug_population(vec3 pos, vec3 n)");
     assert!(pop.contains("lighting_sc_seed(s)"), "the record keeps the seed apart from the mean");
     assert!(pop.contains("3u * s + 2u"), "the record reads the own-sample count");
@@ -154,4 +147,23 @@ fn eight_zero_sets_are_not_resolved() {
         assert!(src.contains("size >= 0.2 ? 128u : 0u"));
         assert!(src.contains("own_b |= 128u"));
     }
+}
+
+#[test]
+fn the_picture_does_not_walk_a_coarser_parent() {
+    let probe = include_str!("../shaders/lighting_screen_probe.glsl");
+    let indirect = function_body(
+        probe,
+        "vec3 lighting_screen_probe_indirect(uvec2 p, vec3 pos, vec3 n)",
+    );
+    assert!(indirect.contains("lighting_sh_compose_lattice(pos, n, false)"));
+    assert!(indirect.contains("lighting_cascade_published(pixel)"));
+    assert!(
+        indirect.contains("!(world.w > LIGHTING_CACHE_HAS_W)"),
+        "a published centre skips the picture claim"
+    );
+    assert!(
+        !indirect.contains("coarse.w"),
+        "the picture does not walk a coarser parent"
+    );
 }

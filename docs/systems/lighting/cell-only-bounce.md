@@ -44,7 +44,7 @@ The knockout that removes the exact path stays. With that path removed, the pixe
 
 A frame spends the same rays whether or not something moved. The one history rule already adopts a fresh ray, a neighbour, or a parent when the stored mean is junk, and it shortens the count when a ray disagrees. That covers a mover, a lamp that moved, and the opening. Nothing else spends rays, or grows a pool, because something changed.
 
-The ray budget stays the fixed 1-in-10 floor plus the fixed ranked burst. A cell that has no shown mean takes one floor ray on the frame it is visible, and then joins that same period. High's burst is 400000 and a cell may take 64 of those rays, so the rays the screen filter used to spend reach the far cells as well as the floor. The picture weights that cell twice and each face neighbour out to six cells once.
+The ray budget stays one coverage ray every two frames plus the preset ranked burst. A cell that has no shown mean takes one floor ray on the frame it is visible, and then joins that same period. High's burst is 400000 and a cell may take 64 of those rays, so the rays the screen filter used to spend reach the far cells as well as the floor. The picture weights that cell twice and each face neighbour out to six cells once.
 
 Removed because that blend already covers them:
 
@@ -55,7 +55,7 @@ Removed because that blend already covers them:
 
 ## Follow-up
 
-Not this change. The next stage is a sparse cascade: surface samples are level 0, coarse world cells are the upper levels, and the penumbra condition sets the spacing. The removed radiance cascades of GI v1 stay removed. This note does not bring that system back.
+The conversion that follows this note is [sparse-radiance-cascades.md](sparse-radiance-cascades.md). Surface samples are level 0, coarse world cells are the upper levels, and the penumbra condition sets the spacing. The removed radiance cascades of GI v1 stay removed. This note does not bring that system back.
 
 ## Networking
 

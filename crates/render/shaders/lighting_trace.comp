@@ -5,6 +5,7 @@
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
+#include "lighting_cascade.glsl"
 
 // Emitted light at a hit point: the emissive instance whose surface is nearest,
 // when the point is on it. Only instances in the emission table are sampled.
@@ -61,7 +62,13 @@ void main() {
         return;
     }
     SceneHit hit;
-    if (!trace_ray(origin, dir, 1.0e-4, 200.0, hit)) {
+    // lighting_cascade_interval clips a cell at least twice 25 cm to one
+    // shell. Those cells are still what the picture gather reads, and the
+    // clip raised wall splotch from 0.049 to 0.084. The ray stays the full
+    // trace until the merge sums the shells.
+    float t0 = CASCADE_TRACE_NEAR;
+    float t1 = CASCADE_TRACE_FAR;
+    if (!trace_ray(origin, dir, t0, t1, hit)) {
         vec4 miss = lighting_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
         work.v[at] = miss;
         lighting_fill_stash(ray, miss.x, 0u);

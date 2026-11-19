@@ -568,40 +568,10 @@ pub struct FillSettings {
     /// `0` leaves the base floor off. Any other value turns it on. The device
     /// gives one ray to each selected cell; it does not spend this as a count.
     pub floor_rays: u32,
-    /// Rays spent highest-value first after the floor. `0` spends none.
-    /// High is 400000, Medium 12500, Low 6250. The device adds
-    /// the rays the 1-in-10 floor no longer spends, so the round stays about
-    /// the size of the old per-preset floor plus this burst. Mover rays come
-    /// out of that sum.
+    /// Rays spent highest-value first after the coverage ray. `0` spends none.
+    /// High is 400000, Medium 12500, Low 6250. The count stays this preset
+    /// value. It does not grow with the live-cell count.
     pub burst: u32,
-}
-
-/// Every live cell gets one floor ray this often. A cell a mover is changing
-/// is due every frame instead. The old 1/2/4 rate is not a setting.
-pub const FILL_FLOOR_PERIOD: u32 = 10;
-
-/// The floor divisor each preset used before the period was fixed at 10.
-/// High traced every live cell, Medium half, Low a quarter.
-#[must_use]
-pub fn fill_legacy_divisor(preset: LightingPreset) -> u32 {
-    match preset {
-        LightingPreset::Low => 4,
-        LightingPreset::Medium => 2,
-        LightingPreset::Potato
-        | LightingPreset::DayCycle
-        | LightingPreset::Gi1Bounce
-        | LightingPreset::High => 1,
-    }
-}
-
-/// Burst after moving the retired floor rays into the ranked pool.
-/// `ceil(live / old) + burst` stays the round size; the new floor is
-/// `ceil(live / 10)`.
-#[must_use]
-pub fn fill_scaled_burst(live: u32, preset: LightingPreset, burst: u32) -> u32 {
-    let old = live.div_ceil(fill_legacy_divisor(preset));
-    let floor = live.div_ceil(FILL_FLOOR_PERIOD);
-    burst.saturating_add(old.saturating_sub(floor))
 }
 
 impl FillSettings {
@@ -2007,7 +1977,7 @@ impl LightingSettings {
             }
             "surface_cache.fill_floor_rate" => {
                 eprintln!(
-                    "warning: surface_cache.fill_floor_rate is removed; every preset uses one floor ray every {FILL_FLOOR_PERIOD} frames (alias ignored for one release)"
+                    "warning: surface_cache.fill_floor_rate is removed; every resident cell is due every two frames and the ranked burst stays the preset count (alias ignored for one release)"
                 );
             }
             "surface_cache.fill_burst" => self.surface_cache.fill.burst = num_u32(value)?,

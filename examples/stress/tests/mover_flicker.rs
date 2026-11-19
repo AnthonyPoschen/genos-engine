@@ -18,7 +18,7 @@ use genos_window::Window;
 
 const WIDTH: u32 = 320;
 const HEIGHT: u32 = 180;
-/// Past the 40-frame opening, and long enough for a 1-in-10 wall cell to settle.
+/// Past the 40-frame opening, and long enough for a wall cell to settle.
 /// The face keeps moving after that: it takes a ray every frame.
 const WARMUP: usize = 120;
 /// Consecutive presented frames. The blotch is every frame, so a short run sees it.

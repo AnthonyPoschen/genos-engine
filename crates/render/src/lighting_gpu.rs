@@ -205,7 +205,18 @@ pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
 }
 
 fn lighting_keys_words(pixels: u64) -> u64 {
-    lighting_fill_keys_words(pixels) + lighting_reach_words()
+    lighting_fill_keys_words(pixels) + lighting_reach_words() + lighting_level0_words(pixels)
+}
+
+/// Level-0 surface samples, after the reach words. One count word, then
+/// `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words, then two
+/// words per pixel (radiance, stamp) that picture compose loads. Matches
+/// `lighting_cascade.glsl`.
+const CASCADE_LEVEL0_CAP: u64 = 16384;
+const CASCADE_LEVEL0_STRIDE: u64 = 12;
+
+fn lighting_level0_words(pixels: u64) -> u64 {
+    1 + CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE + pixels * 2
 }
 
 fn lighting_compose_minx() -> u64 {
@@ -397,12 +408,6 @@ pub(crate) struct Lighting {
     /// LIGHTING_MOVER_KEEP frames, with the frames left: movers. The surface cache leaves
     /// their pixels to the probes; once still that long they are scenery again.
     movers: std::collections::BTreeMap<usize, u32>,
-    /// Object-attached mover texel pool + O(1) table (replaces the change-block hitch list).
-    mover_cache: crate::mover_cache::MoverCache,
-    /// GPU SSBO: header + table + texel pool (binding 15). Host-visible upload.
-    mover_buf: Buffer,
-    /// Equivalent mover-fill rays deposited last sync (16 × deposits).
-    mover_fill_rays: u32,
     /// Traced mesh instances (mesh_field order): last poses, the ones that moved in
     /// the last LIGHTING_MOVER_KEEP frames, and every instance's bounding sphere now.
     mesh_poses: Vec<[f32; 16]>,
@@ -469,6 +474,9 @@ pub(crate) struct Lighting {
     /// Same-frame gather of the bins and lattices maintenance just wrote.
     /// Null when the kill switch keeps the writes inside compose.
     sh_drain_pipe: Handle,
+    /// Level-0 resolve. Writes the per-pixel merge after the lattice drain.
+    /// Picture compose loads those words and does not walk the hash.
+    cascade_pub_pipe: Handle,
     /// #142 kill switch (GENOS_COMPOSE_SC_WRITES=1): compose's specialization
     /// constant 0, writes compiled into compose and no maintenance pass.
     compose_writes: bool,
@@ -800,9 +808,6 @@ impl Default for Lighting {
             round_entries: 0,
             cache_rays: 0,
             movers: std::collections::BTreeMap::new(),
-            mover_cache: crate::mover_cache::MoverCache::high(),
-            mover_buf: Buffer::empty(),
-            mover_fill_rays: 0,
             mesh_poses: Vec::new(),
             mesh_movers: std::collections::BTreeMap::new(),
             mesh_spheres: Vec::new(),
@@ -839,6 +844,7 @@ impl Default for Lighting {
             compose_hdr_pipe: std::ptr::null_mut(),
             compose_maint_pipe: std::ptr::null_mut(),
             sh_drain_pipe: std::ptr::null_mut(),
+            cascade_pub_pipe: std::ptr::null_mut(),
             compose_writes: genos_scene::lighting_env("GENOS_COMPOSE_SC_WRITES")
                 .is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
@@ -1005,7 +1011,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -1171,6 +1177,13 @@ impl Gpu {
             )?;
             self.note_pipeline_time("sh-drain", start);
         }
+        let start = Instant::now();
+        self.lighting.cascade_pub_pipe = self.make_compute_pipe(
+            LIGHTING_CASCADE_PUB_SPV,
+            self.lighting.layout,
+            "cascade-pub",
+        )?;
+        self.note_pipeline_time("cascade-pub", start);
         let start = Instant::now();
         self.lighting.reach_pipe = self.make_compute_pipe(
             LIGHTING_REACH_SPV,
@@ -1673,27 +1686,6 @@ impl Gpu {
         self.lighting.restir_have_prev = false;
         self.lighting.restir_slot = 0;
         self.lighting.restir_frame = false;
-        // Mover table + texel pool SSBO (binding 15). Host-visible so dirty
-        // ranges upload each frame. Stand-in when the pool is off.
-        {
-            let mut old = std::mem::replace(&mut self.lighting.mover_buf, Buffer::empty());
-            self.destroy_buffer(&mut old);
-            let pool = settings.surface_cache.mover_texels;
-            let bytes = if pool == 0 {
-                256
-            } else {
-                crate::mover_cache::mover_gpu_bytes(pool)
-            };
-            self.lighting.mover_buf = self.make_buffer(bytes, 0x20 | 0x2, Memory::Upload)?;
-            if pool > 0 {
-                self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
-            }
-            let packed = self.lighting.mover_cache.pack_gpu();
-            let cap = usize::try_from(self.lighting.mover_buf.size).unwrap_or(0);
-            let n = packed.len().min(cap);
-            self.write_buffer(&self.lighting.mover_buf, &packed[..n])?;
-            self.lighting.mover_cache.clear_dirty();
-        }
         self.lighting.dims = [w, h, cols, rows];
         self.lighting.alloc_key = lighting_alloc_key(&settings);
         self.lighting.compose_valid = false;
@@ -1752,7 +1744,6 @@ impl Gpu {
                 (8, self.lighting.out.buffer),
                 (13, self.lighting.scene_lin.buffer),
                 (14, self.lighting.hdr_params.buffer),
-                (15, self.bound_or_standin(&self.lighting.mover_buf)),
                 (16, self.bound_or_standin(&self.lighting.bloom)),
                 (17, self.bound_or_standin(&self.lighting.hdr_encode)),
                 (18, if meter.is_null() { self.lighting.hdr_params.buffer } else { meter }),
@@ -1889,6 +1880,16 @@ impl Gpu {
     pub(crate) fn lighting_under_trusted_pixels(&mut self) -> u32 {
         self.idle_device();
         const WORD: usize = 24 + 57;
+        self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
+            .map_or(0, |w| w[WORD])
+    }
+
+    /// Visible surfaces last frame whose published sample was empty. A real
+    /// zero has weight and is not counted. Stats word 35 (`gstats.diag[11]`,
+    /// `LIGHTING_DIAG_CASCADE_GAP`). Waits.
+    pub(crate) fn lighting_cascade_gaps(&mut self) -> u32 {
+        self.idle_device();
+        const WORD: usize = 24 + 11;
         self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
             .map_or(0, |w| w[WORD])
     }
@@ -2529,10 +2530,9 @@ impl Gpu {
                 if let Ok(rays) = self.read_stats_word(self.lighting.stats[slot].memory, LIGHTING_CACHE_RAYS_WORD) {
                     self.lighting.cache_rays = rays;
                 }
-                // The scaled burst is ceil(live/old) - ceil(live/10) on top of
-                // the stored burst. Mode 3 does not take the full stats read
-                // (S70B), and without this word the host uploads the stored
-                // burst only. The fence for this slot has already been waited.
+                // The live-cell count sizes the cache sweep. Mode 3 does not
+                // take the full stats read (S70B). The fence for this slot
+                // has already been waited.
                 if let Ok(live) = self.read_stats_word(self.lighting.stats[slot].memory, 2) {
                     self.lighting.live = live;
                 }
@@ -2812,16 +2812,28 @@ impl Gpu {
         if sun_compose || maint.is_null() || drain.is_null() {
             return;
         }
-        // The walk is four world-cache finds per pixel of every dirty block,
-        // and the colour is thrown away. The drain then fills the lattice the
-        // picture compile reads. On a held camera that lattice is already
-        // filled. Frame 32 (and a camera move, which takes the full grid)
-        // requests it again.
+        // Publish reads the lattice centre, or the cell on a miss. The colour
+        // this walk produces is thrown away. The drain fills the centre the
+        // publish pass reads. A camera move does not rebuild the lattice.
+        // The opening, the 32-frame refresh, and a mover's reach still request
+        // it. A held camera with nothing local still returns, which is the
+        // still-idle probe.
         let refresh = self.lighting.frame != 0
             && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
-        // A mover's tiles need the lattice this frame. A held camera with
-        // nothing local still returns, which is the still-idle probe.
-        if self.lighting.still > 0 && !compose_full && !refresh && self.lighting.reach_arm == 0 {
+        let opening = self.lighting.frame != 0 && self.lighting.frame < LIGHTING_FILL_WALK;
+        let bounce_filling = self.lighting.bounce_fill < BOUNCE_FILL_FRAMES;
+        let blocks = u64::from(gx) * u64::from(gy);
+        let lattice = bounce_filling
+            || opening
+            || refresh
+            || !self.lighting.compose_valid
+            || self.lighting.settings.world_mode() != 3
+            || !self.lighting.settings.compose_reuse
+            || !self.lighting.settings.gi.enabled
+            || blocks > LIGHTING_COMPOSE_CAP
+            || (self.particle_stamped && !self.lighting.hdr.legacy_bytes)
+            || self.lighting.reach_arm != 0;
+        if !lattice {
             return;
         }
         self.lighting.maint_ran = true;
@@ -3055,7 +3067,7 @@ impl Gpu {
                     w[24 + 50],
                     w[24 + 7],
                     w[24 + 9],
-                    self.lighting.mover_cache.history_drops()
+                    0
                 );
                 eprintln!("lightingdrain {queue} frame {} sample {} held {} draining {}", self.lighting.frame, w[LIGHTING_DRAIN_WORD], w[LIGHTING_DRAIN_WORD + 1], w[LIGHTING_DRAIN_WORD + 2] != 0);
                 eprintln!("lightingchg {queue} frame {} c {:?}", self.lighting.frame, &w[88..119]);
@@ -4826,9 +4838,8 @@ impl Gpu {
             }
         }
         sent += used;
-        // Movers (surface cache): KEEP timers still run; head w carries the
-        // live count for unhold. The 16×4-vec4 hitch list in the change block
-        // is gone — records live in MoverCache (O(1) table + texel pool).
+        // Movers: KEEP timers still run. Head w / 200000 is the live count
+        // the picture uses to unhold. The texel pool is gone.
         if world == 3 && !self.lighting.kept_bytes.is_empty() {
             let packed = lighting_movers(
                 &self.lighting.kept_bytes,
@@ -4850,24 +4861,17 @@ impl Gpu {
                     ]);
                 }
             }
-            self.sync_mover_cache(&records);
             let n = records.len();
-            // Unhold signal only — do not pack hitch records into the change block.
+            // Unhold while a mover is in the frame. Head w / 200000 is that count.
             block[3] += (n * 200000) as f32;
             if lighting_debug_on() {
                 eprintln!(
-                    "lighting world {world} cap {} flags {flags} local {} movers {n} pool {}/{} occs {} meshes {} of {}",
+                    "lighting world {world} cap {} flags {flags} movers {n} occs {} meshes {} of {}",
                     head.mode_cap % 1000,
-                    u8::from(self.lighting.settings.surface_cache.attach_movers),
-                    self.lighting.mover_cache.used_texels(),
-                    self.lighting.mover_cache.pool_cap(),
                     lighting_occs(&self.frame_bytes).len(),
                     self.lighting.mesh_movers.len(),
                     self.lighting.mesh_poses.len()
                 );
-            }
-            if self.lighting.settings.surface_cache.attach_movers {
-                block[3] += 100000.0;
             }
         }
         if had {
@@ -4983,24 +4987,11 @@ impl Gpu {
                 } else {
                     fill.frame_dt
                 };
-                let floor_rate = if fill.floor_rays == 0 {
-                    0
-                } else {
-                    genos_scene::FILL_FLOOR_PERIOD
-                };
-                // The ranked burst is the preset burst plus the rays the
-                // 1-in-10 floor no longer spends. The round stays about one
-                // ray per live cell plus the preset burst. `live` is the
-                // previous frame's count.
-                let burst = if fill.floor_rays == 0 {
-                    fill.burst
-                } else {
-                    genos_scene::fill_scaled_burst(
-                        self.lighting.live,
-                        self.lighting.settings.preset,
-                        fill.burst,
-                    )
-                };
+                // The 1-in-10 wait is gone. Word 32 only enables coverage, and
+                // the shader period is two frames. The ranked burst stays the
+                // preset count. It does not grow with the live-cell count.
+                let floor_rate = 1u32;
+                let burst = fill.burst;
                 let fill_words = [
                     fill.budget,
                     fill.tile.max(1),
@@ -5677,6 +5668,34 @@ impl Gpu {
                     }
                     self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
                 }
+                // Level 0 is resolved here, after the lattice drain and before
+                // the picture loads it. The hash walk stays out of compose.
+                if pass == 7 && self.lighting.cache_full && !self.lighting.cascade_pub_pipe.is_null()
+                {
+                    if sun_compose && !compose_full {
+                        (self.fns.cmd_fill_buffer)(
+                            self.cmd,
+                            self.lighting.cache_keys.buffer,
+                            (lighting_compose_at() + 3) * 4,
+                            4,
+                            1,
+                        );
+                        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+                    }
+                    (self.fns.cmd_bind_pipe)(self.cmd, 1, self.lighting.cascade_pub_pipe);
+                    if sun_compose || compose_full {
+                        let pgx = if sun_compose { w.div_ceil(8).max(1) } else { gx.max(1) };
+                        let pgy = if sun_compose { h.div_ceil(8).max(1) } else { gy.max(1) };
+                        (self.fns.cmd_dispatch)(self.cmd, pgx, pgy, 1);
+                    } else {
+                        (self.fns.cmd_dispatch_indirect)(
+                            self.cmd,
+                            self.lighting.cache_keys.buffer,
+                            lighting_compose_at() * 4,
+                        );
+                    }
+                    self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                }
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
                 if pass == 7 {
                     self.lighting.compose_dispatches = 1;
@@ -6098,7 +6117,6 @@ impl Gpu {
         let mut keys = std::mem::replace(&mut self.lighting.cache_keys, Buffer::empty());
         let mut cache = std::mem::replace(&mut self.lighting.cache, Buffer::empty());
         let mut compose_host = std::mem::replace(&mut self.lighting.compose_host, Buffer::empty());
-        let mut mover_buf = std::mem::replace(&mut self.lighting.mover_buf, Buffer::empty());
         for k in 0..2 {
             let mut stats_dev = std::mem::replace(&mut self.lighting.stats_dev[k], Buffer::empty());
             self.destroy_buffer(&mut stats_dev);
@@ -6124,9 +6142,6 @@ impl Gpu {
         self.destroy_buffer(&mut keys);
         self.destroy_buffer(&mut cache);
         self.destroy_buffer(&mut compose_host);
-        // Binding 15 mover SSBO: skipping this left VkBuffer + memory alive and
-        // tripped VUID-vkDestroyDevice-device-05137 under gpu-integrity.
-        self.destroy_buffer(&mut mover_buf);
         unsafe {
             for pipe in self
                 .lighting
@@ -6147,6 +6162,7 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.compose_hdr_pipe))
                 .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
                 .chain(std::iter::once(&mut self.lighting.sh_drain_pipe))
+                .chain(std::iter::once(&mut self.lighting.cascade_pub_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {
@@ -6418,75 +6434,6 @@ impl Gpu {
         }
         0
     }
-
-    /// Rebuilds the host mover table from this frame's KEEP hitch records.
-    /// Drops movers that left the list so their texels are freed (no orphans).
-    fn sync_mover_cache(&mut self, records: &[[[f32; 4]; 4]]) {
-        use crate::mover_cache::{MoverRecord, MoverTier, MOVER_ID_NONE};
-        let want: std::collections::BTreeSet<u32> = records
-            .iter()
-            .filter_map(|m| {
-                let id = m[1][3].to_bits();
-                (id != MOVER_ID_NONE).then_some(id)
-            })
-            .collect();
-        let live = self.lighting.mover_cache.table_object_ids();
-        for id in live {
-            if !want.contains(&id) {
-                self.lighting.mover_cache.remove(id);
-            }
-        }
-        let pool = self.lighting.settings.surface_cache.mover_texels;
-        if pool > 0 && self.lighting.mover_cache.pool_cap() != pool {
-            self.lighting.mover_cache = crate::mover_cache::MoverCache::new(pool);
-        }
-        for m in records {
-            let id = m[1][3].to_bits();
-            if id == MOVER_ID_NONE {
-                continue;
-            }
-            let rec = MoverRecord {
-                object_id: id,
-                sphere: m[0],
-                centre: [m[1][0], m[1][1], m[1][2]],
-                half_extents: [m[2][0], m[2][1], m[2][2]],
-                yaw_cos: m[3][0],
-                yaw_sin: m[3][1],
-                texel_base: u32::MAX,
-                texel_count: 0,
-                tier: MoverTier::Near,
-            };
-            let _ = self.lighting.mover_cache.upsert(rec);
-        }
-        // A move does not resize the pool and does not spend fill rays.
-        // The world-cell floor and the ranked burst are the ray budget.
-        let budget = self.lighting.settings.surface_cache.ray_budget;
-        let budget = if budget == 0 { 4096 } else { budget };
-        let stats = self.lighting.mover_cache.prepare_fill(budget, 0.0, 0.0, false, 0.0);
-        self.lighting.mover_fill_rays = stats.rays;
-        self.upload_mover_cache();
-    }
-
-    /// Uploads dirty mover table/pool ranges to binding 15 (full rewrite when needed).
-    fn upload_mover_cache(&mut self) {
-        if self.lighting.mover_buf.buffer.is_null() {
-            return;
-        }
-        let chunks = self.lighting.mover_cache.pack_dirty();
-        if chunks.is_empty() {
-            return;
-        }
-        for (offset, bytes) in chunks {
-            if bytes.is_empty() {
-                continue;
-            }
-            if offset.saturating_add(bytes.len() as u64) > self.lighting.mover_buf.size {
-                continue;
-            }
-            let _ = self.write_buffer_at(&self.lighting.mover_buf, offset, &bytes);
-        }
-        self.lighting.mover_cache.clear_dirty();
-    }
 }
 
 /// Movers: occluders (by index) whose record differs between two scene blocks of
@@ -6622,10 +6569,9 @@ fn reach_mask_saturated(tiles: u32, width: u32, height: u32) -> bool {
     total > 0 && tiles.saturating_mul(2) >= total
 }
 
-/// True when the change-list spheres are not a proved on-screen disc. The
-/// same projection as `reach_disc`: a sphere behind the camera, on the
-/// camera, or entirely off the picture, or whose union covers half the tiles.
-/// An empty list is unproved. #288's mover table is the same spheres.
+/// True when the change-list spheres are not a proved on-screen footprint. A
+/// sphere behind the camera, on the camera, or entirely off the picture, or
+/// whose union covers half the tiles, unholds. An empty list is unproved.
 fn reach_footprint_unproven(frame: &[u8], spheres: &[[f32; 4]], width: u32, height: u32) -> bool {
     if spheres.is_empty() || width == 0 || height == 0 {
         return true;
@@ -8453,5 +8399,19 @@ mod fill_cell_log_tests {
         for share in shares {
             assert!((share - 0.25).abs() < 1.0e-4, "{share}");
         }
+    }
+}
+
+#[cfg(test)]
+mod level0_layout {
+    use super::{lighting_fill_keys_words, lighting_keys_words, lighting_level0_words, lighting_reach_words};
+
+    #[test]
+    fn the_level0_table_fits_in_a_shader_word() {
+        let pixels = 320 * 180;
+        let start = lighting_fill_keys_words(pixels) + lighting_reach_words();
+        let end = lighting_keys_words(pixels);
+        assert_eq!(end - start, lighting_level0_words(pixels));
+        assert!(end < u64::from(u32::MAX), "key words {end} do not fit in a shader index");
     }
 }
