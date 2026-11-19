@@ -1,7 +1,3 @@
-#![cfg_attr(test, expect(clippy::as_conversions, reason = "pixel index is width * height * 4"))]
-#![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "a mean over a face"))]
-#![cfg_attr(test, expect(clippy::cast_possible_truncation, reason = "a window edge fits the frame"))]
-#![cfg_attr(test, expect(clippy::cast_sign_loss, reason = "a window edge is non-negative"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 
 //! Frame-to-frame flicker of a moving box under a still sun.
@@ -87,18 +83,28 @@ fn draw(window: &mut Window, renderer: &mut Renderer, world: &genos_render::Worl
         .expect("presented image: the mover gate reads the swapchain")
 }
 
-fn luma_at(bgra: &[u8], width: usize, x: usize, y: usize) -> f64 {
-    let p = (y * width + x) * 4;
-    0.2126 * f64::from(bgra[p + 2]) + 0.7152 * f64::from(bgra[p + 1]) + 0.0722 * f64::from(bgra[p])
+fn luma_at(bgra: &[u8], width: usize, column: usize, row: usize) -> f64 {
+    let offset = (row * width + column) * 4;
+    0.2126 * f64::from(bgra[offset + 2])
+        + 0.7152 * f64::from(bgra[offset + 1])
+        + 0.0722 * f64::from(bgra[offset])
 }
 
 /// Red-dominant pixels. A dark blotch on the red box still has more red than green.
-fn red_pixel(bgra: &[u8], width: usize, x: usize, y: usize) -> bool {
-    let p = (y * width + x) * 4;
-    let b = u32::from(bgra[p]);
-    let g = u32::from(bgra[p + 1]);
-    let r = u32::from(bgra[p + 2]);
-    r > 40 && r > g + 18 && r > b + 18
+fn red_pixel(bgra: &[u8], width: usize, column: usize, row: usize) -> bool {
+    let offset = (row * width + column) * 4;
+    let blue = u32::from(bgra[offset]);
+    let green = u32::from(bgra[offset + 1]);
+    let red = u32::from(bgra[offset + 2]);
+    red > 40 && red > green + 18 && red > blue + 18
+}
+
+/// A pixel count fits in `f64` exactly through 2^24. The frame is far smaller.
+fn count_f64(count: u64) -> f64 {
+    let Ok(narrow) = u32::try_from(count) else {
+        return f64::from(u32::MAX);
+    };
+    f64::from(narrow)
 }
 
 struct WindowBox {
@@ -146,7 +152,7 @@ fn mean_luma(bgra: &[u8], width: usize, win: &WindowBox) -> f64 {
             n += 1;
         }
     }
-    if n == 0 { 0.0 } else { sum / n as f64 }
+    if n == 0 { 0.0 } else { sum / count_f64(n) }
 }
 
 /// Same size as the face, in the top of the frame, off the red box.
@@ -189,7 +195,7 @@ fn deltas(samples: &[f64]) -> Run {
     }
     let pairs = samples.len().saturating_sub(1);
     Run {
-        avg: if pairs == 0 { 0.0 } else { sum / pairs as f64 },
+        avg: if pairs == 0 { 0.0 } else { sum / count_f64(u64::try_from(pairs).unwrap_or(0)) },
         max,
         hot,
         pairs,
@@ -232,11 +238,11 @@ fn interior_pair(prev: &[u8], curr: &[u8], width: usize, height: usize) -> (f64,
     for y in ERODE..height.saturating_sub(ERODE) {
         for x in ERODE..width.saturating_sub(ERODE) {
             if interior(prev, width, height, x, y) && interior(curr, width, height, x, y) {
-                let a = luma_at(prev, width, x, y);
-                let b = luma_at(curr, width, x, y);
-                sum_p += a;
-                sum_c += b;
-                sum_d += (a - b).abs();
+                let before = luma_at(prev, width, x, y);
+                let after = luma_at(curr, width, x, y);
+                sum_p += before;
+                sum_c += after;
+                sum_d += (before - after).abs();
                 n += 1;
             }
         }
@@ -244,8 +250,9 @@ fn interior_pair(prev: &[u8], curr: &[u8], width: usize, height: usize) -> (f64,
     if n == 0 {
         (0.0, 0.0, 0)
     } else {
-        let nf = n as f64;
-        ((sum_c - sum_p).abs() / nf, sum_d / nf, n as usize)
+        let samples = count_f64(n);
+        let pixels = usize::try_from(n).unwrap_or(0);
+        ((sum_c - sum_p).abs() / samples, sum_d / samples, pixels)
     }
 }
 
@@ -258,7 +265,7 @@ fn pixel_mad(prev: &[u8], curr: &[u8], width: usize, win: &WindowBox) -> f64 {
             n += 1;
         }
     }
-    if n == 0 { 0.0 } else { sum / n as f64 }
+    if n == 0 { 0.0 } else { sum / count_f64(n) }
 }
 
 struct Pass {
@@ -277,8 +284,8 @@ fn measure(
     label: &str,
     settle: usize,
 ) -> Pass {
-    let width = renderer.width() as usize;
-    let height = renderer.height() as usize;
+    let width = usize::try_from(renderer.width()).unwrap_or(0);
+    let height = usize::try_from(renderer.height()).unwrap_or(0);
     for _ in 0..settle {
         stage.advance(1.0 / 60.0);
         let _ = draw(window, renderer, &stage.world, camera);
@@ -333,12 +340,13 @@ fn measure(
     let mut face = deltas(&face_l);
     let mut wall_run = deltas(&wall_l);
     if px_pairs > 0 {
-        face.pixel = face_px / px_pairs as f64;
-        wall_run.pixel = wall_px / px_pairs as f64;
+        let pairs = count_f64(u64::try_from(px_pairs).unwrap_or(0));
+        face.pixel = face_px / pairs;
+        wall_run.pixel = wall_px / pairs;
     }
     let limit = wall_run.avg * FACTOR + SLACK;
     let pixel_limit = wall_run.pixel * FACTOR + SLACK;
-    let texels = if px_pairs == 0 { 0 } else { texels / px_pairs };
+    let texels = texels.checked_div(px_pairs).unwrap_or(0);
     eprintln!(
         "mover flicker {label}: face mean-delta avg {:.3} max {:.3} hot {}/{} pixel {:.3} texels {texels} | wall avg {:.3} max {:.3} pixel {:.3} | limit {:.3} pixel-limit {:.3}",
         face.avg, face.max, face.hot, face.pairs, face.pixel, wall_run.avg, wall_run.max, wall_run.pixel, limit, pixel_limit
