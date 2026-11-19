@@ -52,6 +52,8 @@ Plan for moving lamps and moving assets (not yet built; measurement first): [dyn
 
 ## Names
 
+Cell-only bounce (19 Nov 2026) is the intent in [cell-only-bounce.md](cell-only-bounce.md). Bounce is the 25 cm SH cells, read at the true normal. The 12.5 cm texel pool, the fine band, the screen denoiser, and the separate mover texel pool are removed by the commits that follow that note. This list of deviations stays until those commits land.
+
 The surface light cache and the world cache are one cache ([glossary](../../lighting/GLOSSARY.md)). A cache entry is one hashed surface patch. A slot is only its storage index. `world_cache`, `world_cell`, `world_refresh`, and `world_stale` are the current keys. Moving them under `surface_cache.*`, and keeping the old keys as deprecated aliases, is step 1 of [RENAMES.md](../../lighting/RENAMES.md).
 
 The device sizes that table from the launch preset before a scene exists. `--preset` wins, and `GENOS_LIGHTING_PRESET` applies only when that argument was omitted. A potato launch does not allocate the million-slot table. lavapipe keeps a freed High table until `vkDestroyDevice`, and that release misses the 100 ms quit budget.
