@@ -1369,6 +1369,26 @@ bool lighting_near_change(vec3 p) {
     return false;
 }
 
+// True when the segment a-b passes through the bounds of an occluder that
+// moved, came, or went since the last frame (before and after). A shadow ray
+// that does so may have changed its answer even far from the mover: a low
+// sun's shadow reaches metres past the box.
+bool lighting_segment_near_change(vec3 a, vec3 b) {
+    vec4 head = work.v[lighting_change_at()];
+    uint changes = head.y > 0.5 ? 0u : min(uint(head.x + 0.5), LIGHTING_CHANGES);
+    vec3 ab = b - a;
+    float len2 = dot(ab, ab);
+    [[dont_unroll]] for (uint c = 0u; c < changes; c++) {
+        vec4 m = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + c];
+        float t = len2 > 0.0 ? clamp(dot(m.xyz - a, ab) / len2, 0.0, 1.0) : 0.0;
+        vec3 d = a + ab * t - m.xyz;
+        if (dot(d, d) < m.w * m.w) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Surface cache: the light has held still long enough (params.z bit 10, which
 // means young-only rounds in the other modes).
 bool lighting_sc_light_quiet() {

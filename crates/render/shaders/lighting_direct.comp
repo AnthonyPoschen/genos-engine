@@ -445,7 +445,7 @@ vec3 area_clamp(uint hist_pixel, vec3 mean, vec3 sample_rgb, float open) {
     return s_sum > DISC_EPS ? s * (v_new * open / s_sum) : mean;
 }
 
-vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
+vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open, bool moved) {
     uint hist_pixel;
     float z_hist;
     bool reprojected = lamp_pick_history_pixel(pos, hist_pixel, z_hist);
@@ -483,7 +483,9 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
         area_mean.v[out_base + 1u] = vec4(0.0);
         return vec3(0.0);
     }
-    bool reset = !surface || now_on != was_on;
+    // A shadow ray through a mover's old or new bounds: the stored visibility
+    // may be the box that left. Start over from this frame's sample.
+    bool reset = !surface || now_on != was_on || moved;
     if (reset) {
         mean = sample_rgb;
         count = 0.0;
@@ -1000,6 +1002,7 @@ void main() {
     vec3 e_area = vec3(0.0);
     float area_open = 0.0;
     bool area_any = false;
+    bool area_moved = false;
     vec3 e_sun = vec3(0.0);
     vec3 spec = vec3(0.0);
     vec3 view = vec3(0.0, 1.0, 0.0);
@@ -1128,6 +1131,9 @@ void main() {
         if (area_ray) {
             area_open += w;
             area_any = true;
+            if (lighting_gi_on() && lighting_segment_near_change(origin, target)) {
+                area_moved = true;
+            }
         }
         // S74A: hits (not pixels) reuse a static lamp's shadow (lighting_cache.glsl).
         // Shadows off skips the trace and the cell. Hard traces every time.
@@ -1369,7 +1375,7 @@ void main() {
     if (use_area && idx < pixels && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
         float open_now = area_any ? area_open : 0.0;
         vec3 sample_now = area_any ? e_area : vec3(0.0);
-        vec3 mean = area_history(idx, pos, n, sample_now, open_now);
+        vec3 mean = area_history(idx, pos, n, sample_now, open_now, area_moved);
         if (area_any) {
             e += mean - e_area;
         }
