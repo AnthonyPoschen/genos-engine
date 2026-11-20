@@ -542,7 +542,7 @@ void main() {
         }
         // Level 0 is the visible surface. A loop here stays out of picture
         // compose: that compile faults lavapipe on a per-pixel probe walk.
-        lighting_cascade_insert(pos, n);
+        lighting_cascade_insert(idx, pos, n);
     } else {
         vec4 rec;
         vec3 origin;

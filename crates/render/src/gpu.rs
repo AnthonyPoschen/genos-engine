@@ -1572,6 +1572,11 @@ impl Renderer {
         self.gpu.lighting_cascade_gaps()
     }
 
+    /// Live level-0 voxels from the last finished frame. Waits for that frame.
+    pub fn lighting_level0_voxels(&mut self) -> Result<Vec<crate::Level0Voxel>, String> {
+        self.gpu.lighting_level0_voxels()
+    }
+
     /// Fill scheduler work from the last frame: serial plan iterations, then
     /// the histogram dispatch's group count. Waits for that frame.
     pub fn lighting_fill_compact_work(&mut self) -> [u32; 2] {

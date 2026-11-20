@@ -139,8 +139,8 @@ void main() {
 #ifndef GENOS_COMPOSE_MAINT
     if (mode == 10u) {
         // Level-0 surface voxels (debug_view.rs ViewMode::Voxels). No dither:
-        // the colour is the cell and ring hash, with a line at each ring start.
-        shown = lighting_cascade_debug_voxels(pos);
+        // the colour is the cell and level hash, with a line at each level start.
+        shown = lighting_cascade_debug_voxels(pos, n);
         outc.px[index] = pack_rgb(shown);
         return;
     }
