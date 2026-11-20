@@ -69,7 +69,7 @@ A cell of size `S` is kept while its Chebyshev distance from the eye is at most 
 The merge runs from the back towards the eye, `L(a,c) = L(a,b) + β(a,b)·L(b,c)`, per direction. An upper cell stores SH-L1 radiance for `[4S, ∞)` after its own merge. A level-0 voxel fetches its parent SH once: a sparse trilinear over the parent corners that exist, renormalised, with the plane and facing gates. Each level-0 ray then:
 
 - **Hits inside `[ε, 8s]`:** shades the hit. That is direct light at the hit, plus the bounce stored in the cell at the hit.
-- **Misses:** evaluates the parent SH in its direction (β = 1).
+- **Misses:** evaluates the parent SH in its direction (β = 1). The SH is inverted on the hemisphere so a constant incoming field comes back as that radiance, not the full-sphere Ylm dip at the horizon. Parent corners use the parent cell's own thickness as the plane window (facing and stale still reject a leak).
 
 The voxel's value is the cosine-weighted sum of its rays. This is the real interval merge. Today's "β is 0 while the nearer sample exists" substitution goes away, because the nearer sample is always this frame's.
 
@@ -77,22 +77,14 @@ The voxel's value is the cosine-weighted sum of its rays. This is the real inter
 
 | Level | What stays | Rule |
 |---|---|---|
-| 0 | A one-frame EMA against the same voxel key from the previous frame, double-buffered (two 16384×12-word tables, about 1.5 MB) | The current frame's rays always give a full value, so the EMA only smooths. New weight is at least 0.5. Prior weight shrinks with the change: luminance gap against the voxel's own ray spread, a lamp delta in reach, or a mover sphere. A missing key last frame, a flipped normal, or a level change is a reset. That reset is still a full value, never black. |
-| upper | The running mean and variance, as today | Proportional down-weight. Hard reset only for a gone surface, a failed plane or facing check, or a change of about 1 (lamp off, colour flip). This is the stage-1 rule of `one-ray-allocator.md`, with no allocator around it. |
+| 0 | A running EMA against the same voxel key from the previous frame, double-buffered (two 16384×12-word tables, about 1.5 MB) | The current frame's rays always give a full value, so the EMA only smooths. A change is judged against this frame's standard error: a gap inside two standard errors is noise, stored `N` grows, and the blend is `1/N`. A real change down-weights history in proportion to the luma gap and shrinks `N` by the leftover history so later frames keep catching up. Only non-finite data hard-resets. A missing key last frame, a flipped normal, or a level change is a reset (`N = 1`). That reset is still a full value, never black. |
+| upper | The running mean, with the same standard-error test | A gap inside two standard errors of this refresh is noise, stored `N` grows, and the blend is `1/N`. A real change down-weights history in proportion to the luma gap and shrinks `N` the same way. Hard reset only for invalid (non-finite) data. |
 
 Stable directions per voxel key, rotated slowly, keep fixed-pattern bias from crawling across a still picture. The overlap blend stays, now across footprint levels instead of rings (see Sizes).
 
 ## Refresh schedule for upper levels
 
-Rolling stride: a cell refreshes on the frame where `(hash(key) + frame) % P == 0`. `P` depends on the size and on whether a level-0 voxel claimed the cell this frame:
-
-| Size band | Claimed by an on-screen voxel | Off screen (ray-hit or retained) |
-|---|---|---|
-| `S` ≤ 0.5 m | every 2 frames | every 8 |
-| 0.5 m < `S` ≤ 4 m | every 4 | every 16 |
-| `S` > 4 m | every 8 | every 32 |
-
-A change halves `P` for 30 frames, for cells inside the before-and-after reach of the lamp or mover. That change is the existing `lighting_lamp_delta` and mover-sphere input. There is no rank, histogram, burst, budget split, or seed. The ray count is the sum of `k / P` over resident cells, so it is bounded and known from cell counts.
+Rolling stride: every upper world cell, on or off screen and of every size, refreshes on the frame where `(hash(key) + frame) % P == 0`. `P` is one fixed period (default 4). A debug setting of 1, 2, or 10 replaces it and prints per-level GPU time. There are no size bands, no on/off-screen periods, no halving near changes, and no same-frame big-change catch-up. A lamp, mover, or sun change only down-weights stored history in proportion to its size (hard reset only for invalid data), so the next regular refresh dominates. There is no rank, histogram, burst, budget split, or seed. The ray count is the sum of `k / P` over resident cells, so it is bounded and known from cell counts.
 
 ## Direct light
 

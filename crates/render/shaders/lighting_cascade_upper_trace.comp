@@ -1,0 +1,60 @@
+#version 450
+// Trace this band's due upper cells. Each cell takes 16, 32, or 64
+// hemisphere rays, one bin each in turn, from the surface to 8S. Shade
+// splits them at 4S. This compile's only trace site is trace_ray.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "lighting_cascade.glsl"
+
+void main() {
+    if (!lighting_gi_on()) {
+        return;
+    }
+    uint due = gl_WorkGroupID.x;
+    uint k = gl_LocalInvocationID.x;
+    uint band = (ckeys.key[lighting_cascade_upper_head_at()] >> 16u) & 3u;
+    if (due >= CASCADE_UPPER_CAP || k >= CASCADE_UPPER_RAYS_MAX) {
+        return;
+    }
+    uint count = ckeys.key[lighting_cascade_upper_head_at() + 1u + band];
+    if (due >= min(count, CASCADE_UPPER_CAP)) {
+        return;
+    }
+    uint slot = ckeys.key[lighting_cascade_upper_list_at(band) + due];
+    if (slot >= LIGHTING_CACHE_SLOTS || ckeys.key[slot] == 0u) {
+        return;
+    }
+    vec3 pos = cache.v[3u * slot].xyz;
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float size = cache.v[3u * slot + 1u].w;
+    uint rays = lighting_cascade_refresh_rays(size);
+    if (k >= rays) {
+        return;
+    }
+    uint key = ckeys.key[slot];
+    vec3 dir = lighting_cascade_bin_dir(key, n, k, lighting_frame());
+    vec3 origin = pos + n * 0.02;
+    float t0;
+    float t1;
+    lighting_cascade_interval(size, t0, t1);
+    // From the surface, not from 4S: shade needs to know which rays were
+    // blocked before the interval (left out of the bins) and shades those
+    // hits for the cell's full irradiance.
+    t0 = CASCADE_TRACE_NEAR;
+    uint at = lighting_cascade_upper_hit_at(due, k);
+    SceneHit hit;
+    if (!trace_ray(origin, dir, t0, t1, hit)) {
+        ckeys.key[at] = floatBitsToUint(-1.0);
+        ckeys.key[at + 1u] = 0u;
+        ckeys.key[at + 2u] = 0u;
+        ckeys.key[at + 3u] = 0u;
+        return;
+    }
+    vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+    vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
+    ckeys.key[at] = floatBitsToUint(hit.t);
+    ckeys.key[at + 1u] = lighting_pack_normal(hn);
+    ckeys.key[at + 2u] = packUnorm4x8(vec4(tint * hit.reflect * LIGHTING_PI, 0.0));
+    ckeys.key[at + 3u] = 0u;
+}

@@ -42,13 +42,16 @@ const LIGHTING_CACHE_RAYS: u32 = 16;
 const LIGHTING_SH_HALF: bool = true;
 /// Cache bytes a slot: 23 vec4 regions, the SH-L1 (1.5 vec4 at fp16, 3 at
 /// fp32), padding so the shown-age word is region 26 in both layouts, then
-/// that word. Compose does not read the age. It must not share region 23
-/// with the SH.
+/// that word, then regions 27..30: the 16 rgb9e5 direction bins of an
+/// upper cascade cell (`CASCADE_BINS_AT` in lighting_cascade.glsl).
+/// Compose does not read the age. It must not share region 23 with the SH.
 const LIGHTING_CACHE_SLOT_BYTES: u64 = {
     let sh = if LIGHTING_SH_HALF { 24 } else { 48 };
     let pad = if LIGHTING_SH_HALF { 24 } else { 0 };
-    23 * 16 + sh + pad + 16
+    23 * 16 + sh + pad + 16 + CASCADE_BIN_BYTES
 };
+/// Upper cascade cell direction bins: 16 rgb9e5 words, four vec4 regions.
+const CASCADE_BIN_BYTES: u64 = 4 * 16;
 /// `pc.dims` + `pc.params` + `pc.lamp`. A shader that ignores `pc.lamp` still
 /// accepts a 48-byte push.
 const LIGHTING_PC_BYTES: u32 = 48;
@@ -149,63 +152,38 @@ fn lighting_reach_words() -> u64 {
     MASK + CHANGE + LIGHTING_CACHE_SLOTS / 32
 }
 
-/// Fill param words sit after the per-pixel seed payload. One lock word per
-/// slot follows them (`lighting_fill.glsl`).
-const FILL_PARAM_WORDS: u64 = 34;
-const FILL_LOCK_WORDS: u64 = LIGHTING_CACHE_SLOTS;
-/// Header, off-screen bins, histograms, water-fill plan, extra cursors, then
-/// two hit words and two link words per cache-ray slot. Matches
-/// `lighting_fill.glsl`.
-const FILL_OFF_CAP: u64 = 16384;
-const FILL_HIST_WORDS: u64 = 192;
-const FILL_PLAN_WORDS: u64 = 384;
-const FILL_EXTRA_WORDS: u64 = 192;
-const FILL_HEADER_WORDS: u64 = 8 + FILL_OFF_CAP + FILL_HIST_WORDS + FILL_PLAN_WORDS + FILL_EXTRA_WORDS;
-const FILL_TAIL_PER_RAY: u64 = 4;
-/// Tile words, then one pick word per cache ray. Kept out of the list range so
-/// a 262,144-slot table cannot alias a pick onto a tile.
-const FILL_TILE_WORDS: u64 = 262_144;
-const FILL_TILE_CAP: u64 = FILL_TILE_WORDS;
-
-fn lighting_fill_param_words(pixels: u64) -> u64 {
+pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
+    // The fill lists are gone. Reach starts at the seed-pay end.
     lighting_sh_keys_words() + pixels * 8
 }
 
-/// Tile start, pick start, and end, as word offsets from the fill lock base.
-/// Each step adds. A table of [`FILL_TILE_WORDS`] slots used to carve the tiles
-/// out of `2 * slots - FILL_TILE_WORDS` and put the picks at `slots + 1`, which
-/// aliases and underflows the pick capacity.
-#[expect(
-    clippy::expect_used,
-    reason = "a fill table that does not fit in u64 is a broken layout"
-)]
-fn fill_list_end(slots: u64) -> (u64, u64, u64) {
-    let rays = u64::from(LIGHTING_CACHE_BATCH)
-        .checked_mul(u64::from(LIGHTING_CACHE_RAYS))
-        .expect("fill ray words");
-    let tile = slots
-        .checked_add(FILL_HEADER_WORDS)
-        .and_then(|hit| hit.checked_add(rays.checked_mul(FILL_TAIL_PER_RAY).expect("link words")))
-        .expect("tile words");
-    let pick = tile.checked_add(FILL_TILE_WORDS).expect("pick words");
-    let end = pick.checked_add(rays).expect("fill end");
-    assert!(pick >= tile + FILL_TILE_WORDS);
-    assert!(end > pick);
-    (tile, pick, end)
+const CASCADE_CLAIMED_WORDS: u64 = 32768;
+const CASCADE_UPPER_CAP: u64 = 16384;
+const CASCADE_UPPER_RAYS_MAX: u64 = 64;
+const CASCADE_UPPER_HEAD_WORDS: u64 = 4;
+const CASCADE_UPPER_BANDS: u64 = 3;
+const CASCADE_TIME_QUERIES: u32 = 6;
+
+fn lighting_upper_hits_words() -> u64 {
+    CASCADE_UPPER_CAP * CASCADE_UPPER_RAYS_MAX * CASCADE_L0_HIT_WORDS
 }
 
-fn lighting_fill_tile_at(pixels: u64) -> u64 {
-    let (tile, _pick, _end) = fill_list_end(FILL_LOCK_WORDS);
-    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + tile
+fn lighting_upper_words() -> u64 {
+    CASCADE_CLAIMED_WORDS
+        + CASCADE_UPPER_HEAD_WORDS
+        + CASCADE_UPPER_BANDS * CASCADE_UPPER_CAP
+        + lighting_upper_hits_words()
 }
 
-pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
-    let (_tile, _pick, end) = fill_list_end(FILL_LOCK_WORDS);
-    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + end
+fn lighting_upper_claimed_at(pixels: u64) -> u64 {
+    lighting_level0_counts_at(pixels) + CASCADE_L0_COUNT_WORDS + lighting_level0_hits_words()
 }
 
 fn lighting_keys_words(pixels: u64) -> u64 {
-    lighting_fill_keys_words(pixels) + lighting_reach_words() + lighting_level0_words(pixels)
+    lighting_fill_keys_words(pixels)
+        + lighting_reach_words()
+        + lighting_level0_words(pixels)
+        + lighting_upper_words()
 }
 
 /// Level-0 surface samples, after the reach words. One count word, then two
@@ -214,6 +192,7 @@ fn lighting_keys_words(pixels: u64) -> u64 {
 /// slot and the blend slot, then inserted/traced counts and one four-word
 /// hit record per voxel slot and ray. Matches `lighting_cascade.glsl`.
 const CASCADE_LEVEL0_GROUPS: u32 = 16384;
+const CASCADE_UPPER_GROUPS: u32 = 16384;
 const CASCADE_LEVEL0_CAP: u64 = 16384;
 const CASCADE_LEVEL0_STRIDE: u64 = 12;
 const CASCADE_LEVEL0_TABLES: u64 = 2;
@@ -500,7 +479,7 @@ pub(crate) struct Lighting {
     /// Same-frame gather of the bins and lattices maintenance just wrote.
     /// Null when the kill switch keeps the writes inside compose.
     sh_drain_pipe: Handle,
-    /// Level-0 resolve. Writes the per-pixel neighbour blend after the
+    /// Level-0 resolve. Writes the per-pixel upward footprint blend after the
     /// level-0 shade pass. Picture compose loads those words and does not
     /// walk the hash.
     cascade_pub_pipe: Handle,
@@ -508,6 +487,13 @@ pub(crate) struct Lighting {
     cascade_l0_trace_pipe: Handle,
     /// Shade those rays, merge with the parent SH, and store the EMA.
     cascade_l0_shade_pipe: Handle,
+    cascade_upper_claim_pipe: Handle,
+    cascade_upper_pick_pipe: Handle,
+    cascade_upper_trace_pipe: Handle,
+    cascade_upper_shade_pipe: Handle,
+    /// Timestamps around claim/pick, each upper band, and level 0.
+    cascade_qp: Handle,
+    cascade_times: crate::CascadeTimes,
     /// #142 kill switch (GENOS_COMPOSE_SC_WRITES=1): compose's specialization
     /// constant 0, writes compiled into compose and no maintenance pass.
     compose_writes: bool,
@@ -533,9 +519,6 @@ pub(crate) struct Lighting {
     /// Pixel count the key buffer was sized for. A larger frame rebuilds it
     /// so the fill tail is not written past the allocation.
     cache_key_pixels: u64,
-    /// Previous frame's submit, for the look-ahead step. Empty on the first frame.
-    fill_clock: Option<std::time::Instant>,
-    fill_dt: f32,
     /// Last buffer class. A live edit rebuilds only when this changes.
     alloc_key: (u32, u32, u32, u32, u32, u32, u32),
     /// Ping-pong reservoirs. 64 bytes unless the mode is reuse.
@@ -882,6 +865,12 @@ impl Default for Lighting {
             cascade_pub_pipe: std::ptr::null_mut(),
             cascade_l0_trace_pipe: std::ptr::null_mut(),
             cascade_l0_shade_pipe: std::ptr::null_mut(),
+            cascade_upper_claim_pipe: std::ptr::null_mut(),
+            cascade_upper_pick_pipe: std::ptr::null_mut(),
+            cascade_upper_trace_pipe: std::ptr::null_mut(),
+            cascade_upper_shade_pipe: std::ptr::null_mut(),
+            cascade_qp: std::ptr::null_mut(),
+            cascade_times: crate::CascadeTimes::default(),
             compose_writes: genos_scene::lighting_env("GENOS_COMPOSE_SC_WRITES")
                 .is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
@@ -894,8 +883,6 @@ impl Default for Lighting {
             catch_left: 0,
             cache_full: false,
             cache_key_pixels: 0,
-            fill_clock: None,
-            fill_dt: 0.0,
             alloc_key: (0, 0, 0, 0, 0, 0, 0),
             lamp_res: Buffer::empty(),
             lamp_res_clear: false,
@@ -946,10 +933,6 @@ const LIGHTING_ARGS: u32 = 1 << 30;
 const LIGHTING_MODE1: u32 = LIGHTING_ARGS + 1;
 const LIGHTING_DENSE_RAYS: u32 = LIGHTING_ARGS + 2;
 const LIGHTING_DENSE_ENTRIES: u32 = LIGHTING_ARGS + 3;
-/// Parallel fill schedule. Bit 4 stays clear. The shader reads bits 1 and 2.
-const LIGHTING_FILL_HIST: u32 = LIGHTING_ARGS + 4;
-const LIGHTING_FILL_EMIT_ON: u32 = LIGHTING_ARGS + 5;
-const LIGHTING_FILL_EMIT_OFF: u32 = LIGHTING_ARGS + 6;
 /// Word of the dispatch args in the cache keys (lighting_cache.glsl LIGHTING_ARGS_AT).
 const LIGHTING_ARGS_AT: u64 = 2 * LIGHTING_CACHE_SLOTS + 2 + 17600;
 /// A-trous list metadata (lighting_cache.glsl LIGHTING_ATROUS_*). The threshold
@@ -1249,6 +1232,34 @@ impl Gpu {
         )?;
         self.note_pipeline_time("cascade-l0-shade", start);
         let start = Instant::now();
+        self.lighting.cascade_upper_claim_pipe = self.make_compute_pipe(
+            LIGHTING_CASCADE_UPPER_CLAIM_SPV,
+            self.lighting.layout,
+            "cascade-upper-claim",
+        )?;
+        self.note_pipeline_time("cascade-upper-claim", start);
+        let start = Instant::now();
+        self.lighting.cascade_upper_pick_pipe = self.make_compute_pipe(
+            LIGHTING_CASCADE_UPPER_PICK_SPV,
+            self.lighting.layout,
+            "cascade-upper-pick",
+        )?;
+        self.note_pipeline_time("cascade-upper-pick", start);
+        let start = Instant::now();
+        self.lighting.cascade_upper_trace_pipe = self.make_compute_pipe(
+            LIGHTING_CASCADE_UPPER_TRACE_SPV,
+            self.lighting.layout,
+            "cascade-upper-trace",
+        )?;
+        self.note_pipeline_time("cascade-upper-trace", start);
+        let start = Instant::now();
+        self.lighting.cascade_upper_shade_pipe = self.make_compute_pipe(
+            LIGHTING_CASCADE_UPPER_SHADE_SPV,
+            self.lighting.layout,
+            "cascade-upper-shade",
+        )?;
+        self.note_pipeline_time("cascade-upper-shade", start);
+        let start = Instant::now();
         self.lighting.reach_pipe = self.make_compute_pipe(
             LIGHTING_REACH_SPV,
             self.lighting.layout,
@@ -1322,6 +1333,7 @@ impl Gpu {
         }
         // Stamps 0 and 1: the round's start and end; 2 to 5: after each pass.
         self.lighting.world_qp = self.make_query_pool_n(6)?;
+        self.lighting.cascade_qp = self.make_query_pool_n(CASCADE_TIME_QUERIES)?;
         Ok(())
     }
 
@@ -2048,6 +2060,8 @@ impl Gpu {
                     f32::from_bits(rec[7]),
                     f32::from_bits(rec[8]),
                 ],
+                radiance: crate::cache_probe::unpack_rgb9e5(rec[10]),
+                weight: f32::from_bits(rec[11]),
             };
             if voxels.iter().any(|other: &crate::Level0Voxel| other.key() == voxel.key()) {
                 continue;
@@ -2076,285 +2090,7 @@ impl Gpu {
             .map_or([0; 6], |w| [w[16], w[17], w[19], w[22], w[1], w[2]])
     }
 
-    /// Where the frame's path-reference error sits, and where the burst went.
-    ///
-    /// `pixel_error` is `|live - reference|` per picture pixel, sky already
-    /// zeroed. `keep` is false on sky. Prints `fillcell` lines. The rank is
-    /// the priority bucket that spent this frame's burst (0 is not in that
-    /// histogram). Burst picks are the rays after the floor prefix.
-    pub(crate) fn log_fill_cell_error(
-        &mut self,
-        camera: &genos_scene::Camera,
-        pixel_error: &[f32],
-        keep: &[bool],
-    ) -> Result<(), String> {
-        self.idle_device();
-        let width = self.extent_w;
-        let height = self.extent_h;
-        let pixels = (width as usize).saturating_mul(height as usize);
-        if pixel_error.len() != pixels || keep.len() != pixels || pixels == 0 {
-            return Err("fill cell log picture size does not match the frame".to_string());
-        }
-        if self.lighting.cache.buffer.is_null() || self.lighting.cache_keys.buffer.is_null() {
-            return Err("fill cell log has no cache".to_string());
-        }
-        let key_bytes = LIGHTING_CACHE_SLOTS.saturating_mul(4);
-        if self.lighting.cache_keys.size < key_bytes {
-            return Err("cache key table is shorter than the slot count".to_string());
-        }
-        let keys = u32_words(&self.copy_device_range(self.lighting.cache_keys.buffer, 0, key_bytes)?);
-        let geom_bytes = LIGHTING_CACHE_SLOTS.saturating_mul(3).saturating_mul(16);
-        if self.lighting.cache.size < geom_bytes {
-            return Err("cache records are shorter than the slot table".to_string());
-        }
-        let geom = f32_vec4s(&self.copy_device_range(self.lighting.cache.buffer, 0, geom_bytes)?);
-        let view = FillView::from_camera(camera, width, height);
-        let mut by_slot: std::collections::HashMap<u32, FillPick> = std::collections::HashMap::new();
-        let mut total_error = 0.0f32;
-        for (i, error) in pixel_error.iter().copied().enumerate() {
-            if keep.get(i).copied().unwrap_or(false) && error > 0.0 {
-                total_error += error;
-            }
-        }
-        let mut on_screen_cells = 0u32;
-        let slot_count = usize::try_from(LIGHTING_CACHE_SLOTS).unwrap_or(0);
-        for slot in 0..slot_count {
-            if keys.get(slot).copied().unwrap_or(0) == 0 {
-                continue;
-            }
-            let at = slot.saturating_mul(3);
-            let pos = geom.get(at).copied().unwrap_or([0.0; 4]);
-            let Some((px, py)) = view.project([pos[0], pos[1], pos[2]], width, height) else {
-                continue;
-            };
-            on_screen_cells = on_screen_cells.saturating_add(1);
-            let i = (py as usize).saturating_mul(width as usize).saturating_add(px as usize);
-            let error = if keep.get(i).copied().unwrap_or(false) {
-                pixel_error.get(i).copied().unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            by_slot.insert(
-                u32::try_from(slot).unwrap_or(0),
-                FillPick {
-                    slot: u32::try_from(slot).unwrap_or(0),
-                    error,
-                    pixels: u32::from(error > 0.0),
-                    on_screen: true,
-                    quadrant: screen_quadrant(px, py, width, height),
-                    rank: 0,
-                    floor: 0,
-                    burst: 0,
-                },
-            );
-        }
-        let pixels_u = u64::from(width).saturating_mul(u64::from(height));
-        let base = lighting_fill_param_words(pixels_u).saturating_add(FILL_PARAM_WORDS);
-        let (tile_off, pick_off, _) = fill_list_end(FILL_LOCK_WORDS);
-        let header_at = base.saturating_add(FILL_LOCK_WORDS);
-        let header = self.read_key_words(header_at, 8)?;
-        let floor = header.first().copied().unwrap_or(0);
-        let burst_word = header.get(1).copied().unwrap_or(0);
-        let candidates = header.get(4).copied().unwrap_or(0);
-        let planned = header.get(5).copied().unwrap_or(0);
-        let rays_max = u64::from(LIGHTING_CACHE_BATCH).saturating_mul(u64::from(LIGHTING_CACHE_RAYS));
-        let burst = if burst_word > 0 {
-            burst_word
-        } else {
-            planned.saturating_sub(floor)
-        };
-        let listed = u64::from(floor.saturating_add(burst)).min(rays_max);
-        let picks = self.read_key_words(base.saturating_add(pick_off), listed)?;
-        let cand_n = u64::from(candidates).min(FILL_TILE_CAP);
-        let cand = self.read_key_words(base.saturating_add(tile_off), cand_n)?;
-        let floor_n = (floor as usize).min(picks.len());
-        for (i, slot) in picks.iter().copied().enumerate() {
-            if slot >= crate::cache_probe::SLOTS {
-                continue;
-            }
-            let row = by_slot.entry(slot).or_insert(FillPick {
-                slot,
-                error: 0.0,
-                pixels: 0,
-                on_screen: false,
-                quadrant: 4,
-                rank: 0,
-                floor: 0,
-                burst: 0,
-            });
-            if i < floor_n {
-                row.floor = row.floor.saturating_add(1);
-            } else {
-                row.burst = row.burst.saturating_add(1);
-            }
-        }
-        for word in cand {
-            if word == 0 {
-                continue;
-            }
-            let slot = (word & 2_097_151).saturating_sub(1);
-            if slot >= crate::cache_probe::SLOTS {
-                continue;
-            }
-            let rank = (word >> 21) & 63;
-            if let Some(row) = by_slot.get_mut(&slot) {
-                if rank > row.rank {
-                    row.rank = rank;
-                }
-            }
-        }
-        let rows: Vec<FillPick> = by_slot.into_values().collect();
-        let place = fill_burst_placement(&rows);
-        let quarters = burst_quarter_shares(&rows);
-        eprintln!(
-            "fillcell summary cells {} on_screen {} total_err {:.4} floor {} burst {} planned {} candidates {} top_share {:.4} off_share {:.4} top_rank {:.1} burst_rank {:.1} q {:.4} {:.4} {:.4} {:.4}",
-            rows.len(),
-            on_screen_cells,
-            total_error,
-            floor,
-            burst,
-            planned,
-            candidates,
-            place.top_share,
-            place.off_share,
-            place.top_mean_rank,
-            place.burst_mean_rank,
-            quarters[0],
-            quarters[1],
-            quarters[2],
-            quarters[3]
-        );
-        let mut erred: Vec<FillPick> = rows.iter().copied().filter(|row| row.on_screen && row.error > 0.0).collect();
-        erred.sort_by(|a, b| b.error.total_cmp(&a.error));
-        let mut spent: Vec<FillPick> = rows.iter().copied().filter(|row| row.burst > 0).collect();
-        spent.sort_by(|a, b| b.burst.cmp(&a.burst).then_with(|| b.error.total_cmp(&a.error)));
-        let target = self.lighting.settings.surface_cache.fill.error_target;
-        self.print_fill_cells("top", &erred[..erred.len().min(16)], &view, target, total_error)?;
-        self.print_fill_cells("burst", &spent[..spent.len().min(8)], &view, target, total_error)?;
-        Ok(())
-    }
 
-    fn read_key_words(&self, word: u64, count: u64) -> Result<Vec<u32>, String> {
-        if count == 0 {
-            return Ok(Vec::new());
-        }
-        let bytes = count.saturating_mul(4);
-        let end = word.saturating_mul(4).saturating_add(bytes);
-        if end > self.lighting.cache_keys.size {
-            return Err(format!(
-                "fill list word {word} count {count} sits past the key buffer"
-            ));
-        }
-        Ok(u32_words(&self.copy_device_range(
-            self.lighting.cache_keys.buffer,
-            word.saturating_mul(4),
-            bytes,
-        )?))
-    }
-
-    fn print_fill_cells(
-        &mut self,
-        kind: &str,
-        rows: &[FillPick],
-        view: &FillView,
-        error_target: f32,
-        total_error: f32,
-    ) -> Result<(), String> {
-        for row in rows {
-            let fields = self.read_fill_rank(row.slot, view, error_target)?;
-            let share = if total_error > 0.0 {
-                row.error / total_error
-            } else {
-                0.0
-            };
-            eprintln!(
-                "fillcell {kind} slot {} size {:.3} screen {} px {} err_share {:.4} rank {} burst {} floor {} value {:.3} alloc_err {:.3} rays {:.0} dist {:.2}",
-                row.slot,
-                fields.size,
-                u32::from(row.on_screen),
-                row.pixels,
-                share,
-                row.rank,
-                row.burst,
-                row.floor,
-                fields.value,
-                fields.alloc_err,
-                fields.rays,
-                fields.dist
-            );
-        }
-        Ok(())
-    }
-
-    fn read_fill_sample(&self, slot: u32) -> Result<FillSample, String> {
-        let words = self.read_fill_words(slot)?;
-        let pos = words.first().copied().unwrap_or([0.0; 4]);
-        let normal = words.get(1).copied().unwrap_or([0.0; 4]);
-        let size = if normal[3].is_finite() && normal[3] > 1.0e-4 {
-            normal[3]
-        } else {
-            0.125
-        };
-        Ok(FillSample {
-            pos: [pos[0], pos[1], pos[2]],
-            size,
-            shown: words.get(2).copied().unwrap_or([0.0; 4]),
-            est: words.get(3).copied().unwrap_or([0.0; 4]),
-            rays: words.get(4).copied().unwrap_or([0.0; 4]),
-            grad: words.get(5).copied().unwrap_or([0.0; 4]),
-        })
-    }
-
-    fn read_fill_words(&self, slot: u32) -> Result<Vec<[f32; 4]>, String> {
-        let slot_u = u64::from(slot);
-        let slots = LIGHTING_CACHE_SLOTS;
-        let regions = [
-            (slot_u.saturating_mul(3).saturating_mul(16), 16),
-            (slot_u.saturating_mul(3).saturating_add(1).saturating_mul(16), 16),
-            (slot_u.saturating_mul(3).saturating_add(2).saturating_mul(16), 16),
-            (
-                slots
-                    .saturating_mul(4)
-                    .saturating_add(slot_u.saturating_mul(2))
-                    .saturating_mul(16),
-                32,
-            ),
-            (slots.saturating_mul(11).saturating_add(slot_u).saturating_mul(16), 16),
-        ];
-        for (offset, size) in regions {
-            if offset.saturating_add(size) > self.lighting.cache.size {
-                return Err("fill rank record sits past the cache buffer".to_string());
-            }
-        }
-        Ok(f32_vec4s(&self.copy_device_regions(self.lighting.cache.buffer, &regions)?))
-    }
-
-    fn read_fill_rank(&self, slot: u32, view: &FillView, error_target: f32) -> Result<FillRank, String> {
-        let sample = self.read_fill_sample(slot)?;
-        let at = genos_scene::Vec3::new(sample.pos[0], sample.pos[1], sample.pos[2]);
-        let dist = (at - view.eye).length();
-        let shown = sample.shown;
-        let mean = (0.2126 * shown[0] + 0.7152 * shown[1] + 0.0722 * shown[2]).max(1.0e-4);
-        let rays = sample.rays[3].max(0.0);
-        let dev = sample.est[3].max(0.0).sqrt();
-        let alloc_err = if rays < 0.5 {
-            1.0
-        } else {
-            (dev / mean - error_target.max(0.0)).max(0.0)
-        };
-        let value = if sample.grad[0].is_finite() {
-            sample.grad[0].clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        Ok(FillRank {
-            size: sample.size,
-            value,
-            alloc_err,
-            rays,
-            dist,
-        })
-    }
 
     /// Product frames that missed the reservoir and shaded the labelled exact sum.
     pub(crate) fn lighting_restir_prepare_failures(&self) -> u32 {
@@ -3008,6 +2744,168 @@ impl Gpu {
             (self.fns.cmd_bind_pipe)(self.cmd, 1, shade);
             (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
             self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+        }
+    }
+
+    fn stamp_cascade(&mut self, query: u32) {
+        if self.lighting.cascade_qp.is_null() || self.timestamp_period <= 0.0 {
+            return;
+        }
+        unsafe {
+            (self.fns.cmd_write_timestamp)(self.cmd, 0x800, self.lighting.cascade_qp, query);
+        }
+    }
+
+    fn write_cascade_upper_header(&mut self, w: u32, h: u32, period: u32) {
+        let pixels = u64::from(w).saturating_mul(u64::from(h));
+        let claimed = lighting_upper_claimed_at(pixels);
+        let head = claimed + CASCADE_CLAIMED_WORDS;
+        if self.lighting.cache_keys.buffer.is_null() {
+            return;
+        }
+        // The claim bits are not cleared here: pick consumes them, so a claim
+        // a ray hit made after last frame's pick still keeps its cell.
+        let list_bytes = (CASCADE_UPPER_HEAD_WORDS + CASCADE_UPPER_BANDS * CASCADE_UPPER_CAP)
+            .saturating_mul(4);
+        unsafe {
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                head.saturating_mul(4),
+                list_bytes,
+                0,
+            );
+        }
+        self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
+        let flags = period & 255;
+        let words = [flags, 0, 0, 0];
+        unsafe {
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                head.saturating_mul(4),
+                16,
+                words.as_ptr().cast::<std::ffi::c_void>(),
+            );
+        }
+        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
+    }
+
+    fn set_cascade_upper_band(&mut self, w: u32, h: u32, band: u32, period: u32) {
+        let pixels = u64::from(w).saturating_mul(u64::from(h));
+        let head = lighting_upper_claimed_at(pixels) + CASCADE_CLAIMED_WORDS;
+        let flags = (period & 255) | ((band & 3) << 16);
+        let words = [flags];
+        unsafe {
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                head.saturating_mul(4),
+                4,
+                words.as_ptr().cast::<std::ffi::c_void>(),
+            );
+        }
+        self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
+    }
+
+    /// Claim ancestors, pick this frame's due upper cells, then refresh
+    /// coarse to fine so level 0 can read this frame's parent SH.
+    fn dispatch_cascade_upper(&mut self) {
+        let claim = self.lighting.cascade_upper_claim_pipe;
+        let pick = self.lighting.cascade_upper_pick_pipe;
+        let trace = self.lighting.cascade_upper_trace_pipe;
+        let shade = self.lighting.cascade_upper_shade_pipe;
+        if claim.is_null() || pick.is_null() || trace.is_null() || shade.is_null() {
+            return;
+        }
+        let [w, h, _, _] = self.lighting.dims;
+        let period = crate::cascade::refresh_period(
+            self.lighting.settings.world_cache.cascade_refresh_period,
+        );
+        self.lighting.cascade_times.period = period;
+        if !self.lighting.cascade_qp.is_null() && self.timestamp_period > 0.0 {
+            unsafe {
+                (self.fns.cmd_reset_query)(
+                    self.cmd,
+                    self.lighting.cascade_qp,
+                    0,
+                    CASCADE_TIME_QUERIES,
+                );
+            }
+        }
+        self.write_cascade_upper_header(w, h, period);
+        self.stamp_cascade(0);
+        unsafe {
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, claim);
+            (self.fns.cmd_dispatch)(self.cmd, CASCADE_LEVEL0_GROUPS.div_ceil(64), 1, 1);
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, pick);
+            let slots = u32::try_from(LIGHTING_CACHE_SLOTS).unwrap_or(1);
+            (self.fns.cmd_dispatch)(self.cmd, slots.div_ceil(64), 1, 1);
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+        }
+        self.stamp_cascade(1);
+        // Bands coarse (2) to fine (0) so a parent is refreshed before its child.
+        for (i, band) in [2u32, 1, 0].into_iter().enumerate() {
+            self.set_cascade_upper_band(w, h, band, period);
+            unsafe {
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, trace);
+                (self.fns.cmd_dispatch)(self.cmd, CASCADE_UPPER_GROUPS, 1, 1);
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                (self.fns.cmd_bind_pipe)(self.cmd, 1, shade);
+                (self.fns.cmd_dispatch)(self.cmd, CASCADE_UPPER_GROUPS, 1, 1);
+                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            }
+            self.stamp_cascade(2 + u32::try_from(i).unwrap_or(0));
+        }
+    }
+
+    pub(crate) fn lighting_cascade_times(&mut self) -> crate::CascadeTimes {
+        self.idle_device();
+        self.read_cascade_times();
+        self.lighting.cascade_times
+    }
+
+    fn read_cascade_times(&mut self) {
+        if self.lighting.cascade_qp.is_null() || self.timestamp_period <= 0.0 {
+            return;
+        }
+        let mut raw = [0u64; 6];
+        let got = unsafe {
+            (self.fns.get_query_results)(
+                self.device,
+                self.lighting.cascade_qp,
+                0,
+                CASCADE_TIME_QUERIES,
+                48,
+                raw.as_mut_ptr().cast::<std::ffi::c_void>(),
+                8,
+                0x1,
+            )
+        };
+        if got != 0 {
+            return;
+        }
+        let period = f64::from(self.timestamp_period);
+        let bits = self.timestamp_bits;
+        let ms = |a: u64, b: u64| tick_delta(a, b, bits) as f64 * period / 1.0e6;
+        let times = &mut self.lighting.cascade_times;
+        times.claim_ms = ms(raw[0], raw[1]);
+        times.upper_coarse_ms = ms(raw[1], raw[2]);
+        times.upper_mid_ms = ms(raw[2], raw[3]);
+        times.upper_fine_ms = ms(raw[3], raw[4]);
+        times.l0_ms = ms(raw[4], raw[5]);
+        if genos_scene::lighting_env_flag("GENOS_LIGHTING_CASCADE_TIMES") {
+            eprintln!(
+                "cascade times period {} claim {:.3} ms coarse {:.3} mid {:.3} fine {:.3} l0 {:.3} upper {:.3}",
+                times.period,
+                times.claim_ms,
+                times.upper_coarse_ms,
+                times.upper_mid_ms,
+                times.upper_fine_ms,
+                times.l0_ms,
+                times.upper_ms(),
+            );
         }
     }
 
@@ -4599,67 +4497,6 @@ impl Gpu {
                     (LIGHTING_ARGS_AT + 14) * 4,
                     &drain_sigma.to_ne_bytes(),
                 )?;
-                let fill = self.lighting.settings.surface_cache.fill;
-                let now = std::time::Instant::now();
-                let measured = self.lighting.fill_clock.map_or(0.0, |then| {
-                    now.saturating_duration_since(then).as_secs_f32()
-                });
-                self.lighting.fill_clock = Some(now);
-                self.lighting.fill_dt = measured;
-                let frame_dt = if measured > 1.0e-4 && measured < 0.5 {
-                    measured
-                } else {
-                    fill.frame_dt
-                };
-                // The 1-in-10 wait is gone. Word 32 only enables coverage, and
-                // the shader period is two frames. The ranked burst stays the
-                // preset count. It does not grow with the live-cell count.
-                let floor_rate = 1u32;
-                let burst = fill.burst;
-                let fill_words = [
-                    fill.budget,
-                    fill.tile.max(1),
-                    fill.lod_near.to_bits(),
-                    fill.leash_scale.to_bits(),
-                    fill.look_ahead.to_bits(),
-                    fill.cell_max.to_bits(),
-                    fill.far.to_bits(),
-                    fill.far_share.to_bits(),
-                    fill.offscreen_floor.to_bits(),
-                    fill.error_target.to_bits(),
-                    fill.prox_min.to_bits(),
-                    fill.change_weight.to_bits(),
-                    fill.warmup_rays,
-                    fill.ray_cap,
-                    frame_dt.to_bits(),
-                    self.lighting.settings.world_cache.cell_metres.to_bits(),
-                    fill.check_rate.max(1),
-                    fill.max_picks.clamp(1, 64),
-                    fill.lambda_decay.to_bits(),
-                    fill.window_floor.to_bits(),
-                    fill.catchup_max.to_bits(),
-                    fill.check_sigma.to_bits(),
-                    fill.share,
-                    fill.share_min_hit.to_bits(),
-                    fill.share_cap,
-                    fill.share_plane.to_bits(),
-                    fill.share_normal.to_bits(),
-                    fill.share_w_cap.to_bits(),
-                    fill.share_cos.to_bits(),
-                    fill.share_conf.to_bits(),
-                    fill.share_receivers,
-                    fill.share_handover,
-                    floor_rate,
-                    burst,
-                ];
-                let frame_pixels =
-                    u64::from(self.extent_w.max(1)).saturating_mul(u64::from(self.extent_h.max(1)));
-                self.write_device(
-                    cmd,
-                    keys,
-                    lighting_fill_param_words(frame_pixels) * 4,
-                    pod_slice(&fill_words),
-                )?;
             }
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
         }
@@ -4777,7 +4614,13 @@ impl Gpu {
         // black. Later held frames reuse that store.
         let refresh = self.lighting.frame != 0
             && self.lighting.frame.is_multiple_of(LIGHTING_STILL_REFRESH);
-        let compose_full = bounce_filling
+        // Per-frame cascades: every visible level-0 voxel and its upper chain
+        // are reshaded each frame, so every pixel's bounce can move each frame.
+        // Reusing last frame's picture held the hall at the frame-8 fill until
+        // the 32-frame drift pass (path error 0.38 at frame 24, 0.29 at 32).
+        let cascades = self.lighting.settings.world_mode() == 3 && self.lighting.settings.gi.enabled;
+        let compose_full = cascades
+            || bounce_filling
             || opening
             || refresh
             || !self.lighting.compose_valid
@@ -5059,29 +4902,6 @@ impl Gpu {
                 // the two barriers above order the other frame.
                 self.memory_barrier(0x800, 0x800, 0x40, 0x20);
             }
-            if round
-                && self.lighting.cache_full
-                && self.lighting.settings.surface_cache.fill.budget > 0
-            {
-                let pixels = u64::from(w) * u64::from(h);
-                let scratch =
-                    lighting_fill_param_words(pixels) + FILL_PARAM_WORDS + FILL_LOCK_WORDS;
-                (self.fns.cmd_fill_buffer)(
-                    self.cmd,
-                    self.lighting.cache_keys.buffer,
-                    scratch * 4,
-                    FILL_HEADER_WORDS * 4,
-                    0,
-                );
-                (self.fns.cmd_fill_buffer)(
-                    self.cmd,
-                    self.lighting.cache_keys.buffer,
-                    lighting_fill_tile_at(pixels) * 4,
-                    FILL_TILE_WORDS * 4,
-                    0,
-                );
-                self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
-            }
             if let Some(pool) = stamps {
                 (self.fns.cmd_write_timestamp)(self.cmd, 0x800, pool, first);
             }
@@ -5214,28 +5034,15 @@ impl Gpu {
                 let kind = if gy >= LIGHTING_ARGS { gy } else { 0 };
                 if kind != 0 {
                     let mut k_pc = cur_pc;
-                    // Bits 1 and 2 select the parallel fill passes. Bit 4 is the
-                    // one-thread plan. The three fill passes leave bit 4 clear.
-                    let fill_bits = match kind {
-                        LIGHTING_FILL_HIST => Some(4),
-                        LIGHTING_FILL_EMIT_ON => Some(2),
-                        LIGHTING_FILL_EMIT_OFF => Some(6),
-                        _ => None,
-                    };
-                    if let Some(bits) = fill_bits {
-                        k_pc[6] = (cur_pc[6] & !0x16) | bits;
-                    } else {
-                        k_pc[6] |= 1 << 4;
-                        if kind == LIGHTING_MODE1 {
-                            k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
-                        } else if kind == LIGHTING_DENSE_RAYS {
-                            k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
-                        } else if kind == LIGHTING_DENSE_ENTRIES {
-                            // Fill resolve phase. The cache shader reads lamp.x.
-                            // A non-fill cache dispatch leaves the phase at 0
-                            // and does not enter the resolve.
-                            k_pc[8] = gx;
-                        }
+                    k_pc[6] |= 1 << 4;
+                    if kind == LIGHTING_MODE1 {
+                        k_pc[6] = (cur_pc[6] & !0x310) | 1 << 8;
+                    } else if kind == LIGHTING_DENSE_RAYS {
+                        k_pc[6] = (k_pc[6] & !0x300) | 2 << 8;
+                    } else if kind == LIGHTING_DENSE_ENTRIES {
+                        // The fill resolve phases are gone. A cache dispatch
+                        // leaves the phase at 0 and does not enter resolve.
+                        k_pc[8] = gx;
                     }
                     (self.fns.cmd_push)(
                         self.cmd,
@@ -5296,9 +5103,11 @@ impl Gpu {
                     self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
                 }
                 // Level 0 traces and shades every live voxel, then publish
-                // blends neighbours. The hash walk stays out of compose.
+                // blends this level with the next coarser footprint level.
                 if pass == 7 && self.lighting.cache_full {
+                    self.dispatch_cascade_upper();
                     self.dispatch_cascade_l0();
+                    self.stamp_cascade(5);
                 }
                 if pass == 7 && self.lighting.cache_full && !self.lighting.cascade_pub_pipe.is_null()
                 {
@@ -5732,6 +5541,10 @@ impl Gpu {
                 (self.fns.destroy_query_pool)(self.device, self.lighting.world_qp, std::ptr::null());
                 self.lighting.world_qp = std::ptr::null_mut();
             }
+            if !self.lighting.cascade_qp.is_null() {
+                (self.fns.destroy_query_pool)(self.device, self.lighting.cascade_qp, std::ptr::null());
+                self.lighting.cascade_qp = std::ptr::null_mut();
+            }
         }
         let dumps = std::mem::take(&mut self.lighting.dump);
         for (_, set) in dumps {
@@ -5811,6 +5624,10 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.cascade_pub_pipe))
                 .chain(std::iter::once(&mut self.lighting.cascade_l0_trace_pipe))
                 .chain(std::iter::once(&mut self.lighting.cascade_l0_shade_pipe))
+                .chain(std::iter::once(&mut self.lighting.cascade_upper_claim_pipe))
+                .chain(std::iter::once(&mut self.lighting.cascade_upper_pick_pipe))
+                .chain(std::iter::once(&mut self.lighting.cascade_upper_trace_pipe))
+                .chain(std::iter::once(&mut self.lighting.cascade_upper_shade_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {
@@ -7634,176 +7451,6 @@ fn f32_vec4s(bytes: &[u8]) -> Vec<[f32; 4]> {
     out
 }
 
-/// One cell in the frame-40 error log. Rank 0 is outside the burst histogram.
-#[derive(Clone, Copy)]
-struct FillPick {
-    slot: u32,
-    error: f32,
-    pixels: u32,
-    on_screen: bool,
-    /// 0..3 is a screen quadrant (x bit, then y bit). 4 is off screen.
-    quadrant: u8,
-    rank: u32,
-    floor: u32,
-    burst: u32,
-}
-
-struct FillRank {
-    size: f32,
-    value: f32,
-    alloc_err: f32,
-    rays: f32,
-    dist: f32,
-}
-
-struct FillSample {
-    pos: [f32; 3],
-    size: f32,
-    shown: [f32; 4],
-    est: [f32; 4],
-    rays: [f32; 4],
-    grad: [f32; 4],
-}
-
-struct FillView {
-    forward: genos_scene::Vec3,
-    right: genos_scene::Vec3,
-    up: genos_scene::Vec3,
-    tan_half: f32,
-    aspect: f32,
-    eye: genos_scene::Vec3,
-}
-
-impl FillView {
-    fn from_camera(camera: &genos_scene::Camera, width: u32, height: u32) -> Self {
-        let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
-        let mut right = forward.cross(genos_scene::Vec3::Y);
-        let scale = right.length().max(1.0e-6);
-        right = right / scale;
-        Self {
-            up: right.cross(forward),
-            forward,
-            right,
-            tan_half: 30.0_f32.to_radians().tan(),
-            aspect: (width as f32) / (height.max(1) as f32),
-            eye: camera.position,
-        }
-    }
-
-    /// Screen pixel of a world point. Matches `lighting_fill_pixel`.
-    fn project(&self, pos: [f32; 3], width: u32, height: u32) -> Option<(u32, u32)> {
-        let rel = genos_scene::Vec3::new(pos[0], pos[1], pos[2]) - self.eye;
-        let z = rel.dot(self.forward);
-        if z <= 0.05 || self.tan_half < 1.0e-6 || self.aspect < 1.0e-6 || width == 0 || height == 0
-        {
-            return None;
-        }
-        let ndc_x = rel.dot(self.right) / (z * self.tan_half * self.aspect);
-        let ndc_y = rel.dot(self.up) / (z * self.tan_half);
-        if ndc_x.abs() > 1.0 || ndc_y.abs() > 1.0 {
-            return None;
-        }
-        let px = ((ndc_x * 0.5 + 0.5) * width as f32).floor().max(0.0);
-        let py = ((1.0 - (ndc_y * 0.5 + 0.5)) * height as f32)
-            .floor()
-            .max(0.0);
-        Some((pixel_u32(px, width), pixel_u32(py, height)))
-    }
-}
-
-fn pixel_u32(v: f32, limit: u32) -> u32 {
-    let n = floor_i32(v).max(0);
-    u32::try_from(n).unwrap_or(0).min(limit.saturating_sub(1))
-}
-
-struct FillBurstPlacement {
-    top_share: f32,
-    off_share: f32,
-    top_mean_rank: f32,
-    burst_mean_rank: f32,
-}
-
-/// Share of burst picks on the highest-error quarter of on-screen cells, and
-/// the share that missed the picture. Ranks are the buckets that spent the burst.
-fn fill_burst_placement(rows: &[FillPick]) -> FillBurstPlacement {
-    let burst_total: u32 = rows.iter().map(|row| row.burst).sum();
-    let off: u32 = rows
-        .iter()
-        .filter(|row| !row.on_screen)
-        .map(|row| row.burst)
-        .sum();
-    let mut erred: Vec<&FillPick> = rows
-        .iter()
-        .filter(|row| row.on_screen && row.error > 0.0)
-        .collect();
-    erred.sort_by(|a, b| b.error.total_cmp(&a.error));
-    let top_n = (erred.len() / 4).clamp(1, erred.len().max(1));
-    let top_n = if erred.is_empty() {
-        0
-    } else {
-        top_n.min(erred.len())
-    };
-    let top_burst: u32 = erred.iter().take(top_n).map(|row| row.burst).sum();
-    let top_rank: f32 = if top_n == 0 {
-        0.0
-    } else {
-        erred
-            .iter()
-            .take(top_n)
-            .map(|row| row.rank as f32)
-            .sum::<f32>()
-            / top_n as f32
-    };
-    let burst_rank_w: f32 = rows
-        .iter()
-        .map(|row| row.rank as f32 * row.burst as f32)
-        .sum();
-    let burst_rank = if burst_total == 0 {
-        0.0
-    } else {
-        burst_rank_w / burst_total as f32
-    };
-    let share = |part: u32| {
-        if burst_total == 0 {
-            0.0
-        } else {
-            part as f32 / burst_total as f32
-        }
-    };
-    FillBurstPlacement {
-        top_share: share(top_burst),
-        off_share: share(off),
-        top_mean_rank: top_rank,
-        burst_mean_rank: burst_rank,
-    }
-}
-
-/// Screen quadrant of a pixel. Bit 0 is the right half, bit 1 the bottom half.
-fn screen_quadrant(px: u32, py: u32, width: u32, height: u32) -> u8 {
-    let right = u8::from(px >= width / 2);
-    let bottom = u8::from(py >= height / 2);
-    bottom.saturating_mul(2).saturating_add(right)
-}
-
-/// Share of on-screen burst rays in each screen quadrant. A fair split is 0.25.
-fn burst_quarter_shares(rows: &[FillPick]) -> [f32; 4] {
-    let mut part = [0u32; 4];
-    for row in rows {
-        if row.on_screen && row.quadrant < 4 {
-            let at = usize::from(row.quadrant);
-            part[at] = part[at].saturating_add(row.burst);
-        }
-    }
-    let total: u32 = part.iter().sum();
-    let mut out = [0.0f32; 4];
-    if total == 0 {
-        return out;
-    }
-    for (i, n) in part.iter().copied().enumerate() {
-        out[i] = n as f32 / total as f32;
-    }
-    out
-}
 
 fn seven_vec4s(words: &[[f32; 4]], at: usize) -> Option<[[f32; 4]; 7]> {
     let mut records = [[0.0f32; 4]; 7];
@@ -7848,7 +7495,7 @@ mod sh_knob_tests {
         let tail = LIGHTING_CACHE_SLOT_BYTES - 23 * 16;
         let sh_bytes = if LIGHTING_SH_HALF { 24 } else { 48 };
         let pad = if LIGHTING_SH_HALF { 24 } else { 0 };
-        assert_eq!(tail, sh_bytes + pad + 16);
+        assert_eq!(tail, sh_bytes + pad + 16 + CASCADE_BIN_BYTES);
         let rays = glsl
             .lines()
             .find(|l| l.starts_with("const uint LIGHTING_CACHE_RAYS"))
@@ -8052,84 +7699,24 @@ mod reach_footprint_tests {
     }
 }
 
-#[cfg(test)]
-mod fill_layout_tests {
-    use super::*;
 
-    #[test]
-    fn fill_lists_do_not_alias_at_262144_slots() {
-        let slots = 262_144u64;
-        let (tile, pick, end) = fill_list_end(slots);
-        let rays = u64::from(LIGHTING_CACHE_BATCH) * u64::from(LIGHTING_CACHE_RAYS);
-        assert_eq!(pick, tile + FILL_TILE_WORDS);
-        assert_eq!(end, pick + rays);
-        let old_tile = slots * 2 - FILL_TILE_WORDS;
-        let old_pick = slots + 1;
-        assert!(old_pick > old_tile && old_pick < old_tile + FILL_TILE_WORDS);
-        let old_tile_u = u32::try_from(old_tile).unwrap_or(u32::MAX);
-        let old_pick_u = u32::try_from(old_pick).unwrap_or(u32::MAX);
-        let old_cap = old_tile_u.wrapping_sub(old_pick_u);
-        let rays_u = u32::try_from(rays).unwrap_or(u32::MAX);
-        assert!(
-            old_cap > rays_u,
-            "old pick capacity underflows, got {old_cap}"
-        );
-        let (big_tile, big_pick, _) = fill_list_end(1_048_576);
-        assert_eq!(big_pick, big_tile + FILL_TILE_WORDS);
-        let (_t, _p, host_end) = fill_list_end(FILL_LOCK_WORDS);
-        assert_eq!(
-            lighting_fill_keys_words(0) - lighting_fill_param_words(0),
-            FILL_PARAM_WORDS + host_end
-        );
-    }
-}
-
-#[cfg(test)]
-mod fill_cell_log_tests {
-    use super::{burst_quarter_shares, fill_burst_placement, FillPick};
-
-    #[test]
-    fn burst_on_low_error_cells_is_not_counted_as_covering_the_error() {
-        let rows = [
-            FillPick { slot: 1, error: 10.0, pixels: 4, on_screen: true, quadrant: 0, rank: 2, floor: 1, burst: 0 },
-            FillPick { slot: 2, error: 9.0, pixels: 4, on_screen: true, quadrant: 1, rank: 3, floor: 1, burst: 0 },
-            FillPick { slot: 3, error: 1.0, pixels: 4, on_screen: true, quadrant: 2, rank: 60, floor: 1, burst: 50 },
-            FillPick { slot: 4, error: 0.5, pixels: 4, on_screen: true, quadrant: 3, rank: 61, floor: 1, burst: 50 },
-            FillPick { slot: 5, error: 0.0, pixels: 0, on_screen: false, quadrant: 4, rank: 40, floor: 0, burst: 20 },
-        ];
-        let place = fill_burst_placement(&rows);
-        assert!(place.top_share < 0.01, "top error share {}", place.top_share);
-        assert!((place.off_share - 20.0 / 120.0).abs() < 1.0e-4, "{}", place.off_share);
-        assert!(place.top_mean_rank < 10.0, "{}", place.top_mean_rank);
-        assert!(place.burst_mean_rank > 40.0, "{}", place.burst_mean_rank);
-    }
-
-    #[test]
-    fn on_screen_burst_splits_across_the_four_quarters() {
-        let rows = [
-            FillPick { slot: 1, error: 1.0, pixels: 1, on_screen: true, quadrant: 0, rank: 1, floor: 0, burst: 25 },
-            FillPick { slot: 2, error: 1.0, pixels: 1, on_screen: true, quadrant: 1, rank: 1, floor: 0, burst: 25 },
-            FillPick { slot: 3, error: 1.0, pixels: 1, on_screen: true, quadrant: 2, rank: 1, floor: 0, burst: 25 },
-            FillPick { slot: 4, error: 1.0, pixels: 1, on_screen: true, quadrant: 3, rank: 1, floor: 0, burst: 25 },
-            FillPick { slot: 5, error: 0.0, pixels: 0, on_screen: false, quadrant: 4, rank: 1, floor: 0, burst: 100 },
-        ];
-        let shares = burst_quarter_shares(&rows);
-        for share in shares {
-            assert!((share - 0.25).abs() < 1.0e-4, "{share}");
-        }
-    }
-}
 
 #[cfg(test)]
 mod level0_layout {
-    use super::{lighting_fill_keys_words, lighting_keys_words, lighting_level0_words, lighting_reach_words};
+    use super::{
+        lighting_fill_keys_words, lighting_keys_words, lighting_level0_words, lighting_reach_words,
+        lighting_upper_words,
+    };
 
     #[test]
     fn the_level0_table_fits_in_a_shader_word() {
         let pixels = 320 * 180;
         let start = lighting_fill_keys_words(pixels) + lighting_reach_words();
         let end = lighting_keys_words(pixels);
-        assert_eq!(end - start, lighting_level0_words(pixels));
+        assert_eq!(
+            end - start,
+            lighting_level0_words(pixels) + lighting_upper_words()
+        );
         assert!(end < u64::from(u32::MAX), "key words {end} do not fit in a shader index");
     }
 }

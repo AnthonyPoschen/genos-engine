@@ -60,11 +60,7 @@ void main() {
     vec3 n = lighting_unpack_normal(ckeys.key[word + 9u]);
     float size = lighting_cascade_l0_size(lighting_cascade_unpack_level(ckeys.key[word + 5u]));
     uint key = ckeys.key[word];
-    vec3 dir = lighting_dir(key, n, k, CASCADE_L0_RAYS);
-    float ang = float(lighting_frame()) * CASCADE_GOLDEN;
-    float ca = cos(ang);
-    float sa = sin(ang);
-    dir = dir * ca + cross(n, dir) * sa + n * dot(n, dir) * (1.0 - ca);
+    vec3 dir = lighting_cascade_l0_dir(key, n, k);
     float nd = dot(dir, n);
     if (nd <= 0.0) {
         dir = normalize(dir - n * nd + n * CASCADE_EPS);

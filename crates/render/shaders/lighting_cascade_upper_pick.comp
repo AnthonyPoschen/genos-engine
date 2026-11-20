@@ -1,0 +1,50 @@
+#version 450
+// Build this frame's upper refresh lists. A cell outside 16S that nothing
+// claimed since the last pick is freed.
+// Every resident cell, on or off screen and of any size, is due when
+// (hash(key)+frame)%P==0 for the single fixed period P.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "lighting_cascade.glsl"
+
+void main() {
+    if (!lighting_gi_on()) {
+        return;
+    }
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    uint key = ckeys.key[slot];
+    if (key == 0u) {
+        return;
+    }
+    vec3 pos = cache.v[3u * slot].xyz;
+    vec3 n = cache.v[3u * slot + 1u].xyz;
+    float size = cache.v[3u * slot + 1u].w;
+    if (!(size > 0.0)) {
+        return;
+    }
+    vec3 rel = abs(pos - scene.eye.xyz);
+    float cheb = max(rel.x, max(rel.y, rel.z));
+    // A cell some level-0 voxel's chain or some ray hit read since the last
+    // pick stays resident, whatever its distance: the footprint rule can put
+    // a voxel's parent past 16S, and freeing it would turn that voxel's
+    // misses black. The claim bit is consumed here.
+    bool claimed = lighting_cascade_take_claimed(slot);
+    if (!claimed && !lighting_cascade_in_extent(cheb, size)) {
+        atomicCompSwap(ckeys.key[slot], key, 0u);
+        return;
+    }
+    uint head = lighting_cascade_upper_head_at();
+    uint period = lighting_cascade_refresh_period(ckeys.key[head] & 255u);
+    if (!lighting_cascade_refresh_due(key, lighting_frame(), period)) {
+        return;
+    }
+    uint band = lighting_cascade_upper_band(size);
+    uint i = atomicAdd(ckeys.key[head + 1u + band], 1u);
+    if (i < CASCADE_UPPER_CAP) {
+        ckeys.key[lighting_cascade_upper_list_at(band) + i] = slot;
+    }
+}

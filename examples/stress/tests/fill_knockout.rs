@@ -2,15 +2,17 @@
 #![cfg_attr(test, expect(clippy::cast_precision_loss, reason = "a mean over the frame"))]
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 
-//! Presented-frame knockout for the surface-cache fill (stage F0).
+//! Presented-frame knockout for the per-frame cascade fill (level-0 and upper).
 //!
-//! The test reads the swapchain image. With the cache writing, the hall moves
-//! off the first frames as the cache replaces the probe mix, and its error
-//! against the path reference falls. With
+//! The test reads the swapchain image. With the cascade writing, the hall
+//! moves off the first frames as level-0 and upper cells replace the empty
+//! start, and its error against the path reference falls. With
 //! `--features knockout` and `GENOS_KNOCKOUT=cache_fill`, those value writes
-//! are frozen and this test goes red. The passes still dispatch.
+//! are frozen (`LIGHTING_TOGGLE_FREEZE_CACHE` covers level-0 store and upper
+//! shade/publish) and this test goes red. The passes still dispatch.
 //!
-//! `scripts/ci-fill-knockout.sh` runs both.
+//! Late path-reference error must be <= 0.213. `scripts/ci-fill-knockout.sh`
+//! runs both the live and the frozen builds.
 
 use std::sync::Mutex;
 
@@ -39,9 +41,8 @@ const MIN_DELTA_CODES: f64 = 4.0;
 /// that writes four times too bright moves the picture the wrong way and the
 /// error rises. The due-list on master, same harness, falls to 0.193.
 const MIN_ERROR_GAIN: f64 = 0.03;
-/// Late path-reference error of the due-list scheduler on this harness
-/// (master, lavapipe, 40 frames, 320×180). Re-measure if the harness changes.
-const BASE_LATE_ERROR: f64 = 0.1930;
+/// Late path-reference error gate of this harness (lavapipe, 40 frames, 320×180).
+const LATE_ERROR_GATE: f64 = 0.213;
 /// Prefix of every assertion message. `scripts/ci-fill-knockout.sh` requires it
 /// in the knocked-out run, so a build failure does not count as red.
 const RED: &str = "fill gate red:";
@@ -226,19 +227,6 @@ fn the_presented_frame_moves_when_the_cache_fills() {
     assert!(!late.is_empty(), "late frame");
     let delta = mean_abs_codes(&early, &late);
     let reference = reference_plane(renderer.width() as usize, renderer.height() as usize);
-    if genos_scene::lighting_env_os("GENOS_LIGHTING_FILL_CELL_LOG").is_some() {
-        let mut pixel_error = vec![0.0f32; reference.0.len()];
-        for (i, px) in late.as_chunks::<4>().0.iter().enumerate() {
-            if !reference.1[i] {
-                continue;
-            }
-            let live = pixel_luminance(&[px[2], px[1], px[0]]);
-            pixel_error[i] = (live - reference.0[i]).abs();
-        }
-        if let Err(err) = renderer.log_fill_cell_error(&camera, &pixel_error, &reference.1) {
-            eprintln!("fillcell log failed: {err}");
-        }
-    }
     let early_error = error_vs_reference(&early, &reference);
     let late_error = error_vs_reference(&late, &reference);
     let bands = band_luma(&late, renderer.width() as usize, renderer.height() as usize);
@@ -257,27 +245,14 @@ fn the_presented_frame_moves_when_the_cache_fills() {
         "{RED} the presented frame moved but not toward the path reference (error {early_error:.4} to {late_error:.4}, \
          need a fall of {MIN_ERROR_GAIN})"
     );
-    // The due-list path on master, same harness, lavapipe. Fill schedules into
-    // the same cache, so the late error stays within this of that run.
-    let [serial, hist_groups] = renderer.lighting_fill_compact_work();
     let split = renderer.lighting_fill_ray_split();
-    let hist_threads = hist_groups.saturating_mul(64);
     eprintln!(
-        "fill compact work: serial {serial} hist_threads {hist_threads} late {late_error:.4} \
-         rays {} on {} rest {} checks {} relit {} live {}",
+        "fill rays: late {late_error:.4} rays {} on {} rest {} checks {} relit {} live {}",
         split[0], split[1], split[2], split[3], split[4], split[5]
     );
     assert!(
-        serial > 0 && serial < 4096,
-        "fill scheduler serial work {serial} is a slot-table scan or did not run"
-    );
-    assert!(
-        (16_384..1_048_576).contains(&hist_threads),
-        "fill histogram covers {hist_threads} threads; the slot table is 1048576"
-    );
-    assert!(
-        late_error <= BASE_LATE_ERROR + 0.02,
-        "{RED} fill late error {late_error:.4} is past the due-list late error {BASE_LATE_ERROR:.4} plus 0.02"
+        late_error <= LATE_ERROR_GATE,
+        "{RED} fill late error {late_error:.4} is past the cascade late-error gate {LATE_ERROR_GATE:.4}"
     );
 }
 

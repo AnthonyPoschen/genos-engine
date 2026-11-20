@@ -331,7 +331,6 @@ fn rerun_shader_pieces() {
         "lighting_pack.glsl",
         "lighting_cache.glsl",
         "lighting_cascade.glsl",
-        "lighting_fill.glsl",
         "lighting_cache_slots.glsl",
         "lighting_lamp_pick.glsl",
         "lighting_sun_compose.comp",
@@ -348,6 +347,10 @@ fn rerun_shader_pieces() {
         "lighting_cascade_pub.comp",
         "lighting_cascade_l0_trace.comp",
         "lighting_cascade_l0_shade.comp",
+        "lighting_cascade_upper_claim.comp",
+        "lighting_cascade_upper_pick.comp",
+        "lighting_cascade_upper_trace.comp",
+        "lighting_cascade_upper_shade.comp",
         "scene.vert",
         "gbuffer.vert",
         "instance_ssbo.glsl",
@@ -454,6 +457,31 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
         "pub static LIGHTING_CASCADE_L0_SHADE_SPV: &[u8] = include_bytes!(\"{}\");\n",
         cascade_l0_shade.display()
     ));
+    for (src, sym) in [
+        (
+            "shaders/lighting_cascade_upper_claim.comp",
+            "LIGHTING_CASCADE_UPPER_CLAIM_SPV",
+        ),
+        (
+            "shaders/lighting_cascade_upper_pick.comp",
+            "LIGHTING_CASCADE_UPPER_PICK_SPV",
+        ),
+        (
+            "shaders/lighting_cascade_upper_trace.comp",
+            "LIGHTING_CASCADE_UPPER_TRACE_SPV",
+        ),
+        (
+            "shaders/lighting_cascade_upper_shade.comp",
+            "LIGHTING_CASCADE_UPPER_SHADE_SPV",
+        ),
+    ] {
+        let name = src.rsplit('/').next().expect("shader");
+        let spv = compile(src, &out.join(format!("{name}.spv")));
+        glue_text.push_str(&format!(
+            "pub static {sym}: &[u8] = include_bytes!(\"{}\");\n",
+            spv.display()
+        ));
+    }
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",
         compose_hdr.display()

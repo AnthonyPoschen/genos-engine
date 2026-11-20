@@ -1055,10 +1055,21 @@ void lighting_sc_seed_apply(uint slot);
 // second, unlit copy of that patch.
 // ADR 0039 stage 2 SH-L1 store (defined with the SH reads below), for the claim's reset.
 void lighting_sh_put(uint slot, vec3 c0, vec3 cx, vec3 cy, vec3 cz);
-bool lighting_fill_pixel(vec3 p, out uint px, out uint py);
-float lighting_fill_leash(uint level);
-float lighting_fill_create(uint level);
-float lighting_fill_f(uint i);
+// True when p projects into the picture. Used to keep off-screen fine
+// claims inside a size's 16S extent (the fill leash is gone).
+const float LIGHTING_CACHE_EXTENT = 16.0;
+bool lighting_in_picture(vec3 p) {
+    vec3 rel = p - scene.eye.xyz;
+    float z = dot(rel, scene.view_forward.xyz);
+    float tan_half = scene.view_right.w;
+    float aspect = scene.view_forward.w;
+    if (z <= 1.0e-4 || tan_half < 1.0e-6 || aspect < 1.0e-6) {
+        return false;
+    }
+    float ndc_x = dot(rel, scene.view_right.xyz) / (z * tan_half * aspect);
+    float ndc_y = dot(rel, scene.view_up.xyz) / (z * tan_half);
+    return abs(ndc_x) <= 1.0 && abs(ndc_y) <= 1.0;
+}
 float lighting_fine_word(uint at);
 void lighting_fine_raise_value(uint slot, float value);
 uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at) {
@@ -1079,18 +1090,13 @@ uint lighting_cache_find_sized(vec3 pos, vec3 n, bool claim, float size, vec3 at
     if (!claim || !LIGHTING_SC_WRITES) {
         return ~0u;
     }
-    // The leash load stays outside the screen test: lavapipe faults when a
-    // wave skips a descriptor load (the bounce presented-frame gate).
-    // On screen, compose reads a texel at any distance, so the claim stands.
-    // Off screen, past the level-0 leash, the visit coarsens that cell.
-    // Claiming it out to far filled the pool, and the ranked burst then
-    // missed the back of the hall.
-    float claim_dist = length(pos - scene.eye.xyz);
-    float leash0 = lighting_fill_leash(0u);
-    if (size <= LIGHTING_SC_HIT && leash0 > 0.0) {
-        uint keep_x;
-        uint keep_y;
-        if (!lighting_fill_pixel(pos, keep_x, keep_y) && claim_dist > leash0) {
+    // On screen, compose may claim a texel at any distance. Off screen, a
+    // cell is kept only inside 16S (Chebyshev), the same extent the
+    // cascades use. The fill leash is gone.
+    if (size <= LIGHTING_SC_HIT && !lighting_in_picture(pos)) {
+        vec3 d = pos - scene.eye.xyz;
+        float cheb = max(max(abs(d.x), abs(d.y)), abs(d.z));
+        if (cheb > LIGHTING_CACHE_EXTENT * max(size, 1.0e-6)) {
             return ~0u;
         }
     }
@@ -3251,7 +3257,6 @@ vec3 lighting_cache_irradiance_at(vec3 pos, vec3 n, float t) {
     return lighting_cache_irradiance(pos, n);
 }
 
-bool lighting_ray_fill_on();
 // Irradiance already bounced onto the surface at pos facing n (0 for a new patch).
 vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     if (!lighting_bounce_ok()) {
@@ -3284,11 +3289,10 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
     // new cells is not black until the next round relights it.
     // Flag 32768 (surface cache): every round, not only the round that claimed it.
     bool fill_any = lighting_world_mode() == 3u && (lighting_sc_flags() & 32768u) != 0u;
-    bool fill_parent = lighting_world_mode() == 3u && lighting_ray_fill_on();
-    // The tile fill leaves the 12.5 cm texel empty on purpose. A bounce that
-    // stopped at that texel would stay on the direct light. The parent is the
-    // world cell the rays deposit into.
-    if (e.w < 0.5 && (fill_any || fill_parent || ((pc.params.z >> 7u) & 1u) != 0u)) {
+    // The tile fill used to leave the 12.5 cm texel empty on purpose. A bounce
+    // that stopped at that texel would stay on the direct light. The parent is
+    // the cascade cell at the hit.
+    if (e.w < 0.5 && (fill_any || ((pc.params.z >> 7u) & 1u) != 0u)) {
         float size = cache.v[3u * slot + 1u].w;
         // A bounce that stops on an empty texel reads the world cell the rays
         // deposit into. The picture does not use this swap: it loads the
@@ -3366,8 +3370,6 @@ vec3 lighting_cache_irradiance(vec3 pos, vec3 n) {
 // dispatch sizes past the WRC lists (LIGHTING_ARGS_AT: rays x,y,z; entries x,y,z;
 // dense count; segment ends) and the ray and cache passes map their dense thread
 // to the entry (lighting_dense_entry). Nothing past the live entries is dispatched.
-bool lighting_ray_fill_on();
-void lighting_fill_dispatch();
 const uint LIGHTING_ARGS_AT = 2u * LIGHTING_CACHE_SLOTS + 2u + 17600u;
 // Surface-cache firefly clamp (`surface_cache.firefly_sigma`). Barré-Brisebois
 // et al., MultiscaleMeanEstimator.hlsl, uses 8. The clamp is biased. 0 keeps
@@ -3651,11 +3653,7 @@ void lighting_write_args() {
         ckeys.key[LIGHTING_DRAIN_SQ_AT] = 0u;
         gstats.draining = ckeys.key[LIGHTING_DRAIN_FLAG_AT];
         lighting_shadow_epochs();
-        if (lighting_ray_fill_on()) {
-            lighting_fill_dispatch();
-            return;
-        }
-        // World mode 3 due lists are gone. A budget of 0 traces no cache rays.
+        // The fill allocator is gone. World mode 3 traces no cache rays here.
         a = 0u;
         b = 0u;
         c = 0u;
@@ -7261,13 +7259,8 @@ void lighting_sc_seed_apply(uint slot) {
 void lighting_gdirty_mark(uint probe) {
     work.v[lighting_gdirty_at() + 2u * probe].x = uintBitsToFloat(lighting_frame());
 }
-#include "lighting_fill.glsl"
-// Past the fill lists. One constant, so compose keeps a multiply and an add
-// and not a chain of adds. Same end as `lighting_fill_keys_words`.
-const uint LIGHTING_REACH_TAIL = LIGHTING_FILL_PARAMS + LIGHTING_CACHE_SLOTS + 8u
-    + LIGHTING_FILL_OFF_CAP + LIGHTING_FILL_HIST_WORDS + LIGHTING_FILL_PLAN_WORDS
-    + LIGHTING_FILL_EXTRA_WORDS + LIGHTING_CACHE_BATCH * LIGHTING_CACHE_RAYS * 5u
-    + LIGHTING_FILL_TILE_CAP;
+// The fill lists are gone. Reach starts at the seed-pay end, which is also
+// `lighting_fill_keys_words` on the host.
 uint lighting_reach_base() {
-    return LIGHTING_SC_SEED_PAY_AT + pc.dims.x * pc.dims.y * 8u + LIGHTING_REACH_TAIL;
+    return LIGHTING_SC_SEED_PAY_AT + pc.dims.x * pc.dims.y * 8u;
 }
