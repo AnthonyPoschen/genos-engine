@@ -43,7 +43,7 @@ fn hall(output: OutputMode) -> World {
 fn picture(window: &mut Window, renderer: &mut Renderer, world: &World) -> Vec<u8> {
     let camera = Camera::opening();
     let mut last = Vec::new();
-    for _ in 0..3 {
+    for _ in 0..60 {
         let _ = window.pump();
         last = renderer
             .draw(world, &camera, true)

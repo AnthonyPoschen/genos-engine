@@ -738,6 +738,9 @@ fn adaptive_atrous_matches_the_full_reference() {
     let camera = Camera::opening();
     renderer.set_lighting_settings(denoise_settings());
     view_at(renderer, ViewMode::Bounce);
+    for _ in 0..60 {
+        let _ = draw(window, renderer, &world, &camera);
+    }
     let mut full_frames = Vec::new();
     for _ in 0..6 {
         full_frames.push(draw(window, renderer, &world, &camera));
