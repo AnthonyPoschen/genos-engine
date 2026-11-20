@@ -273,6 +273,11 @@ kind = "test"
 detail = "harness only"
 
 [[var]]
+name = "GENOS_PIPELINE_CACHE"
+kind = "override"
+detail = "$XDG_CACHE_HOME/genos/vk-pipeline-cache.bin is primary; this path replaces that file, or 0/off disables it"
+
+[[var]]
 name = "GENOS_KNOCKOUT"
 kind = "test"
 detail = "harness only"
