@@ -1,6 +1,7 @@
 #version 450
-// Claim the parent chain of every live level-0 voxel so upper cells exist
-// for the rolling refresh and for this frame's parent SH fetch.
+// Claim the eight parent-grid corners of every live level-0 voxel, at
+// each exact parent size, so the rolling refresh can shade the interval
+// that starts where the voxel's rays end.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
@@ -26,15 +27,5 @@ void main() {
         uintBitsToFloat(ckeys.key[word + 8u]));
     vec3 n = lighting_unpack_normal(ckeys.key[word + 9u]);
     float size = lighting_cascade_l0_size(lighting_cascade_unpack_level(ckeys.key[word + 5u]));
-    float parent = size * CASCADE_PARENT_SCALE;
-    [[dont_unroll]] for (uint i = 0u; i < 9u; i++) {
-        if (parent > 32.0 + CASCADE_EPS) {
-            break;
-        }
-        uint s = lighting_cache_find_sized(pos, n, true, parent, pos);
-        if (s != ~0u) {
-            lighting_cascade_mark_claimed(s);
-        }
-        parent *= CASCADE_PARENT_SCALE;
-    }
+    lighting_cascade_claim_parents(pos, n, size);
 }

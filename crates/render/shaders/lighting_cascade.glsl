@@ -81,7 +81,9 @@ float lighting_cascade_ema_step(vec3 cur, vec3 prior, float se, float prior_n, f
     }
     float lc = dot(cur, CASCADE_LUMA);
     float lp = dot(prior, CASCADE_LUMA);
-    float gap = abs(lc - lp);
+    // Luma-weighted L1 so a directional or chromatic shift that cancels
+    // in mean luma is still a disagreement.
+    float gap = max(abs(lc - lp), dot(abs(cur - prior), CASCADE_LUMA));
     float noise = max(se, CASCADE_EPS);
     float cap = max(n_max, 1.0);
     float n0 = min(max(prior_n, 1.0), cap);
@@ -93,7 +95,7 @@ float lighting_cascade_ema_step(vec3 cur, vec3 prior, float se, float prior_n, f
     // A real change never takes less of the new sample than agreement
     // would: at a cap of 1 (an upper cell refreshed every 4 frames) the
     // value is replaced either way.
-    float den = max(max(abs(lc), abs(lp)), CASCADE_EPS);
+    float den = max(max(abs(lc), abs(lp)), max(dot(abs(cur), CASCADE_LUMA), CASCADE_EPS));
     float nw = max(clamp(gap / den, 0.0, 1.0), 1.0 / agree);
     new_n = min(max(n0 * (1.0 - nw) + 1.0, 1.0), cap);
     return nw;
@@ -604,54 +606,90 @@ vec4 lighting_cascade_gated(uint s, vec3 q, vec3 n, float plane) {
     return vec4(max(v.rgb, vec3(0.0)), 1.0);
 }
 
+// One of the eight parent-grid cells around `pos` at exactly `size`.
+// `claim` allocates a missing corner so the rolling refresh can shade it;
+// a newly claimed cell is empty until that refresh.
+void lighting_cascade_parent_corner(vec3 pos, vec3 n, float size, uint i, bool claim, out uint slot, out float weight) {
+    // Same grid as lighting_cache_key_sized / lighting_sc_centre: half a
+    // cell in along the axis, not a cube inset on every axis. Otherwise
+    // the eight corners miss the cells the cache actually allocated.
+    vec3 inset = lighting_world_mode() != 0u
+        ? 0.5 * lighting_axis_vec(lighting_axis(n))
+        : vec3(0.0);
+    vec3 uv = pos / size - inset;
+    ivec3 base = ivec3(floor(uv));
+    vec3 f = fract(uv);
+    ivec3 o = ivec3(int(i & 1u), int((i >> 1u) & 1u), int((i >> 2u) & 1u));
+    vec3 wt = mix(1.0 - f, f, vec3(o));
+    weight = wt.x * wt.y * wt.z;
+    slot = ~0u;
+    if (!(weight > 0.0)) {
+        return;
+    }
+    vec3 q = (vec3(base + o) + vec3(0.5) + inset) * size;
+    slot = lighting_cache_find_sized(q, n, claim, size, q);
+}
+
+// Claim the eight parent-grid corners at every exact parent size of a
+// level-0 voxel, so interval chaining has the cell whose 4S starts
+// where the child's rays end (8s). A coarser size is a different
+// interval and is not a stand-in.
+void lighting_cascade_claim_parents(vec3 pos, vec3 n, float child_size) {
+    float size = child_size * CASCADE_PARENT_SCALE;
+    [[dont_unroll]] for (uint level = 0u; level < 9u; level++) {
+        if (size > 32.0 + CASCADE_EPS) {
+            return;
+        }
+        [[dont_unroll]] for (uint i = 0u; i < 8u; i++) {
+            uint s;
+            float w;
+            lighting_cascade_parent_corner(pos, n, size, i, true, s, w);
+            if (s != ~0u) {
+                lighting_cascade_mark_claimed(s);
+            }
+        }
+        size *= CASCADE_PARENT_SCALE;
+    }
+}
+
 // Parent bins for a probe at `pos` facing `n` whose own rays end at the
 // parent's interval start: the trilinear mix of the eight parent cells
-// around `pos`, each through the leak gates. When no parent corner passes,
-// the nearest coarser ancestor that does is used instead, never zero.
-// `ok` is false only when no ancestor up to 32 m exists yet.
+// at exactly 2 * child_size, each through the leak gates. A coarser
+// ancestor's bins start farther out (its own 4S), so they are not used
+// as this interval. `ok` is false until those exact parents exist and
+// have been shaded.
 void lighting_cascade_parent_bins(vec3 pos, vec3 n, float child_size, out vec3 bins[16], out bool ok) {
     for (uint b = 0u; b < CASCADE_BINS; b++) {
         bins[b] = vec3(0.0);
     }
     ok = false;
     float size = child_size * CASCADE_PARENT_SCALE;
-    [[dont_unroll]] for (uint level = 0u; level < 10u; level++) {
-        if (size > 32.0 + CASCADE_EPS) {
-            return;
+    if (size > 32.0 + CASCADE_EPS) {
+        return;
+    }
+    float wsum = 0.0;
+    [[dont_unroll]] for (uint i = 0u; i < 8u; i++) {
+        uint s;
+        float w;
+        lighting_cascade_parent_corner(pos, n, size, i, true, s, w);
+        if (!(w > 0.0)) {
+            continue;
         }
-        // The parent cell's own thickness: a metre-scale parent must pass
-        // its trilinear corners. Facing and stale still reject the far wall.
-        vec3 base_p = pos / size - vec3(LIGHTING_CELL_HALF);
-        ivec3 base = ivec3(floor(base_p));
-        vec3 f = fract(base_p);
-        float wsum = 0.0;
-        [[dont_unroll]] for (uint i = 0u; i < 8u; i++) {
-            ivec3 o = ivec3(int(i & 1u), int((i >> 1u) & 1u), int((i >> 2u) & 1u));
-            vec3 wt = mix(1.0 - f, f, vec3(o));
-            float w = wt.x * wt.y * wt.z;
-            if (!(w > 0.0)) {
-                continue;
-            }
-            vec3 q = (vec3(base + o) + vec3(LIGHTING_CELL_HALF)) * size;
-            uint s = lighting_cache_find_sized(q, n, false, size, q);
-            vec4 g = lighting_cascade_gated(s, pos, n, size);
-            if (!(g.w > LIGHTING_CACHE_HAS_W)) {
-                continue;
-            }
-            lighting_cascade_mark_claimed(s);
-            for (uint b = 0u; b < CASCADE_BINS; b++) {
-                bins[b] += w * lighting_cascade_bin_get(s, b);
-            }
-            wsum += w;
+        vec4 g = lighting_cascade_gated(s, pos, n, size);
+        if (!(g.w > LIGHTING_CACHE_HAS_W)) {
+            continue;
         }
-        if (wsum > 0.0) {
-            for (uint b = 0u; b < CASCADE_BINS; b++) {
-                bins[b] /= wsum;
-            }
-            ok = true;
-            return;
+        lighting_cascade_mark_claimed(s);
+        for (uint b = 0u; b < CASCADE_BINS; b++) {
+            bins[b] += w * lighting_cascade_bin_get(s, b);
         }
-        size *= CASCADE_PARENT_SCALE;
+        wsum += w;
+    }
+    if (wsum > 0.0) {
+        for (uint b = 0u; b < CASCADE_BINS; b++) {
+            bins[b] /= wsum;
+        }
+        ok = true;
     }
 }
 

@@ -198,10 +198,24 @@ void main() {
         cur = mix(old.rgb, cur, wa);
     }
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u) {
+        uint period = lighting_cascade_refresh_period(
+            ckeys.key[lighting_cascade_upper_head_at()] & 255u);
+        float n_max = lighting_cascade_ema_n_max(period);
         for (uint b = 0u; b < CASCADE_BINS; b++) {
             if (bin_n[b] > 0.0) {
                 vec3 now = bin_sum[b] / bin_n[b];
-                lighting_cascade_bin_put(slot, b, has_old ? mix(lighting_cascade_bin_get(slot, b), now, wa) : now);
+                if (has_old) {
+                    // This bin's own SE: the cell SE scaled by the fewer
+                    // samples in the bin. A directional change down-weights
+                    // only this bin; a quiet bin keeps its history.
+                    float se_b = se * sqrt(nray / bin_n[b]);
+                    float nb = 1.0;
+                    float wb = lighting_cascade_ema_step(
+                        now, lighting_cascade_bin_get(slot, b), se_b, old.w, n_max, nb);
+                    lighting_cascade_bin_put(slot, b, mix(lighting_cascade_bin_get(slot, b), now, wb));
+                } else {
+                    lighting_cascade_bin_put(slot, b, now);
+                }
             } else if (!has_old) {
                 lighting_cascade_bin_put(slot, b, clear_mean);
             }
