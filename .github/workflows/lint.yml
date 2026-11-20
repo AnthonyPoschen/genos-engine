@@ -156,13 +156,17 @@ jobs:
           cargo test --locked --workspace $gpu --no-fail-fast -- --test-threads=1 --skip every_binary_answers_pings_while_it_quits
           cargo test --locked --release -p genos-restir-ref --no-fail-fast -- --test-threads=1
           cargo test --locked -p genos-render -p genos-stress -p genos-debug --lib --bins --no-fail-fast -- --test-threads=1
-          # Integration tests in those crates that never open a device: CPU
-          # references, shader-source lints and CPU-side packing checks.
+          # Whitelist. Most of these never open a device: CPU references,
+          # shader-source lints, and CPU-side packing checks. noise_gate does.
           cargo test --locked --no-fail-fast \
             -p genos-debug --test fog_froxel --test fog_integrate --test fog_reference --test fire_reference \
             -p genos-render --test gpu_budget --test shader_loops --test particle_resident --test instance_stride \
             -p genos-stress --test lighting_ref_check --test lighting_ref_generate --test noise_gate \
             -- --test-threads=1
+          # The splotch gate. Limits stay in bounce_residual.rs. One lavapipe
+          # thread keeps the High hall inside the house pod's memory.
+          LP_NUM_THREADS=1 cargo test --locked -p genos-stress --test bounce_residual \
+            floor_speckle_is_under_the_bar_and_splotch_is_not -- --test-threads=1 --exact
 
   fill-knockout:
     runs-on: ubuntu-latest
