@@ -2,6 +2,8 @@
 
 Intent for the bounce field that replaces the cell-only picture. The implementation commits on this branch follow this note. GI v1's radiance cascades stay removed. This system does not bring that path back.
 
+Next step (proposal): [per-frame-cascades.md](per-frame-cascades.md), where level 0 traces every frame and upper cells refresh on a rolling stride.
+
 Sources: Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384, and Osborne and Sannikov, arXiv 2408.14425. Where this note departs from those papers, the departure is named below.
 
 ## Level 0
