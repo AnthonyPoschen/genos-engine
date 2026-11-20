@@ -113,13 +113,186 @@ pub fn interval_merge(hit: Option<[f32; 3]>, parent: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// New-sample weight for the level-0 EMA. At least 0.5. Grows with the
-/// luminance gap against the voxel's own ray spread (`1/sqrt(rays)`).
+/// History window of every cascade value, in frames (shader
+/// `CASCADE_EMA_WINDOW`). Level-0 voxels update every frame, so their stored
+/// sample count caps at this (new-sample weight >= 1/4). An upper cell
+/// updates every `period` frames, so its cap is the window over the period:
+/// one shared timescale, with no value remembering more than ~4 frames.
+pub const EMA_WINDOW_FRAMES: f32 = 4.0;
+
+/// Cap on the stored level-0 EMA sample count, matching the shader.
+pub const EMA_N_MAX: f32 = EMA_WINDOW_FRAMES;
+
+/// Stored-count cap of a value refreshed every `period` frames.
+#[must_use]
+pub fn ema_n_max(period: u32) -> f32 {
+    let p = f32::from(u16::try_from(period.max(1)).unwrap_or(u16::MAX));
+    (EMA_WINDOW_FRAMES / p).max(1.0)
+}
+
+fn ema_rays(rays: u32) -> f32 {
+    f32::from(u16::try_from(rays.max(1)).unwrap_or(u16::MAX))
+}
+
+/// New-sample weight for the level-0 EMA.
+///
+/// The change is judged against the estimate's standard error
+/// `max(|current|, |prior|) / sqrt(rays)` (the Poisson-like bound used
+/// when only the two lumas are known; the shader uses the real
+/// second-moment SE of this frame's rays). A gap inside two standard
+/// errors is noise and blends at `1/rays`. A real change down-weights
+/// history in proportion to the gap over the larger luma. Only
+/// non-finite values take weight 1 as a hard reset.
+///
+/// This is the instantaneous SE rule, used by unit tests. The stored
+/// sample count is applied in [`ema_step`].
 pub fn ema_weight(current: f32, prior: f32, rays: u32) -> f32 {
-    let count = f32::from(u16::try_from(rays.max(1)).unwrap_or(u16::MAX));
-    let spread = current.abs().max(1.0e-6) / count.sqrt();
+    if !current.is_finite() || !prior.is_finite() {
+        return 1.0;
+    }
+    let count = ema_rays(rays);
+    let se = current.abs().max(prior.abs()).max(1.0e-6) / count.sqrt();
     let gap = (current - prior).abs();
-    (gap / (3.0 * spread)).clamp(0.5, 1.0)
+    if gap <= 2.0 * se {
+        return 1.0 / count;
+    }
+    let den = current.abs().max(prior.abs()).max(1.0e-6);
+    (gap / den).clamp(0.0, 1.0)
+}
+
+/// Mix weight and the stored sample count after this update.
+///
+/// Agreement grows `prior_n` and blends at `1/n`. A real change
+/// shrinks `prior_n` by the leftover history weight so later frames
+/// keep catching up instead of stalling inside the new-sample
+/// standard error. Invalid data returns weight 1 and `n = 1`.
+#[must_use]
+pub fn ema_step(current: f32, prior: f32, rays: u32, prior_n: f32, n_max: f32) -> (f32, f32) {
+    if !current.is_finite() || !prior.is_finite() {
+        return (1.0, 1.0);
+    }
+    let count = ema_rays(rays);
+    let se = current.abs().max(prior.abs()).max(1.0e-6) / count.sqrt();
+    let gap = (current - prior).abs();
+    let cap = n_max.max(1.0);
+    let n0 = prior_n.clamp(1.0, cap);
+    let agree = (n0 + 1.0).min(cap);
+    if gap <= 2.0 * se {
+        return (1.0 / agree, agree);
+    }
+    // A real change never takes less of the new sample than agreement.
+    let den = current.abs().max(prior.abs()).max(1.0e-6);
+    let nw = (gap / den).clamp(0.0, 1.0).max(1.0 / agree);
+    let n = (n0 * (1.0 - nw) + 1.0).clamp(1.0, cap);
+    (nw, n)
+}
+
+/// Default upper refresh stride. Every resident upper cell uses this
+/// period unless the debug setting is 1, 2, or 10.
+pub const PERIOD_DEFAULT: u32 = 4;
+
+/// Chebyshev retention: a cell of size `S` is kept while distance ≤ `16S`.
+pub const EXTENT_FACTOR: f32 = 16.0;
+
+/// Fixed rolling period for every upper cell, on or off screen, every size.
+/// The setting is 1, 2, 4, or 10. Anything else is [`PERIOD_DEFAULT`].
+#[must_use]
+pub fn refresh_period(setting: u32) -> u32 {
+    match setting {
+        1 | 2 | 4 | 10 => setting,
+        _ => PERIOD_DEFAULT,
+    }
+}
+
+/// Rays traced on a refresh of a cell of `size` metres.
+#[must_use]
+pub fn refresh_rays(size: f32) -> u32 {
+    if size <= 0.5 {
+        16
+    } else if size <= 4.0 {
+        32
+    } else {
+        64
+    }
+}
+
+/// True while a cell of `size` stays inside the camera-centred clipmap.
+#[must_use]
+pub fn in_extent(cheb: f32, size: f32) -> bool {
+    cheb <= EXTENT_FACTOR * size.max(0.0)
+}
+
+/// SH-L1 Ylm constants, matching `lighting_cache.glsl`.
+const SH_Y0: f32 = 0.282_094_8;
+const SH_Y1: f32 = 0.488_602_5;
+
+fn sh_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0].mul_add(b[0], a[1].mul_add(b[1], a[2] * b[2]))
+}
+
+fn sh_scale(v: [f32; 3], s: f32) -> [f32; 3] {
+    [v[0] * s, v[1] * s, v[2] * s]
+}
+
+fn sh_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn sh_norm(v: [f32; 3]) -> [f32; 3] {
+    let len = sh_dot(v, v).sqrt().max(1.0e-6);
+    sh_scale(v, 1.0 / len)
+}
+
+/// Hemispheric inversion of an upper cell's SH-L1, matching
+/// `lighting_cascade_sh_radiance`. A constant incoming field reconstructs
+/// as that radiance in every direction on the hemisphere.
+#[must_use]
+pub fn sh_radiance_hemi(
+    dir: [f32; 3],
+    axis: [f32; 3],
+    c0: [f32; 3],
+    cx: [f32; 3],
+    cy: [f32; 3],
+    cz: [f32; 3],
+) -> [f32; 3] {
+    let n = if sh_dot(axis, axis) > 0.25 {
+        sh_norm(axis)
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let i0 = sh_scale(c0, 1.0 / SH_Y0);
+    let idot = sh_scale(
+        [
+            cx[0].mul_add(dir[0], cy[0].mul_add(dir[1], cz[0] * dir[2])),
+            cx[1].mul_add(dir[0], cy[1].mul_add(dir[1], cz[1] * dir[2])),
+            cx[2].mul_add(dir[0], cy[2].mul_add(dir[1], cz[2] * dir[2])),
+        ],
+        1.0 / SH_Y1,
+    );
+    let i1 = sh_scale(
+        [
+            cx[0].mul_add(n[0], cy[0].mul_add(n[1], cz[0] * n[2])),
+            cx[1].mul_add(n[0], cy[1].mul_add(n[1], cz[1] * n[2])),
+            cx[2].mul_add(n[0], cy[2].mul_add(n[1], cz[2] * n[2])),
+        ],
+        1.0 / SH_Y1,
+    );
+    let a = sh_scale(sh_add(sh_scale(i0, 2.0), sh_scale(i1, -3.0)), 1.0 / std::f32::consts::PI);
+    let mu = sh_dot(dir, n);
+    let l = sh_add(
+        sh_scale(a, 1.0 - 1.5 * mu),
+        sh_scale(idot, 1.5 / std::f32::consts::PI),
+    );
+    [l[0].max(0.0), l[1].max(0.0), l[2].max(0.0)]
+}
+
+/// Rolling-stride due test: `(hash + frame) % P == 0`. Period 1 is every frame.
+#[must_use]
+pub fn refresh_due(key_hash: u32, frame: u32, period: u32) -> bool {
+    if period <= 1 {
+        return true;
+    }
+    key_hash.wrapping_add(frame).is_multiple_of(period)
 }
 
 /// Weight of the next ring. Zero until the outer tenth of this ring.
@@ -290,6 +463,8 @@ pub struct Level0Voxel {
     pub level: u32,
     pub axis: u32,
     pub pos: [f32; 3],
+    pub radiance: [f32; 3],
+    pub weight: f32,
 }
 
 impl Level0Voxel {
@@ -298,14 +473,56 @@ impl Level0Voxel {
     pub fn key(self) -> (i32, i32, i32, u32, u32) {
         (self.cell[0], self.cell[1], self.cell[2], self.level, self.axis)
     }
+
+    /// Rec.709 luminance of the stored voxel radiance.
+    #[must_use]
+    pub fn luma(self) -> f32 {
+        0.2126 * self.radiance[0] + 0.7152 * self.radiance[1] + 0.0722 * self.radiance[2]
+    }
+
+    /// Key of the next coarser cell that contains this voxel's point.
+    #[must_use]
+    pub fn parent_key(self) -> Option<(i32, i32, i32, u32, u32)> {
+        if self.level >= L0_MAX {
+            return None;
+        }
+        let size = l0_size(self.level + 1);
+        let n_axis = axis_vec(self.axis);
+        let cell = l0_cell(self.pos, n_axis, size);
+        Some((cell[0], cell[1], cell[2], self.level + 1, self.axis))
+    }
+}
+
+/// GPU milliseconds for one frame of the cascade, by level band.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CascadeTimes {
+    /// `0` is the normal rolling table; otherwise 1, 2, 4, or 10.
+    pub period: u32,
+    pub l0_ms: f64,
+    /// `S <= 0.5 m`.
+    pub upper_fine_ms: f64,
+    /// `0.5 m < S <= 4 m`.
+    pub upper_mid_ms: f64,
+    /// `S > 4 m`.
+    pub upper_coarse_ms: f64,
+    pub claim_ms: f64,
+}
+
+impl CascadeTimes {
+    /// Sum of the three upper size bands, excluding claim/pick.
+    #[must_use]
+    pub fn upper_ms(self) -> f64 {
+        self.upper_fine_ms + self.upper_mid_ms + self.upper_coarse_ms
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        axis, axis_vec, cell_size, chebyshev, ema_weight, interval, interval_merge, l0_cell,
-        l0_centre, l0_interval, l0_level, l0_level_plain, l0_size, overlap_blend, parent_gate,
-        ring, want, FINE, L0_MAX, OVERLAP, PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
+        axis, axis_vec, cell_size, chebyshev, ema_n_max, ema_step, ema_weight, in_extent, interval, interval_merge,
+        l0_cell, l0_centre, l0_interval, l0_level, l0_level_plain, l0_size, overlap_blend,
+        parent_gate, refresh_due, refresh_period, refresh_rays, ring, sh_radiance_hemi, want, FINE, L0_MAX, OVERLAP,
+        EMA_N_MAX, EMA_WINDOW_FRAMES, PERIOD_DEFAULT, PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
     };
 
     #[test]
@@ -374,11 +591,87 @@ mod tests {
     }
 
     #[test]
-    fn the_level0_ema_weight_is_at_least_a_half() {
-        assert!((ema_weight(1.0, 1.0, 32) - 0.5).abs() < 1.0e-5);
+    fn a_level0_ema_treats_noise_as_agreement() {
+        assert!((ema_weight(1.0, 1.0, 32) - 1.0 / 32.0).abs() < 1.0e-5);
+        // se = 1/sqrt(32) ≈ 0.177; a 0.1 gap is inside two standard errors.
+        assert!((ema_weight(1.1, 1.0, 32) - 1.0 / 32.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn a_level0_ema_downweights_a_real_change() {
+        // se ≈ 4/sqrt(32) ≈ 0.707; gap 3.9 is many standard errors.
         let hot = ema_weight(4.0, 0.1, 32);
-        assert!(hot > 0.5, "a large gap must shrink the prior, got {hot}");
-        assert!(hot <= 1.0);
+        assert!((hot - 3.9 / 4.0).abs() < 1.0e-4, "got {hot}");
+    }
+
+    #[test]
+    fn a_level0_ema_hard_resets_invalid_data() {
+        assert!((ema_weight(f32::NAN, 1.0, 32) - 1.0).abs() < 1.0e-5);
+        assert!((ema_weight(1.0, f32::INFINITY, 32) - 1.0).abs() < 1.0e-5);
+        let (w, n) = ema_step(f32::NAN, 1.0, 32, 16.0, EMA_N_MAX);
+        assert!((w - 1.0).abs() < 1.0e-5 && (n - 1.0).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn a_level0_ema_grows_n_on_agreement_and_shrinks_it_on_change() {
+        let (w, n) = ema_step(1.1, 1.0, 32, 2.0, EMA_N_MAX);
+        assert!((w - 1.0 / 3.0).abs() < 1.0e-5, "got {w}");
+        assert!((n - 3.0).abs() < 1.0e-5, "got {n}");
+        let (hot, n1) = ema_step(4.0, 0.1, 32, EMA_N_MAX, EMA_N_MAX);
+        assert!((hot - 3.9 / 4.0).abs() < 1.0e-4, "got {hot}");
+        let expect_n = EMA_N_MAX * (1.0 - 3.9 / 4.0) + 1.0;
+        assert!((n1 - expect_n).abs() < 1.0e-4, "got {n1}");
+        // Leftover after the change is often inside this frame's SE.
+        // Reduced N keeps the next agreement blend faster than the cap.
+        let prior = 0.1f32.mul_add(1.0 - hot, 4.0 * hot);
+        let (w2, n2) = ema_step(4.0, prior, 32, n1, EMA_N_MAX);
+        assert!(w2 > 1.0 / EMA_N_MAX + 1.0e-5, "leftover weight {w2} stalled at the cap");
+        assert!(n2 < EMA_N_MAX, "leftover n {n2} did not stay reduced");
+    }
+
+    #[test]
+    fn every_cascade_value_remembers_at_most_the_shared_window() {
+        // Agreement forever: the weight settles at 1/cap, never below 1/4.
+        let mut n = 1.0;
+        let mut w = 1.0;
+        for _ in 0..1000 {
+            (w, n) = ema_step(1.0, 1.0, 32, n, EMA_N_MAX);
+        }
+        assert!(w >= 0.25 - 1.0e-6, "level-0 new weight {w}");
+        for period in [1u32, 2, 4, 10] {
+            let cap = ema_n_max(period);
+            let frames = cap * period as f32;
+            assert!(cap >= 1.0, "period {period} cap {cap}");
+            assert!(
+                frames <= EMA_WINDOW_FRAMES.max(period as f32) + 1.0e-6,
+                "period {period}: memory {frames} frames"
+            );
+        }
+        assert!((ema_n_max(4) - 1.0).abs() < 1.0e-6);
+        assert!((ema_n_max(1) - EMA_N_MAX).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn a_constant_hemisphere_sh_reconstructs_as_that_radiance() {
+        let axis = [0.0, 1.0, 0.0];
+        let l = 2.0;
+        let pi = std::f32::consts::PI;
+        let c0 = [2.0 * pi * super::SH_Y0 * l; 3];
+        let cx = [pi * super::SH_Y1 * l * axis[0]; 3];
+        let cy = [pi * super::SH_Y1 * l * axis[1]; 3];
+        let cz = [pi * super::SH_Y1 * l * axis[2]; 3];
+        let dirs = [
+            axis,
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            super::sh_norm([0.6, 0.8, 0.0]),
+        ];
+        for dir in dirs {
+            let got = sh_radiance_hemi(dir, axis, c0, cx, cy, cz);
+            for c in got {
+                assert!((c - l).abs() < 1.0e-4, "dir {dir:?} got {got:?}");
+            }
+        }
     }
 
     #[test]
@@ -434,7 +727,11 @@ mod tests {
         assert!(shader.contains("lighting_cascade_l0_interval"));
         assert!(shader.contains("const uint CASCADE_L0_RAYS = 32u;"));
         assert!(shader.contains("lighting_cascade_merge"));
-        assert!(shader.contains("lighting_cascade_neighbors"));
+        assert!(shader.contains("lighting_cascade_at"));
+        assert!(
+            !shader.contains("lighting_cascade_neighbors"),
+            "publish has no same-level neighbour gather"
+        );
         assert!(
             !shader.contains("lighting_sh_compose_shown"),
             "publish does not read the SH lattice"
@@ -445,7 +742,11 @@ mod tests {
         assert!(!shader.contains("lighting_cascade_voxel("));
         assert!(!shader.contains("lighting_cascade_facing"));
         assert!(shader.contains("LIGHTING_DIAG_CASCADE_GAP = 11u"));
-        assert!(shader.contains("LIGHTING_CELL_HALF * size"));
+        assert!(shader.contains("LIGHTING_CELL_HALF * plane"));
+        assert!(
+            shader.contains("abs(dot(stored - pos, n)) > size"),
+            "bounce/picture record accepts a hit in the cell, not only half a cell"
+        );
         let probe = include_str!("../shaders/lighting_screen_probe.glsl");
         assert!(
             probe.contains("lighting_cascade_published(pixel)"),
@@ -535,5 +836,40 @@ mod tests {
         assert_eq!(l0_level(pos, n, eye, Some(level)), level);
         let kept = l0_level(pos, n, [0.0, 1.8, 0.2], Some(level));
         assert_eq!(kept, level, "a small eye move must keep the leaf");
+    }
+
+    #[test]
+    fn the_upper_refresh_period_is_one_fixed_stride() {
+        assert_eq!(refresh_period(0), PERIOD_DEFAULT);
+        assert_eq!(refresh_period(3), PERIOD_DEFAULT);
+        assert_eq!(refresh_period(1), 1);
+        assert_eq!(refresh_period(2), 2);
+        assert_eq!(refresh_period(4), 4);
+        assert_eq!(refresh_period(10), 10);
+    }
+
+    #[test]
+    fn an_upper_cell_traces_more_rays_as_it_grows() {
+        assert_eq!(refresh_rays(0.25), 16);
+        assert_eq!(refresh_rays(0.5), 16);
+        assert_eq!(refresh_rays(1.0), 32);
+        assert_eq!(refresh_rays(4.0), 32);
+        assert_eq!(refresh_rays(8.0), 64);
+    }
+
+    #[test]
+    fn a_cell_is_kept_inside_sixteen_times_its_size() {
+        assert!(in_extent(4.0, 0.25));
+        assert!(!in_extent(4.01, 0.25));
+        assert!(in_extent(16.0, 1.0));
+        assert!(!in_extent(16.01, 1.0));
+    }
+
+    #[test]
+    fn the_rolling_stride_hits_every_period() {
+        assert!(refresh_due(7, 0, 1));
+        assert!(refresh_due(7, 1, 1));
+        assert!(refresh_due(3, 1, 4));
+        assert!(!refresh_due(3, 2, 4));
     }
 }

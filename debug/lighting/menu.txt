@@ -53,24 +53,6 @@ GI | world | World cache | closed | lighting_surface_cache_blend
 GI | world | World cache | closed | lighting_surface_cache_firefly_sigma
 GI | world | World cache | closed | lighting_surface_cache_ray_budget
 GI | world | World cache | closed | lighting_surface_cache_dormant_rays
-GI | world | World cache | closed | lighting_fill_budget
-GI | world | World cache | closed | lighting_fill_change_weight
-GI | world | World cache | closed | lighting_fill_check_rate
-GI | world | World cache | closed | lighting_fill_max_picks
-GI | world | World cache | closed | lighting_fill_lambda_decay
-GI | world | World cache | closed | lighting_fill_window_floor
-GI | world | World cache | closed | lighting_fill_catchup_max
-GI | world | World cache | closed | lighting_fill_check_sigma
-GI | world | World cache | closed | lighting_fill_share
-GI | world | World cache | closed | lighting_fill_share_min_hit
-GI | world | World cache | closed | lighting_fill_share_cap
-GI | world | World cache | closed | lighting_fill_share_plane
-GI | world | World cache | closed | lighting_fill_share_normal
-GI | world | World cache | closed | lighting_fill_share_w_cap
-GI | world | World cache | closed | lighting_fill_share_cos
-GI | world | World cache | closed | lighting_fill_share_conf
-GI | world | World cache | closed | lighting_fill_share_receivers
-GI | world | World cache | closed | lighting_fill_share_handover
 GI | world | World cache | closed | lighting_screen_verify
 GI | world | World cache | closed | lighting_world_verify
 Denoise | - | - | open | lighting_denoise_iters

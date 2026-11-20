@@ -489,181 +489,6 @@ kind = "mirror"
 detail = "Removed. set_key warns and drops the value. The rank is not scaled."
 
 [[var]]
-name = "GENOS_LIGHTING_FILL_BUDGET"
-kind = "mirror"
-detail = "surface_cache.fill_budget (stress knob lighting_fill_budget); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_BURST"
-kind = "mirror"
-detail = "surface_cache.fill_burst (stress knob lighting_fill_burst); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_CELL_LOG"
-kind = "test"
-detail = "harness only: the fill picture test prints fillcell at frame 40"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_CATCHUP_MAX"
-kind = "mirror"
-detail = "surface_cache.fill_catchup_max (stress knob lighting_fill_catchup_max); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_CELL_MAX"
-kind = "mirror"
-detail = "surface_cache.fill_cell_max (stress knob lighting_fill_cell_max); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_CHANGE_WEIGHT"
-kind = "mirror"
-detail = "surface_cache.fill_change_weight (stress knob lighting_fill_change_weight); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_CHECK_RATE"
-kind = "mirror"
-detail = "surface_cache.fill_check_rate (stress knob lighting_fill_check_rate); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_CHECK_SIGMA"
-kind = "mirror"
-detail = "surface_cache.fill_check_sigma (stress knob lighting_fill_check_sigma); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_ERROR_TARGET"
-kind = "mirror"
-detail = "surface_cache.fill_error_target (stress knob lighting_fill_error_target); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_FAR"
-kind = "mirror"
-detail = "surface_cache.fill_far (stress knob lighting_fill_far); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_FAR_SHARE"
-kind = "mirror"
-detail = "surface_cache.fill_far_share (stress knob lighting_fill_far_share); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_FLOOR_RATE"
-kind = "mirror"
-detail = "surface_cache.fill_floor_rate (stress knob lighting_fill_floor_rate); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_FLOOR_RAYS"
-kind = "mirror"
-detail = "surface_cache.fill_floor_rays (stress knob lighting_fill_floor_rays); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_FRAME_DT"
-kind = "mirror"
-detail = "surface_cache.fill_frame_dt (stress knob lighting_fill_frame_dt); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_LAMBDA_DECAY"
-kind = "mirror"
-detail = "surface_cache.fill_lambda_decay (stress knob lighting_fill_lambda_decay); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_LEASH"
-kind = "mirror"
-detail = "surface_cache.fill_leash (stress knob lighting_fill_leash); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_LOD_NEAR"
-kind = "mirror"
-detail = "surface_cache.fill_lod_near (stress knob lighting_fill_lod_near); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_LOOK_AHEAD"
-kind = "mirror"
-detail = "surface_cache.fill_look_ahead (stress knob lighting_fill_look_ahead); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_MAX_PICKS"
-kind = "mirror"
-detail = "surface_cache.fill_max_picks (stress knob lighting_fill_max_picks); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_OFFSCREEN_FLOOR"
-kind = "mirror"
-detail = "surface_cache.fill_offscreen_floor (stress knob lighting_fill_offscreen_floor); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_PROX_MIN"
-kind = "mirror"
-detail = "surface_cache.fill_prox_min (stress knob lighting_fill_prox_min); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_RAY_CAP"
-kind = "mirror"
-detail = "surface_cache.fill_ray_cap (stress knob lighting_fill_ray_cap); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE"
-kind = "mirror"
-detail = "surface_cache.fill_share (stress knob lighting_fill_share); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_CAP"
-kind = "mirror"
-detail = "surface_cache.fill_share_cap (stress knob lighting_fill_share_cap); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_CONF"
-kind = "mirror"
-detail = "surface_cache.fill_share_conf (stress knob lighting_fill_share_conf); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_COS"
-kind = "mirror"
-detail = "surface_cache.fill_share_cos (stress knob lighting_fill_share_cos); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_HANDOVER"
-kind = "mirror"
-detail = "surface_cache.fill_share_handover (stress knob lighting_fill_share_handover); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_MIN_HIT"
-kind = "mirror"
-detail = "surface_cache.fill_share_min_hit (stress knob lighting_fill_share_min_hit); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_NORMAL"
-kind = "mirror"
-detail = "surface_cache.fill_share_normal (stress knob lighting_fill_share_normal); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_PLANE"
-kind = "mirror"
-detail = "surface_cache.fill_share_plane (stress knob lighting_fill_share_plane); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_RECEIVERS"
-kind = "mirror"
-detail = "surface_cache.fill_share_receivers (stress knob lighting_fill_share_receivers); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_SHARE_W_CAP"
-kind = "mirror"
-detail = "surface_cache.fill_share_w_cap (stress knob lighting_fill_share_w_cap); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_TILE"
-kind = "mirror"
-detail = "surface_cache.fill_tile (stress knob lighting_fill_tile); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_WARMUP"
-kind = "mirror"
-detail = "surface_cache.fill_warmup (stress knob lighting_fill_warmup); MCP set_lighting_settings"
-
-[[var]]
-name = "GENOS_LIGHTING_FILL_WINDOW_FLOOR"
-kind = "mirror"
-detail = "surface_cache.fill_window_floor (stress knob lighting_fill_window_floor); MCP set_lighting_settings"
-
-[[var]]
 name = "GENOS_LIGHTING_GI"
 kind = "todo"
 detail = "no CLI argument yet"
@@ -942,6 +767,11 @@ detail = "no CLI argument yet"
 name = "GENOS_LIGHTING_WORLD_STALE"
 kind = "todo"
 detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_CASCADE_REFRESH_PERIOD"
+kind = "mirror"
+detail = "world_cache.cascade_refresh_period; LightingSettings key cascade_refresh_period; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_YOUNG_ONLY"
@@ -1866,13 +1696,3 @@ detail = "glslang -D for picture and sun compose; the picture loads the publishe
 name = "GENOS_COMPOSE_SC_WRITES"
 kind = "override"
 detail = "read-only compose is primary; 1 sets compose spec constant 0 so compose writes the cache again (A/B kill switch)"
-
-[[var]]
-name = "GENOS_FILL_REF_OUT"
-kind = "mirror"
-detail = "--out on fill-ref"
-
-[[var]]
-name = "GENOS_FILL_TILE"
-kind = "mirror"
-detail = "--tile-fill"

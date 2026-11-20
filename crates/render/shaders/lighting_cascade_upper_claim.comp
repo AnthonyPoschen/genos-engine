@@ -1,0 +1,31 @@
+#version 450
+// Claim the eight parent-grid corners of every live level-0 voxel, at
+// each exact parent size, so the rolling refresh can shade the interval
+// that starts where the voxel's rays end.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "lighting_cascade.glsl"
+
+void main() {
+    if (!lighting_gi_on()) {
+        return;
+    }
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= CASCADE_LEVEL0_CAP) {
+        return;
+    }
+    uint word = lighting_cascade_table_base(lighting_frame() & 1u)
+        + slot * CASCADE_LEVEL0_STRIDE;
+    uint frame = lighting_frame() + 1u;
+    if (ckeys.key[word] == 0u || ckeys.key[word + 1u] != frame) {
+        return;
+    }
+    vec3 pos = vec3(
+        uintBitsToFloat(ckeys.key[word + 6u]),
+        uintBitsToFloat(ckeys.key[word + 7u]),
+        uintBitsToFloat(ckeys.key[word + 8u]));
+    vec3 n = lighting_unpack_normal(ckeys.key[word + 9u]);
+    float size = lighting_cascade_l0_size(lighting_cascade_unpack_level(ckeys.key[word + 5u]));
+    lighting_cascade_claim_parents(pos, n, size);
+}

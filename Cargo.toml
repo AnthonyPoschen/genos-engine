@@ -20,7 +20,6 @@ members = [
     "crates/ui",
     "crates/lighting-ref",
     "crates/restir-ref",
-    "crates/fill-ref",
     "crates/restir-gpu",
     "crates/load",
     "crates/load-check",

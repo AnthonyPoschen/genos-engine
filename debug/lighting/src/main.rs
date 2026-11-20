@@ -165,26 +165,9 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --surface-cache-ray-budget N
                          cache-round ray cap; 0 keeps the existing lists
                          (GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET).
-                         World mode 3 does not spend this number. A positive
-                         fill_budget turns the pass on. The traced count is one
-                         coverage ray per live cell every two frames, plus
-                         fill_burst. The burst stays that preset count.
-                         fill_burst 0 spends no extra rays. High defaults to 400000,
-                         Medium to 12500, Low to 6250. fill_budget 0 traces none.
-                         The other fill knobs are surface_cache.fill_* and
-                         GENOS_LIGHTING_FILL_TILE, FILL_LOD_NEAR, FILL_CELL_MAX,
-                         FILL_LEASH, FILL_LOOK_AHEAD, FILL_FAR, FILL_FAR_SHARE,
-                         FILL_OFFSCREEN_FLOOR, FILL_ERROR_TARGET, FILL_PROX_MIN,
-                         FILL_CHANGE_WEIGHT, FILL_CHECK_RATE, FILL_MAX_PICKS,
-                         FILL_LAMBDA_DECAY, FILL_WINDOW_FLOOR, FILL_CATCHUP_MAX,
-                         FILL_CHECK_SIGMA, FILL_WARMUP, FILL_RAY_CAP, FILL_FRAME_DT,
-                         FILL_SHARE, FILL_SHARE_MIN_HIT, FILL_SHARE_CAP,
-                         FILL_SHARE_PLANE, FILL_SHARE_NORMAL, FILL_SHARE_W_CAP,
-                         FILL_SHARE_COS, FILL_SHARE_CONF, FILL_SHARE_RECEIVERS,
-                         FILL_SHARE_HANDOVER, FILL_FLOOR_RAYS, FILL_FLOOR_RATE,
-                         FILL_BURST.
-                         fill_share 1 seeds other cells in the same tile.
-                         0 turns that off. Ring is not a value here.
+                         World mode 3 no longer spends a fill allocator
+                         budget. Cascades trace level-0 every frame and
+                         refresh upper cells on a fixed rolling stride.
   --surface-cache-dormant-rays N
                          fresh rays per frame for a dormant cache entry, 0..16.
                          0 keeps one sweep in eight. 1..16 traces one new
@@ -340,39 +323,6 @@ const SLIDER_KNOBS: &[&str] = &[
     "lighting_surface_cache_firefly_sigma",
     "lighting_surface_cache_ray_budget",
     "lighting_surface_cache_dormant_rays",
-    "lighting_fill_budget",
-    "lighting_fill_tile",
-    "lighting_fill_lod_near",
-    "lighting_fill_cell_max",
-    "lighting_fill_leash",
-    "lighting_fill_look_ahead",
-    "lighting_fill_far",
-    "lighting_fill_offscreen_floor",
-    "lighting_fill_error_target",
-    "lighting_fill_far_share",
-    "lighting_fill_prox_min",
-    "lighting_fill_change_weight",
-    "lighting_fill_check_rate",
-    "lighting_fill_max_picks",
-    "lighting_fill_lambda_decay",
-    "lighting_fill_window_floor",
-    "lighting_fill_catchup_max",
-    "lighting_fill_check_sigma",
-    "lighting_fill_warmup",
-    "lighting_fill_ray_cap",
-    "lighting_fill_frame_dt",
-    "lighting_fill_share",
-    "lighting_fill_share_min_hit",
-    "lighting_fill_share_cap",
-    "lighting_fill_share_plane",
-    "lighting_fill_share_normal",
-    "lighting_fill_share_w_cap",
-    "lighting_fill_share_cos",
-    "lighting_fill_share_conf",
-    "lighting_fill_share_receivers",
-    "lighting_fill_share_handover",
-    "lighting_fill_floor_rays",
-    "lighting_fill_burst",
     "lighting_world_stale",
     "lighting_denoise_iters",
     "lighting_denoise_variance",

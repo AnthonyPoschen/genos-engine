@@ -1582,6 +1582,19 @@ impl Renderer {
         self.gpu.lighting_level0_counts()
     }
 
+    /// Last frame's cascade GPU times, by level. Waits for that frame.
+    pub fn lighting_cascade_times(&mut self) -> crate::CascadeTimes {
+        self.gpu.lighting_cascade_times()
+    }
+
+    /// Debug/stress upper refresh period: 1, 2, 4, or 10. Default 4.
+    pub fn set_cascade_refresh_period(&mut self, period: u32) -> Result<(), String> {
+        let mut settings = self.lighting_settings();
+        settings.set_key("cascade_refresh_period", &period.to_string())?;
+        self.set_lighting_settings(settings);
+        Ok(())
+    }
+
     /// Fill scheduler work from the last frame: serial plan iterations, then
     /// the histogram dispatch's group count. Waits for that frame.
     pub fn lighting_fill_compact_work(&mut self) -> [u32; 2] {
@@ -1591,18 +1604,6 @@ impl Renderer {
     /// Last frame: rays, on-screen, remainder, checks, cells committed, live.
     pub fn lighting_fill_ray_split(&mut self) -> [u32; 6] {
         self.gpu.lighting_fill_ray_split()
-    }
-
-    /// Print `fillcell` for this frame: path-reference error against burst rank.
-    ///
-    /// `pixel_error` is `|live − reference|` per pixel. `keep` is false on sky.
-    pub fn log_fill_cell_error(
-        &mut self,
-        camera: &genos_scene::Camera,
-        pixel_error: &[f32],
-        keep: &[bool],
-    ) -> Result<(), String> {
-        self.gpu.log_fill_cell_error(camera, pixel_error, keep)
     }
 
     /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`

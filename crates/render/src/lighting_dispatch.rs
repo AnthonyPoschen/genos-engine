@@ -383,56 +383,10 @@ impl LightGroups {
     }
 }
 
-fn fill_parallel(settings: &LightingSettings) -> bool {
-    settings.world_mode() == 3 && settings.surface_cache.fill.budget > 0
-}
-
-fn fill_tiles(settings: &LightingSettings, w: u32, h: u32) -> u32 {
-    let tile = settings.surface_cache.fill.tile.max(1);
-    w.div_ceil(tile)
-        .saturating_mul(h.div_ceil(tile))
-        .min(u32::try_from(FILL_TILE_CAP).unwrap_or(u32::MAX))
-}
-
-/// Histogram before the one-thread plan. Emit after it. Neither covers the slot table.
-fn push_fill_hist(out: &mut LightGroups, settings: &LightingSettings, w: u32, h: u32) {
-    if !fill_parallel(settings) {
-        return;
-    }
-    let tiles = fill_tiles(settings, w, h);
-    let groups = tiles
-        .max(u32::try_from(FILL_OFF_CAP).unwrap_or(u32::MAX))
-        .div_ceil(64)
-        .max(1);
-    out.push(0, groups, LIGHTING_FILL_HIST, B_COMPACT);
-}
-
-fn push_fill_emit(out: &mut LightGroups, settings: &LightingSettings, _w: u32, _h: u32) {
-    if !fill_parallel(settings) {
-        return;
-    }
-    // One thread per candidate the visit may list. The list is capped at the
-    // old tile table, which is the storage the visit writes into.
-    let groups = u32::try_from(FILL_TILE_CAP).unwrap_or(u32::MAX).div_ceil(64);
-    out.push(0, groups.max(1), LIGHTING_FILL_EMIT_ON, B_COMPACT);
-}
-
-/// Fill resolve is six dispatches, one thread per traced ray. The group
-/// count is the indirect word the plan writes (`(traced + 63) / 64`). `gx`
-/// is the phase the cache shader reads from the lamp push-constant word:
-/// clear, link, commit, then the three share passes. One group of 64 used
-/// to stride the whole ray list inside the cache timestamp.
-fn push_cache_resolve(out: &mut LightGroups, settings: &LightingSettings) {
-    if fill_parallel(settings) {
-        // Share is three more passes over the same rays. Off, those dispatches
-        // would be empty groups the size of the ray list.
-        let phases = if settings.surface_cache.fill.share == 1 { 6 } else { 3 };
-        for phase in 0..phases {
-            out.push(6, phase, LIGHTING_DENSE_ENTRIES, B_CACHE);
-        }
-    } else {
-        out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
-    }
+/// The fill allocator is gone. A cache dispatch still runs so lavapipe
+/// keeps a live pipeline, but it traces no scheduler rays.
+fn push_cache_resolve(out: &mut LightGroups, _settings: &LightingSettings) {
+    out.push(6, 0, LIGHTING_DENSE_ENTRIES, B_CACHE);
 }
 
 fn push_picture(out: &mut LightGroups, settings: &LightingSettings, gx: u32, gy: u32) {
@@ -505,9 +459,7 @@ pub(crate) fn light_groups(
         && settings.denoiser.iterations == 5
     {
         out.push(0, slots, 1, B_COMPACT);
-        push_fill_hist(&mut out, settings, w, h);
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
-        push_fill_emit(&mut out, settings, w, h);
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
         out.push(3, pixels.div_ceil(64), LIGHTING_MODE1, B_DIRECT);
         out.push(3, 0, LIGHTING_DENSE_RAYS, B_HIT);
@@ -569,11 +521,9 @@ fn gated(
     }
     if round && buckets.compact {
         out.push(0, slots, 1, B_COMPACT);
-        push_fill_hist(out, settings, w, h);
     }
     if round && (buckets.cache_rays || buckets.cache) {
         out.push(0, 1, LIGHTING_ARGS, B_COMPACT);
-        push_fill_emit(out, settings, w, h);
     }
     if round && buckets.cache_rays {
         out.push(2, 0, LIGHTING_DENSE_RAYS, B_CACHE_RAYS);
@@ -733,43 +683,22 @@ mod probe_still_tests {
     }
 
     #[test]
-    fn a_moving_high_frame_histograms_bins_not_the_slot_table() {
+    fn a_moving_high_frame_does_not_schedule_the_fill_allocator() {
         let high = LightingSettings::preset(LightingPreset::High);
         let moving = groups(&high, false, true);
-        let hist: Vec<_> = moving
-            .groups
-            .iter()
-            .copied()
-            .filter(|g| g.2 == LIGHTING_FILL_HIST)
-            .collect();
-        assert_eq!(hist.len(), 1, "one histogram dispatch");
-        let threads = hist[0].1.saturating_mul(64);
         assert!(
-            threads >= 16_384,
-            "the histogram covers the off-screen bins ({threads})"
-        );
-        assert!(
-            u64::from(threads) < LIGHTING_CACHE_SLOTS,
-            "the histogram must not cover the slot table ({threads})"
-        );
-        assert_eq!(
-            moving.groups.iter().filter(|g| g.2 == LIGHTING_FILL_EMIT_ON).count(),
-            1
-        );
-        assert_eq!(
-            moving.groups.iter().filter(|g| g.2 == LIGHTING_FILL_EMIT_OFF).count(),
-            0,
-            "the off-screen bin emit is gone"
+            moving.groups.iter().all(|g| g.2 != LIGHTING_ARGS + 4
+                && g.2 != LIGHTING_ARGS + 5
+                && g.2 != LIGHTING_ARGS + 6),
+            "the fill histogram and emit passes are gone"
         );
         let visit = moving.groups.iter().position(|g| g.2 == 1 && g.0 == 0);
         let plan = moving.groups.iter().position(|g| g.2 == LIGHTING_ARGS);
-        let hist_at = moving.groups.iter().position(|g| g.2 == LIGHTING_FILL_HIST);
-        let emit = moving.groups.iter().position(|g| g.2 == LIGHTING_FILL_EMIT_ON);
-        assert!(visit < hist_at && hist_at < plan && plan < emit);
+        assert!(visit < plan, "the args pass still follows the slot visit");
     }
 
     #[test]
-    fn a_fill_round_resolves_one_thread_per_ray() {
+    fn a_cache_round_keeps_one_resolve_dispatch() {
         let high = LightingSettings::preset(LightingPreset::High);
         let moving = groups(&high, false, true);
         let resolve: Vec<_> = moving
@@ -783,22 +712,8 @@ mod probe_still_tests {
             "pass stamps stop before the ReSTIR queries ({})",
             moving.groups.len()
         );
-        assert_eq!(resolve.len(), 3, "clear, link, commit; share is off");
-        for (phase, group) in resolve.iter().enumerate() {
-            assert_eq!(group.1, u32::try_from(phase).expect("phase"), "gx is the resolve phase");
-        }
-        let mut shared = high.clone();
-        shared.surface_cache.fill.share = 1;
-        let shared_groups = groups(&shared, false, true);
-        assert_eq!(
-            shared_groups
-                .groups
-                .iter()
-                .filter(|g| g.0 == 6 && g.2 == LIGHTING_DENSE_ENTRIES)
-                .count(),
-            6,
-            "sharing adds the three elect passes"
-        );
+        assert_eq!(resolve.len(), 1, "the fill resolve phases are gone");
+        assert_eq!(resolve[0].1, 0);
         let idle = groups(&high, true, false);
         assert_eq!(
             idle.groups.iter().filter(|g| g.0 == 6).count(),
@@ -822,7 +737,7 @@ mod probe_still_tests {
         assert_eq!(quiet.counts[B_ATROUS as usize], 0);
         assert_eq!(quiet.groups.len(), 3);
         assert!(
-            quiet.groups.iter().all(|g| g.2 != LIGHTING_FILL_HIST),
+            quiet.groups.iter().all(|g| g.2 != LIGHTING_ARGS + 4),
             "a settled frame does not schedule fill"
         );
         assert_eq!(quiet.groups[1].0, SH_PREP_PASS);

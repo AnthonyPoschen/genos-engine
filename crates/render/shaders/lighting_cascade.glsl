@@ -3,8 +3,9 @@
 // screen footprint, not Chebyshev rings. A half-cell inset along the
 // dominant axis stops grid-plane flips. Two tables (this frame and last)
 // keep the previous leaves for the level-0 EMA and quarter-level hysteresis.
-// Every live voxel traces 32 rays each frame. Publish blends neighbouring
-// leaves on the same surface. GI v1 stays removed.
+// Every live voxel traces 32 rays each frame. Publish blends only upward:
+// this footprint level with the next coarser one across the outer tenth.
+// There is no same-level neighbour gather. GI v1 stays removed.
 //
 // The record sits after the reach words. Word 0 is unused. Two tables of
 // CASCADE_LEVEL0_CAP records, then four words a pixel: published radiance
@@ -53,6 +54,52 @@ const float CASCADE_EPS = 1.0e-6;
 const uint CASCADE_L0_RAYS = 32u;
 const float CASCADE_GOLDEN = 2.399963229728653;
 const uint CASCADE_L0_HIT_WORDS = 4u;
+const vec3 CASCADE_LUMA = vec3(0.2126, 0.7152, 0.0722);
+// History window of every cascade value, in frames (cascade.rs
+// EMA_WINDOW_FRAMES). A level-0 voxel updates each frame and caps its stored
+// count at this. An upper cell updates every refresh period and caps at the
+// window over the period, so cells, voxels and bounce share one timescale.
+const float CASCADE_EMA_WINDOW = 4.0;
+const float CASCADE_EMA_N_MAX = CASCADE_EMA_WINDOW;
+
+float lighting_cascade_ema_n_max(uint period) {
+    return max(CASCADE_EMA_WINDOW / float(max(period, 1u)), 1.0);
+}
+
+// Mix weight and the stored sample count after this update.
+// A gap inside two standard errors of this frame's estimate is noise:
+// N grows and the blend is 1/N. A larger gap down-weights history by
+// the relative luma change and shrinks N by the leftover history so
+// later frames keep catching up instead of stalling inside the
+// new-sample standard error. Non-finite values take weight 1 and N = 1.
+float lighting_cascade_ema_step(vec3 cur, vec3 prior, float se, float prior_n, float n_max, out float new_n) {
+    if (isnan(cur.x) || isinf(cur.x) || isnan(cur.y) || isinf(cur.y)
+        || isnan(cur.z) || isinf(cur.z) || isnan(prior.x) || isinf(prior.x)
+        || isnan(prior.y) || isinf(prior.y) || isnan(prior.z) || isinf(prior.z)) {
+        new_n = 1.0;
+        return 1.0;
+    }
+    float lc = dot(cur, CASCADE_LUMA);
+    float lp = dot(prior, CASCADE_LUMA);
+    // Luma-weighted L1 so a directional or chromatic shift that cancels
+    // in mean luma is still a disagreement.
+    float gap = max(abs(lc - lp), dot(abs(cur - prior), CASCADE_LUMA));
+    float noise = max(se, CASCADE_EPS);
+    float cap = max(n_max, 1.0);
+    float n0 = min(max(prior_n, 1.0), cap);
+    float agree = min(n0 + 1.0, cap);
+    if (gap <= 2.0 * noise) {
+        new_n = agree;
+        return 1.0 / new_n;
+    }
+    // A real change never takes less of the new sample than agreement
+    // would: at a cap of 1 (an upper cell refreshed every 4 frames) the
+    // value is replaced either way.
+    float den = max(max(abs(lc), abs(lp)), max(dot(abs(cur), CASCADE_LUMA), CASCADE_EPS));
+    float nw = max(clamp(gap / den, 0.0, 1.0), 1.0 / agree);
+    new_n = min(max(n0 * (1.0 - nw) + 1.0, 1.0), cap);
+    return nw;
+}
 
 uint lighting_cascade_base() {
     return lighting_reach_base()
@@ -82,9 +129,188 @@ uint lighting_cascade_counts_at() {
         + pc.dims.x * pc.dims.y * CASCADE_PIXEL_WORDS;
 }
 
+// Level-0 ray k of CASCADE_L0_RAYS about n: one stratum of cos(theta) each,
+// so every equal-measure band of the hemisphere gets the same share of rays
+// (a sqrt(N) x sqrt(N) grid with N = 32 leaves 6x6 cells with 2 rays short in
+// the top band and oversamples grazing rays, biasing 2pi/N sum L cos low by
+// ~4%). The turn steps by the golden angle per ray and per frame.
+vec3 lighting_cascade_l0_dir(uint key, vec3 n, uint k) {
+    float j1 = lighting_unit(key ^ (k * 0x9e3779b9u + 1u));
+    float j2 = lighting_unit(key ^ (k * 0x85ebca6bu + 2u));
+    float u = max((float(k) + j1) / float(CASCADE_L0_RAYS), CASCADE_EPS);
+    float turn = fract(float(k) * 0.6180339887 + j2) * LIGHTING_TAU
+        + float(lighting_frame()) * CASCADE_GOLDEN;
+    return lighting_hemi_dir(key, n, u, turn / LIGHTING_TAU);
+}
+
 uint lighting_cascade_hit_at(uint slot, uint k) {
     return lighting_cascade_counts_at() + 2u
         + (slot * CASCADE_L0_RAYS + k) * CASCADE_L0_HIT_WORDS;
+}
+
+// Upper refresh list, after the level-0 hit records. A claimed bit per
+// world-cache slot, then a header (period, flags, per-band counts) and
+// three due lists (fine / mid / coarse), then one hit record per due
+// slot and ray in the band being shaded.
+const uint CASCADE_CLAIMED_WORDS = 32768u;
+const uint CASCADE_UPPER_CAP = 16384u;
+const uint CASCADE_UPPER_RAYS_MAX = 64u;
+const float CASCADE_EXTENT_FACTOR = 16.0;
+
+uint lighting_cascade_claimed_at() {
+    return lighting_cascade_counts_at() + 2u
+        + CASCADE_LEVEL0_CAP * CASCADE_L0_RAYS * CASCADE_L0_HIT_WORDS;
+}
+
+uint lighting_cascade_upper_head_at() {
+    return lighting_cascade_claimed_at() + CASCADE_CLAIMED_WORDS;
+}
+
+// Word 0: period (low 8 bits), current dispatch band (bits 16-17).
+// Words 1..3: due counts for size bands 0 (S<=0.5), 1 (S<=4), 2 (S>4),
+// used only to merge coarse to fine this frame. Every cell shares one P.
+uint lighting_cascade_upper_list_at(uint band) {
+    return lighting_cascade_upper_head_at() + 4u + band * CASCADE_UPPER_CAP;
+}
+
+uint lighting_cascade_upper_hit_at(uint due, uint k) {
+    return lighting_cascade_upper_head_at() + 4u + 3u * CASCADE_UPPER_CAP
+        + (due * CASCADE_UPPER_RAYS_MAX + k) * CASCADE_L0_HIT_WORDS;
+}
+
+uint lighting_cascade_refresh_period(uint setting) {
+    if (setting == 1u || setting == 2u || setting == 4u || setting == 10u) {
+        return setting;
+    }
+    return 4u;
+}
+
+uint lighting_cascade_refresh_rays(float size) {
+    if (size <= 0.5) {
+        return 16u;
+    }
+    if (size <= 4.0) {
+        return 32u;
+    }
+    return 64u;
+}
+
+uint lighting_cascade_upper_band(float size) {
+    if (size <= 0.5) {
+        return 0u;
+    }
+    if (size <= 4.0) {
+        return 1u;
+    }
+    return 2u;
+}
+
+bool lighting_cascade_in_extent(float cheb, float size) {
+    return cheb <= CASCADE_EXTENT_FACTOR * max(size, 0.0);
+}
+
+bool lighting_cascade_refresh_due(uint key, uint frame, uint period) {
+    if (period <= 1u) {
+        return true;
+    }
+    return (key + frame) % period == 0u;
+}
+
+// Upper-cell interval radiance: 16 direction bins over the hemisphere of
+// the cell's axis, 4 rows of equal cos(theta) by 4 columns of turn, so
+// every bin is the same solid angle (pi/8 sr). Ray k of a refresh lies in
+// bin k % 16, jittered inside it, so every bin gets a sample each refresh.
+//
+// A bin holds the mean radiance of the rays in it whose path stayed clear
+// up to the cell's interval start 4S: an interval hit, or the parent's
+// bins on a miss. A ray blocked before 4S is left out of the bins. A child
+// reads a bin only along a direction its own rays found clear to 8s = 4S,
+// so a bin that averaged in the blocked directions would hand the child
+// light that is not there. Blocked rays still count in the cell's full
+// irradiance (cache.v[3s+2]), which ray hits read for the next bounce.
+//
+// Bins are rgb9e5, four per vec4, in regions 27..30 of the cache.
+const uint CASCADE_BINS = 16u;
+const float CASCADE_BIN_SIDE = 4.0;
+const uint CASCADE_BINS_AT = 27u * LIGHTING_CACHE_SLOTS;
+
+void lighting_cascade_bin_frame(vec3 n, out vec3 tx, out vec3 ty) {
+    vec3 helper = abs(n.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    tx = normalize(cross(helper, n));
+    ty = cross(n, tx);
+}
+
+// Direction of ray k of an upper cell's refresh: bin k % 16, jittered per
+// key, ray and frame.
+vec3 lighting_cascade_bin_dir(uint key, vec3 n, uint k, uint frame) {
+    uint b = k % CASCADE_BINS;
+    uint h = lighting_hash(key ^ (k * 0x9e3779b9u) ^ (frame * 0x85ebca6bu));
+    float j1 = lighting_unit(h);
+    float j2 = lighting_unit(lighting_hash(h ^ 0x27d4eb2fu));
+    float u = (float(b / 4u) + j1) / CASCADE_BIN_SIDE;
+    float phi = LIGHTING_TAU * (float(b % 4u) + j2) / CASCADE_BIN_SIDE;
+    float r = sqrt(max(1.0 - u * u, 0.0));
+    vec3 tx;
+    vec3 ty;
+    lighting_cascade_bin_frame(n, tx, ty);
+    return normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * u);
+}
+
+// Four bins around `dir` and their bilinear weights (rows clamped, the
+// turn wraps).
+void lighting_cascade_bin_taps(vec3 dir, vec3 n, out uvec4 idx, out vec4 w) {
+    vec3 tx;
+    vec3 ty;
+    lighting_cascade_bin_frame(n, tx, ty);
+    float u = clamp(dot(dir, n), 0.0, 1.0);
+    float phi = atan(dot(dir, ty), dot(dir, tx));
+    if (phi < 0.0) {
+        phi += LIGHTING_TAU;
+    }
+    float fu = clamp(u * CASCADE_BIN_SIDE - 0.5, 0.0, CASCADE_BIN_SIDE - 1.0);
+    float fp = phi / LIGHTING_TAU * CASCADE_BIN_SIDE - 0.5;
+    float r0 = min(floor(fu), CASCADE_BIN_SIDE - 2.0);
+    float wu = fu - r0;
+    float c0 = floor(fp);
+    float wp = fp - c0;
+    uint ra = uint(r0);
+    uint ca = uint(mod(c0, CASCADE_BIN_SIDE));
+    uint cb = uint(mod(c0 + 1.0, CASCADE_BIN_SIDE));
+    idx = uvec4(ra * 4u + ca, ra * 4u + cb, (ra + 1u) * 4u + ca, (ra + 1u) * 4u + cb);
+    w = vec4((1.0 - wu) * (1.0 - wp), (1.0 - wu) * wp, wu * (1.0 - wp), wu * wp);
+}
+
+vec3 lighting_cascade_bin_get(uint slot, uint b) {
+    float f = cache.v[CASCADE_BINS_AT + (b >> 2u) * LIGHTING_CACHE_SLOTS + slot][b & 3u];
+    return max(lighting_unpack_rgb9e5(floatBitsToUint(f)), vec3(0.0));
+}
+
+void lighting_cascade_bin_put(uint slot, uint b, vec3 rgb) {
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
+        return;
+    }
+    uint at = CASCADE_BINS_AT + (b >> 2u) * LIGHTING_CACHE_SLOTS + slot;
+    cache.v[at][b & 3u] = uintBitsToFloat(lighting_pack_rgb9e5(max(rgb, vec3(0.0))));
+}
+
+void lighting_cascade_mark_claimed(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return;
+    }
+    uint word = lighting_cascade_claimed_at() + (slot >> 5u);
+    atomicOr(ckeys.key[word], 1u << (slot & 31u));
+}
+
+// Read and clear this slot's claim bit. The bits are not cleared each
+// frame: a claim made by a ray hit after this frame's pick must survive
+// to the next pick.
+bool lighting_cascade_take_claimed(uint slot) {
+    if (slot >= LIGHTING_CACHE_SLOTS) {
+        return false;
+    }
+    uint word = lighting_cascade_claimed_at() + (slot >> 5u);
+    uint bit = 1u << (slot & 31u);
+    return (atomicAnd(ckeys.key[word], ~bit) & bit) != 0u;
 }
 
 float lighting_cascade_l0_size(uint level) {
@@ -335,8 +561,12 @@ uint lighting_cascade_insert_level(vec3 pos, vec3 n, uint level) {
         ckeys.key[word + 3u] = uint(cell.y);
         ckeys.key[word + 4u] = uint(cell.z);
         ckeys.key[word + 5u] = packed;
-        vec3 stored = lighting_cascade_l0_centre(cell, size)
-            + n_axis * (size * LIGHTING_CELL_HALF);
+        // The cell centre moved along the axis onto this pixel's surface.
+        // The half-cell inset puts the cell behind a surface that sits in
+        // the outer half of its cell, so the +axis face can be inside a
+        // wall that is not on a grid plane; rays from there see nothing.
+        vec3 centre = lighting_cascade_l0_centre(cell, size);
+        vec3 stored = centre + n_axis * dot(pos - centre, n_axis);
         ckeys.key[word + 6u] = floatBitsToUint(stored.x);
         ckeys.key[word + 7u] = floatBitsToUint(stored.y);
         ckeys.key[word + 8u] = floatBitsToUint(stored.z);
@@ -350,6 +580,7 @@ uint lighting_cascade_insert_level(vec3 pos, vec3 n, uint level) {
 
 uint lighting_cascade_find(ivec3 cell, uint level, uint axis);
 vec4 lighting_cascade_record(uint word, vec3 pos, vec3 n);
+vec4 lighting_cascade_at(vec3 pos, vec3 n, uint level);
 
 // A parent corner the leak gates refuse contributes nothing. Facing, a
 // stale cell, and an empty mean are the same refusals as before. The
@@ -375,55 +606,100 @@ vec4 lighting_cascade_gated(uint s, vec3 q, vec3 n, float plane) {
     return vec4(max(v.rgb, vec3(0.0)), 1.0);
 }
 
+// One of the eight parent-grid cells around `pos` at exactly `size`.
+// `claim` allocates a missing corner so the rolling refresh can shade it;
+// a newly claimed cell is empty until that refresh.
+void lighting_cascade_parent_corner(vec3 pos, vec3 n, float size, uint i, bool claim, out uint slot, out float weight) {
+    // Same grid as lighting_cache_key_sized / lighting_sc_centre: half a
+    // cell in along the axis, not a cube inset on every axis. Otherwise
+    // the eight corners miss the cells the cache actually allocated.
+    vec3 inset = lighting_world_mode() != 0u
+        ? 0.5 * lighting_axis_vec(lighting_axis(n))
+        : vec3(0.0);
+    vec3 uv = pos / size - inset;
+    ivec3 base = ivec3(floor(uv));
+    vec3 f = fract(uv);
+    ivec3 o = ivec3(int(i & 1u), int((i >> 1u) & 1u), int((i >> 2u) & 1u));
+    vec3 wt = mix(1.0 - f, f, vec3(o));
+    weight = wt.x * wt.y * wt.z;
+    slot = ~0u;
+    if (!(weight > 0.0)) {
+        return;
+    }
+    vec3 q = (vec3(base + o) + vec3(0.5) + inset) * size;
+    slot = lighting_cache_find_sized(q, n, claim, size, q);
+}
+
+// Claim the eight parent-grid corners at every exact parent size of a
+// level-0 voxel, so interval chaining has the cell whose 4S starts
+// where the child's rays end (8s). A coarser size is a different
+// interval and is not a stand-in.
+void lighting_cascade_claim_parents(vec3 pos, vec3 n, float child_size) {
+    float size = child_size * CASCADE_PARENT_SCALE;
+    [[dont_unroll]] for (uint level = 0u; level < 9u; level++) {
+        if (size > 32.0 + CASCADE_EPS) {
+            return;
+        }
+        [[dont_unroll]] for (uint i = 0u; i < 8u; i++) {
+            uint s;
+            float w;
+            lighting_cascade_parent_corner(pos, n, size, i, true, s, w);
+            if (s != ~0u) {
+                lighting_cascade_mark_claimed(s);
+            }
+        }
+        size *= CASCADE_PARENT_SCALE;
+    }
+}
+
+// Parent bins for a probe at `pos` facing `n` whose own rays end at the
+// parent's interval start: the trilinear mix of the eight parent cells
+// at exactly 2 * child_size, each through the leak gates. A coarser
+// ancestor's bins start farther out (its own 4S), so they are not used
+// as this interval. `ok` is false until those exact parents exist and
+// have been shaded.
+void lighting_cascade_parent_bins(vec3 pos, vec3 n, float child_size, out vec3 bins[16], out bool ok) {
+    for (uint b = 0u; b < CASCADE_BINS; b++) {
+        bins[b] = vec3(0.0);
+    }
+    ok = false;
+    float size = child_size * CASCADE_PARENT_SCALE;
+    if (size > 32.0 + CASCADE_EPS) {
+        return;
+    }
+    float wsum = 0.0;
+    [[dont_unroll]] for (uint i = 0u; i < 8u; i++) {
+        uint s;
+        float w;
+        lighting_cascade_parent_corner(pos, n, size, i, true, s, w);
+        if (!(w > 0.0)) {
+            continue;
+        }
+        vec4 g = lighting_cascade_gated(s, pos, n, size);
+        if (!(g.w > LIGHTING_CACHE_HAS_W)) {
+            continue;
+        }
+        lighting_cascade_mark_claimed(s);
+        for (uint b = 0u; b < CASCADE_BINS; b++) {
+            bins[b] += w * lighting_cascade_bin_get(s, b);
+        }
+        wsum += w;
+    }
+    if (wsum > 0.0) {
+        for (uint b = 0u; b < CASCADE_BINS; b++) {
+            bins[b] /= wsum;
+        }
+        ok = true;
+    }
+}
+
 // Visible surfaces whose published sample is empty. Stats word 35 (diag[11]).
 const uint LIGHTING_DIAG_CASCADE_GAP = 11u;
 
-// Tangent-plane bilinear over the four neighbouring leaves at `level`.
-// A refused corner is dropped and the rest are renormalised, so one
-// empty neighbour is not a hard block.
-vec4 lighting_cascade_neighbors(vec3 pos, vec3 n, uint level) {
-    uint axis = lighting_cascade_axis(n);
-    vec3 n_axis = lighting_cascade_axis_vec(axis);
-    float size = lighting_cascade_l0_size(level);
-    uint a = axis >> 1u;
-    uint a1 = (a + 1u) % 3u;
-    uint a2 = (a + 2u) % 3u;
-    float u = pos[a1] / size - LIGHTING_CELL_HALF;
-    float v = pos[a2] / size - LIGHTING_CELL_HALF;
-    int u0 = int(floor(u));
-    int v0 = int(floor(v));
-    float fu = clamp(u - float(u0), 0.0, 1.0);
-    float fv = clamp(v - float(v0), 0.0, 1.0);
-    ivec3 base = lighting_cascade_l0_cell(pos, n_axis, size);
-    vec3 sum = vec3(0.0);
-    float wsum = 0.0;
-    [[dont_unroll]] for (int i = 0; i < 2; i++) {
-        [[dont_unroll]] for (int j = 0; j < 2; j++) {
-            float w = (i == 0 ? 1.0 - fu : fu) * (j == 0 ? 1.0 - fv : fv);
-            if (!(w > 0.0)) {
-                continue;
-            }
-            ivec3 cell = base;
-            cell[a1] = u0 + i;
-            cell[a2] = v0 + j;
-            vec4 tap = lighting_cascade_record(
-                lighting_cascade_find(cell, level, axis), pos, n);
-            if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
-                continue;
-            }
-            sum += tap.rgb * w;
-            wsum += w;
-        }
-    }
-    if (!(wsum > 0.0)) {
-        return vec4(0.0);
-    }
-    return vec4(sum / wsum, 1.0);
-}
-
-// Neighbour blend at this footprint level, mixed with the next coarser
-// level across the outer tenth. An empty published sample counts as a
-// cascade gap. There is no parent-fallback walk.
+// This footprint level, mixed with the next coarser level across the
+// outer tenth. An empty nearer cell may still take the coarser level.
+// There is no same-level neighbour gather and no claimed-slot bypass
+// of the plane and facing gates. An empty published sample is a gap.
 vec4 lighting_cascade_merge(uvec2 p, vec3 pos, vec3 n) {
     uint pixel = p.y * pc.dims.x + p.x;
     uint at = lighting_cascade_pixel_at(pixel);
@@ -440,10 +716,10 @@ vec4 lighting_cascade_merge(uvec2 p, vec3 pos, vec3 n) {
     ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
     vec3 centre = lighting_cascade_l0_centre(cell, size);
     float blend = lighting_cascade_footprint_blend(lighting_cascade_want(centre, n_axis), size);
-    vec4 near = lighting_cascade_neighbors(pos, n, level);
+    vec4 near = lighting_cascade_at(pos, n, level);
     vec4 far = vec4(0.0);
-    if (blend > 0.0 && level < CASCADE_L0_MAX) {
-        far = lighting_cascade_neighbors(pos, n, level + 1u);
+    if (level < CASCADE_L0_MAX) {
+        far = lighting_cascade_at(pos, n, level + 1u);
     }
     bool near_ok = near.w > LIGHTING_CACHE_HAS_W;
     bool far_ok = far.w > LIGHTING_CACHE_HAS_W;
@@ -455,25 +731,6 @@ vec4 lighting_cascade_merge(uvec2 p, vec3 pos, vec3 n) {
     } else if (far_ok) {
         shown = far;
     }
-    // A pixel that claimed a live slot still publishes that slot when the
-    // neighbour gather refuses every tap (a plane or facing miss at a
-    // corner or along a silhouette). An empty gather here used to leave
-    // a hole in the picture.
-    if (!(shown.w > LIGHTING_CACHE_HAS_W) && word != ~0u) {
-        float weight = uintBitsToFloat(ckeys.key[word + 11u]);
-        if (weight > LIGHTING_CACHE_HAS_W) {
-            shown = vec4(max(lighting_unpack_rgb9e5(ckeys.key[word + 10u]), vec3(0.0)), 1.0);
-        }
-    }
-    if (!(shown.w > LIGHTING_CACHE_HAS_W)) {
-        uint word_next = ckeys.key[at + 3u];
-        if (word_next != ~0u) {
-            float weight = uintBitsToFloat(ckeys.key[word_next + 11u]);
-            if (weight > LIGHTING_CACHE_HAS_W) {
-                shown = vec4(max(lighting_unpack_rgb9e5(ckeys.key[word_next + 10u]), vec3(0.0)), 1.0);
-            }
-        }
-    }
     if (!(shown.w > LIGHTING_CACHE_HAS_W)) {
         atomicAdd(gstats.diag[LIGHTING_DIAG_CASCADE_GAP], 1u);
     }
@@ -482,6 +739,9 @@ vec4 lighting_cascade_merge(uvec2 p, vec3 pos, vec3 n) {
 
 void lighting_cascade_store(uint word, uint packed, uint weight) {
     if (word == ~0u) {
+        return;
+    }
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
         return;
     }
     ckeys.key[word + 10u] = packed;
@@ -515,13 +775,6 @@ uint lighting_cascade_ray_slot(uint ray) {
         return ~0u;
     }
     uint r = ray - lighting_probe_rays();
-    if (lighting_ray_fill_on()) {
-        if (r >= lighting_fill_traced()) {
-            return ~0u;
-        }
-        uint slot = ckeys.key[lighting_fill_pick_at() + r];
-        return slot < LIGHTING_CACHE_SLOTS ? slot : ~0u;
-    }
     uint entry = r / LIGHTING_CACHE_RAYS;
     if (lighting_world_mode() == 3u
         && entry >= lighting_grad_first()
@@ -550,6 +803,86 @@ uint lighting_cascade_find(ivec3 cell, uint level, uint axis) {
         lighting_frame() & 1u, lighting_frame() + 1u, cell, level, axis);
 }
 
+vec4 lighting_cascade_at_in(uint parity, uint stamp, vec3 pos, vec3 n, uint level) {
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(level);
+    ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+    return lighting_cascade_record(
+        lighting_cascade_find_in(parity, stamp, cell, level, axis), pos, n);
+}
+
+vec4 lighting_cascade_blend_pair(vec4 near, vec4 far, float blend) {
+    bool near_ok = near.w > LIGHTING_CACHE_HAS_W;
+    bool far_ok = far.w > LIGHTING_CACHE_HAS_W;
+    if (near_ok && far_ok && blend > 0.0) {
+        return vec4(mix(near.rgb, far.rgb, blend), 1.0);
+    }
+    if (near_ok) {
+        return near;
+    }
+    if (far_ok) {
+        return far;
+    }
+    return vec4(0.0);
+}
+
+// Bounce at a hit: last frame's level-0 record at the hit, blended with
+// the next coarser level. A miss takes an upper cell the rolling refresh
+// keeps at the hit (claiming the parent chain so later frames can shade
+// it). The current table is not read: this frame's shade has not finished.
+vec4 lighting_cascade_bounce_level(uint parity, uint stamp, vec3 pos, vec3 n, uint level) {
+    if (level > CASCADE_L0_MAX) {
+        return vec4(0.0);
+    }
+    return lighting_cascade_at_in(parity, stamp, pos, n, level);
+}
+
+// Last frame's stored bounce only. Fresh direct is shaded at the hit by
+// the caller. The old bounce-round gate (lighting_bounce_ok, cache reads
+// from bounce 2) does not apply: multi-bounce is this history lookup.
+vec3 lighting_cascade_bounce(vec3 pos, vec3 n) {
+    uint level = lighting_cascade_l0_level(pos, n);
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(level);
+    ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+    vec3 centre = lighting_cascade_l0_centre(cell, size);
+    float blend = lighting_cascade_footprint_blend(lighting_cascade_want(centre, n_axis), size);
+    uint prev = (lighting_frame() + 1u) & 1u;
+    uint stamp = lighting_frame();
+    vec4 near = lighting_cascade_bounce_level(prev, stamp, pos, n, level);
+    if (!(near.w > LIGHTING_CACHE_HAS_W) && level > 0u) {
+        near = lighting_cascade_bounce_level(prev, stamp, pos, n, level - 1u);
+    }
+    vec4 far = vec4(0.0);
+    if (level < CASCADE_L0_MAX) {
+        far = lighting_cascade_bounce_level(prev, stamp, pos, n, level + 1u);
+    }
+    vec4 shown = lighting_cascade_blend_pair(near, far, blend);
+    if (shown.w > LIGHTING_CACHE_HAS_W) {
+        return shown.rgb;
+    }
+    float parent = size * CASCADE_PARENT_SCALE;
+    vec3 e = vec3(0.0);
+    [[dont_unroll]] for (uint i = 0u; i < 9u; i++) {
+        if (parent > 32.0 + CASCADE_EPS) {
+            break;
+        }
+        uint s = lighting_cache_find_sized(pos, n, true, parent, pos);
+        if (s != ~0u) {
+            lighting_cascade_mark_claimed(s);
+            vec4 g = lighting_cascade_gated(s, pos, n, parent);
+            if (g.w > LIGHTING_CACHE_HAS_W) {
+                e = g.rgb;
+                break;
+            }
+        }
+        parent *= CASCADE_PARENT_SCALE;
+    }
+    return e;
+}
+
 vec4 lighting_cascade_record(uint word, vec3 pos, vec3 n) {
     if (word == ~0u) {
         return vec4(0.0);
@@ -563,7 +896,7 @@ vec4 lighting_cascade_record(uint word, vec3 pos, vec3 n) {
     if (dot(sn, n) <= 0.0) {
         return vec4(0.0);
     }
-    if (abs(dot(stored - pos, n)) > LIGHTING_CELL_HALF * size) {
+    if (abs(dot(stored - pos, n)) > size) {
         return vec4(0.0);
     }
     float weight = uintBitsToFloat(ckeys.key[word + 11u]);
@@ -581,8 +914,8 @@ vec4 lighting_cascade_at(vec3 pos, vec3 n, uint level) {
     return lighting_cascade_record(lighting_cascade_find(cell, level, axis), pos, n);
 }
 
-// This level, blended with the next coarser level across the outer tenth,
-// each side itself a neighbour blend on the surface.
+// This level, blended with the next coarser level across the outer tenth.
+// Each side is that level's own cell. There is no same-level gather.
 vec4 lighting_cascade_picture(vec3 pos, vec3 n) {
     uint level = lighting_cascade_l0_level(pos, n);
     uint axis = lighting_cascade_axis(n);
@@ -591,10 +924,10 @@ vec4 lighting_cascade_picture(vec3 pos, vec3 n) {
     ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
     vec3 centre = lighting_cascade_l0_centre(cell, size);
     float blend = lighting_cascade_footprint_blend(lighting_cascade_want(centre, n_axis), size);
-    vec4 near = lighting_cascade_neighbors(pos, n, level);
+    vec4 near = lighting_cascade_at(pos, n, level);
     vec4 far = vec4(0.0);
     if (level < CASCADE_L0_MAX) {
-        far = lighting_cascade_neighbors(pos, n, level + 1u);
+        far = lighting_cascade_at(pos, n, level + 1u);
     }
     bool near_ok = near.w > LIGHTING_CACHE_HAS_W;
     bool far_ok = far.w > LIGHTING_CACHE_HAS_W;
@@ -611,11 +944,12 @@ vec4 lighting_cascade_picture(vec3 pos, vec3 n) {
 }
 
 void lighting_cascade_publish(uint pixel, uvec2 p, vec3 pos, vec3 n) {
-    // This pixel's merge, after the lattice fill. Writing the shared cell
-    // from every pixel raced and painted it black on a camera turn. The
-    // picture loads this pixel's own word. The slots were written at insert;
-    // Publish reads the slots insert chose, blends neighbouring leaves,
-    // and writes the radiance the compose pass loads.
+    // This pixel's merge. The picture loads this pixel's own word. Insert
+    // claims the slots; publish blends this footprint level with the next
+    // coarser one and writes the radiance compose loads.
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) != 0u) {
+        return;
+    }
     uint at = lighting_cascade_pixel_at(pixel);
     uint word = ckeys.key[at + 2u];
     uint word_next = ckeys.key[at + 3u];

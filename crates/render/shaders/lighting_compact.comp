@@ -1,13 +1,11 @@
 #version 450
-// GI light cache, first pass: list the live patch slots, mature from the front
-// and young from the back (both counts were zeroed before the round), so the
-// round's batch relights live patches only, the young first. A slot claimed but
-// not yet written (normal w 0) waits for the next round. No trace.
+// GI light cache, first pass: apply offers and seeds, then pool world-mode-3
+// cells. The fill allocator's young/mature lists and stale walk are gone.
+// Other modes still list young from the back and mature from the front.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 
-const bool LIGHTING_WRC_STALE_CHECK = true;
 shared uint sc_lamp_pend;
 void main() {
     // One scan per group. The change frame's compact runs before the ring
@@ -17,20 +15,6 @@ void main() {
     }
     barrier();
     uint slot = gl_GlobalInvocationID.x;
-    // Bits 1 and 2, with bit 4 clear: the parallel fill schedule. Bit 2 alone
-    // is the histogram, bit 1 alone emits screen rays, both emit off-screen
-    // rays. None of them walks the slot table.
-    uint fill_sched = pc.params.z & 6u;
-    if ((pc.params.z & 16u) == 0u && fill_sched != 0u) {
-        if (fill_sched == 6u) {
-            lighting_fill_emit_off(slot);
-        } else if (fill_sched == 4u) {
-            lighting_fill_hist(slot);
-        } else {
-            lighting_fill_emit_on(slot);
-        }
-        return;
-    }
     // Screen wavelet counters (diag 61 changed, 62 fine, 63 coarse). Zeroed
     // before that pass. The hash wavelet does not use these words.
     if (slot == 0u && (gstats.ctrl_bits & 524288u) != 0u) {
@@ -84,15 +68,7 @@ void main() {
     float t = cache.v[3u * slot + 2u].w;
     if (lighting_world_mode() == 3u) {
         lighting_sc_pool(slot);
-        // A mover does not wipe the stored hit. The cell value does that work.
-        if (lighting_ray_fill_on()) {
-            atomicAdd(ckeys.key[lighting_fill_header_at() + 7u], 1u);
-            lighting_fill_visit(slot);
-            lighting_fine_world_filter(slot);
-            return;
-        }
-        // World mode 3 due lists, settle-every-cell, and the old refresh walks
-        // are removed. fill_budget 0 traces no cache rays.
+        // The fill allocator is gone. World mode 3 traces no cache rays here.
         return;
     }
     // Other modes: a patch around a moved object is relit with the young.

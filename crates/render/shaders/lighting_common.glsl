@@ -423,9 +423,6 @@ bool lighting_ray(uint ray, out vec3 origin, out vec3 dir, out vec3 n) {
     origin = vec3(0.0);
     dir = vec3(0.0, 1.0, 0.0);
     n = vec3(0.0, 1.0, 0.0);
-    if (lighting_ray_fill_on()) {
-        return lighting_fill_ray(ray, origin, dir, n);
-    }
     if (ray < lighting_probe_rays()) {
         return false;
     }

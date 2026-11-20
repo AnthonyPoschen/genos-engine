@@ -34,11 +34,7 @@ uint lighting_hit_glow(vec3 p) {
 
 void main() {
     uint ray = gl_GlobalInvocationID.x;
-    if (lighting_ray_fill_on()) {
-        if (ray >= lighting_fill_traced()) {
-            return;
-        }
-    } else if (lighting_dense()) {
+    if (lighting_dense()) {
         if (ray >= lighting_dense_count() * LIGHTING_CACHE_RAYS) {
             return;
         }
@@ -58,7 +54,6 @@ void main() {
     vec3 n;
     if (!lighting_ray(ray, origin, dir, n)) {
         work.v[at] = LIGHTING_NO_RAY;
-        lighting_fill_stash(ray, LIGHTING_NO_RAY.x, 0u);
         return;
     }
     SceneHit hit;
@@ -70,7 +65,6 @@ void main() {
     if (!trace_ray(origin, dir, t0, t1, hit)) {
         vec4 miss = lighting_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
         work.v[at] = miss;
-        lighting_fill_stash(ray, miss.x, 0u);
         return;
     }
     vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
@@ -79,5 +73,4 @@ void main() {
     work.v[at] = vec4(hit.t, uintBitsToFloat(packed_n),
         uintBitsToFloat(packUnorm4x8(vec4(tint * hit.reflect * LIGHTING_PI, 0.0))),
         uintBitsToFloat(lighting_hit_glow(origin + dir * hit.t)));
-    lighting_fill_stash(ray, hit.t, packed_n);
 }
