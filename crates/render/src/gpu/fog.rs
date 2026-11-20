@@ -861,7 +861,7 @@ impl Gpu {
         unsafe {
             let result = (self.fns.create_compute)(
                 self.device,
-                std::ptr::null_mut(),
+                self.pipeline_cache,
                 1,
                 std::ptr::from_ref(&info).cast(),
                 std::ptr::null(),

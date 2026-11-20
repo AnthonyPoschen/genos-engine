@@ -24,9 +24,13 @@ fn run(flag: &str, fixture: &str, out: &std::path::Path) -> (u8, String) {
         text.push('\n');
     }
     let err = String::from_utf8(output.stderr).unwrap_or_else(|err| panic!("{err}"));
-    // The device teardown report (`vk_teardown`, `vk_traffic`, `vk_memory`) is
-    // expected on stderr; anything else is an error.
-    let unexpected: Vec<&str> = err.lines().filter(|line| !line.starts_with("vk_")).collect();
+    // The device teardown report (`vk_teardown`, `vk_traffic`, `vk_memory`) and
+    // the startup timing lines (`genos-startup`) are expected on stderr;
+    // anything else is an error.
+    let unexpected: Vec<&str> = err
+        .lines()
+        .filter(|line| !line.starts_with("vk_") && !line.starts_with("genos-startup"))
+        .collect();
     assert!(unexpected.is_empty(), "{err}");
     (u8::try_from(code).unwrap_or(255), text)
 }

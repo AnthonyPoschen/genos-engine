@@ -2731,7 +2731,7 @@ fn create_compute_pipe(gpu: &Gpu, module: Handle, layout: Handle) -> Result<Hand
         check(
             (gpu.fns.create_compute)(
                 gpu.device,
-                std::ptr::null_mut(),
+                gpu.pipeline_cache,
                 1,
                 &info as *const Info as *const u8,
                 std::ptr::null(),
@@ -3279,7 +3279,7 @@ fn create_draw_pipe(
         check(
             (gpu.fns.create_pipelines)(
                 gpu.device,
-                std::ptr::null_mut(),
+                gpu.pipeline_cache,
                 1,
                 &pipe as *const Pipe as *const u8,
                 std::ptr::null(),
