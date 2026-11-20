@@ -206,26 +206,13 @@ void main() {
 #ifdef GENOS_COMPOSE_MAINT
     return;
 #endif
+#ifdef GENOS_LEVEL0_PICTURE
     if (mode == 9u) {
-        // Path codes, not light. R is lighting_px_shade / 8. G is 0 when the
-        // world-cache read was skipped, 0.5 when that read stayed at full
-        // trust, 1 when the mix owns the pixel. B is 1 when a corner took
-        // lighting_sc_parent. Screen probes are gone. No dither: the bytes
-        // are the codes. PATH_SHADE_SCALE packs eight path codes into red.
-        // PATH_MIXED_W is trust below a full world read. PATH_PROBES_READ is
-        // the old green code for a full-trust read.
-        const float PATH_MIXED_W = 0.99;
-        const float PATH_PROBES_READ = 0.5;
-        const float PATH_SHADE_SCALE = 1.0 / 8.0;
-        float pg = 0.0;
-        if (lighting_px_probe_skipped == 0u) {
-            bool mixed = lighting_px_world_w < PATH_MIXED_W || lighting_px_shade == 3u || lighting_px_shade == 8u;
-            pg = mixed ? 1.0 : PATH_PROBES_READ;
-        }
-        shown = vec3(float(lighting_px_shade) * PATH_SHADE_SCALE, pg, float(lighting_px_parent));
+        shown = lighting_cascade_path_view(pos, n, lighting_px_world_w);
         outc.px[index] = pack_rgb(shown);
         return;
     }
+#endif
     if ((gstats.ctrl_bits & 4096u) != 0u) {
         vec3 sky_fill = vec3(gstats.ctrl_ambient_r, gstats.ctrl_ambient_g, gstats.ctrl_ambient_b);
         vec3 fill = sky_fill;

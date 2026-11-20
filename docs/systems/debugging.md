@@ -294,7 +294,7 @@ replaced by a later one.
 `full`, `direct` (lamps and sun, shadowed), `bounce` (indirect only), `nobounce`
 (the same as `direct`), `albedo`, `normal`, `depth`, `light:I` (one lamp and its
 shadow), `texels` (the surface cache texel each pixel reads, dim under 4 sets),
-`variance`, `path`, `voxels` (level-0 surface voxel projection: each pixel is a
+`variance`, `path` (cascade codes, not light: red where a pixel has no level-0 sample, green the blend towards the coarser level, blue the level), `voxels` (level-0 surface voxel projection: each pixel is a
 hash of the cell insert claims at its footprint level, with a bright line where
 that level starts). The
 v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.

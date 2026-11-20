@@ -36,8 +36,10 @@ pub enum ViewMode {
     /// Short-term relative standard deviation of the cache entry under each
     /// pixel. Grey is a missing or unallocated entry. Blue is quiet, red is noisy.
     Variance,
-    /// Which path produced the bounce: cell step, fine texel, probe, or a ray
-    /// hit. The picture is flat codes, not light. See lighting_compose.comp.
+    /// Where the bounce comes from in the cascade, as flat codes, not light:
+    /// red where the pixel has no published level-0 sample (a gap), green the
+    /// blend towards the coarser footprint level, blue the finer level over
+    /// the deepest. See `lighting_cascade_path_view`.
     Path,
     /// Level-0 surface voxel each pixel maps to. Colour is a hash of the
     /// voxel's cell and ring, the same ring and cell size insert uses, so

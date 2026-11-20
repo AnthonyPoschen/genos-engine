@@ -390,6 +390,15 @@ float lighting_cascade_lod_blend(float lod) {
     return lod - floor(lod);
 }
 
+// Debug view "path" (compose mode 9): red 1 where the pixel has no
+// published level-0 sample (a gap), green the blend towards the coarser
+// level, blue the finer footprint level over the deepest level.
+vec3 lighting_cascade_path_view(vec3 pos, vec3 n, float published_w) {
+    float lod = lighting_cascade_lod(pos, n);
+    float gap = published_w > LIGHTING_CACHE_HAS_W ? 0.0 : 1.0;
+    return vec3(gap, lighting_cascade_lod_blend(lod), float(lighting_cascade_lod_level(lod)) / float(CASCADE_L0_MAX));
+}
+
 vec4 lighting_cascade_published(uint pixel) {
     uint at = lighting_cascade_pixel_at(pixel);
     if (ckeys.key[at + 1u] != lighting_frame() + 1u) {
