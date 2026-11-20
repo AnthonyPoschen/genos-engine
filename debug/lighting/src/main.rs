@@ -392,8 +392,9 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_surface_cache_blend",
     "fog_view",
 ];
-const VIEWS: [&str; 9] = [
+const VIEWS: [&str; 10] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance", "path",
+    "voxels",
 ];
 const PRESETS: [&str; 4] = ["potato", "low", "medium", "high"];
 
@@ -454,6 +455,7 @@ fn main() {
 }
 
 fn run() -> Result<i32, String> {
+    let run_start = Instant::now();
     let opts = options()?;
     apply_intent(&opts)?;
     std::fs::create_dir_all(opts.out.join("shots")).map_err(|err| err.to_string())?;
@@ -472,11 +474,16 @@ fn run() -> Result<i32, String> {
     if entries.is_empty() {
         return Err("no scenes in debug/scenes".into());
     }
+    let load_at = Instant::now();
     let mut app = App::open(
         entries,
         root,
         log.try_clone().map_err(|err| err.to_string())?,
     )?;
+    eprintln!(
+        "genos-startup scene catalog: {:.1} ms",
+        load_at.elapsed().as_secs_f64() * 1000.0
+    );
     app.fog_cli = opts.fog_cli.clone();
     app.fog_env = opts.fog_env;
     app.particle_cli = opts.particle_cli.clone();
@@ -492,19 +499,29 @@ fn run() -> Result<i32, String> {
     }
     let (width, height) = opts.size;
     let display = opts.display.as_deref();
+    let window_at = Instant::now();
     let mut window = if opts.headless {
         Window::open_proof_on(width, height, display)?
     } else {
         Window::open_named_on(width, height, "genos-lighting", "Genos lighting", display)?
     };
+    eprintln!(
+        "genos-startup window: {:.1} ms",
+        window_at.elapsed().as_secs_f64() * 1000.0
+    );
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
     if first.closing {
         return Ok(0);
     }
+    let renderer_at = Instant::now();
     let (renderer, permit) =
         Renderer::open(window.display, window.surface, first.width, first.height)?;
+    eprintln!(
+        "genos-startup Renderer::open call: {:.1} ms",
+        renderer_at.elapsed().as_secs_f64() * 1000.0
+    );
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let script_hold = std::sync::Arc::new(std::sync::Mutex::new(
         None::<genos_window::ThreadStop<bool>>,
@@ -596,6 +613,11 @@ fn run() -> Result<i32, String> {
     let mut drawn = 0u32;
     let mut clock: Option<Instant> = None;
     let mut fps_overlay = FpsOverlay::new();
+    let loop_at = Instant::now();
+    eprintln!(
+        "genos-startup pre-loop setup: {:.1} ms",
+        renderer_at.elapsed().as_secs_f64() * 1000.0
+    );
     loop {
         let now = Instant::now();
         let real_dt = clock
@@ -817,6 +839,21 @@ fn run() -> Result<i32, String> {
         let drawn_world = if loading { &load_world } else { app.world() };
         let pixels =
             renderer.draw_with_overlay(drawn_world, &camera, &overlay, want_read, false)?;
+        if drawn == 1 {
+            eprintln!(
+                "genos-startup first draw: {:.1} ms (window to first frame {:.1} ms, process {:.1} ms, loop wait {:.1} ms)",
+                draw_start.elapsed().as_secs_f64() * 1000.0,
+                window_at.elapsed().as_secs_f64() * 1000.0,
+                run_start.elapsed().as_secs_f64() * 1000.0,
+                loop_at.elapsed().as_secs_f64() * 1000.0
+            );
+            for (name, took) in renderer.pipeline_times() {
+                eprintln!(
+                    "genos-startup pipeline {name}: {:.1} ms",
+                    took.as_secs_f64() * 1000.0
+                );
+            }
+        }
         tools.after_draw(
             renderer,
             pixels.as_deref(),
@@ -1647,6 +1684,7 @@ fn view_name(mode: ViewMode) -> &'static str {
         ViewMode::Texels => "texels",
         ViewMode::Variance => "variance",
         ViewMode::Path => "path",
+        ViewMode::Voxels => "voxels",
         ViewMode::Light => "light",
         ViewMode::Full => "full",
     }
@@ -2694,6 +2732,7 @@ fn view_from_name(name: &str) -> ViewMode {
         "texels" => ViewMode::Texels,
         "variance" => ViewMode::Variance,
         "path" => ViewMode::Path,
+        "voxels" => ViewMode::Voxels,
         _ => ViewMode::Full,
     }
 }

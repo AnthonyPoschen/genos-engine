@@ -65,7 +65,7 @@ pub struct Look {
 
 impl Look {
     /// `full`, `direct`, `bounce`, `nobounce` (the same as `direct`), `albedo`,
-    /// `normal`, `depth`, `light:I`, `texels`.
+    /// `normal`, `depth`, `light:I`, `texels`, `variance`, `path`, `voxels`.
     pub fn parse(spec: &str) -> Result<Self, String> {
         let (head, arg) = match spec.split_once(':') {
             Some((h, a)) => (h.trim(), Some(a.trim())),
@@ -79,7 +79,7 @@ impl Look {
         } else {
             ViewMode::parse(head).ok_or_else(|| {
                 format!(
-                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels, variance, path"
+                    "unknown view {head}: use full, direct, bounce, nobounce, albedo, normal, depth, light:I, texels, variance, path, voxels"
                 )
             })?
         };
@@ -3107,6 +3107,14 @@ mod tests {
             assert!(draws < 1000, "the reference job never finished");
         }
         (job.live.as_ref().unwrap().rgb[0], draws)
+    }
+
+    #[test]
+    fn view_parses_the_level0_voxel_mode() {
+        let look = Look::parse("voxels").expect("voxels");
+        assert_eq!(look.view.mode, ViewMode::Voxels);
+        assert_eq!(look.name(), "voxels");
+        assert!(Look::parse("not-a-view").unwrap_err().contains("voxels"));
     }
 
     #[test]

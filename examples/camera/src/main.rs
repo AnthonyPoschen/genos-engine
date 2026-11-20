@@ -371,19 +371,30 @@ fn run() -> Result<i32, String> {
         genos_window::request_full_driver_destroy();
     }
     let scene_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&scene_name);
+    let window_at = Instant::now();
     let mut window = if proof {
         Window::open_proof(size.0, size.1)?
     } else {
         Window::open(size.0, size.1)?
     };
+    eprintln!(
+        "genos-startup window: {:.1} ms",
+        window_at.elapsed().as_secs_f64() * 1000.0
+    );
     window.install_seat_pump();
     Renderer::set_blocker(genos_window::seat_enter, genos_window::seat_leave);
     let first = window.pump();
     if first.closing {
         return Ok(0);
     }
+    let renderer_at = Instant::now();
     let (renderer, permit) =
         Renderer::open(window.display, window.surface, first.width, first.height)?;
+    eprintln!(
+        "genos-startup Renderer::open call: {:.1} ms (window to renderer ready {:.1} ms)",
+        renderer_at.elapsed().as_secs_f64() * 1000.0,
+        window_at.elapsed().as_secs_f64() * 1000.0
+    );
     let server_hold = std::sync::Arc::new(std::sync::Mutex::new(None));
     let mut owner = genos_window::Lifecycle::new(window, renderer, permit);
     if let Some(stall) = block_ms {
