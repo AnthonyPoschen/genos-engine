@@ -738,7 +738,7 @@ void lighting_cascade_l0_interval(float size, out float t0, out float t1) {
 
 void lighting_cascade_interval(float size, out float t0, out float t1) {
     t0 = 4.0 * max(size, CASCADE_EPS);
-    t1 = min(8.0 * max(size, CASCADE_EPS), CASCADE_TRACE_FAR);
+    t1 = min(32.0 * max(size, CASCADE_EPS), CASCADE_TRACE_FAR);
     if (t0 >= CASCADE_TRACE_FAR) {
         t0 = CASCADE_TRACE_FAR;
         t1 = CASCADE_TRACE_FAR;

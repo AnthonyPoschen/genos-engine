@@ -18,6 +18,10 @@ Off-screen surfaces and long-range light live here. A distant lamp and the sun's
 
 The memory cap is the screen density, not the world size. Lighting VRAM stays at or under 200 MB.
 
+## Reach
+
+An upper cell's rays run to 32 of its sizes (`lighting_cascade_interval`), from the surface. Level-0 rays stay at 8 cell sizes. Level-0 rays at 32 lit the outside of `a_lamp_sealed_in_walls_under_a_roof_lights_nothing_outside` (41 against 3), so only the upper cells reach farther. Until 21 Nov 2026 the upper cells stopped at 8. Past that the light came only through 16 parent bins, about 0.39 sr each, and a room lit through an opening by a sunlit wall lost the opening in the dark directions around it. At the room pose in `examples/stress/scripts/room_bounce.rhai`, against a 64-bounce reference: walls and ceiling 0.83-0.87 before, 0.94-1.04 after; floor 0.58-0.65 before, 0.77-0.84 after; the outside wall seen through the opening 1.12 before, 1.09 after. Leaving the rays that hit before 4S out of the bins, with a held bin when all its rays were blocked, made the room 0.36-0.50: a parent sits where the child's rays stop, so those near hits are the light the child needs. The shadowed outer wall in `examples/stress/scripts/wall_ground_bounce.rhai` moved from 0.77 to 0.97 of the reference. Cost: an upper cell's rays can run four times as far. Not timed on the 4070. `lighting_bounces` does not limit the cascade (multi-bounce is the history lookup in `lighting_cascade_bounce`), so `bounce_counts_brighten_the_shadow_and_skip_work`, which wants bounce 2 a level brighter than bounce 1, now fails at 0.4.
+
 ## Merge
 
 Levels merge from the back toward the eye with transmittance:
