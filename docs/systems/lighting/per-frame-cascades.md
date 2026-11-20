@@ -31,7 +31,7 @@ The rule, in plain words: pick the cube size whose patch of this surface covers 
 - **Normal inset.** The point is moved half a cell into the surface along `n_a` before `floor(p / S)`.
   - Today, a floor at y = 0 or a wall on a grid plane flips between the two cells either side of the plane with depth noise. On the census below, 38% of the hall's level-0 records are such duplicates (82% of records sit within 2% of a grid plane).
   - This, not sub-pixel voxels, is the speckled band in the #313 voxel view. Depth noise grows with distance, and the cell size is fixed within a ring, so it is worst just before each ring line. The inset puts the point mid-cell along the normal.
-- **Stability.** A cell that was a leaf last frame keeps its size while `want / S` stays in `[2^-0.25, 2^1.25]`, a quarter-level dead band either side of `[1, 2)`. The previous-frame level-0 table, kept for the level-0 EMA below, holds that state. Without a previous entry, the plain rule decides. Inputs are world cell centres and the eye, so a still camera gives the same leaves every frame.
+- **Stability.** A cell that was a leaf last frame keeps its size while `want / S` stays in `[2^-0.25, 2^1.25]`, a quarter-level dead band either side of `[1, 2)`. The previous-frame level-0 table, kept for the four-slot direction ring below, holds that state. Without a previous entry, the plain rule decides. Inputs are world cell centres and the eye, so a still camera gives the same leaves every frame.
 - **Insert and read agree by construction.** Insert decides the level once per pixel per frame and records that voxel's slot in the pixel's word. Publish and compose read the voxel through that word and never recompute the size. A debug view that recomputes it must call the same function.
 - **Seams.** On one surface, neighbouring leaves differ by at most one level, because `want` is smooth across a cell. Cells nest, so a coarse cell and its fine neighbours share edges without gaps.
   - The value step at that edge uses today's overlap blend, driven by the footprint ratio instead of Chebyshev distance. A pixel whose `want / S` is in the top tenth of its level, log scale, also inserts the coarser cell and blends towards it.
@@ -48,7 +48,7 @@ The interval depends only on cell size, the rule `lighting_cascade_interval` alr
 
 | Level | Probe | Ray interval | Rays per probe |
 |---|---|---|---|
-| 0 | Screen voxel, a world cell of size `s` chosen by footprint | `[ε, 8s]` | 32 per frame (16 is the cheaper option), stratified, fixed per voxel key, rotated by the golden angle each frame |
+| 0 | Screen voxel, a world cell of size `s` chosen by footprint | `[ε, 8s]` | 32 per frame (16 is the cheaper option), from a fixed 128-direction set split into 4 interleaved slots; frame `f` traces slot `f % 4`. Same directions every cycle, plus a per-voxel turn from the key |
 | upper, size `S` = `2s`, `4s`, ... | World surface cell | `[4S, 8S]`, the last one clipped at 200 m | 16 for `S` ≤ 0.5 m, 32 up to 4 m, 64 above, per refresh |
 
 From a 6.25 cm voxel, nine upper sizes reach 200 m (12.5 cm to 32 m). Penumbra condition: spacing over interval start is `S / 4S` = 1/4 on every upper level.
@@ -77,21 +77,21 @@ The voxel's value is the cosine-weighted sum of its rays. This is the real inter
 
 | Level | What stays | Rule |
 |---|---|---|
-| 0 | A running EMA against the same voxel key from the previous frame, double-buffered (two 16384×12-word tables, about 1.5 MB) | The current frame's rays always give a full value, so the EMA only smooths. A change is judged against this frame's standard error: a gap inside two standard errors is noise, stored `N` grows, and the blend is `1/N`. A real change down-weights history in proportion to the luma gap and shrinks `N` by the leftover history so later frames keep catching up. Only non-finite data hard-resets. A missing key last frame, a flipped normal, or a level change is a reset (`N = 1`). That reset is still a full value, never black. |
-| upper | The running mean, with the same standard-error test | A gap inside two standard errors of this refresh is noise, stored `N` grows, and the blend is `1/N`. A real change down-weights history in proportion to the luma gap and shrinks `N` the same way. Hard reset only for invalid (non-finite) data. |
+| 0 | A four-slot direction ring, double-buffered (two 16384×16-word tables, 2.0 MB) | 128 fixed stratified directions are split into 4 interleaved sets of 32. Frame `f` traces slot `f % 4` and replaces that slot. The voxel value is the average of the filled slots. There is no EMA across cycles: a still scene is exact once all four slots are filled, and a change lands within 4 frames. Non-finite samples leave that slot unchanged. A new key starts with one slot and fills over the next frames. |
+| upper | This refresh replaces the stored irradiance and clear-path bins | Directions are fixed per key and ray, the same every cycle. A still refresh repeats the same set, so the stored value is stable. A change lands on the next refresh (within `P` frames, default 4). Non-finite samples are refused. |
 
-Stable directions per voxel key, rotated slowly, keep fixed-pattern bias from crawling across a still picture. The overlap blend stays, now across footprint levels instead of rings (see Sizes).
+Each voxel also has a fixed turn from its key (`lighting_hemi_dir`), so neighbouring voxels do not share one ray pattern. Compose filters the read: a sparse trilinear of neighbouring same-level cells around the query, renormalised, with the plane and facing gates. Stored values are not blended with neighbours. The overlap blend stays across footprint levels (see Sizes).
 
 ## Refresh schedule for upper levels
 
-Rolling stride: every upper world cell, on or off screen and of every size, refreshes on the frame where `(hash(key) + frame) % P == 0`. `P` is one fixed period (default 4). A debug setting of 1, 2, or 10 replaces it and prints per-level GPU time. There are no size bands, no on/off-screen periods, no halving near changes, and no same-frame big-change catch-up. A lamp, mover, or sun change only down-weights stored history in proportion to its size (hard reset only for invalid data), so the next regular refresh dominates. There is no rank, histogram, burst, budget split, or seed. The ray count is the sum of `k / P` over resident cells, so it is bounded and known from cell counts.
+Rolling stride: every upper world cell, on or off screen and of every size, refreshes on the frame where `(hash(key) + frame) % P == 0`. `P` is one fixed period (default 4). A debug setting of 1, 2, or 10 replaces it and prints per-level GPU time. There are no size bands, no on/off-screen periods, no halving near changes, and no same-frame big-change catch-up. A lamp, mover, or sun change is taken on the next regular refresh (fixed directions, the new estimate replaces the stored value). Hard reset only for invalid data. There is no rank, histogram, burst, budget split, or seed. The ray count is the sum of `k / P` over resident cells, so it is bounded and known from cell counts.
 
 ## Direct light
 
 | Light | Where it goes |
 |---|---|
 | Brightest near lamp | Exact per pixel: one disc-sampled shadow ray (#310's penumbra), as approved today |
-| Other lamps, near or distant | Folded into the cascades. Each level-0 voxel takes one disc-sampled shadow ray per lamp per frame at its centre, smoothed by the level-0 EMA. Upper-ray hits shade every lamp (today's `cache_pick`). This leaves no per-pixel cost and no ReSTIR. |
+| Other lamps, near or distant | Folded into the cascades. Each level-0 voxel takes one disc-sampled shadow ray per lamp per frame at its centre, stored into that frame's ring slot and averaged with the other three. Upper-ray hits shade every lamp (today's `cache_pick`). This leaves no per-pixel cost and no ReSTIR. |
 | Sun | Hybrid, pending the sun study (bc-27dddef0). Each voxel traces one sun ray at its centre and four at its corners. A voxel whose five rays agree takes the cascade sun with no per-pixel ray. A voxel whose rays disagree (it straddles a shadow edge) marks its pixels for one exact per-pixel sun ray. Expect 10 to 20% of pixels on edges. Full per-pixel sun stays the fallback until that study shows the edge error against the reference. |
 
 The ReSTIR spatial and candidate passes are deleted, as already approved.
@@ -210,7 +210,7 @@ Today it is 16.1 ms. After the approved cuts, it is estimated at about 7.5. The 
 
 In order:
 
-1. Level 0 at 16 rays with the EMA. Saves about 0.3 ms.
+1. Level 0 at 16 rays (two slots of 16 from a 64-direction set). Saves about 0.3 ms.
 2. Upper schedule B. Saves about 0.1 ms.
 3. A larger `K`, the box angle. `K` = 1/16 is about a third of the voxels (1,428), at 44 × 84 px boxes.
 4. A bounded short-ray traversal for level 0 (`t ≤ 8s`, early out).
@@ -232,7 +232,7 @@ Level 0 is never put on a half rate.
 
 - **Cost per ray.** The 4.7 ns comes from today's mix: long rays to 200 m, and hit shading on most rays. Short level-0 rays should be cheaper, but this has not been measured. The level-0 merge (one parent SH fetch per voxel, 8 gated corners) is also unmeasured.
 - **Off-screen count.** The 8.6× multiplier is geometric. It ignores occlusion and the rooms behind walls. Ray-hit claims could push the resident count above 37k. The cost scales linearly.
-- **Level-0 noise.** 32 rays with a one-frame EMA may still shimmer on bright, near contact. The fallback is 64 rays (+0.64 ms) or a 0.33 new-weight EMA.
+- **Level-0 noise.** 32 rays in a four-slot ring of 128 fixed directions should be still once the ring is full. Structured per-voxel aliasing would be the thing to watch; a stronger per-voxel turn is the fallback, not a longer history.
 - **Footprint rule.** Counted on lavapipe at two still poses only. The level-switch dead band, the seam blend, and the leak cap are untested. A footprint-driven coarser cube is a new leak risk on parallel surfaces, and the thin-wall test must cover it.
 - **Sun edges.** The quality of the edge-pixel test against the reference is open (bc-27dddef0).
 - **Compose and publish.** Under 1.66 ms once the fallback walk is gone, but not measured.

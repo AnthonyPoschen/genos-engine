@@ -187,14 +187,15 @@ fn lighting_keys_words(pixels: u64) -> u64 {
 }
 
 /// Level-0 surface samples, after the reach words. One count word, then two
-/// tables of `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words,
-/// then four words per pixel: published radiance and stamp, then the insert
-/// slot and the blend slot, then inserted/traced counts and one four-word
-/// hit record per voxel slot and ray. Matches `lighting_cascade.glsl`.
+/// tables of `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words
+/// (12 header words plus four packed slot radiances), then four words per
+/// pixel: published radiance and stamp, then the insert slot and the blend
+/// slot, then inserted/traced counts and one four-word hit record per voxel
+/// slot and ray. Matches `lighting_cascade.glsl`.
 const CASCADE_LEVEL0_GROUPS: u32 = 16384;
 const CASCADE_UPPER_GROUPS: u32 = 16384;
 const CASCADE_LEVEL0_CAP: u64 = 16384;
-const CASCADE_LEVEL0_STRIDE: u64 = 12;
+const CASCADE_LEVEL0_STRIDE: u64 = 16;
 const CASCADE_LEVEL0_TABLES: u64 = 2;
 const CASCADE_LEVEL0_PIXEL_WORDS: u64 = 4;
 const CASCADE_L0_RAYS: u64 = 32;
