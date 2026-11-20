@@ -59,7 +59,7 @@ fn sun(speed, pass, hist, every, day) {
     camera(#{ position: [12.5, 6.0, 48.0], look_at: [12.5, 1.5, 25.0] });
     // The sun_speed knob tops out at x64, so the script drives the clock
     // itself: sun frozen, time_of_day stepped once per frame.
-    knob("sun", "freeze");
+    knob("sun_speed", 0.0);
     if pass == "temporal" {
         knob("time_of_day", 5.0);
         wait(30);
@@ -92,7 +92,7 @@ fn sun(speed, pass, hist, every, day) {
 // A box spinning beside a hall lamp at night.
 fn spin(pass, hist, every) {
     knob("time_of_day", 22.0);
-    knob("sun", "freeze");
+    knob("sun_speed", 0.0);
     lamps_on(true);
     // The box nearest the lit hall (12.5, 20); the first box in the list is
     // outdoors and black at night.
@@ -128,7 +128,7 @@ fn spin(pass, hist, every) {
 // Dark room, every lamp switches on in one frame (the worst case: a full re-light).
 fn light_switch(pass) {
     knob("time_of_day", 0.0);
-    knob("sun", "freeze");
+    knob("sun_speed", 0.0);
     camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
     lamps_on(false);
     // The cache fades slowly after lamps go off (still about 70% of the lit
@@ -156,7 +156,7 @@ fn turn_pose(f) {
 }
 fn turn(pass, hist, every) {
     knob("time_of_day", 22.0);
-    knob("sun", "freeze");
+    knob("sun_speed", 0.0);
     lamps_on(true);
     let start = turn_pose(0);
     camera(#{ position: [start[0], start[1], start[2]], yaw: start[3], pitch: start[4] });
@@ -189,7 +189,7 @@ fn turn(pass, hist, every) {
 // smaller part (scripts/lighting/slant_mid_split.py).
 fn slant(pass, dir, hour) {
     knob("time_of_day", hour);
-    knob("sun", "freeze");
+    knob("sun_speed", 0.0);
     lamps_on(hour > 18.0 || hour < 6.0);
     let boxes = objects().filter(|o| o.height <= 1.2 && o.size <= 1.5);
     require(boxes.len() > 0, "the scene has a box");

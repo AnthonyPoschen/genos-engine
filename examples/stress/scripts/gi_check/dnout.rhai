@@ -5,7 +5,7 @@
 // pose settled (ref.png). gi-check dnout_rows: first-frame error and frames until
 // it stays under 2 %. Sun frozen, boxes and lamps still. Filled in: __DIR__.
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "still");
 knob("lamps", 1.0);
 knob("dynamic", 0.0);

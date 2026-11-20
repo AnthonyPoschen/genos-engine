@@ -3,7 +3,7 @@
 // 7.7 m is 231 frames at 1/60. Yaw 0 looks down -Z. Pitch aims at z=8, y=1.
 // Pass --gi-metrics. CSV: <out>/gi/s3-approach.csv
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "move");
 knob("lamps", "move");
 knob("dynamic", 50);

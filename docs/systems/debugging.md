@@ -254,7 +254,7 @@ on lavapipe. The cap is one hour.
 ```rhai
 time(#{ pause: true });
 knob("time_of_day", 12.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
 wait_settled(#{ timeout_frames: 900 });
 shot("noon-direct", "direct");

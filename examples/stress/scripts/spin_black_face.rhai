@@ -2,7 +2,7 @@
 // faces to stay lit in every frame of the turn.
 time(#{ fixed_dt: 0.0166667 });
 knob("time_of_day", 12.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "still");
 let boxes = objects().filter(|o| o.height <= 1.2 && o.size <= 1.5);
 require(boxes.len() > 0, "the scene has a box");

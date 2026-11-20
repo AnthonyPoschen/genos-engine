@@ -10,7 +10,7 @@
 // the next one. The still marks are before the lamp moves.
 
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "still");
 knob("lamps", "still");
 knob("dynamic", 0.0);

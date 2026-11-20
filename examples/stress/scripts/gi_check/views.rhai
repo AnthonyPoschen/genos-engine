@@ -11,7 +11,7 @@
 let moving = __MOVING__;
 time(#{ fixed_dt: 0.0166667 });
 if !moving { time(#{ pause: true }); }
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 const PAD = 600;
 const MOVE = 120;
 let views = [

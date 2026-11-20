@@ -16,7 +16,7 @@ let REF_EVERY = if PROFILE == "full" { 1 } else { 12 };
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("boxes", "still");
 knob("lamps", "still");
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 
 fn pad(i) { if i < 10 { `000${i}` } else if i < 100 { `00${i}` } else if i < 1000 { `0${i}` } else { `${i}` } }
 
