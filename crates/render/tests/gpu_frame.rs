@@ -741,6 +741,10 @@ fn walking_does_not_flip_the_light_between_states() {
     let wall = [0.2_f32, 1.3, 4.72];
     let mut camera = Camera::new(0.0, 1.2, std::f32::consts::PI);
     camera.pitch = -0.18;
+    camera.position.z = 1.2;
+    for _ in 0..90 {
+        let _ = draw_game(window, renderer, &world, &camera);
+    }
     let mut wall_colors: Vec<[f32; 3]> = Vec::new();
     let mut note = String::new();
     let mut worst = 0.0_f32;
