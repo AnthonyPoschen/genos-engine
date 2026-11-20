@@ -215,8 +215,8 @@ fn same_lamp(a: &GpuLamp, b: &GpuLamp) -> bool {
 /// reservoir histories that used to follow the prefix are gone.
 #[must_use]
 pub fn buffer_bytes(pixels: u64) -> u64 {
-    let _ = pixels;
     const CASCADE_DIRECT_CAP: u64 = 16384;
+    let _ = pixels;
     let table = 2 * CASCADE_DIRECT_CAP * 4 * 4;
     PREFIX_CAP_WORDS.saturating_mul(4).saturating_add(table)
 }
@@ -602,7 +602,7 @@ mod tests {
             super::POINT_ADD_WORD
         )));
         assert!(direct.contains("const uint CASCADE_DIRECT_AT = 164032u;"));
-        assert_eq!(super::PREFIX_CAP_WORDS, 164032);
+        assert_eq!(super::PREFIX_CAP_WORDS, 164_032);
     }
 
     #[test]
