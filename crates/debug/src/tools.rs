@@ -723,11 +723,12 @@ impl Tools {
                     None => Some(Err("reference needs the frame device".to_string())),
                     Some(renderer) => {
                         if job.on_draw(if image_used { None } else { image.as_ref() }) {
-                            job.scene = renderer
-                                .read_scene()
-                                .ok()
-                                .filter(|read| !read.rgb.is_empty());
                             job.legacy_display = renderer.hdr_legacy_display();
+                            job.scene = if job.legacy_display {
+                                None
+                            } else {
+                                renderer.read_scene().ok().filter(|read| !read.rgb.is_empty())
+                            };
                             image_used = true;
                         }
                         let ready =
