@@ -39,11 +39,16 @@ pub enum ViewMode {
     /// Which path produced the bounce: cell step, fine texel, probe, or a ray
     /// hit. The picture is flat codes, not light. See lighting_compose.comp.
     Path,
+    /// Level-0 surface voxel each pixel maps to. Colour is a hash of the
+    /// voxel's cell and ring, the same ring and cell size insert uses, so
+    /// the patches stay screen-constant and the ring boundaries move with
+    /// the camera. A bright line marks each ring start.
+    Voxels,
 }
 
 impl ViewMode {
     /// In the compose pass's code order (lighting_compose.comp).
-    pub const ALL: [ViewMode; 10] = [
+    pub const ALL: [ViewMode; 11] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -54,6 +59,7 @@ impl ViewMode {
         Self::Texels,
         Self::Variance,
         Self::Path,
+        Self::Voxels,
     ];
 
     pub fn name(self) -> &'static str {
@@ -68,6 +74,7 @@ impl ViewMode {
             Self::Texels => "texels",
             Self::Variance => "variance",
             Self::Path => "path",
+            Self::Voxels => "voxels",
         }
     }
 
@@ -267,4 +274,20 @@ fn sphere_screen_share(matrix: &[f32; 16], center: [f32; 3], radius: f32) -> f32
     let w = (hi[0].min(1.0) - lo[0].max(-1.0)).max(0.0);
     let h = (hi[1].min(1.0) - lo[1].max(-1.0)).max(0.0);
     (w * h / 4.0).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voxels_is_the_next_compose_mode() {
+        assert_eq!(ViewMode::parse("voxels"), Some(ViewMode::Voxels));
+        assert_eq!(ViewMode::Voxels.name(), "voxels");
+        assert_eq!(ViewMode::ALL.len(), 11);
+        assert_eq!(ViewMode::Full.code(), 0);
+        assert_eq!(ViewMode::Texels.code(), 7);
+        assert_eq!(ViewMode::Path.code(), 9);
+        assert_eq!(ViewMode::Voxels.code(), 10);
+    }
 }

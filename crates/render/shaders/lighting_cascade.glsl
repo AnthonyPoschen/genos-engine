@@ -40,6 +40,30 @@ vec4 lighting_cascade_published(uint pixel) {
     return vec4(max(lighting_unpack_rgb9e5(ckeys.key[at]), vec3(0.0)), 1.0);
 }
 
+// Level-0 surface voxel projection. Same ring and cell as insert. Math only:
+// compose can call this. A hash walk here faults lavapipe.
+vec3 lighting_cascade_debug_voxels(vec3 pos) {
+    vec3 rel = abs(pos - scene.eye.xyz);
+    float cheb = max(rel.x, max(rel.y, rel.z));
+    float level = log2(max(cheb, CASCADE_RING_NEAR) / CASCADE_RING_NEAR);
+    uint ring = uint(clamp(floor(level), 0.0, float(CASCADE_RING_MAX)));
+    float size = CASCADE_PROJ * CASCADE_RING_NEAR * exp2(float(ring));
+    ivec3 cell = ivec3(floor(pos / size));
+    uint h = hash_cell3(cell, CASCADE_LEVEL0_SALT ^ ring);
+    vec3 col = vec3(
+        lighting_unit(h),
+        lighting_unit(lighting_hash(h ^ 0x9E3779B9u)),
+        lighting_unit(lighting_hash(h ^ 0x85EBCA6Bu))
+    );
+    col = mix(vec3(0.12), col, 0.88);
+    col *= 1.0 - 0.08 * float(ring);
+    float frac = level - floor(level);
+    if (ring > 0u && frac < 0.03) {
+        col = mix(col, vec3(1.0), 0.65);
+    }
+    return col;
+}
+
 #ifndef GENOS_COMPOSE_NO_WALK
 
 float lighting_cascade_cheb(vec3 pos) {

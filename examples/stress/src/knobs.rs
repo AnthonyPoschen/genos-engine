@@ -61,12 +61,6 @@ impl Host for Stage {
         let mut knobs = vec![
             time,
             speed,
-            Knob::choice(
-                "sun",
-                "Sun",
-                usize::from(self.sun_frozen),
-                &["run", "freeze"],
-            ),
             Knob::switch("sky", "Sky", self.sky_on),
             Knob::choice(
                 "boxes",
@@ -80,8 +74,6 @@ impl Host for Stage {
                 usize::from(self.lamps_still),
                 &["move", "still"],
             ),
-            Knob::switch("unfilled", "Unfilled", self.unfilled_count),
-            Knob::switch("unfilled_tint", "Unfilled tint", self.unfilled_tint),
             Knob::number(
                 "lamp_clock",
                 "Lamp clock",
@@ -1267,12 +1259,9 @@ mod tests {
     const GI_KNOBS: &[&str] = &[
         "time_of_day",
         "sun_speed",
-        "sun",
         "sky",
         "boxes",
         "lamps",
-        "unfilled",
-        "unfilled_tint",
         "lamp_clock",
         "box_clock",
         "lights",
@@ -1374,6 +1363,32 @@ mod tests {
                 .value;
             stage.set_knob(name, value).expect(name);
         }
+    }
+
+    #[test]
+    fn sun_speed_slider_reaches_zero() {
+        let stage = Stage::new(
+            Scale::SMALL,
+            1,
+            LightMix {
+                count: 5,
+                dynamic_pct: 50,
+                layout: Layout::Spread,
+            },
+            1.0,
+            0.12,
+            120.0,
+        );
+        let speed = stage
+            .knobs()
+            .into_iter()
+            .find(|knob| knob.name == "sun_speed")
+            .expect("sun_speed");
+        assert_eq!(speed.min, 0.0);
+        assert!(speed.max > 0.0);
+        let mut frozen = stage;
+        frozen.set_knob("sun_speed", 0.0).expect("sun_speed");
+        assert!(frozen.sun_speed.abs() < 1.0e-6);
     }
 
     #[test]
