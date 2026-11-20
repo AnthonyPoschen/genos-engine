@@ -265,9 +265,11 @@ vec3 lighting_cascade_bin_dir(uint key, vec3 n, uint k) {
     return normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * u);
 }
 
-// Four bins around `dir` and their bilinear weights (rows clamped, the
-// turn wraps).
-void lighting_cascade_bin_taps(vec3 dir, vec3 n, out uvec4 idx, out vec4 w) {
+// The bin that holds `dir`. A bin is the mean radiance of its own pi/8 sr,
+// so a ray reads that bin alone. Blending the 90-degree neighbours smeared
+// the sunlit ground below the horizon into the empty directions above it:
+// a shadowed wall facing sunlit ground took twice the light it should.
+uint lighting_cascade_bin_of(vec3 dir, vec3 n) {
     vec3 tx;
     vec3 ty;
     lighting_cascade_bin_frame(n, tx, ty);
@@ -276,17 +278,9 @@ void lighting_cascade_bin_taps(vec3 dir, vec3 n, out uvec4 idx, out vec4 w) {
     if (phi < 0.0) {
         phi += LIGHTING_TAU;
     }
-    float fu = clamp(u * CASCADE_BIN_SIDE - 0.5, 0.0, CASCADE_BIN_SIDE - 1.0);
-    float fp = phi / LIGHTING_TAU * CASCADE_BIN_SIDE - 0.5;
-    float r0 = min(floor(fu), CASCADE_BIN_SIDE - 2.0);
-    float wu = fu - r0;
-    float c0 = floor(fp);
-    float wp = fp - c0;
-    uint ra = uint(r0);
-    uint ca = uint(mod(c0, CASCADE_BIN_SIDE));
-    uint cb = uint(mod(c0 + 1.0, CASCADE_BIN_SIDE));
-    idx = uvec4(ra * 4u + ca, ra * 4u + cb, (ra + 1u) * 4u + ca, (ra + 1u) * 4u + cb);
-    w = vec4((1.0 - wu) * (1.0 - wp), (1.0 - wu) * wp, wu * (1.0 - wp), wu * wp);
+    uint row = uint(clamp(floor(u * CASCADE_BIN_SIDE), 0.0, CASCADE_BIN_SIDE - 1.0));
+    uint col = uint(clamp(floor(phi / LIGHTING_TAU * CASCADE_BIN_SIDE), 0.0, CASCADE_BIN_SIDE - 1.0));
+    return row * 4u + col;
 }
 
 vec3 lighting_cascade_bin_get(uint slot, uint b) {

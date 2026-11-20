@@ -26,6 +26,8 @@ Levels merge from the back toward the eye with transmittance:
 
 The sample is a sparse trilinear over the parents that exist, renormalised so a missing parent does not darken the result. A missing level contributes nothing, and the coarser level shows through. A pixel is black only when no level has data. That is the same rule the 25 cm lattice already uses for an empty cell: the child weight is its sets over a full cell, and a refused parent walks to the next valid one.
 
+A ray past the child's interval reads the one parent bin that holds its direction (`lighting_cascade_bin_of`). A bin is the mean radiance of its own pi/8 sr, 4 rows of equal cos(theta) by 4 columns of 90 degrees around the cell axis. Until 21 Nov 2026 the ray read a bilinear blend of the four nearest bins. On a vertical wall that blend pulls a lower column, the ground, into the directions above the horizon. A shadowed outer wall facing sunlit ground took 2.24 times the reference with the sky off. With the bin that holds the ray it is 0.76 times (`examples/stress/scripts/wall_ground_bounce.rhai`). At the pose that showed it, mean error over the picture fell from 0.084 to 0.058. The wall is now somewhat dark: about 0.8 of the reference with the sky on and off.
+
 ## History
 
 History stays one confidence-weighted mean. There is no full reset. A fresh sample is adopted when the stored mean is junk, and a zero-radiance ray is adopted only when the surface is already dark or a full set of rays agreed on dark. Temporal accumulation improves a frame. It is not what makes the first frame usable. One frame of level 0 is already a picture.

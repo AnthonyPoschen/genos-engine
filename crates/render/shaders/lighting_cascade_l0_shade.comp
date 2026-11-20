@@ -22,10 +22,7 @@ vec3 lighting_cascade_parent_eval(vec3 dir, vec3 n_axis) {
     if (!sh_ok) {
         return has_sky() ? scene.sky.rgb : vec3(0.0);
     }
-    uvec4 idx;
-    vec4 w;
-    lighting_cascade_bin_taps(dir, n_axis, idx, w);
-    return w.x * sh_bins[idx.x] + w.y * sh_bins[idx.y] + w.z * sh_bins[idx.z] + w.w * sh_bins[idx.w];
+    return sh_bins[lighting_cascade_bin_of(dir, n_axis)];
 }
 
 void lighting_cascade_parent_fetch(vec3 pos, vec3 n, float child_size) {
