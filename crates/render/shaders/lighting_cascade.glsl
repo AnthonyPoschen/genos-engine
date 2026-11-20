@@ -27,7 +27,7 @@ const float CASCADE_RING_NEAR = 1.0;
 const uint CASCADE_RING_MAX = 6u;
 const float CASCADE_OVERLAP = 0.1;
 const float CASCADE_PARENT_SCALE = 2.0;
-const float CASCADE_RESEAT = 0.02;
+const float CASCADE_RESEAT = 0.002;
 // Voxel debug view (lighting_cascade_debug_voxels). Floor and mix keep
 // hashed colours visible; ring dim and line mark distance rings.
 const float CASCADE_VOXEL_VIEW_FLOOR = 0.12;
@@ -483,6 +483,21 @@ uint lighting_cascade_find_in(uint parity, uint stamp, ivec3 cell, uint level, u
     return ~0u;
 }
 
+uint lighting_cascade_find_layer(uint parity, uint stamp, ivec3 cell, uint ax, uint level, uint axis, uint found) {
+    if (found != ~0u) {
+        return found;
+    }
+    ivec3 below = cell;
+    below[ax] -= 1;
+    uint word = lighting_cascade_find_in(parity, stamp, below, level, axis);
+    if (word != ~0u) {
+        return word;
+    }
+    ivec3 above = cell;
+    above[ax] += 1;
+    return lighting_cascade_find_in(parity, stamp, above, level, axis);
+}
+
 uint lighting_cascade_insert_level(vec3 pos, vec3 n, uint level) {
     uint axis = lighting_cascade_axis(n);
     vec3 n_axis = lighting_cascade_axis_vec(axis);
@@ -586,7 +601,6 @@ void lighting_cascade_parent_corner(vec3 pos, vec3 n, float size, uint i, bool c
     slot = lighting_cache_find_sized(q, n, claim, size, q);
     if (seat && slot != ~0u && dot(cache.v[3u * slot].xyz - q, n) < -CASCADE_RESEAT) {
         cache.v[3u * slot].xyz = q;
-        cache.v[3u * slot + 2u] = vec4(0.0);
     }
 }
 
@@ -778,8 +792,14 @@ vec4 lighting_cascade_at_in(uint parity, uint stamp, vec3 pos, vec3 n, uint leve
         if (!(w > 0.0)) {
             continue;
         }
-        vec4 rec = lighting_cascade_record(
-            lighting_cascade_find_in(parity, stamp, base + o, level, axis), pos, n);
+        ivec3 c = base + o;
+        vec3 q = (vec3(c) + vec3(LIGHTING_CELL_HALF)) * size;
+        float slope = ((q[a1] - pos[a1]) * n[a1] + (q[a2] - pos[a2]) * n[a2]) / n[ax];
+        q[ax] = pos[ax] - clamp(slope, -size, size);
+        c[ax] = lighting_cascade_l0_cell(q, n_axis, size)[ax];
+        uint word = lighting_cascade_find_in(parity, stamp, c, level, axis);
+        word = lighting_cascade_find_layer(parity, stamp, c, ax, level, axis, word);
+        vec4 rec = lighting_cascade_record(word, pos, n);
         if (rec.w > LIGHTING_CACHE_HAS_W) {
             acc += w * rec.rgb;
             wsum += w;

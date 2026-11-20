@@ -170,10 +170,12 @@ void main() {
         int(ckeys.key[word + 2u]),
         int(ckeys.key[word + 3u]),
         int(ckeys.key[word + 4u]));
-    uint prev = lighting_cascade_find_in(
-        (lighting_frame() + 1u) & 1u, lighting_frame(), cell, level, axis);
+    uint prev = lighting_cascade_find_layer(
+        (lighting_frame() + 1u) & 1u, lighting_frame(), cell, axis >> 1u, level, axis,
+        lighting_cascade_find_in((lighting_frame() + 1u) & 1u, lighting_frame(), cell, level, axis));
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u) {
-        lighting_cascade_ring_store(word, prev, cur);
+        bool inside = scene_inside(pos + n * 0.02);
+        lighting_cascade_ring_store(word, prev, inside ? vec3(uintBitsToFloat(0x7fc00000u)) : cur);
     }
     atomicAdd(ckeys.key[lighting_cascade_counts_at() + 1u], 1u);
 }

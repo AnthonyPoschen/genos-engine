@@ -12,8 +12,8 @@ use genos_scene::{
 };
 use genos_window::Window;
 
-const WIDTH: u32 = 320;
-const HEIGHT: u32 = 180;
+const WIDTH: u32 = 640;
+const HEIGHT: u32 = 360;
 const BOX_AT: [f32; 3] = [0.0, 0.0, 6.0];
 const BOX_SIZE: f32 = 1.0;
 const BOX_HEIGHT: f32 = 1.0;
@@ -127,11 +127,11 @@ fn axis_vec(n: [f32; 3]) -> [f32; 3] {
 }
 
 /// The side face of the box a point lies on, as its outward normal.
-fn face_normal(p: [f32; 3], yaw: f32) -> Option<[f32; 3]> {
-    let (s, c) = yaw.sin_cos();
+fn face_normal(p: [f32; 3], solid: &Solid) -> Option<[f32; 3]> {
+    let (s, c) = solid.yaw.sin_cos();
     let ex = [c, 0.0, -s];
     let ez = [s, 0.0, c];
-    let d = [p[0] - BOX_AT[0], p[1], p[2] - BOX_AT[2]];
+    let d = [p[0] - solid.position.x, p[1], p[2] - solid.position.z];
     let lx = d[0] * ex[0] + d[2] * ex[2];
     let lz = d[0] * ez[0] + d[2] * ez[2];
     let half = BOX_SIZE * 0.5;
@@ -228,17 +228,29 @@ fn run(yaw: f32) {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
-    let sc = scene(yaw);
-    let world = World::from_scene(sc.clone());
+    let mut sc = scene(yaw);
+    let mut world = World::from_scene(sc.clone());
     renderer.set_lighting_settings(sc.lighting.clone());
     renderer.set_debug_view(DebugView { mode: ViewMode::Full, lamp: 0 });
     let mut cam = Camera::opening();
-    cam.set_pose(Vec3::new(1.2, 1.4, 8.6), 0.35, -0.2);
+    let cam_yaw: f32 = std::env::var("PROBE_CAM_YAW").ok().and_then(|v| v.parse().ok()).unwrap_or(0.35);
+    let cam_x: f32 = std::env::var("PROBE_CAM_X").ok().and_then(|v| v.parse().ok()).unwrap_or(1.2);
+    let cam_z: f32 = std::env::var("PROBE_CAM_Z").ok().and_then(|v| v.parse().ok()).unwrap_or(8.6);
+    cam.set_pose(Vec3::new(cam_x, 1.4, cam_z), cam_yaw, -0.2);
     let moving: u32 = std::env::var("PROBE_MOVE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let spin: u32 = std::env::var("PROBE_SPIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     for frame in 0..64u32 {
         if frame + moving >= 64 {
             let k = (frame + moving - 64) as f32;
-            cam.set_pose(Vec3::new(1.2 - 0.03 * k, 1.4, 8.6 - 0.03 * k), 0.35 - 0.02 * k, -0.2);
+            cam.set_pose(Vec3::new(cam_x - 0.03 * k, 1.4, cam_z - 0.03 * k), cam_yaw - 0.02 * k, -0.2);
+        }
+        let hold: u32 = std::env::var("PROBE_HOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        if frame + spin >= 64 && frame + hold < 64 {
+            let k = (frame + spin - 64) as f32 + 1.0;
+            let solid = &mut world.scene.solids[0];
+            solid.yaw = yaw + 0.01 * k;
+            solid.position.x = BOX_AT[0] + 0.02 * k;
+            sc.solids[0] = solid.clone();
         }
         let _ = window.pump();
         renderer.draw(&world, &cam, true).expect("draw").expect("readback");
@@ -255,9 +267,35 @@ fn run(yaw: f32) {
         }
         std::fs::write(path, ppm).expect("shot");
     }
+    if std::env::var("PROBE_LAG").is_ok() {
+        for lag in 0..4 {
+            let mut solid = sc.solids[0].clone();
+            solid.yaw -= 0.01 * lag as f32;
+            solid.position.x -= 0.02 * lag as f32;
+            let (sn, cs) = solid.yaw.sin_cos();
+            let (ex, ez) = ([cs, 0.0, -sn], [sn, 0.0, cs]);
+            let mut sum = 0.0f32;
+            let mut count = 0u32;
+            for v in voxels.iter().filter(|v| v.weight > 0.5 && v.axis != 2 && v.axis != 3) {
+                let d = [v.pos[0] - solid.position.x, v.pos[2] - solid.position.z];
+                let lx = d[0] * ex[0] + d[1] * ex[2];
+                let lz = d[0] * ez[0] + d[1] * ez[2];
+                let gap = (lx.abs() - 0.5).abs().min((lz.abs() - 0.5).abs());
+                if lx.abs() < 0.6 && lz.abs() < 0.6 && v.pos[1] < BOX_HEIGHT {
+                    sum += gap;
+                    count += 1;
+                }
+            }
+            eprintln!("lag {lag}: {count} side voxels, mean distance to face {:.4} m", sum / count.max(1) as f32);
+        }
+    }
     let mut rows = Vec::new();
     for v in voxels.iter().filter(|v| v.weight > 0.5) {
-        let Some(n) = face_normal(v.pos, yaw) else { continue };
+        let Some(n) = face_normal(v.pos, &sc.solids[0]) else { continue };
+        let ax = axis_of(n);
+        if v.axis != (ax as u32) * 2 + u32::from(n[ax] < 0.0) {
+            continue;
+        }
         let s = 0.0625 * 2f32.powi(v.level as i32);
         let reference = luma(bounce_irradiance(&sc, v.pos, n, 512, 16, 7));
         let from = add(v.pos, n, 0.02);

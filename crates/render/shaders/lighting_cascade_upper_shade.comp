@@ -157,7 +157,8 @@ void main() {
         bin_n[b] += 1.0;
     }
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u
-        && lighting_cascade_finite3(cur)) {
+        && lighting_cascade_finite3(cur)
+        && !scene_inside(pos + n * 0.02)) {
         for (uint b = 0u; b < CASCADE_BINS; b++) {
             lighting_cascade_bin_put(slot, b, bin_sum[b] / max(bin_n[b], 1.0));
         }
