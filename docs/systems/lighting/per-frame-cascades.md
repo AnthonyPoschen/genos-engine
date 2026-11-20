@@ -26,15 +26,17 @@ The rule, in plain words: pick the cube size whose patch of this surface covers 
 
 - The wanted size at a point is `want = K · dist / sqrt(max(|n_a · v|, 1/16))`. Here `dist` is the Euclidean distance from the eye, `v` the view direction, and `n_a` the dominant normal axis. `K` is the angular size of a box. `K = 1/32` gives boxes of about 22 × 40 px at 1440p.
 - The `1/16` floor caps the grazing boost at 4×, which is two grid levels.
-- **Choice.** Walk from coarse to fine. A point takes the largest grid size `S` with `S ≤ want(centre of the S-cell that holds the point)`.
-  - The test is evaluated at the cell centre, with the axis normal, not at the pixel. So every pixel on that surface inside that cell makes the same choice, and the leaves form a clean quadtree on the surface: no overlaps and no gaps.
+- **Choice.** Each pixel has a continuous footprint level, `lod = log2(want(pixel) / (1/16 m))`, like a texture mip level. Insert claims the cells at `floor(lod)` and `floor(lod) + 1`. Publish shows `mix(level floor, level floor + 1, fract(lod))`.
+  - The weight depends only on the pixel, so there is no edge along cell borders. A voxel appears at weight 0, so its first frames, with one ring slot filled, are not seen.
+  - Two levels per pixel cost about 25% more voxels than one (the coarser level has a quarter of the cells).
+  - Was: the largest `S` with `S ≤ want(cell centre)`, a quadtree with a blend only in the top tenth of a level. The blend weight was constant per cell, so level borders showed as a cell-shaped staircase.
 - **Normal inset.** The point is moved half a cell into the surface along `n_a` before `floor(p / S)`.
   - Today, a floor at y = 0 or a wall on a grid plane flips between the two cells either side of the plane with depth noise. On the census below, 38% of the hall's level-0 records are such duplicates (82% of records sit within 2% of a grid plane).
   - This, not sub-pixel voxels, is the speckled band in the #313 voxel view. Depth noise grows with distance, and the cell size is fixed within a ring, so it is worst just before each ring line. The inset puts the point mid-cell along the normal.
-- **Stability.** A cell that was a leaf last frame keeps its size while `want / S` stays in `[2^-0.25, 2^1.25]`, a quarter-level dead band either side of `[1, 2)`. The previous-frame level-0 table, kept for the four-slot direction ring below, holds that state. Without a previous entry, the plain rule decides. Inputs are world cell centres and the eye, so a still camera gives the same leaves every frame.
-- **Insert and read agree by construction.** Insert decides the level once per pixel per frame and records that voxel's slot in the pixel's word. Publish and compose read the voxel through that word and never recompute the size. A debug view that recomputes it must call the same function.
-- **Seams.** On one surface, neighbouring leaves differ by at most one level, because `want` is smooth across a cell. Cells nest, so a coarse cell and its fine neighbours share edges without gaps.
-  - The value step at that edge uses today's overlap blend, driven by the footprint ratio instead of Chebyshev distance. A pixel whose `want / S` is in the top tenth of its level, log scale, also inserts the coarser cell and blends towards it.
+- **Stability.** Inputs are the pixel position and the eye, so a still camera gives the same voxels every frame. There is no hysteresis: a moving camera changes the weights continuously.
+- **Insert and read agree by construction.** Insert, publish, bounce and the voxel debug view all call `lighting_cascade_lod`.
+- **Sample point.** A voxel's rays start on the surface: the axis line through the cell centre meets the pixel's surface plane there. On a face that is not axis-aligned (a turned box), moving the centre along the axis alone left the point up to a few centimetres behind the face.
+- **Table.** The host zeroes this frame's level-0 table before insert. A slot is claimed by one compare-and-swap from key 0. Before, a slot was free when its stamp was old, and the stamp was written after the key, so two inserts could write one record.
 - **Leaks.** A coarser cube spans more along the normal, so it can join two parallel surfaces closer than `S`, such as two floors either side of a thin wall.
   - The cap of two levels bounds this, and the dominant-axis-and-sign key keeps walls apart.
   - The plane gate uses the distance size `K·dist`, not the enlarged `S`. A parallel surface farther than that from the stored plane is refused.
@@ -69,7 +71,17 @@ A cell of size `S` is kept while its Chebyshev distance from the eye is at most 
 The merge runs from the back towards the eye, `L(a,c) = L(a,b) + β(a,b)·L(b,c)`, per direction. An upper cell stores SH-L1 radiance for `[4S, ∞)` after its own merge. A level-0 voxel fetches its parent SH once: a sparse trilinear over the parent corners that exist, renormalised, with the plane and facing gates. Each level-0 ray then:
 
 - **Hits inside `[ε, 8s]`:** shades the hit. That is direct light at the hit, plus the bounce stored in the cell at the hit.
-- **Misses:** evaluates the parent SH in its direction (β = 1). The SH is inverted on the hemisphere so a constant incoming field comes back as that radiance, not the full-sphere Ylm dip at the horizon. Parent corners use the parent cell's own thickness as the plane window (facing and stale still reject a leak).
+- **Misses:** evaluates the parent's 16 direction bins in its direction (β = 1), bilinear across bins.
+
+Parent cells, as built (20 Nov 2026):
+
+- **Read.** A bilinear of the four parent cells around the voxel on its surface plane, between cell centres. Along the normal there is one cell, the one holding the surface.
+- **Position.** A claimed parent cell sits on the claiming voxel's surface plane, under the cell's tangent centre. It used to sit on a grid plane, which put the cells of an off-grid wall inside the wall; their rays saw nothing.
+- **Re-seat.** When a level-0 voxel finds a parent cell behind its own surface (a cell claimed while a box stood elsewhere), it moves the cell onto its plane and clears it; the rolling refresh shades an empty cell in the frame it is found. Only level-0 voxels re-seat, because only they carry the surface normal. Upper cells store the axis normal, and letting them re-seat moved a cell back and forth every frame.
+- **Visibility.** A parent corner the voxel cannot see, by one shadow ray from the voxel to the cell, is skipped. A floor next to a thin wall otherwise read parents on the far side.
+- **Bins.** A bin is the mean radiance of all its rays: a hit, or the parent's bins on a miss. The earlier rule left out rays blocked before `4S` and stored a bin with no clear ray as zero. Near walls most bins went to zero and the chain lost energy at every level.
+
+Measured with `crates/debug/tests/cascade_energy_probe.rs` (multi-bounce reference, test hall): 0.57 of the reference before these changes, 0.98 after. Walls went from 0.09–0.47 to about 0.9; the fine levels were the darkest, which was the pop when a surface moved to a finer level. `crates/debug/tests/cascade_box_probe.rs` checks every voxel on a box face, turned or not and with the camera still or moving: no voxel below half the reference.
 
 The voxel's value is the cosine-weighted sum of its rays. This is the real interval merge. Today's "β is 0 while the nearer sample exists" substitution goes away, because the nearer sample is always this frame's.
 
@@ -78,9 +90,9 @@ The voxel's value is the cosine-weighted sum of its rays. This is the real inter
 | Level | What stays | Rule |
 |---|---|---|
 | 0 | A four-slot direction ring, double-buffered (two 16384×16-word tables, 2.0 MB) | 128 fixed stratified directions are split into 4 interleaved sets of 32. Frame `f` traces slot `f % 4` and replaces that slot. The voxel value is the average of the filled slots. There is no EMA across cycles: a still scene is exact once all four slots are filled, and a change lands within 4 frames. Non-finite samples leave that slot unchanged. A new key starts with one slot and fills over the next frames. |
-| upper | This refresh replaces the stored irradiance and clear-path bins | Directions are fixed per key and ray, the same every cycle. A still refresh repeats the same set, so the stored value is stable. A change lands on the next refresh (within `P` frames, default 4). Non-finite samples are refused. |
+| upper | This refresh replaces the stored irradiance and bins. An empty cell (just claimed or re-seated) is due at once | Directions are fixed per key and ray, the same every cycle. A still refresh repeats the same set, so the stored value is stable. A change lands on the next refresh (within `P` frames, default 4). Non-finite samples are refused. |
 
-Each voxel also has a fixed turn from its key (`lighting_hemi_dir`), so neighbouring voxels do not share one ray pattern. Compose filters the read: a sparse trilinear of neighbouring same-level cells around the query, renormalised, with the plane and facing gates. Stored values are not blended with neighbours. The overlap blend stays across footprint levels (see Sizes).
+Each voxel also has a fixed turn from its key (`lighting_hemi_dir`), so neighbouring voxels do not share one ray pattern. Compose filters the read: a bilinear of the four same-level cell centres around the query on its surface plane, renormalised, with the plane and facing gates. Stored values are not blended with neighbours. Levels blend by the pixel's footprint level (see Sizes).
 
 ## Refresh schedule for upper levels
 

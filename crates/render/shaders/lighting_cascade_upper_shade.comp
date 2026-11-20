@@ -1,12 +1,10 @@
 #version 450
 // Shade this band's due upper cells. Every ray is shaded: a hit is exact
 // lamp light plus the bounce stored at the hit, a miss is the parent's
-// clear-path bins. The cosine-weighted sum of all rays is the cell's full
-// irradiance (what a ray hit reads for the next bounce). The bins take
-// only the rays still clear at the interval start 4S. Directions are
-// fixed per key and ray, the same every refresh, and this refresh
-// replaces the stored irradiance and bins (no EMA). A non-finite
-// estimate is refused. This compile's only trace site is trace_occluded.
+// bins. The cosine-weighted sum of all rays is the cell's irradiance, and
+// each bin is the mean radiance of its rays. This refresh replaces both
+// (no EMA). A non-finite estimate is refused. This compile's only trace
+// site is trace_occluded.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
@@ -16,7 +14,6 @@ shared vec3 sh_bins[16];
 shared bool sh_ok;
 shared vec3 sh_sum[64];
 shared vec3 sh_rad[64];
-shared bool sh_clear[64];
 
 bool lighting_cascade_hit_is_lamp(vec3 hp) {
     LampList list = lamps_at(hp);
@@ -48,7 +45,7 @@ vec3 lighting_cascade_parent_eval(vec3 dir, vec3 n_axis) {
 void lighting_cascade_parent_fetch(vec3 pos, vec3 n, float child_size) {
     vec3 bins[16];
     bool ok;
-    lighting_cascade_parent_bins(pos, n, child_size, bins, ok);
+    lighting_cascade_parent_bins(pos, n, child_size, false, bins, ok);
     for (uint b = 0u; b < CASCADE_BINS; b++) {
         sh_bins[b] = bins[b];
     }
@@ -118,32 +115,25 @@ void main() {
     memoryBarrierShared();
     vec3 li = vec3(0.0);
     float nd = 0.0;
-    bool clear = false;
     if (live && k < rays) {
         uint key = ckeys.key[slot];
         vec3 dir = lighting_cascade_bin_dir(key, n, k);
         nd = max(dot(dir, n), 0.0);
-        float t0;
-        float t1;
-        lighting_cascade_interval(size, t0, t1);
         uint at = lighting_cascade_upper_hit_at(due, k);
         float t = uintBitsToFloat(ckeys.key[at]);
         vec3 hp = pos + n * 0.02 + dir * t;
         if (t < 0.0 || lighting_cascade_hit_is_lamp(hp)) {
             li = lighting_cascade_parent_eval(dir, n);
-            clear = true;
         } else {
             vec3 hn = lighting_unpack_normal(ckeys.key[at + 1u]);
             vec3 reflectance = unpackUnorm4x8(ckeys.key[at + 2u]).rgb * (1.0 / LIGHTING_PI);
             vec3 bounce = lighting_cascade_bounce(hp, hn);
             vec3 e = lighting_cascade_direct_at(hp + hn * 0.02, hn);
             li = reflectance * (e + bounce);
-            clear = t >= t0;
         }
     }
     sh_sum[k] = li * nd;
     sh_rad[k] = li;
-    sh_clear[k] = clear;
     barrier();
     memoryBarrierShared();
     if (!live || k != 0u) {
@@ -155,9 +145,6 @@ void main() {
     }
     float nray = float(max(rays, 1u));
     vec3 cur = max((LIGHTING_TAU / nray) * s0, vec3(0.0));
-    // Per-bin clear-path mean from this refresh only. A bin with no
-    // clear ray is not a clear path this cycle (fixed directions), so
-    // it is stored as zero rather than kept from history.
     vec3 bin_sum[16];
     float bin_n[16];
     for (uint b = 0u; b < CASCADE_BINS; b++) {
@@ -165,9 +152,6 @@ void main() {
         bin_n[b] = 0.0;
     }
     [[dont_unroll]] for (uint i = 0u; i < rays; i++) {
-        if (!sh_clear[i]) {
-            continue;
-        }
         uint b = i % CASCADE_BINS;
         bin_sum[b] += sh_rad[i];
         bin_n[b] += 1.0;
@@ -175,11 +159,7 @@ void main() {
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u
         && lighting_cascade_finite3(cur)) {
         for (uint b = 0u; b < CASCADE_BINS; b++) {
-            if (bin_n[b] > 0.0) {
-                lighting_cascade_bin_put(slot, b, bin_sum[b] / bin_n[b]);
-            } else {
-                lighting_cascade_bin_put(slot, b, vec3(0.0));
-            }
+            lighting_cascade_bin_put(slot, b, bin_sum[b] / max(bin_n[b], 1.0));
         }
         cache.v[3u * slot + 2u] = vec4(cur, 1.0);
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());

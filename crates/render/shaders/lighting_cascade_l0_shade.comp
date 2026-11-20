@@ -1,8 +1,7 @@
 #version 450
 // Level-0 merge and four-slot direction ring. Each live voxel shades
 // its 32 rays: a hit is explicit lamp shading plus the bounce stored at
-// the hit, a miss is the parent's clear-path radiance bins in that
-// direction. A ray that hits a lamp already sampled by those shadow rays
+// the hit, a miss is the parent's radiance bins in that direction. A ray that hits a lamp already sampled by those shadow rays
 // (mesh glow or a point within LAMP_RADIUS) is a miss, so the emitter is
 // not counted twice. The cosine-weighted sum replaces slot
 // lighting_frame() % 4; the voxel value is the average of the filled
@@ -18,8 +17,7 @@ shared bool sh_ok;
 shared vec3 sh_sum[32];
 shared float sh_cos[32];
 
-// Radiance past this voxel's interval along `dir`: the parent's clear-path
-// bins. No ancestor yet is the sky, or nothing indoors.
+// Radiance past this voxel's interval along `dir`: the parent's bins. No ancestor yet is the sky, or nothing indoors.
 vec3 lighting_cascade_parent_eval(vec3 dir, vec3 n_axis) {
     if (!sh_ok) {
         return has_sky() ? scene.sky.rgb : vec3(0.0);
@@ -33,7 +31,7 @@ vec3 lighting_cascade_parent_eval(vec3 dir, vec3 n_axis) {
 void lighting_cascade_parent_fetch(vec3 pos, vec3 n, float child_size) {
     vec3 bins[16];
     bool ok;
-    lighting_cascade_parent_bins(pos, n, child_size, bins, ok);
+    lighting_cascade_parent_bins(pos, n, child_size, true, bins, ok);
     for (uint b = 0u; b < CASCADE_BINS; b++) {
         sh_bins[b] = bins[b];
     }

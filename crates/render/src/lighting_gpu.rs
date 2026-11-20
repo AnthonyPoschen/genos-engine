@@ -2702,13 +2702,20 @@ impl Gpu {
         }
     }
 
-    /// Zero the level-0 inserted/traced counters before this frame's insert.
-    fn clear_cascade_l0_counts(&mut self, w: u32, h: u32) {
+    fn clear_cascade_l0_frame(&mut self, w: u32, h: u32) {
         let pixels = u64::from(w).saturating_mul(u64::from(h));
         let offset = lighting_level0_counts_at(pixels).saturating_mul(4);
         let bytes = CASCADE_L0_COUNT_WORDS.saturating_mul(4);
+        let table_words = CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE;
+        let table_at = lighting_fill_keys_words(pixels)
+            + lighting_reach_words()
+            + 1
+            + (u64::from(self.lighting.frame) & 1) * table_words;
+        let table_offset = table_at.saturating_mul(4);
+        let table_bytes = table_words.saturating_mul(4);
         if self.lighting.cache_keys.buffer.is_null()
             || offset.saturating_add(bytes) > self.lighting.cache_keys.size
+            || table_offset.saturating_add(table_bytes) > self.lighting.cache_keys.size
         {
             return;
         }
@@ -2720,6 +2727,13 @@ impl Gpu {
                 self.lighting.cache_keys.buffer,
                 offset,
                 bytes,
+                0,
+            );
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                table_offset,
+                table_bytes,
                 0,
             );
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
@@ -4917,7 +4931,7 @@ impl Gpu {
             let mut cur_pc = pc;
             let mut reach_marked = false;
             if self.lighting.cache_full && !self.lighting.cache_keys.buffer.is_null() {
-                self.clear_cascade_l0_counts(w, h);
+                self.clear_cascade_l0_frame(w, h);
             }
             for (k, (pass, gx, gy)) in groups.iter().copied().enumerate() {
                 if !reach_marked && (pass == 7 || pass == 8 || pass == SH_PREP_PASS) {
