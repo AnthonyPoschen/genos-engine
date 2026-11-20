@@ -281,7 +281,14 @@ float cascade_lamp_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp
     float size = CASCADE_LAMP_FINE * exp2(float(bucket));
     ivec3 cell = ivec3(floor(origin / max(size, 0.25)));
     uint axis = lighting_pack_normal(n);
-    uint key = hash_cell3(cell, bucket * 16u + lamp_i * 131u + axis * 4096u + 0xC35Cu);
+    // The lamp pose is part of the key. A move inside the same shell must not
+    // keep the old visibility mean: after RESTIR_MEAN_CAP that mean moves at
+    // one sample in 4096. A new pose starts a new mean.
+    uint salt = bucket * 16u + lamp_i * 131u + axis * 4096u + 0xC35Cu;
+    salt ^= floatBitsToUint(lamp.pos.x);
+    salt ^= lighting_hash(floatBitsToUint(lamp.pos.y));
+    salt ^= lighting_hash(floatBitsToUint(lamp.pos.z));
+    uint key = hash_cell3(cell, salt);
     if (key == 0u) {
         key = 1u;
     }
