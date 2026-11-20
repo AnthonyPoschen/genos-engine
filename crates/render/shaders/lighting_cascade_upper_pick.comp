@@ -39,8 +39,7 @@ void main() {
     }
     uint head = lighting_cascade_upper_head_at();
     uint period = lighting_cascade_refresh_period(ckeys.key[head] & 255u);
-    bool empty = !(cache.v[3u * slot + 2u].w > LIGHTING_CACHE_HAS_W);
-    if (!empty && !lighting_cascade_refresh_due(key, lighting_frame(), period)) {
+    if (!lighting_cascade_refresh_due(key, lighting_frame(), period)) {
         return;
     }
     uint band = lighting_cascade_upper_band(size);

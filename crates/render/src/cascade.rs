@@ -656,7 +656,7 @@ mod tests {
         assert!(gpu.contains("cascade_l0_shade_pipe"));
         assert!(shader.contains("const float CASCADE_GRID_BASE = 0.0625;"));
         assert!(shader.contains("const float CASCADE_FOOTPRINT_K = 0.03125;"));
-        assert!(shader.contains("lighting_cascade_l0_level_plain"));
+        assert!(shader.contains("float lighting_cascade_lod(vec3 pos, vec3 n)"));
         assert!(shader.contains("lighting_cascade_l0_cell"));
         let direct = include_str!("../shaders/lighting_direct.comp");
         assert!(
