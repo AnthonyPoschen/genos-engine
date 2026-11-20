@@ -359,7 +359,7 @@ float cascade_lamp_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp
 #endif
 
 // Pixel exact-shadow mean, two frames. Two vec4s a slot: mean.rgb and count,
-// then depth, packed normal, the unshadowed sum, and the short mean. The shade writes this pixel's current slot and reads the
+// then depth, packed normal, the unshadowed sum, and the short visibility mean. The shade writes this pixel's current slot and reads the
 // previous frame at the reprojected pixel (lamp_pick_history_pixel, then
 // the same 2% / 5 cm / 0.9 tolerances as lamp_pick_reproject_at). A failed
 // reprojection is a new surface and starts from the fresh sample. A
@@ -388,6 +388,61 @@ uint area_slot_prev() {
 
 uint area_mean_index(uint pixel, uint slot) {
     return (slot * pc.dims.x * pc.dims.y + pixel) * 2u;
+}
+
+// Neighbourhood clamp. The previous frame's 3x3 around the reprojected pixel
+// holds each pixel's short mean (about four frames) of its visibility, the
+// sample over its unshadowed sum. That slot is not written this dispatch. The long
+// mean's visibility is clamped to the neighbours' range, widened by
+// AREA_CLAMP_PAD. A still penumbra's short means spread around the long
+// mean, so the clamp does not move it. Behind a moving shadow edge every
+// neighbour's short mean has fallen, so the old light goes in a few frames
+// instead of tens. Raw one-ray samples are 0 or 1 and would clip the outer
+// penumbra; short means do not. Neighbours with no light stored are skipped.
+const float AREA_CLAMP_PAD = 0.05;
+const int AREA_CLAMP_RADIUS = 1;
+
+vec3 area_clamp(uint hist_pixel, vec3 mean, vec3 sample_rgb, float open) {
+    if (!(open > DISC_EPS)) {
+        return mean;
+    }
+    int w = int(pc.dims.x);
+    int h = int(pc.dims.y);
+    int hx = int(hist_pixel % pc.dims.x);
+    int hy = int(hist_pixel / pc.dims.x);
+    float lo = 1.0e9;
+    float hi = -1.0e9;
+    for (int dy = -AREA_CLAMP_RADIUS; dy <= AREA_CLAMP_RADIUS; dy++) {
+        for (int dx = -AREA_CLAMP_RADIUS; dx <= AREA_CLAMP_RADIUS; dx++) {
+            int qx = hx + dx;
+            int qy = hy + dy;
+            if (qx < 0 || qy < 0 || qx >= w || qy >= h) {
+                continue;
+            }
+            vec4 g = area_mean.v[area_mean_index(uint(qy * w + qx), area_slot_prev()) + 1u];
+            if (!(g.z > DISC_EPS) || !(g.w == g.w)) {
+                continue;
+            }
+            float v = g.w;
+            lo = min(lo, v);
+            hi = max(hi, v);
+        }
+    }
+    if (hi < lo) {
+        return mean;
+    }
+    vec3 lit = max(mean, vec3(0.0));
+    float v_hist = (lit.r + lit.g + lit.b) / open;
+    float v_new = clamp(v_hist, lo - AREA_CLAMP_PAD, hi + AREA_CLAMP_PAD);
+    if (v_new == v_hist) {
+        return mean;
+    }
+    if (v_hist > DISC_EPS) {
+        return mean * (v_new / v_hist);
+    }
+    vec3 s = max(sample_rgb, vec3(0.0));
+    float s_sum = s.r + s.g + s.b;
+    return s_sum > DISC_EPS ? s * (v_new * open / s_sum) : mean;
 }
 
 vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
@@ -447,6 +502,9 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
     if (lighting_gi_on() && lighting_near_change(pos) && count > LIGHTING_SC_MOVING) {
         count = LIGHTING_SC_MOVING;
     }
+    if (!reset && now_on && reprojected) {
+        mean = area_clamp(hist_pixel, mean, sample_rgb, open);
+    }
     // Nothing was stored and nothing is lit. Do not write a zero over an
     // empty slot every frame.
     if (!now_on && !stored_ok) {
@@ -457,7 +515,11 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
     float long_sum = lit_mean.r + lit_mean.g + lit_mean.b;
     float sample_sum = lit_sample.r + lit_sample.g + lit_sample.b;
     float peak = max(max(open, long_sum), DISC_EPS);
-    float short_mean = reset || !(geo.w == geo.w) ? sample_sum : mix(geo.w, sample_sum, AREA_SHORT);
+    // The short mean is stored as visibility, so a moving lamp's changing
+    // unshadowed sum does not read as a drift or a neighbour's shadow.
+    float sample_vis = open > DISC_EPS ? sample_sum / open : 0.0;
+    float short_vis = reset || !(geo.w == geo.w) ? sample_vis : mix(geo.w, sample_vis, AREA_SHORT);
+    float short_mean = short_vis * open;
     float drift = abs(short_mean - long_sum) / peak;
     bool capped = !reset && count >= float(RESTIR_MEAN_CAP);
     if (!reset && drift > AREA_MOVE && count > AREA_FLOOR) {
@@ -471,7 +533,7 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
         mean += (sample_rgb - mean) / count;
     }
     area_mean.v[out_base] = vec4(mean, count);
-    area_mean.v[out_base + 1u] = vec4(z, uintBitsToFloat(packed), open, short_mean);
+    area_mean.v[out_base + 1u] = vec4(z, uintBitsToFloat(packed), open, short_vis);
     return mean;
 }
 
