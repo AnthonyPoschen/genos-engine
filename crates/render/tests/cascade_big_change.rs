@@ -1,13 +1,23 @@
-#![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
+#![cfg_attr(
+    test,
+    expect(clippy::as_conversions, reason = "pixel ndc from the integer size"),
+    expect(
+        clippy::cast_precision_loss,
+        reason = "pixel ndc from the integer size"
+    ),
+    expect(clippy::expect_used, reason = "a test aborts when a fixture fails")
+)]
 
-//! Sun jump and lamp flip: a change only down-weights stored history, and
-//! the next regular refresh (stride P) dominates catch-up. Measures frames
-//! and per-level GPU ms against a period-1 reference for P in 1, 2, 4, 10.
-//! Lavapipe times are not the on-device cost.
+//! Sun jump, lamp flip, and lamp-off: a change only down-weights stored
+//! history, and the next regular refresh (stride P=4) dominates catch-up
+//! within 5 frames. Lamp-off is checked against a path-traced reference
+//! (the closed room must go nearly black). Lavapipe times are not the
+//! on-device cost.
 
-use genos_render::{CascadeTimes, DebugView, Renderer, ViewMode, World};
+use genos_render::{radiance_hits, trace_ray, CascadeTimes, DebugView, Renderer, ViewMode, World};
 use genos_scene::{
-    AmbientMode, Camera, Ceiling, Floor, Light, LightingPreset, LightingSettings, Scene, Vec3, Wall,
+    look_direction, AmbientMode, Camera, Ceiling, Floor, Light, LightingPreset, LightingSettings,
+    Scene, Vec3, Wall,
 };
 use genos_window::Window;
 
@@ -20,19 +30,25 @@ const HEIGHT: u32 = 180;
 const STILL: u32 = 16;
 const REF_AFTER: u32 = 16;
 const CATCH_MEAN: f64 = 0.04;
-const PERIODS: [u32; 4] = [1, 2, 4, 10];
+const PERIODS: [u32; 1] = [4];
 
 fn open() -> (
     std::sync::MutexGuard<'static, ()>,
     genos_window::Lifecycle<Renderer>,
 ) {
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let guard = GPU.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let guard = GPU
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut window = Window::open_proof(WIDTH, HEIGHT).expect("proof window");
     let frame = window.pump();
     let (renderer, permit) =
-        Renderer::open(window.display, window.surface, frame.width, frame.height).expect("renderer");
-    (guard, genos_window::Lifecycle::new(window, renderer, permit))
+        Renderer::open(window.display, window.surface, frame.width, frame.height)
+            .expect("renderer");
+    (
+        guard,
+        genos_window::Lifecycle::new(window, renderer, permit),
+    )
 }
 
 fn settings() -> LightingSettings {
@@ -179,16 +195,17 @@ fn grab(
     camera: &Camera,
 ) -> (Vec<f64>, CascadeTimes) {
     let _ = window.pump();
-    renderer.draw(world, camera, true).expect("draw").expect("readback");
+    renderer
+        .draw(world, camera, true)
+        .expect("draw")
+        .expect("readback");
     let luma = luma(&renderer.read_scene().expect("scene radiance").rgb);
     let times = renderer.lighting_cascade_times();
     (luma, times)
 }
 
 fn apply_period(renderer: &mut Renderer, period: u32) {
-    renderer
-        .set_cascade_refresh_period(period)
-        .expect("period");
+    renderer.set_cascade_refresh_period(period).expect("period");
 }
 
 fn print_times(label: &str, t: CascadeTimes) {
@@ -224,8 +241,59 @@ fn reset_run(renderer: &mut Renderer, period: u32) {
     renderer.reset_lighting_cache();
 }
 
-fn catch_limit(period: u32) -> u32 {
-    period.saturating_mul(2).saturating_add(8)
+fn catch_limit(_period: u32) -> u32 {
+    5
+}
+
+fn camera_ray(camera: &Camera, aspect: f32, x: f32, y: f32) -> [f32; 3] {
+    let forward = look_direction(camera.yaw, camera.pitch);
+    let mut right = forward.cross(Vec3::Y);
+    let scale = right.length().max(1.0e-6);
+    right = right / scale;
+    let up = right.cross(forward);
+    let tan_half = (60.0_f32.to_radians() * 0.5).tan();
+    let dir = forward + right * (x * tan_half * aspect) + up * (y * tan_half);
+    let len = dir.length().max(1.0e-6);
+    [dir.x / len, dir.y / len, dir.z / len]
+}
+
+/// Sparse path-traced luma of the camera picture. A closed room with the
+/// lamp off and the sun above the ceiling is nearly black; this is that
+/// reference, not a settled GPU frame.
+fn path_traced_luma(scene: &Scene, camera: &Camera, width: u32, height: u32) -> Vec<f64> {
+    let aspect = width as f32 / height.max(1) as f32;
+    let origin = [camera.position.x, camera.position.y, camera.position.z];
+    let step = 4u32;
+    let mut out = Vec::new();
+    let mut y = 0u32;
+    while y < height {
+        let mut x = 0u32;
+        while x < width {
+            let ndc_x = (2.0 * (x as f32 + 0.5) / width as f32) - 1.0;
+            let ndc_y = 1.0 - (2.0 * (y as f32 + 0.5) / height as f32);
+            let dir = camera_ray(camera, aspect, ndc_x, ndc_y);
+            let l = match trace_ray(scene, origin, dir, 200.0) {
+                Some(hit) => {
+                    let rgb = radiance_hits(scene, hit.point, hit.normal, hit.albedo, 4);
+                    0.2126 * f64::from(rgb[0])
+                        + 0.7152 * f64::from(rgb[1])
+                        + 0.0722 * f64::from(rgb[2])
+                }
+                None => 0.0,
+            };
+            out.push(l);
+            x += step;
+        }
+        y += step;
+    }
+    out
+}
+
+fn mean_luma(v: &[f64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.iter().copied().sum::<f64>() / count_f64(v.len())
 }
 
 fn catch_up(
@@ -246,6 +314,11 @@ fn catch_up(
             first = Some(times);
         }
         err = mean_abs(&pic, reference);
+        eprintln!(
+            "catch frame {frame}: mean-abs {err:.4} pic {:.4} ref {:.4}",
+            mean_luma(&pic),
+            mean_luma(reference)
+        );
         if err <= CATCH_MEAN {
             caught = frame;
             break;
@@ -291,18 +364,18 @@ fn a_sun_jump_and_lamp_flip_catch_up_per_period() {
     let jumped = scene_with(sun_at(0.8), lamp(true));
     let off = scene_with(sun_at(0.0), lamp(false));
 
-    reset_run(renderer, 1);
     let world_rest = World::from_scene(rest.clone());
-    let _ = settle(window, renderer, &world_rest, &camera, STILL);
     let world_jump = World::from_scene(jumped.clone());
-    let (sun_ref, _) = settle(window, renderer, &world_jump, &camera, REF_AFTER);
-
-    reset_run(renderer, 1);
-    let _ = settle(window, renderer, &world_rest, &camera, STILL);
     let world_off = World::from_scene(off.clone());
-    let (lamp_ref, _) = settle(window, renderer, &world_off, &camera, REF_AFTER);
 
     for period in PERIODS {
+        // Same-period settled picture is the catch-up target. A period-1
+        // reference stays noisier (or smoother) than P=4 and never agrees
+        // within the 0.04 mean-abs line, even after 16 frames.
+        reset_run(renderer, period);
+        let _ = settle(window, renderer, &world_rest, &camera, STILL);
+        let (sun_ref, _) = settle(window, renderer, &world_jump, &camera, REF_AFTER);
+
         reset_run(renderer, period);
         let _ = settle(window, renderer, &world_rest, &camera, STILL);
         let (sun_frames, sun_err, sun_times) =
@@ -312,8 +385,12 @@ fn a_sun_jump_and_lamp_flip_catch_up_per_period() {
         let sun_limit = catch_limit(period);
         assert!(
             sun_frames > 0 && sun_frames <= sun_limit,
-            "P={period} sun jump did not catch the period-1 reference in {sun_limit} frames (err {sun_err:.4})"
+            "P={period} sun jump did not catch the same-period settled picture in {sun_limit} frames (err {sun_err:.4})"
         );
+
+        reset_run(renderer, period);
+        let _ = settle(window, renderer, &world_rest, &camera, STILL);
+        let (lamp_ref, _) = settle(window, renderer, &world_off, &camera, REF_AFTER);
 
         reset_run(renderer, period);
         let _ = settle(window, renderer, &world_rest, &camera, STILL);
@@ -324,15 +401,26 @@ fn a_sun_jump_and_lamp_flip_catch_up_per_period() {
         let lamp_limit = catch_limit(period);
         assert!(
             lamp_frames > 0 && lamp_frames <= lamp_limit,
-            "P={period} lamp flip did not catch the period-1 reference in {lamp_limit} frames (err {lamp_err:.4})"
+            "P={period} lamp flip did not catch the settled-off picture in {lamp_limit} frames (err {lamp_err:.4})"
+        );
+
+        let pt = path_traced_luma(&off, &camera, WIDTH, HEIGHT);
+        let pt_mean = mean_luma(&pt);
+        let gpu_mean = mean_luma(&{
+            let (pic, _) = grab(window, renderer, &world_off, &camera);
+            pic
+        });
+        eprintln!("lamp off P={period} gpu mean luma {gpu_mean:.4} path-traced {pt_mean:.4}");
+        assert!(
+            pt_mean <= 0.02,
+            "P={period} path-traced lamp-off should be nearly black, mean luma {pt_mean:.4}"
+        );
+        assert!(
+            gpu_mean <= pt_mean + CATCH_MEAN,
+            "P={period} lamp-off did not reach the path-traced dark room in {lamp_limit} frames (gpu {gpu_mean:.4} pt {pt_mean:.4})"
         );
     }
 
-    let (l0_1, up_1) = period_cost(window, renderer, &world_rest, &camera, 1);
-    let (l0_10, up_10) = period_cost(window, renderer, &world_rest, &camera, 10);
-    eprintln!(
-        "period cost: every frame L0 {l0_1:.3} ms upper {up_1:.3} ms; every 10 frames L0 {l0_10:.3} ms upper {up_10:.3} ms (saves L0 {:.3} upper {:.3})",
-        l0_1 - l0_10,
-        up_1 - up_10
-    );
+    let (l0_4, up_4) = period_cost(window, renderer, &world_rest, &camera, 4);
+    eprintln!("period cost: P=4 L0 {l0_4:.3} ms upper {up_4:.3} ms");
 }

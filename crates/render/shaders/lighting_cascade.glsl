@@ -800,10 +800,10 @@ vec4 lighting_cascade_bounce_level(uint parity, uint stamp, vec3 pos, vec3 n, ui
     return lighting_cascade_at_in(parity, stamp, pos, n, level);
 }
 
+// Last frame's stored bounce only. Fresh direct is shaded at the hit by
+// the caller. The old bounce-round gate (lighting_bounce_ok, cache reads
+// from bounce 2) does not apply: multi-bounce is this history lookup.
 vec3 lighting_cascade_bounce(vec3 pos, vec3 n) {
-    if (!lighting_bounce_ok()) {
-        return vec3(0.0);
-    }
     uint level = lighting_cascade_l0_level(pos, n);
     uint axis = lighting_cascade_axis(n);
     vec3 n_axis = lighting_cascade_axis_vec(axis);
