@@ -167,6 +167,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::raw::c_char;
+use std::path::PathBuf;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -1985,6 +1986,8 @@ struct Gpu {
     depth_write_force: Option<bool>,
     /// How long each pipeline took to build.
     pipeline_times: Vec<(String, Duration)>,
+    /// Driver pipeline cache, persisted across launches.
+    pipeline_cache: Handle,
     desc_layout: Handle,
     desc_pool: Handle,
     /// Raster set of the frame being recorded: `raster_sets[flight]`.
@@ -2248,6 +2251,9 @@ struct Fns {
     create_render_pass: FnRenderPass,
     destroy_render_pass: Fn2,
     create_pipelines: FnPipelines,
+    create_pipeline_cache: FnPool,
+    destroy_pipeline_cache: Fn2,
+    get_pipeline_cache_data: FnCacheData,
     destroy_pipeline: Fn2,
     create_framebuffer: FnFramebuffer,
     destroy_framebuffer: Fn2,
@@ -2361,6 +2367,7 @@ type FnPipelines = unsafe extern "system" fn(
     *const c_void,
     *mut Handle,
 ) -> VkResult;
+type FnCacheData = unsafe extern "system" fn(Handle, Handle, *mut usize, *mut u8) -> VkResult;
 type FnFramebuffer =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnPool = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
@@ -2915,6 +2922,7 @@ impl Gpu {
                 pipe_pass: std::ptr::null_mut(),
                 depth_write_force: None,
                 pipeline_times: Vec::new(),
+                pipeline_cache: std::ptr::null_mut(),
                 desc_layout: std::ptr::null_mut(),
                 desc_pool: std::ptr::null_mut(),
                 desc_set: std::ptr::null_mut(),
@@ -3060,13 +3068,30 @@ impl Gpu {
                 stage: stage::StageSet::empty(),
             };
             let _ = (destroy_instance, surface_support);
+            let open_start = Instant::now();
+            gpu.create_pipeline_cache()?;
             gpu.create_static_objects()?;
+            note_startup("command resources", open_start);
+            let swap = Instant::now();
             gpu.recreate(width, height)?;
+            note_startup("swapchain", swap);
+            // The window is already mapped. Present a dark frame before the
+            // lighting pipelines compile, so the surface is not left blank.
+            let clear = Instant::now();
+            gpu.present_loading_frame()?;
+            note_startup("first present (clear)", clear);
+            let pipes = Instant::now();
+            gpu.create_startup_pipelines()?;
             block(|| gpu.make_lighting())?;
+            note_startup("pipelines", pipes);
             // Before the scene exists. Otherwise a potato launch still builds
             // the High cache once, and lavapipe holds it through quit.
             gpu.apply_launch_preset()?;
+            let targets = Instant::now();
             gpu.make_lighting_targets()?;
+            note_startup("lighting targets", targets);
+            gpu.log_pipeline_times();
+            note_startup("renderer open", open_start);
             let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
             gpu.debug_out = launch.out.clone();
             crate::unfilled::enforce_unfilled_cap(std::path::Path::new(&gpu.debug_out))?;
@@ -3082,12 +3107,6 @@ impl Gpu {
             self.keep_pass_store = self.make_render_pass(true, true)?;
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
-            let start = Instant::now();
-            self.pipeline = block(|| self.make_pipeline(true, true, false))?;
-            self.note_pipeline_time("scene", start);
-            self.depth_pipeline = block(|| self.make_depth_pipeline())?;
-            self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
-            self.wire_pipeline = block(|| self.make_pipeline(false, false, true))?;
             #[repr(C)]
             struct PoolInfo {
                 s_type: i32,
@@ -3216,8 +3235,253 @@ impl Gpu {
             let start = Instant::now();
             self.make_scene_buffers()?;
             self.note_pipeline_time("scene buffers", start);
-            self.make_aa_pipes()?;
         }
+        Ok(())
+    }
+
+    /// Raster and AA pipelines, after the first clear present.
+    fn create_startup_pipelines(&mut self) -> Result<(), String> {
+        let start = Instant::now();
+        self.pipeline = block(|| self.make_pipeline(true, true, false))?;
+        self.note_pipeline_time("scene", start);
+        let start = Instant::now();
+        self.depth_pipeline = block(|| self.make_depth_pipeline())?;
+        self.note_pipeline_time("depth", start);
+        let start = Instant::now();
+        self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
+        self.note_pipeline_time("overlay", start);
+        let start = Instant::now();
+        self.wire_pipeline = block(|| self.make_pipeline(false, false, true))?;
+        self.note_pipeline_time("wire", start);
+        let start = Instant::now();
+        self.make_aa_pipes()?;
+        self.note_pipeline_time("aa", start);
+        if !self.aa_src[0].buffer.is_null() {
+            self.write_aa_sets()?;
+        }
+        Ok(())
+    }
+
+    fn log_pipeline_times(&self) {
+        let mut total = Duration::ZERO;
+        for (name, took) in &self.pipeline_times {
+            total += *took;
+            eprintln!(
+                "genos-startup pipeline {name}: {:.1} ms",
+                took.as_secs_f64() * 1000.0
+            );
+        }
+        eprintln!(
+            "genos-startup pipeline total: {:.1} ms ({} pipes)",
+            total.as_secs_f64() * 1000.0,
+            self.pipeline_times.len()
+        );
+    }
+
+    fn create_pipeline_cache(&mut self) -> Result<(), String> {
+        let path = pipeline_cache_path();
+        let bytes = path.as_ref().and_then(|p| std::fs::read(p).ok());
+        let initial_len = bytes.as_ref().map_or(0, Vec::len);
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            size: usize,
+            data: *const c_void,
+        }
+        let info = Info {
+            s_type: 17,
+            next: std::ptr::null(),
+            flags: 0,
+            size: initial_len,
+            data: bytes
+                .as_ref()
+                .map_or(std::ptr::null(), |b| b.as_ptr().cast()),
+        };
+        unsafe {
+            check(
+                (self.fns.create_pipeline_cache)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut self.pipeline_cache,
+                ),
+                "pipeline cache",
+            )?;
+        }
+        match (path.as_ref(), initial_len) {
+            (Some(path), 0) => {
+                eprintln!("genos-startup pipeline cache: new {}", path.display());
+            }
+            (Some(path), n) => {
+                eprintln!(
+                    "genos-startup pipeline cache: loaded {n} B from {}",
+                    path.display()
+                );
+            }
+            (None, _) => eprintln!("genos-startup pipeline cache: disabled"),
+        }
+        Ok(())
+    }
+
+    fn save_pipeline_cache(&self) {
+        if self.pipeline_cache.is_null() || self.device.is_null() {
+            return;
+        }
+        let Some(path) = pipeline_cache_path() else {
+            return;
+        };
+        let mut size = 0usize;
+        unsafe {
+            if (self.fns.get_pipeline_cache_data)(
+                self.device,
+                self.pipeline_cache,
+                &mut size,
+                std::ptr::null_mut(),
+            ) != VK_SUCCESS
+                || size == 0
+            {
+                return;
+            }
+        }
+        let mut data = vec![0u8; size];
+        let mut got = size;
+        unsafe {
+            if (self.fns.get_pipeline_cache_data)(
+                self.device,
+                self.pipeline_cache,
+                &mut got,
+                data.as_mut_ptr(),
+            ) != VK_SUCCESS
+            {
+                return;
+            }
+        }
+        data.truncate(got);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("bin.tmp");
+        if std::fs::write(&tmp, &data).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+            eprintln!(
+                "genos-startup pipeline cache: saved {} B to {}",
+                data.len(),
+                path.display()
+            );
+        }
+    }
+
+    fn destroy_pipeline_cache(&mut self) {
+        if self.pipeline_cache.is_null() || self.device.is_null() {
+            return;
+        }
+        unsafe {
+            (self.fns.destroy_pipeline_cache)(
+                self.device,
+                self.pipeline_cache,
+                std::ptr::null(),
+            );
+        }
+        self.pipeline_cache = std::ptr::null_mut();
+    }
+
+    /// Present a dark frame as soon as the swapchain exists, before the lighting
+    /// pipelines compile. The window is already mapped, and those compiles are
+    /// the wait after a shader change. This is not a counted game frame.
+    fn present_loading_frame(&mut self) -> Result<(), String> {
+        if self.cmd.is_null() || self.swapchain.is_null() || self.render_done.is_null() {
+            return Ok(());
+        }
+        if self.flight_live[self.flight] {
+            self.wait_fence(self.fence, "loading present wait")?;
+            self.flight_live[self.flight] = false;
+        }
+        let (acquire, index) = self.acquire_index();
+        if acquire == OUT_OF_DATE {
+            return Ok(());
+        }
+        if acquire != VK_SUCCESS && acquire != SUBOPTIMAL {
+            return Err(format!("acquire failed: {acquire}"));
+        }
+        let Some(&swap) = self.swap_images.get(index as usize) else {
+            return Err("swapchain image missing".into());
+        };
+        let fences = [self.fence];
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset fence",
+            )?;
+            check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
+            self.begin_reused(self.cmd)?;
+            self.image_barrier(swap, 0, 7, 0x1, 0x1000, 0, 0x1000);
+            let color = [0.04f32, 0.04, 0.05, 1.0];
+            #[repr(C)]
+            struct Range {
+                aspect: u32,
+                mip: u32,
+                levels: u32,
+                layer: u32,
+                layers: u32,
+            }
+            let range = Range {
+                aspect: 1,
+                mip: 0,
+                levels: 1,
+                layer: 0,
+                layers: 1,
+            };
+            (self.fns.cmd_clear_color)(
+                self.cmd,
+                swap,
+                7,
+                color.as_ptr().cast(),
+                1,
+                &range as *const Range as *const u8,
+            );
+            self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
+            check((self.fns.end_cmd)(self.cmd), "end cmd")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let wait_sem = [self.image_ready];
+            let wait_stage = [0x1000u32];
+            let signal_sem = [self.render_done];
+            let cmd = [self.cmd];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 1,
+                waits: wait_sem.as_ptr(),
+                stages: wait_stage.as_ptr(),
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 1,
+                signals: signal_sem.as_ptr(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.fence,
+                ),
+                "loading present submit",
+            )?;
+        }
+        self.present_index = index;
+        let _ = self.queue_present()?;
+        self.wait_fence(self.fence, "loading present")?;
         Ok(())
     }
 
@@ -4915,6 +5179,14 @@ impl Gpu {
     }
 
     fn present(&mut self) -> Result<VkResult, String> {
+        let result = self.queue_present()?;
+        if result != OUT_OF_DATE {
+            self.presented += 1;
+        }
+        Ok(result)
+    }
+
+    fn queue_present(&self) -> Result<VkResult, String> {
         unsafe {
             let swap = [self.swapchain];
             let index = [self.present_index];
@@ -4943,9 +5215,6 @@ impl Gpu {
             let result = (self.fns.present)(self.queue, &info as *const Present as *const u8);
             if result != VK_SUCCESS && result != SUBOPTIMAL && result != OUT_OF_DATE {
                 return Err(format!("present failed: {result}"));
-            }
-            if result != OUT_OF_DATE {
-                self.presented += 1;
             }
             Ok(result)
         }
@@ -5823,7 +6092,7 @@ impl Gpu {
         unsafe {
             let result = (self.fns.create_compute)(
                 self.device,
-                std::ptr::null_mut(),
+                self.pipeline_cache,
                 1,
                 &pipe as *const Pipe as *const u8,
                 std::ptr::null(),
@@ -7204,7 +7473,7 @@ impl Gpu {
             let mut pipeline = std::ptr::null_mut();
             let result = (self.fns.create_pipelines)(
                 self.device,
-                std::ptr::null_mut(),
+                self.pipeline_cache,
                 1,
                 &pipe as *const Pipe as *const u8,
                 std::ptr::null(),
@@ -9740,6 +10009,8 @@ impl Gpu {
         // already did this. A path that skipped it still must not free over a
         // live frame. A fence that was reset and not submitted is not live.
         self.drain_for_teardown();
+        self.save_pipeline_cache();
+        self.destroy_pipeline_cache();
         // Stream pages and staging buffers are device memory. Free them here,
         // on the lifecycle step, instead of waiting idle in Drop.
         teardown_phase("drop_stages", || self.drop_stages());
@@ -10153,6 +10424,9 @@ fn load_fns(
             create_render_pass: d!("vkCreateRenderPass"),
             destroy_render_pass: d!("vkDestroyRenderPass"),
             create_pipelines: d!("vkCreateGraphicsPipelines"),
+            create_pipeline_cache: d!("vkCreatePipelineCache"),
+            destroy_pipeline_cache: d!("vkDestroyPipelineCache"),
+            get_pipeline_cache_data: d!("vkGetPipelineCacheData"),
             destroy_pipeline: d!("vkDestroyPipeline"),
             create_framebuffer: d!("vkCreateFramebuffer"),
             destroy_framebuffer: d!("vkDestroyFramebuffer"),
@@ -10631,6 +10905,30 @@ impl Default for GpuTimes {
 
 /// Run one teardown call and print how long it took, so a slow quit names
 /// the driver call that owns the time.
+fn note_startup(name: &str, start: Instant) {
+    eprintln!(
+        "genos-startup {name}: {:.1} ms",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// `GENOS_PIPELINE_CACHE` is the file, or `0`/`off` to disable. Otherwise
+/// `$XDG_CACHE_HOME/genos/vk-pipeline-cache.bin` or `~/.cache/genos/...`.
+fn pipeline_cache_path() -> Option<PathBuf> {
+    match std::env::var_os("GENOS_PIPELINE_CACHE") {
+        Some(val) if val.is_empty() || val == "0" || val == "off" => None,
+        Some(val) => Some(PathBuf::from(val)),
+        None => {
+            let base = std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
+                })?;
+            Some(base.join("genos").join("vk-pipeline-cache.bin"))
+        }
+    }
+}
+
 fn teardown_phase(name: &str, f: impl FnOnce()) {
     let start = Instant::now();
     f();
