@@ -609,6 +609,7 @@ void lighting_cascade_parent_corner(vec3 pos, vec3 n, float size, uint i, bool c
     q[ax] = pos[ax] - clamp(slope, -size, size);
     slot = lighting_cache_find_sized(q, n, claim, size, q);
     if (seat && slot != ~0u) {
+        cache.v[3u * slot + 1u].xyz = n;
         float off = dot(cache.v[3u * slot].xyz - q, n);
         if (off < -CASCADE_RESEAT || off > LIGHTING_CELL_HALF * size) {
             cache.v[3u * slot].xyz = q;

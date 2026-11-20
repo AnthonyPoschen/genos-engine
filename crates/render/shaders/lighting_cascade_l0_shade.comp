@@ -142,7 +142,7 @@ void main() {
         uint at = lighting_cascade_hit_at(slot, k);
         float t = uintBitsToFloat(ckeys.key[at]);
         if (t < 0.0 || lighting_cascade_hit_is_lamp(pos + n * 0.02 + dir * t, ckeys.key[at + 3u])) {
-            li = lighting_cascade_parent_eval(dir, lighting_cascade_axis_vec(axis));
+            li = lighting_cascade_parent_eval(dir, n);
         } else {
             vec3 hp = pos + n * 0.02 + dir * t;
             vec3 hn = lighting_unpack_normal(ckeys.key[at + 1u]);

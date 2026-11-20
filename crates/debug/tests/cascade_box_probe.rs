@@ -313,6 +313,16 @@ fn run(yaw: f32) {
             cs,
         ));
     }
+    let (mut cell_sum, mut cell_n) = (0.0f32, 0u32);
+    for r in &rows {
+        for c in &r.8 {
+            if c.found && c.filled && c.reference > 0.05 {
+                cell_sum += c.luma / c.reference;
+                cell_n += 1;
+            }
+        }
+    }
+    eprintln!("box yaw {yaw:.2}: parent cells engine/ref mean {:.3} over {cell_n}", cell_sum / cell_n.max(1) as f32);
     rows.sort_by(|a, b| a.0.total_cmp(&b.0));
     let count = rows.len();
     eprintln!("box yaw {yaw:.2}: {count} face voxels");
