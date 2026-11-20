@@ -230,8 +230,10 @@ On a box without a GPU this runs on lavapipe under a headless Weston
 (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`). The first run after a shader change spends
 minutes compiling pipelines. The window presents a dark frame as soon as the
 swapchain exists, then those pipelines compile. A `VkPipelineCache` is stored at
-`$XDG_CACHE_HOME/genos/vk-pipeline-cache.bin` (or `GENOS_PIPELINE_CACHE`, or
-`0`/`off` to disable). Startup steps print `genos-startup` lines to stderr.
+`$XDG_CACHE_HOME/genos/vk-pipeline-cache.bin` when `XDG_CACHE_HOME` is set,
+otherwise `./genos-debug/pipeline-cache/vk-pipeline-cache.bin`. `GENOS_PIPELINE_CACHE`
+replaces that path, or `0`/`off` disables it. Startup steps print `genos-startup`
+lines to stderr.
 
 Scripted verdicts (`docs/VERIFY.md`) judge a repeat of the same picture or
 frame time. They print one PASS, FAIL, UNSURE, or ERROR line and leave the evidence

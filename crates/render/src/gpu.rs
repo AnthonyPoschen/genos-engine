@@ -10913,19 +10913,20 @@ fn note_startup(name: &str, start: Instant) {
 }
 
 /// `GENOS_PIPELINE_CACHE` is the file, or `0`/`off` to disable. Otherwise
-/// `$XDG_CACHE_HOME/genos/vk-pipeline-cache.bin` or `~/.cache/genos/...`.
+/// `$XDG_CACHE_HOME/genos/vk-pipeline-cache.bin` when that variable is set,
+/// or `./genos-debug/pipeline-cache/vk-pipeline-cache.bin`.
 fn pipeline_cache_path() -> Option<PathBuf> {
     match std::env::var_os("GENOS_PIPELINE_CACHE") {
         Some(val) if val.is_empty() || val == "0" || val == "off" => None,
         Some(val) => Some(PathBuf::from(val)),
-        None => {
-            let base = std::env::var_os("XDG_CACHE_HOME")
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
-                })?;
-            Some(base.join("genos").join("vk-pipeline-cache.bin"))
-        }
+        None => match std::env::var_os("XDG_CACHE_HOME") {
+            Some(base) => Some(PathBuf::from(base).join("genos").join("vk-pipeline-cache.bin")),
+            None => Some(
+                PathBuf::from("genos-debug")
+                    .join("pipeline-cache")
+                    .join("vk-pipeline-cache.bin"),
+            ),
+        },
     }
 }
 
