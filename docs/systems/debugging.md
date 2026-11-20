@@ -295,7 +295,8 @@ replaced by a later one.
 (the same as `direct`), `albedo`, `normal`, `depth`, `light:I` (one lamp and its
 shadow), `texels` (the surface cache texel each pixel reads, dim under 4 sets),
 `variance`, `path`, `voxels` (level-0 surface voxel projection: each pixel is a
-hash of the cell and ring it maps to, with a bright line at each ring start). The
+hash of the cell insert claims at its footprint level, with a bright line where
+that level starts). The
 v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
 
 ## Ground truth
@@ -629,10 +630,10 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   binary yet.
 - The command catalogue already answers status, knobs, lights, objects, camera,
   time, view, capture, diff, flicker, compare (with a heatmap), and timing.
-  `Tools::overlay`, `profile_overlay`, and `inspect_region` draw for a person.
   `level0_voxels` (around [x,y,z], radius) replies with the level-0 cascade
   voxels near a point and their four parent cells: position, radiance, filled
   ring slots, and whether each parent was found and filled. It writes no file.
+  `Tools::overlay`, `profile_overlay`, and `inspect_region` draw for a person.
   Lighting's dump, counters, isolate toggles, and pop checks are the reference
   set in [the lighting debug standard](lighting/debug-standard.md). A dump and
   a snapshot plus restore for every other subsystem are not shared commands yet.
