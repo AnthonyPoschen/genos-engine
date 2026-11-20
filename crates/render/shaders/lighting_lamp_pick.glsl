@@ -195,6 +195,19 @@ float lamp_pick_depth(vec3 pos) {
     return dot(pos - scene.eye.xyz, scene.view_forward.xyz);
 }
 
+// True when the last camera is stored, so a failed reprojection means the
+// point was not on the previous frame. False when GI is off or no frame
+// came before: nothing can be reprojected.
+bool lamp_pick_last_camera() {
+    if (!lighting_gi_on()) {
+        return false;
+    }
+    vec4 eye = work.v[lighting_change_at() + 1u];
+    vec3 fwd = work.v[lighting_change_at() + 4u].xyz;
+    float t = work.v[lighting_change_at() + 2u].w;
+    return eye.w >= 0.5 && dot(fwd, fwd) >= 0.5 && t != 0.0;
+}
+
 // Previous-frame pixel for `pos`. Depth is along the last camera. No geo
 // load, so a caller can test its own history. GI off, a missing last
 // camera, a point behind that camera, or a pixel off the previous frame

@@ -394,6 +394,10 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
     uint hist_pixel;
     float z_hist;
     bool reprojected = lamp_pick_history_pixel(pos, hist_pixel, z_hist);
+    // Off the previous frame is a new surface. The same screen pixel shows
+    // another point at the same depth on a floor, so its mean would drag that
+    // point's shadow with a camera turn. Only a missing last camera reads it.
+    bool off_screen = !reprojected && lamp_pick_last_camera();
     if (!reprojected) {
         hist_pixel = idx;
         z_hist = lamp_pick_depth(pos);
@@ -411,7 +415,7 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
     float gap = abs(z_hist - geo.x);
     bool depth_ok = !(gap / z_hist > LAMP_PICK_DEPTH_REL && gap > LAMP_PICK_DEPTH_ABS);
     bool normal_ok = dot(lighting_unpack_normal(floatBitsToUint(geo.y)), n) >= LAMP_PICK_NORMAL_MIN;
-    bool surface = stored_ok && depth_ok && normal_ok;
+    bool surface = !off_screen && stored_ok && depth_ok && normal_ok;
     bool now_on = open > 0.0;
     bool was_on = geo.z > 0.0;
     vec3 mean = rec.xyz;
