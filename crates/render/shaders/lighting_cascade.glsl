@@ -279,7 +279,7 @@ vec4 lighting_cascade_inward(uvec2 p, vec3 pos, vec3 n) {
     if (!found) {
         return vec4(0.0);
     }
-    vec4 tap = lighting_sh_lattice_at(best_pos, best_n);
+    vec4 tap = lighting_sh_compose_shown(best_pos, best_n);
     if (!(tap.w > LIGHTING_CACHE_HAS_W)) {
         tap = lighting_cascade_voxel(best_pos, best_n, LIGHTING_SC_HIT);
     }
@@ -316,10 +316,12 @@ const uint LIGHTING_DIAG_CASCADE_GAP = 11u;
 
 // L(a,c) = L(a,b) + beta(a,b) * L(b,c). Beta is 0 when the nearer sample
 // exists, so that sample occludes the parent. The nearer sample is the
-// lattice centre. A miss reads the 25 cm cell, then each coarser size.
-// Black only when none of those has data.
+// confidence-weighted lattice sample: the centre counts twice, each face
+// neighbour out to LIGHTING_LATTICE_REACH counts once, and a parent ring
+// mixes in by the centre's trust. A miss reads the 25 cm cell, then each
+// coarser size. Black only when none of those has data.
 vec4 lighting_cascade_merge(uvec2 p, vec3 pos, vec3 n) {
-    vec4 near = lighting_sh_lattice_at(pos, n);
+    vec4 near = lighting_sh_compose_shown(pos, n);
     vec4 voxel = vec4(0.0);
     vec4 far = vec4(0.0);
     if (!(near.w > LIGHTING_CACHE_HAS_W)) {
