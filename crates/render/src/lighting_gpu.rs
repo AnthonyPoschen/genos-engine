@@ -1689,9 +1689,10 @@ impl Gpu {
         self.lighting.lamp_res_clear = reuse;
         let mut area_old = std::mem::replace(&mut self.lighting.area_mean, Buffer::empty());
         self.destroy_buffer(&mut area_old);
-        // Two vec4s a pixel. The shade reads and writes the same pixel, so one
-        // copy is enough. A resize zeros it before the next trace.
-        let area_bytes = pixels.saturating_mul(32).max(64);
+        // Two frames of two vec4s a pixel. The shade writes the current slot
+        // and reads the previous frame at the reprojected pixel. A resize
+        // zeros both slots before the next trace.
+        let area_bytes = pixels.saturating_mul(32 * 2).max(64);
         self.lighting.area_mean =
             self.make_buffer_queues(area_bytes, 0x20 | 0x2, Memory::Device, &share)?;
         self.lighting.area_clear = true;
