@@ -11,6 +11,7 @@ tests=(
   "gate_presented:the_direct_light_is_in_the_presented_frame:${DIRECT_GUARD:-direct_in_compose}"
   "gate_presented:the_bounce_adds_light_to_the_presented_frame:${BOUNCE_GUARD:-bounce_in_compose}"
   "restir_moving_grain:a_moving_point_lamp_does_not_grain_a_flat_wall:${WALL_GUARD:-moving_lamp_wall}"
+  "penumbra:the_penumbra_is_in_the_presented_frame:${DISC_GUARD:-lamp_disc}"
 )
 
 # The knockout feature must stay test-only, and it is never a default.
@@ -35,6 +36,7 @@ fi
 echo "==> presented-frame gates, guards on"
 cargo test -p genos-render --test gate_presented -- --test-threads=1 --nocapture
 cargo test -p genos-render --test restir_moving_grain -- --test-threads=1 --nocapture
+cargo test -p genos-render --test penumbra the_penumbra_is_in_the_presented_frame -- --test-threads=1 --exact --nocapture
 
 for entry in "${tests[@]}"; do
   binary=${entry%%:*}

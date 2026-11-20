@@ -28,6 +28,12 @@ pub const BOUNCE_IN_COMPOSE: &str = "bounce_in_compose";
 /// reservoir, and a changed ball drops that history. The presented wall grains.
 pub const MOVING_LAMP_WALL: &str = "moving_lamp_wall";
 
+/// A pixel shadow of a lamp or the sun aims at the disc.
+///
+/// Knocking this out aims that ray at the centre, so the presented penumbra
+/// collapses to a hard edge.
+pub const LAMP_DISC: &str = "lamp_disc";
+
 /// True when the named production guard is in force.
 #[must_use]
 #[inline]
@@ -74,6 +80,7 @@ mod tests {
         assert!(super::guard(super::DIRECT_IN_COMPOSE));
         assert!(super::guard(super::BOUNCE_IN_COMPOSE));
         assert!(super::guard(super::MOVING_LAMP_WALL));
+        assert!(super::guard(super::LAMP_DISC));
         assert!(super::guard("unknown_guard"));
     }
 }
