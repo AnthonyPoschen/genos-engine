@@ -3,10 +3,10 @@
 // lamp light plus the bounce stored at the hit, a miss is the parent's
 // clear-path bins. The cosine-weighted sum of all rays is the cell's full
 // irradiance (what a ray hit reads for the next bounce). The bins take
-// only the rays still clear at the interval start 4S. History is
-// down-weighted in proportion to the change and holds at most
-// CASCADE_EMA_N_MAX refreshes; only invalid data is a hard reset.
-// This compile's only trace site is trace_occluded.
+// only the rays still clear at the interval start 4S. Directions are
+// fixed per key and ray, the same every refresh, and this refresh
+// replaces the stored irradiance and bins (no EMA). A non-finite
+// estimate is refused. This compile's only trace site is trace_occluded.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
@@ -121,7 +121,7 @@ void main() {
     bool clear = false;
     if (live && k < rays) {
         uint key = ckeys.key[slot];
-        vec3 dir = lighting_cascade_bin_dir(key, n, k, lighting_frame());
+        vec3 dir = lighting_cascade_bin_dir(key, n, k);
         nd = max(dot(dir, n), 0.0);
         float t0;
         float t1;
@@ -150,31 +150,20 @@ void main() {
         return;
     }
     vec3 s0 = vec3(0.0);
-    float acc = 0.0;
     [[dont_unroll]] for (uint i = 0u; i < rays; i++) {
         s0 += sh_sum[i];
-        acc += dot(sh_sum[i], CASCADE_LUMA);
     }
     float nray = float(max(rays, 1u));
-    float mean_x = acc / nray;
-    float var_x = 0.0;
-    [[dont_unroll]] for (uint i = 0u; i < rays; i++) {
-        float d = dot(sh_sum[i], CASCADE_LUMA) - mean_x;
-        var_x += d * d;
-    }
-    var_x /= nray;
-    float se = LIGHTING_TAU * sqrt(var_x / nray);
     vec3 cur = max((LIGHTING_TAU / nray) * s0, vec3(0.0));
-    // Per-bin clear-path mean. A bin with no clear ray this refresh keeps
-    // its history, or on a new cell takes the mean of the clear rays.
+    // Per-bin clear-path mean from this refresh only. A bin with no
+    // clear ray is not a clear path this cycle (fixed directions), so
+    // it is stored as zero rather than kept from history.
     vec3 bin_sum[16];
     float bin_n[16];
     for (uint b = 0u; b < CASCADE_BINS; b++) {
         bin_sum[b] = vec3(0.0);
         bin_n[b] = 0.0;
     }
-    vec3 clear_sum = vec3(0.0);
-    float clear_n = 0.0;
     [[dont_unroll]] for (uint i = 0u; i < rays; i++) {
         if (!sh_clear[i]) {
             continue;
@@ -182,45 +171,17 @@ void main() {
         uint b = i % CASCADE_BINS;
         bin_sum[b] += sh_rad[i];
         bin_n[b] += 1.0;
-        clear_sum += sh_rad[i];
-        clear_n += 1.0;
     }
-    vec3 clear_mean = clear_n > 0.0 ? clear_sum / clear_n : vec3(0.0);
-    vec4 old = cache.v[3u * slot + 2u];
-    bool has_old = old.w > LIGHTING_CACHE_HAS_W;
-    float wa = 1.0;
-    float nn = 1.0;
-    if (has_old) {
-        uint period = lighting_cascade_refresh_period(
-            ckeys.key[lighting_cascade_upper_head_at()] & 255u);
-        wa = lighting_cascade_ema_step(
-            cur, old.rgb, se, old.w, lighting_cascade_ema_n_max(period), nn);
-        cur = mix(old.rgb, cur, wa);
-    }
-    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u) {
-        uint period = lighting_cascade_refresh_period(
-            ckeys.key[lighting_cascade_upper_head_at()] & 255u);
-        float n_max = lighting_cascade_ema_n_max(period);
+    if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u
+        && lighting_cascade_finite3(cur)) {
         for (uint b = 0u; b < CASCADE_BINS; b++) {
             if (bin_n[b] > 0.0) {
-                vec3 now = bin_sum[b] / bin_n[b];
-                if (has_old) {
-                    // This bin's own SE: the cell SE scaled by the fewer
-                    // samples in the bin. A directional change down-weights
-                    // only this bin; a quiet bin keeps its history.
-                    float se_b = se * sqrt(nray / bin_n[b]);
-                    float nb = 1.0;
-                    float wb = lighting_cascade_ema_step(
-                        now, lighting_cascade_bin_get(slot, b), se_b, old.w, n_max, nb);
-                    lighting_cascade_bin_put(slot, b, mix(lighting_cascade_bin_get(slot, b), now, wb));
-                } else {
-                    lighting_cascade_bin_put(slot, b, now);
-                }
-            } else if (!has_old) {
-                lighting_cascade_bin_put(slot, b, clear_mean);
+                lighting_cascade_bin_put(slot, b, bin_sum[b] / bin_n[b]);
+            } else {
+                lighting_cascade_bin_put(slot, b, vec3(0.0));
             }
         }
-        cache.v[3u * slot + 2u] = vec4(cur, nn);
+        cache.v[3u * slot + 2u] = vec4(cur, 1.0);
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
     }
 }

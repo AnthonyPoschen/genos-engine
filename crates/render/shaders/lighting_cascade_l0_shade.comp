@@ -1,14 +1,13 @@
 #version 450
-// Level-0 merge and EMA. Each live voxel shades its 32 rays: a hit is
-// explicit lamp shading plus the bounce stored at the hit, a miss is the
-// parent's clear-path radiance bins in that direction. A ray that hits a lamp already sampled by
-// those shadow rays (mesh glow or a point within LAMP_RADIUS) is a miss,
-// so the emitter is not counted twice. The cosine-weighted sum is the
-// voxel's value. The EMA judges a change against this frame's standard
-// error: noise grows stored N and blends at 1/N, a real change
-// down-weights history in proportion and shrinks N, and only
-// non-finite data hard-resets. This compile's only trace site is
-// trace_occluded.
+// Level-0 merge and four-slot direction ring. Each live voxel shades
+// its 32 rays: a hit is explicit lamp shading plus the bounce stored at
+// the hit, a miss is the parent's clear-path radiance bins in that
+// direction. A ray that hits a lamp already sampled by those shadow rays
+// (mesh glow or a point within LAMP_RADIUS) is a miss, so the emitter is
+// not counted twice. The cosine-weighted sum replaces slot
+// lighting_frame() % 4; the voxel value is the average of the filled
+// slots. Non-finite estimates leave that slot unchanged. This compile's
+// only trace site is trace_occluded.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 32) in;
 #include "lighting_common.glsl"
@@ -164,44 +163,19 @@ void main() {
         return;
     }
     vec3 sum = vec3(0.0);
-    float acc = 0.0;
     [[dont_unroll]] for (uint i = 0u; i < CASCADE_L0_RAYS; i++) {
         sum += sh_sum[i];
-        acc += dot(sh_sum[i], CASCADE_LUMA);
     }
     // Uniform-hemisphere estimator for irradiance: 2π / N Σ L cosθ.
-    // Standard error of that mean, from the 32-sample second moment.
-    float mean_x = acc / float(CASCADE_L0_RAYS);
-    float var_x = 0.0;
-    [[dont_unroll]] for (uint i = 0u; i < CASCADE_L0_RAYS; i++) {
-        float d = dot(sh_sum[i], CASCADE_LUMA) - mean_x;
-        var_x += d * d;
-    }
-    var_x /= float(CASCADE_L0_RAYS);
-    float se = LIGHTING_TAU * sqrt(var_x / float(CASCADE_L0_RAYS));
-    vec3 cur = (LIGHTING_TAU / float(CASCADE_L0_RAYS)) * sum;
-    cur = max(cur, vec3(0.0));
+    vec3 cur = max((LIGHTING_TAU / float(CASCADE_L0_RAYS)) * sum, vec3(0.0));
     ivec3 cell = ivec3(
         int(ckeys.key[word + 2u]),
         int(ckeys.key[word + 3u]),
         int(ckeys.key[word + 4u]));
     uint prev = lighting_cascade_find_in(
         (lighting_frame() + 1u) & 1u, lighting_frame(), cell, level, axis);
-    vec3 shown = cur;
-    float nn = 1.0;
-    if (prev != ~0u) {
-        vec3 pn = lighting_unpack_normal(ckeys.key[prev + 9u]);
-        uint prev_level = lighting_cascade_unpack_level(ckeys.key[prev + 5u]);
-        float pw = uintBitsToFloat(ckeys.key[prev + 11u]);
-        if (dot(pn, n) > 0.0 && prev_level == level && pw > LIGHTING_CACHE_HAS_W) {
-            vec3 prior = max(lighting_unpack_rgb9e5(ckeys.key[prev + 10u]), vec3(0.0));
-            float nw = lighting_cascade_ema_step(cur, prior, se, pw, CASCADE_EMA_N_MAX, nn);
-            shown = mix(prior, cur, nw);
-        }
-    }
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u) {
-        ckeys.key[word + 10u] = lighting_pack_rgb9e5(shown);
-        ckeys.key[word + 11u] = floatBitsToUint(nn);
+        lighting_cascade_ring_store(word, prev, cur);
     }
     atomicAdd(ckeys.key[lighting_cascade_counts_at() + 1u], 1u);
 }

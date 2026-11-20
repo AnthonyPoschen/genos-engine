@@ -96,7 +96,10 @@ pub fn interval(size: f32) -> (f32, f32) {
 
 /// Level-0 ray interval: `[ε, 8s]`, clipped at [`TRACE_FAR`].
 pub fn l0_interval(size: f32) -> (f32, f32) {
-    (TRACE_NEAR, (8.0 * size.max(0.0)).clamp(TRACE_NEAR, TRACE_FAR))
+    (
+        TRACE_NEAR,
+        (8.0 * size.max(0.0)).clamp(TRACE_NEAR, TRACE_FAR),
+    )
 }
 
 /// True when a parent corner survives the plane and facing gates.
@@ -113,78 +116,35 @@ pub fn interval_merge(hit: Option<[f32; 3]>, parent: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// History window of every cascade value, in frames (shader
-/// `CASCADE_EMA_WINDOW`). Level-0 voxels update every frame, so their stored
-/// sample count caps at this (new-sample weight >= 1/4). An upper cell
-/// updates every `period` frames, so its cap is the window over the period:
-/// one shared timescale, with no value remembering more than ~4 frames.
-pub const EMA_WINDOW_FRAMES: f32 = 4.0;
+/// Four-frame direction ring, matching `CASCADE_L0_SLOTS`. Frame `f`
+/// traces and replaces slot `f % 4`. The voxel value is the mean of the
+/// slots that have a value. There is no EMA across cycles.
+pub const L0_SLOTS: usize = 4;
 
-/// Cap on the stored level-0 EMA sample count, matching the shader.
-pub const EMA_N_MAX: f32 = EMA_WINDOW_FRAMES;
+/// Replace `slots[frame % 4]` with `current` when it is finite. A
+/// non-finite sample leaves the ring unchanged.
+pub fn ring_replace(slots: &mut [Option<f32>; L0_SLOTS], frame: u32, current: f32) {
+    if !current.is_finite() {
+        return;
+    }
+    let slot = usize::try_from(frame % u32::try_from(L0_SLOTS).unwrap_or(4)).unwrap_or(0);
+    if let Some(entry) = slots.get_mut(slot) {
+        *entry = Some(current);
+    }
+}
 
-/// Stored-count cap of a value refreshed every `period` frames.
+/// Mean of the filled slots. `None` when the ring is empty.
 #[must_use]
-pub fn ema_n_max(period: u32) -> f32 {
-    let p = f32::from(u16::try_from(period.max(1)).unwrap_or(u16::MAX));
-    (EMA_WINDOW_FRAMES / p).max(1.0)
-}
-
-fn ema_rays(rays: u32) -> f32 {
-    f32::from(u16::try_from(rays.max(1)).unwrap_or(u16::MAX))
-}
-
-/// New-sample weight for the level-0 EMA.
-///
-/// The change is judged against the estimate's standard error
-/// `max(|current|, |prior|) / sqrt(rays)` (the Poisson-like bound used
-/// when only the two lumas are known; the shader uses the real
-/// second-moment SE of this frame's rays). A gap inside two standard
-/// errors is noise and blends at `1/rays`. A real change down-weights
-/// history in proportion to the gap over the larger luma. Only
-/// non-finite values take weight 1 as a hard reset.
-///
-/// This is the instantaneous SE rule, used by unit tests. The stored
-/// sample count is applied in [`ema_step`].
-pub fn ema_weight(current: f32, prior: f32, rays: u32) -> f32 {
-    if !current.is_finite() || !prior.is_finite() {
-        return 1.0;
+pub fn ring_mean(slots: &[Option<f32>; L0_SLOTS]) -> Option<f32> {
+    let mut acc = 0.0;
+    let mut n = 0.0;
+    for value in slots {
+        if let Some(sample) = *value {
+            acc += sample;
+            n += 1.0;
+        }
     }
-    let count = ema_rays(rays);
-    let se = current.abs().max(prior.abs()).max(1.0e-6) / count.sqrt();
-    let gap = (current - prior).abs();
-    if gap <= 2.0 * se {
-        return 1.0 / count;
-    }
-    let den = current.abs().max(prior.abs()).max(1.0e-6);
-    (gap / den).clamp(0.0, 1.0)
-}
-
-/// Mix weight and the stored sample count after this update.
-///
-/// Agreement grows `prior_n` and blends at `1/n`. A real change
-/// shrinks `prior_n` by the leftover history weight so later frames
-/// keep catching up instead of stalling inside the new-sample
-/// standard error. Invalid data returns weight 1 and `n = 1`.
-#[must_use]
-pub fn ema_step(current: f32, prior: f32, rays: u32, prior_n: f32, n_max: f32) -> (f32, f32) {
-    if !current.is_finite() || !prior.is_finite() {
-        return (1.0, 1.0);
-    }
-    let count = ema_rays(rays);
-    let se = current.abs().max(prior.abs()).max(1.0e-6) / count.sqrt();
-    let gap = (current - prior).abs();
-    let cap = n_max.max(1.0);
-    let n0 = prior_n.clamp(1.0, cap);
-    let agree = (n0 + 1.0).min(cap);
-    if gap <= 2.0 * se {
-        return (1.0 / agree, agree);
-    }
-    // A real change never takes less of the new sample than agreement.
-    let den = current.abs().max(prior.abs()).max(1.0e-6);
-    let nw = (gap / den).clamp(0.0, 1.0).max(1.0 / agree);
-    let n = (n0 * (1.0 - nw) + 1.0).clamp(1.0, cap);
-    (nw, n)
+    (n > 0.0).then_some(acc / n)
 }
 
 /// Default upper refresh stride. Every resident upper cell uses this
@@ -277,7 +237,10 @@ pub fn sh_radiance_hemi(
         ],
         1.0 / SH_Y1,
     );
-    let a = sh_scale(sh_add(sh_scale(i0, 2.0), sh_scale(i1, -3.0)), 1.0 / std::f32::consts::PI);
+    let a = sh_scale(
+        sh_add(sh_scale(i0, 2.0), sh_scale(i1, -3.0)),
+        1.0 / std::f32::consts::PI,
+    );
     let mu = sh_dot(dir, n);
     let l = sh_add(
         sh_scale(a, 1.0 - 1.5 * mu),
@@ -308,7 +271,6 @@ pub fn overlap_blend(cheb: f32) -> f32 {
     }
     (frac - start) / OVERLAP
 }
-
 
 fn floor_i32(v: f32) -> i32 {
     crate::cache_probe::floor_i32(v)
@@ -471,7 +433,13 @@ impl Level0Voxel {
     /// Key used to compare leaves across frames.
     #[must_use]
     pub fn key(self) -> (i32, i32, i32, u32, u32) {
-        (self.cell[0], self.cell[1], self.cell[2], self.level, self.axis)
+        (
+            self.cell[0],
+            self.cell[1],
+            self.cell[2],
+            self.level,
+            self.axis,
+        )
     }
 
     /// Rec.709 luminance of the stored voxel radiance.
@@ -519,10 +487,11 @@ impl CascadeTimes {
 #[cfg(test)]
 mod tests {
     use super::{
-        axis, axis_vec, cell_size, chebyshev, ema_n_max, ema_step, ema_weight, in_extent, interval, interval_merge,
+        FINE, L0_MAX, L0_SLOTS, OVERLAP, PERIOD_DEFAULT, PROJ, RING_MAX, RING_NEAR, TRACE_FAR,
+        TRACE_NEAR, axis, axis_vec, cell_size, chebyshev, in_extent, interval, interval_merge,
         l0_cell, l0_centre, l0_interval, l0_level, l0_level_plain, l0_size, overlap_blend,
-        parent_gate, refresh_due, refresh_period, refresh_rays, ring, sh_radiance_hemi, want, FINE, L0_MAX, OVERLAP,
-        EMA_N_MAX, EMA_WINDOW_FRAMES, PERIOD_DEFAULT, PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
+        parent_gate, refresh_due, refresh_period, refresh_rays, ring, ring_mean, ring_replace,
+        sh_radiance_hemi, want,
     };
 
     #[test]
@@ -584,71 +553,51 @@ mod tests {
             interval_merge(Some([0.2, 0.0, 0.0]), [9.0, 0.0, 0.0]),
             [0.2, 0.0, 0.0]
         );
-        assert_eq!(
-            interval_merge(None, [0.4, 0.1, 0.0]),
-            [0.4, 0.1, 0.0]
-        );
+        assert_eq!(interval_merge(None, [0.4, 0.1, 0.0]), [0.4, 0.1, 0.0]);
     }
 
     #[test]
-    fn a_level0_ema_treats_noise_as_agreement() {
-        assert!((ema_weight(1.0, 1.0, 32) - 1.0 / 32.0).abs() < 1.0e-5);
-        // se = 1/sqrt(32) ≈ 0.177; a 0.1 gap is inside two standard errors.
-        assert!((ema_weight(1.1, 1.0, 32) - 1.0 / 32.0).abs() < 1.0e-5);
+    fn a_level0_ring_averages_the_filled_slots() {
+        let mut slots = [None; L0_SLOTS];
+        ring_replace(&mut slots, 0, 1.0);
+        assert_eq!(ring_mean(&slots), Some(1.0));
+        ring_replace(&mut slots, 1, 3.0);
+        assert_eq!(ring_mean(&slots), Some(2.0));
     }
 
     #[test]
-    fn a_level0_ema_downweights_a_real_change() {
-        // se ≈ 4/sqrt(32) ≈ 0.707; gap 3.9 is many standard errors.
-        let hot = ema_weight(4.0, 0.1, 32);
-        assert!((hot - 3.9 / 4.0).abs() < 1.0e-4, "got {hot}");
-    }
-
-    #[test]
-    fn a_level0_ema_hard_resets_invalid_data() {
-        assert!((ema_weight(f32::NAN, 1.0, 32) - 1.0).abs() < 1.0e-5);
-        assert!((ema_weight(1.0, f32::INFINITY, 32) - 1.0).abs() < 1.0e-5);
-        let (w, n) = ema_step(f32::NAN, 1.0, 32, 16.0, EMA_N_MAX);
-        assert!((w - 1.0).abs() < 1.0e-5 && (n - 1.0).abs() < 1.0e-5);
-    }
-
-    #[test]
-    fn a_level0_ema_grows_n_on_agreement_and_shrinks_it_on_change() {
-        let (w, n) = ema_step(1.1, 1.0, 32, 2.0, EMA_N_MAX);
-        assert!((w - 1.0 / 3.0).abs() < 1.0e-5, "got {w}");
-        assert!((n - 3.0).abs() < 1.0e-5, "got {n}");
-        let (hot, n1) = ema_step(4.0, 0.1, 32, EMA_N_MAX, EMA_N_MAX);
-        assert!((hot - 3.9 / 4.0).abs() < 1.0e-4, "got {hot}");
-        let expect_n = EMA_N_MAX * (1.0 - 3.9 / 4.0) + 1.0;
-        assert!((n1 - expect_n).abs() < 1.0e-4, "got {n1}");
-        // Leftover after the change is often inside this frame's SE.
-        // Reduced N keeps the next agreement blend faster than the cap.
-        let prior = 0.1f32.mul_add(1.0 - hot, 4.0 * hot);
-        let (w2, n2) = ema_step(4.0, prior, 32, n1, EMA_N_MAX);
-        assert!(w2 > 1.0 / EMA_N_MAX + 1.0e-5, "leftover weight {w2} stalled at the cap");
-        assert!(n2 < EMA_N_MAX, "leftover n {n2} did not stay reduced");
-    }
-
-    #[test]
-    fn every_cascade_value_remembers_at_most_the_shared_window() {
-        // Agreement forever: the weight settles at 1/cap, never below 1/4.
-        let mut n = 1.0;
-        let mut w = 1.0;
-        for _ in 0..1000 {
-            (w, n) = ema_step(1.0, 1.0, 32, n, EMA_N_MAX);
+    fn a_level0_ring_is_stable_once_a_cycle_repeats() {
+        let mut slots = [None; L0_SLOTS];
+        let cycle = [1.0, 2.0, 3.0, 4.0];
+        for (frame, value) in (0u32..4).zip(cycle) {
+            ring_replace(&mut slots, frame, value);
         }
-        assert!(w >= 0.25 - 1.0e-6, "level-0 new weight {w}");
-        for period in [1u32, 2, 4, 10] {
-            let cap = ema_n_max(period);
-            let frames = cap * period as f32;
-            assert!(cap >= 1.0, "period {period} cap {cap}");
-            assert!(
-                frames <= EMA_WINDOW_FRAMES.max(period as f32) + 1.0e-6,
-                "period {period}: memory {frames} frames"
-            );
+        assert_eq!(ring_mean(&slots), Some(2.5));
+        ring_replace(&mut slots, 4, cycle[0]);
+        assert_eq!(ring_mean(&slots), Some(2.5));
+    }
+
+    #[test]
+    fn a_level0_ring_a_change_lands_in_four_frames() {
+        let mut slots = [None; L0_SLOTS];
+        for frame in 0..4u32 {
+            ring_replace(&mut slots, frame, 1.0);
         }
-        assert!((ema_n_max(4) - 1.0).abs() < 1.0e-6);
-        assert!((ema_n_max(1) - EMA_N_MAX).abs() < 1.0e-6);
+        for frame in 4..8u32 {
+            ring_replace(&mut slots, frame, 5.0);
+        }
+        assert_eq!(ring_mean(&slots), Some(5.0));
+    }
+
+    #[test]
+    fn a_level0_ring_refuses_invalid_data() {
+        let mut slots = [None; L0_SLOTS];
+        ring_replace(&mut slots, 0, 2.0);
+        ring_replace(&mut slots, 0, f32::NAN);
+        assert_eq!(ring_mean(&slots), Some(2.0));
+        ring_replace(&mut slots, 1, f32::INFINITY);
+        assert_eq!(ring_mean(&slots), Some(2.0));
+        assert!(slots[1].is_none());
     }
 
     #[test]
@@ -698,7 +647,7 @@ mod tests {
         assert!(shader.contains("hash_cell3"));
         let gpu = include_str!("lighting_gpu.rs");
         assert!(gpu.contains("CASCADE_LEVEL0_CAP: u64 = 16384"));
-        assert!(gpu.contains("CASCADE_LEVEL0_STRIDE: u64 = 12"));
+        assert!(gpu.contains("CASCADE_LEVEL0_STRIDE: u64 = 16"));
         assert!(gpu.contains("CASCADE_LEVEL0_TABLES: u64 = 2"));
         assert!(gpu.contains("CASCADE_LEVEL0_PIXEL_WORDS: u64 = 4"));
         assert!(gpu.contains("lighting_level0_table_words()"));
@@ -726,6 +675,13 @@ mod tests {
         assert!(shader.contains("lighting_cascade_interval"));
         assert!(shader.contains("lighting_cascade_l0_interval"));
         assert!(shader.contains("const uint CASCADE_L0_RAYS = 32u;"));
+        assert!(shader.contains("const uint CASCADE_L0_SLOTS = 4u;"));
+        assert!(shader.contains("const uint CASCADE_LEVEL0_STRIDE = 16u;"));
+        assert!(
+            !shader.contains("lighting_cascade_ema_step"),
+            "the SE change-test EMA is deleted"
+        );
+
         assert!(shader.contains("lighting_cascade_merge"));
         assert!(shader.contains("lighting_cascade_at"));
         assert!(
@@ -787,7 +743,10 @@ mod tests {
             (-1.0e-4 / size).floor(),
             (1.3 / size).floor(),
         ];
-        assert_ne!(raw_a[1], raw_b[1], "the raw snap without an inset does flip");
+        assert_ne!(
+            raw_a[1], raw_b[1],
+            "the raw snap without an inset does flip"
+        );
         let _ = eye;
     }
 
