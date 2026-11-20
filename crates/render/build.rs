@@ -346,6 +346,8 @@ fn rerun_shader_pieces() {
         "lighting_check.comp",
         "lighting_sh_drain.comp",
         "lighting_cascade_pub.comp",
+        "lighting_cascade_l0_trace.comp",
+        "lighting_cascade_l0_shade.comp",
         "scene.vert",
         "gbuffer.vert",
         "instance_ssbo.glsl",
@@ -435,6 +437,22 @@ fn append_hdr_compose(glue_text: &mut String, out: &std::path::Path) {
     glue_text.push_str(&format!(
         "pub static LIGHTING_CASCADE_PUB_SPV: &[u8] = include_bytes!(\"{}\");\n",
         cascade_pub.display()
+    ));
+    let cascade_l0_trace = compile(
+        "shaders/lighting_cascade_l0_trace.comp",
+        &out.join("lighting_cascade_l0_trace.comp.spv"),
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_CASCADE_L0_TRACE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        cascade_l0_trace.display()
+    ));
+    let cascade_l0_shade = compile(
+        "shaders/lighting_cascade_l0_shade.comp",
+        &out.join("lighting_cascade_l0_shade.comp.spv"),
+    );
+    glue_text.push_str(&format!(
+        "pub static LIGHTING_CASCADE_L0_SHADE_SPV: &[u8] = include_bytes!(\"{}\");\n",
+        cascade_l0_shade.display()
     ));
     glue_text.push_str(&format!(
         "pub static LIGHTING_COMPOSE_HDR_SPV: &[u8] = include_bytes!(\"{}\");\n",

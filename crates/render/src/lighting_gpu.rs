@@ -211,14 +211,37 @@ fn lighting_keys_words(pixels: u64) -> u64 {
 /// Level-0 surface samples, after the reach words. One count word, then two
 /// tables of `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words,
 /// then four words per pixel: published radiance and stamp, then the insert
-/// slot and the blend slot. Matches `lighting_cascade.glsl`.
+/// slot and the blend slot, then inserted/traced counts and one four-word
+/// hit record per voxel slot and ray. Matches `lighting_cascade.glsl`.
+const CASCADE_LEVEL0_GROUPS: u32 = 16384;
 const CASCADE_LEVEL0_CAP: u64 = 16384;
 const CASCADE_LEVEL0_STRIDE: u64 = 12;
 const CASCADE_LEVEL0_TABLES: u64 = 2;
 const CASCADE_LEVEL0_PIXEL_WORDS: u64 = 4;
+const CASCADE_L0_RAYS: u64 = 32;
+const CASCADE_L0_HIT_WORDS: u64 = 4;
+const CASCADE_L0_COUNT_WORDS: u64 = 2;
+
+fn lighting_level0_table_words() -> u64 {
+    CASCADE_LEVEL0_TABLES * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE
+}
+
+fn lighting_level0_hits_words() -> u64 {
+    CASCADE_LEVEL0_CAP * CASCADE_L0_RAYS * CASCADE_L0_HIT_WORDS
+}
 
 fn lighting_level0_words(pixels: u64) -> u64 {
-    1 + CASCADE_LEVEL0_TABLES * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE
+    1 + lighting_level0_table_words()
+        + pixels * CASCADE_LEVEL0_PIXEL_WORDS
+        + CASCADE_L0_COUNT_WORDS
+        + lighting_level0_hits_words()
+}
+
+fn lighting_level0_counts_at(pixels: u64) -> u64 {
+    lighting_fill_keys_words(pixels)
+        + lighting_reach_words()
+        + 1
+        + lighting_level0_table_words()
         + pixels * CASCADE_LEVEL0_PIXEL_WORDS
 }
 
@@ -477,9 +500,14 @@ pub(crate) struct Lighting {
     /// Same-frame gather of the bins and lattices maintenance just wrote.
     /// Null when the kill switch keeps the writes inside compose.
     sh_drain_pipe: Handle,
-    /// Level-0 resolve. Writes the per-pixel merge after the lattice drain.
-    /// Picture compose loads those words and does not walk the hash.
+    /// Level-0 resolve. Writes the per-pixel neighbour blend after the
+    /// level-0 shade pass. Picture compose loads those words and does not
+    /// walk the hash.
     cascade_pub_pipe: Handle,
+    /// Trace 32 rays for every live level-0 voxel. Null if compile failed.
+    cascade_l0_trace_pipe: Handle,
+    /// Shade those rays, merge with the parent SH, and store the EMA.
+    cascade_l0_shade_pipe: Handle,
     /// #142 kill switch (GENOS_COMPOSE_SC_WRITES=1): compose's specialization
     /// constant 0, writes compiled into compose and no maintenance pass.
     compose_writes: bool,
@@ -852,6 +880,8 @@ impl Default for Lighting {
             compose_maint_pipe: std::ptr::null_mut(),
             sh_drain_pipe: std::ptr::null_mut(),
             cascade_pub_pipe: std::ptr::null_mut(),
+            cascade_l0_trace_pipe: std::ptr::null_mut(),
+            cascade_l0_shade_pipe: std::ptr::null_mut(),
             compose_writes: genos_scene::lighting_env("GENOS_COMPOSE_SC_WRITES")
                 .is_ok_and(|v| v == "1"),
             sun_hdr_pipe: std::ptr::null_mut(),
@@ -1204,6 +1234,20 @@ impl Gpu {
             "cascade-pub",
         )?;
         self.note_pipeline_time("cascade-pub", start);
+        let start = Instant::now();
+        self.lighting.cascade_l0_trace_pipe = self.make_compute_pipe(
+            LIGHTING_CASCADE_L0_TRACE_SPV,
+            self.lighting.layout,
+            "cascade-l0-trace",
+        )?;
+        self.note_pipeline_time("cascade-l0-trace", start);
+        let start = Instant::now();
+        self.lighting.cascade_l0_shade_pipe = self.make_compute_pipe(
+            LIGHTING_CASCADE_L0_SHADE_SPV,
+            self.lighting.layout,
+            "cascade-l0-shade",
+        )?;
+        self.note_pipeline_time("cascade-l0-shade", start);
         let start = Instant::now();
         self.lighting.reach_pipe = self.make_compute_pipe(
             LIGHTING_REACH_SPV,
@@ -1922,6 +1966,22 @@ impl Gpu {
         const WORD: usize = 24 + 11;
         self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
             .map_or(0, |w| w[WORD])
+    }
+
+    /// Level-0 voxels inserted and traced last frame. Waits.
+    pub(crate) fn lighting_level0_counts(&mut self) -> Result<(u32, u32), String> {
+        self.idle_device();
+        if self.lighting.cache_keys.buffer.is_null() {
+            return Ok((0, 0));
+        }
+        let [width, height, _, _] = self.lighting.dims;
+        let pixels = u64::from(width).saturating_mul(u64::from(height));
+        let offset = lighting_level0_counts_at(pixels).saturating_mul(4);
+        let raw = self.copy_device_range(self.lighting.cache_keys.buffer, offset, 8)?;
+        let words = u32_words(&raw);
+        let inserted = words.first().copied().unwrap_or(0);
+        let traced = words.get(1).copied().unwrap_or(0);
+        Ok((inserted, traced))
     }
 
     /// Live level-0 voxels from the table written by the last finished frame.
@@ -2902,6 +2962,52 @@ impl Gpu {
                     }
                 }
             }
+        }
+    }
+
+    /// Zero the level-0 inserted/traced counters before this frame's insert.
+    fn clear_cascade_l0_counts(&mut self, w: u32, h: u32) {
+        let pixels = u64::from(w).saturating_mul(u64::from(h));
+        let offset = lighting_level0_counts_at(pixels).saturating_mul(4);
+        let bytes = CASCADE_L0_COUNT_WORDS.saturating_mul(4);
+        if self.lighting.cache_keys.buffer.is_null()
+            || offset.saturating_add(bytes) > self.lighting.cache_keys.size
+        {
+            return;
+        }
+        // SAFETY: the command buffer and the key buffer are the frame's live
+        // handles. The fill is the same call used for other per-frame counters.
+        unsafe {
+            (self.fns.cmd_fill_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                offset,
+                bytes,
+                0,
+            );
+            self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
+        }
+    }
+
+    /// Trace and shade every live level-0 voxel, then leave their radiance
+    /// in the table for the publish pass.
+    fn dispatch_cascade_l0(&mut self) {
+        let trace = self.lighting.cascade_l0_trace_pipe;
+        let shade = self.lighting.cascade_l0_shade_pipe;
+        if trace.is_null() || shade.is_null() {
+            return;
+        }
+        let groups = CASCADE_LEVEL0_GROUPS;
+        // SAFETY: the command buffer and both pipelines are the lighting
+        // frame's live handles. Insert has already claimed this frame's
+        // voxels. Publish has not run.
+        unsafe {
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, trace);
+            (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            (self.fns.cmd_bind_pipe)(self.cmd, 1, shade);
+            (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
+            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
         }
     }
 
@@ -4989,6 +5095,9 @@ impl Gpu {
             // The push constants the next pass sees (the gather and filter rounds add bits).
             let mut cur_pc = pc;
             let mut reach_marked = false;
+            if self.lighting.cache_full && !self.lighting.cache_keys.buffer.is_null() {
+                self.clear_cascade_l0_counts(w, h);
+            }
             for (k, (pass, gx, gy)) in groups.iter().copied().enumerate() {
                 if !reach_marked && (pass == 7 || pass == 8 || pass == SH_PREP_PASS) {
                     reach_marked = true;
@@ -5186,8 +5295,11 @@ impl Gpu {
                     }
                     self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
                 }
-                // Level 0 is resolved here, after the lattice drain and before
-                // the picture loads it. The hash walk stays out of compose.
+                // Level 0 traces and shades every live voxel, then publish
+                // blends neighbours. The hash walk stays out of compose.
+                if pass == 7 && self.lighting.cache_full {
+                    self.dispatch_cascade_l0();
+                }
                 if pass == 7 && self.lighting.cache_full && !self.lighting.cascade_pub_pipe.is_null()
                 {
                     if sun_compose && !compose_full {
@@ -5697,6 +5809,8 @@ impl Gpu {
                 .chain(std::iter::once(&mut self.lighting.compose_maint_pipe))
                 .chain(std::iter::once(&mut self.lighting.sh_drain_pipe))
                 .chain(std::iter::once(&mut self.lighting.cascade_pub_pipe))
+                .chain(std::iter::once(&mut self.lighting.cascade_l0_trace_pipe))
+                .chain(std::iter::once(&mut self.lighting.cascade_l0_shade_pipe))
                 .chain(std::iter::once(&mut self.lighting.sun_hdr_pipe))
             {
                 if !pipe.is_null() {

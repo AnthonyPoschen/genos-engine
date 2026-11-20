@@ -80,66 +80,46 @@ pub const TRACE_FAR: f32 = 200.0;
 /// Last upper-level index. Its shell runs out to [`TRACE_FAR`].
 pub const INTERVAL_MAX: f32 = 6.0;
 
-/// Ray interval for a world cell of `size` metres.
-///
-/// The 25 cm cell returns the full trace. A coarser cell returns
-/// `[2^level, 2^(level+1)]`, and level 6 returns `[64, 200]`.
+/// Ray interval for an upper world cell of `size` metres: `[4S, 8S]`,
+/// clipped at [`TRACE_FAR`]. Level-0 uses [`l0_interval`].
 pub fn interval(size: f32) -> (f32, f32) {
-    if size.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) || size < FINE * 2.0 {
+    if size.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
         return (TRACE_NEAR, TRACE_FAR);
     }
-    let ratio = (size / FINE).max(1.0);
-    let level = (ratio.log2() + 0.5).floor();
-    if level < 1.0 {
-        return (TRACE_NEAR, TRACE_FAR);
+    let near = (4.0 * size).max(TRACE_NEAR);
+    let far = (8.0 * size).min(TRACE_FAR);
+    if near >= TRACE_FAR {
+        return (TRACE_FAR, TRACE_FAR);
     }
-    let level = level.min(INTERVAL_MAX);
-    let near = 2.0_f32.powf(level);
-    let far = if level >= INTERVAL_MAX {
-        TRACE_FAR
-    } else {
-        2.0_f32.powf(level + 1.0)
-    };
-    (near, far)
+    (near, far.max(near))
 }
 
-/// True when a parent sample survives the thin-wall gates.
-pub fn keeps_sample(facing: f32, plane: f32, half_cell: f32, stale: bool, weight: f32) -> bool {
+/// Level-0 ray interval: `[ε, 8s]`, clipped at [`TRACE_FAR`].
+pub fn l0_interval(size: f32) -> (f32, f32) {
+    (TRACE_NEAR, (8.0 * size.max(0.0)).clamp(TRACE_NEAR, TRACE_FAR))
+}
+
+/// True when a parent corner survives the plane and facing gates.
+pub fn parent_gate(facing: f32, plane: f32, half_cell: f32, stale: bool, weight: f32) -> bool {
     !stale && facing > 0.0 && plane.abs() <= half_cell && weight > 0.5
 }
 
-/// First sample whose weight is above a half. Order is the lattice, the
-/// fine cell, then each coarser size. An empty entry is not black when a
-/// later entry has data.
-pub fn shown_sample(samples: &[[f32; 4]]) -> [f32; 4] {
-    for sample in samples {
-        if sample[3] > 0.5 {
-            return [
-                sample[0].max(0.0),
-                sample[1].max(0.0),
-                sample[2].max(0.0),
-                1.0,
-            ];
-        }
+/// Interval merge along one ray. A hit in `[ε, 8s]` is the nearer sample.
+/// A miss takes the parent (`β = 1`).
+pub fn interval_merge(hit: Option<[f32; 3]>, parent: [f32; 3]) -> [f32; 3] {
+    match hit {
+        Some(near) => [near[0].max(0.0), near[1].max(0.0), near[2].max(0.0)],
+        None => [parent[0].max(0.0), parent[1].max(0.0), parent[2].max(0.0)],
     }
-    [0.0, 0.0, 0.0, 0.0]
 }
 
-/// `L(a,c) = L(a,b) + beta * L(b,c)`. Beta is 0 when the nearer sample exists.
-pub fn merge(near: [f32; 3], near_w: f32, far: [f32; 3], far_w: f32) -> ([f32; 3], f32) {
-    let near_ok = near_w > 0.5;
-    let far_ok = far_w > 0.5;
-    let beta = if near_ok { 0.0 } else { 1.0 };
-    let rgb = [
-        if near_ok { near[0].max(0.0) } else { 0.0 }
-            + if far_ok { beta * far[0].max(0.0) } else { 0.0 },
-        if near_ok { near[1].max(0.0) } else { 0.0 }
-            + if far_ok { beta * far[1].max(0.0) } else { 0.0 },
-        if near_ok { near[2].max(0.0) } else { 0.0 }
-            + if far_ok { beta * far[2].max(0.0) } else { 0.0 },
-    ];
-    let w = if near_ok || far_ok { 1.0 } else { 0.0 };
-    (rgb, w)
+/// New-sample weight for the level-0 EMA. At least 0.5. Grows with the
+/// luminance gap against the voxel's own ray spread (`1/sqrt(rays)`).
+pub fn ema_weight(current: f32, prior: f32, rays: u32) -> f32 {
+    let count = f32::from(u16::try_from(rays.max(1)).unwrap_or(u16::MAX));
+    let spread = current.abs().max(1.0e-6) / count.sqrt();
+    let gap = (current - prior).abs();
+    (gap / (3.0 * spread)).clamp(0.5, 1.0)
 }
 
 /// Weight of the next ring. Zero until the outer tenth of this ring.
@@ -323,9 +303,9 @@ impl Level0Voxel {
 #[cfg(test)]
 mod tests {
     use super::{
-        axis, axis_vec, cell_size, chebyshev, interval, keeps_sample, l0_cell, l0_centre,
-        l0_level, l0_level_plain, l0_size, merge, overlap_blend, ring, shown_sample, want, FINE,
-        L0_MAX, OVERLAP, PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
+        axis, axis_vec, cell_size, chebyshev, ema_weight, interval, interval_merge, l0_cell,
+        l0_centre, l0_interval, l0_level, l0_level_plain, l0_size, overlap_blend, parent_gate,
+        ring, want, FINE, L0_MAX, OVERLAP, PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
     };
 
     #[test]
@@ -367,55 +347,49 @@ mod tests {
     }
 
     #[test]
-    fn the_finest_cell_keeps_the_full_trace_and_a_coarser_cell_owns_one_shell() {
-        assert_eq!(interval(FINE), (TRACE_NEAR, TRACE_FAR));
+    fn an_upper_cell_traces_four_to_eight_times_its_size() {
+        assert_eq!(interval(FINE), (1.0, 2.0));
         assert_eq!(interval(0.0), (TRACE_NEAR, TRACE_FAR));
         assert_eq!(interval(0.5), (2.0, 4.0));
         assert_eq!(interval(1.0), (4.0, 8.0));
         assert_eq!(interval(2.0), (8.0, 16.0));
         assert_eq!(interval(4.0), (16.0, 32.0));
         assert_eq!(interval(8.0), (32.0, 64.0));
-        assert_eq!(interval(16.0), (64.0, TRACE_FAR));
+        assert_eq!(interval(16.0), (64.0, 128.0));
+        assert_eq!(interval(32.0), (128.0, TRACE_FAR));
+        assert_eq!(l0_interval(FINE), (TRACE_NEAR, 2.0));
+        assert_eq!(l0_interval(0.0625), (TRACE_NEAR, 0.5));
     }
 
     #[test]
-    fn an_empty_voxel_shows_the_first_coarser_sample_with_data() {
-        let black = shown_sample(&[[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]);
-        assert_eq!(black, [0.0, 0.0, 0.0, 0.0]);
-        let coarse = shown_sample(&[
-            [0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-            [0.4, 0.1, 0.0, 1.0],
-        ]);
-        assert_eq!(coarse, [0.4, 0.1, 0.0, 1.0]);
-        let lattice = shown_sample(&[[0.2, 0.0, 0.0, 1.0], [9.0, 0.0, 0.0, 1.0]]);
-        assert_eq!(lattice, [0.2, 0.0, 0.0, 1.0]);
-        let refused = shown_sample(&[[0.0, 0.0, 0.0, 0.5], [0.3, 0.0, 0.0, 0.9]]);
-        assert_eq!(refused, [0.3, 0.0, 0.0, 1.0]);
+    fn a_hit_replaces_the_parent_and_a_miss_keeps_it() {
+        assert_eq!(
+            interval_merge(Some([0.2, 0.0, 0.0]), [9.0, 0.0, 0.0]),
+            [0.2, 0.0, 0.0]
+        );
+        assert_eq!(
+            interval_merge(None, [0.4, 0.1, 0.0]),
+            [0.4, 0.1, 0.0]
+        );
     }
 
     #[test]
-    fn a_near_sample_hides_the_parent_and_a_missing_one_shows_it() {
-        let (rgb, w) = merge([0.2, 0.0, 0.0], 1.0, [9.0, 0.0, 0.0], 1.0);
-        assert_eq!(rgb, [0.2, 0.0, 0.0]);
-        assert_eq!(w, 1.0);
-        let (rgb, w) = merge([0.0, 0.0, 0.0], 0.0, [0.4, 0.1, 0.0], 1.0);
-        assert_eq!(rgb, [0.4, 0.1, 0.0]);
-        assert_eq!(w, 1.0);
-        let (rgb, w) = merge([0.0, 0.0, 0.0], 0.0, [1.0, 0.0, 0.0], 0.0);
-        assert_eq!(rgb, [0.0, 0.0, 0.0]);
-        assert_eq!(w, 0.0);
+    fn the_level0_ema_weight_is_at_least_a_half() {
+        assert!((ema_weight(1.0, 1.0, 32) - 0.5).abs() < 1.0e-5);
+        let hot = ema_weight(4.0, 0.1, 32);
+        assert!(hot > 0.5, "a large gap must shrink the prior, got {hot}");
+        assert!(hot <= 1.0);
     }
 
     #[test]
     fn a_thin_wall_refuses_the_far_side() {
         let half = 0.125;
-        assert!(keeps_sample(1.0, 0.0, half, false, 1.0));
-        assert!(!keeps_sample(0.0, 0.0, half, false, 1.0));
-        assert!(!keeps_sample(-0.2, 0.0, half, false, 1.0));
-        assert!(!keeps_sample(1.0, 0.2, half, false, 1.0));
-        assert!(!keeps_sample(1.0, 0.0, half, true, 1.0));
-        assert!(!keeps_sample(1.0, 0.0, half, false, 0.0));
+        assert!(parent_gate(1.0, 0.0, half, false, 1.0));
+        assert!(!parent_gate(0.0, 0.0, half, false, 1.0));
+        assert!(!parent_gate(-0.2, 0.0, half, false, 1.0));
+        assert!(!parent_gate(1.0, 0.2, half, false, 1.0));
+        assert!(!parent_gate(1.0, 0.0, half, true, 1.0));
+        assert!(!parent_gate(1.0, 0.0, half, false, 0.0));
     }
 
     #[test]
@@ -434,9 +408,10 @@ mod tests {
         assert!(gpu.contains("CASCADE_LEVEL0_STRIDE: u64 = 12"));
         assert!(gpu.contains("CASCADE_LEVEL0_TABLES: u64 = 2"));
         assert!(gpu.contains("CASCADE_LEVEL0_PIXEL_WORDS: u64 = 4"));
-        assert!(gpu.contains(
-            "1 + CASCADE_LEVEL0_TABLES * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE"
-        ));
+        assert!(gpu.contains("lighting_level0_table_words()"));
+        assert!(gpu.contains("CASCADE_L0_RAYS: u64 = 32"));
+        assert!(gpu.contains("cascade_l0_trace_pipe"));
+        assert!(gpu.contains("cascade_l0_shade_pipe"));
         assert!(shader.contains("const float CASCADE_GRID_BASE = 0.0625;"));
         assert!(shader.contains("const float CASCADE_FOOTPRINT_K = 0.03125;"));
         assert!(shader.contains("lighting_cascade_l0_level_plain"));
@@ -452,40 +427,29 @@ mod tests {
         );
         let trace = include_str!("../shaders/lighting_trace.comp");
         assert!(
-            trace.contains("CASCADE_TRACE_NEAR"),
-            "picture cells keep the full trace"
+            trace.contains("lighting_cascade_ray_range"),
+            "upper-cell rays use [4S, 8S]"
         );
         assert!(shader.contains("lighting_cascade_interval"));
-        assert!(shader.contains("level < 1.0"));
+        assert!(shader.contains("lighting_cascade_l0_interval"));
+        assert!(shader.contains("const uint CASCADE_L0_RAYS = 32u;"));
         assert!(shader.contains("lighting_cascade_merge"));
+        assert!(shader.contains("lighting_cascade_neighbors"));
         assert!(
-            shader.contains("lighting_sh_compose_shown(pos, n)"),
-            "publish reads the confidence-weighted lattice sample"
+            !shader.contains("lighting_sh_compose_shown"),
+            "publish does not read the SH lattice"
         );
-        assert!(shader.contains("lighting_cascade_voxel"));
-        assert!(shader.contains("lighting_cascade_ancestor"));
-        assert!(shader.contains("lighting_cascade_children"));
-        assert!(shader.contains("lighting_cascade_inward"));
-        assert!(
-            shader.contains("One neighbour cell toward the image centre."),
-            "an inward miss is one cell"
-        );
-        assert!(
-            !shader.contains("k <= 16u"),
-            "the sixteen-pixel inward gather is deleted"
-        );
-        assert!(shader.contains("lighting_cascade_facing"));
+        assert!(!shader.contains("lighting_cascade_ancestor"));
+        assert!(!shader.contains("lighting_cascade_children"));
+        assert!(!shader.contains("lighting_cascade_inward"));
+        assert!(!shader.contains("lighting_cascade_voxel("));
+        assert!(!shader.contains("lighting_cascade_facing"));
         assert!(shader.contains("LIGHTING_DIAG_CASCADE_GAP = 11u"));
         assert!(shader.contains("LIGHTING_CELL_HALF * size"));
-        assert!(shader.contains("beta * far_rgb"));
         let probe = include_str!("../shaders/lighting_screen_probe.glsl");
         assert!(
             probe.contains("lighting_cascade_published(pixel)"),
             "picture compose loads the published level-0 word"
-        );
-        assert!(
-            probe.contains("lighting_sh_compose_lattice(pos, n, false)"),
-            "maintenance still requests the lattice the publish pass reads"
         );
         let build = include_str!("../build.rs");
         assert!(

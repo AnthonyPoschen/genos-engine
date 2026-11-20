@@ -1,5 +1,5 @@
 #version 450
-// Level-0 resolve. Runs after the lattice drain and before picture compose.
+// Level-0 resolve. Runs after the level-0 shade pass and before picture compose.
 // Compose loads the two words this writes and does not walk the hash.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;

@@ -62,12 +62,11 @@ void main() {
         return;
     }
     SceneHit hit;
-    // lighting_cascade_interval clips a cell at least twice 25 cm to one
-    // shell. Those cells are still what the picture gather reads, and the
-    // clip raised wall splotch from 0.049 to 0.084. The ray stays the full
-    // trace until the merge sums the shells.
-    float t0 = CASCADE_TRACE_NEAR;
-    float t1 = CASCADE_TRACE_FAR;
+    // Upper cells own [4S, 8S]. Contact and the near field belong to
+    // level 0's [ε, 8s] rays, which run in a separate pass.
+    float t0;
+    float t1;
+    lighting_cascade_ray_range(ray, t0, t1);
     if (!trace_ray(origin, dir, t0, t1, hit)) {
         vec4 miss = lighting_miss_slot(has_sky() ? scene.sky.rgb : vec3(0.0));
         work.v[at] = miss;
