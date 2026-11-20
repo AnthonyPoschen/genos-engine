@@ -169,6 +169,12 @@ const uint CASCADE_CLAIMED_WORDS = 32768u;
 const uint CASCADE_UPPER_CAP = 16384u;
 const uint CASCADE_UPPER_RAYS_MAX = 64u;
 const float CASCADE_EXTENT_FACTOR = 16.0;
+// Share of a refresh an upper cell takes, and the irradiance change past
+// which it takes all of it (lighting_cascade_upper_shade.comp).
+const float CASCADE_UPPER_RATE = 0.25;
+const float CASCADE_UPPER_JUMP = 0.9;
+// Refreshes an upper cell takes whole before it is damped.
+const float CASCADE_UPPER_WARM = 8.0;
 
 uint lighting_cascade_claimed_at() {
     return lighting_cascade_counts_at() + 2u

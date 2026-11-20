@@ -2,8 +2,8 @@
 // Shade this band's due upper cells. Every ray is shaded: a hit is exact
 // lamp light plus the bounce stored at the hit, a miss is the parent's
 // bins. The cosine-weighted sum of all rays is the cell's irradiance, and
-// each bin is the mean radiance of its rays. This refresh replaces both
-// (no EMA). A non-finite estimate is refused. This compile's only trace
+// each bin is the mean radiance of its rays. A refresh moves both part of
+// the way (see CASCADE_UPPER_RATE). A non-finite estimate is refused. This compile's only trace
 // site is trace_occluded.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
@@ -156,10 +156,29 @@ void main() {
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u
         && lighting_cascade_finite3(cur)
         && !scene_inside(pos + n * 0.02)) {
+        // A refresh moves a shaded cell CASCADE_UPPER_RATE of the way to the
+        // new estimate. One to four rays a bin, replaced outright, kept a
+        // still scene popping: cells feed each other's bounce and each
+        // refresh moved the wall by a visible step. A change of more than
+        // CASCADE_UPPER_JUMP of the cell's irradiance is a real change (a
+        // lamp, a mover) and takes the new estimate.
+        vec4 had = cache.v[3u * slot + 2u];
+        float l_old = dot(had.xyz, vec3(0.2126, 0.7152, 0.0722));
+        float l_new = dot(cur, vec3(0.2126, 0.7152, 0.0722));
+        // .w counts refreshes up to CASCADE_UPPER_WARM (1 is the first). The
+        // first refreshes take the new estimate whole: a cold start builds its
+        // bounce through the chain of parents, and damping each link slowed a
+        // cut to full brightness.
+        bool warm = had.w > CASCADE_UPPER_WARM - 0.5;
+        bool keep = warm
+            && abs(l_new - l_old) <= CASCADE_UPPER_JUMP * max(max(l_new, l_old), CASCADE_EPS);
+        float rate = keep ? CASCADE_UPPER_RATE : 1.0;
+        float age = had.w > 0.5 ? min(had.w + 1.0, CASCADE_UPPER_WARM) : 1.0;
         for (uint b = 0u; b < CASCADE_BINS; b++) {
-            lighting_cascade_bin_put(slot, b, bin_sum[b] / max(bin_n[b], 1.0));
+            vec3 nb = bin_sum[b] / max(bin_n[b], 1.0);
+            lighting_cascade_bin_put(slot, b, mix(lighting_cascade_bin_get(slot, b), nb, rate));
         }
-        cache.v[3u * slot + 2u] = vec4(cur, 1.0);
+        cache.v[3u * slot + 2u] = vec4(mix(had.xyz, cur, rate), age);
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());
     }
 }
