@@ -36,6 +36,12 @@ const float CASCADE_LAMP_FINE = 0.25;
 // Visibility means. 4096 frames is a stuck shadow on a moving lamp. 32 lets a
 // still penumbra settle and a shortened count catch a move in a few frames.
 const float CASCADE_VIS_CAP = 32.0;
+// Shell index is log2 of the lamp distance, clamped to this many doublings.
+const float CASCADE_BUCKET_MAX = 6.0;
+// The outer tenth of a shell blends into the next coarser cell.
+const float CASCADE_SHELL_BLEND = 0.9;
+const float CASCADE_BLEND_SPAN = 0.1;
+const float CASCADE_EDGE_EPS = 1.0e-3;
 // The shade sets this before a tail read. The helpers below are only
 // called for a restir pixel, and the load has to sit under that test.
 bool restir_pix = false;
@@ -282,7 +288,7 @@ float cascade_disc_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp
 float cascade_lamp_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp_i, uint bucket) {
     if (restir_pix) {
     float size = CASCADE_LAMP_FINE * exp2(float(bucket));
-    ivec3 cell = ivec3(floor(origin / max(size, 0.25)));
+    ivec3 cell = ivec3(floor(origin / max(size, CASCADE_LAMP_FINE)));
     uint axis = lighting_pack_normal(n);
     // The key stays on the cell, the shell, and the lamp. A move does not
     // start a new mean. It shortens the count below.
@@ -1247,14 +1253,16 @@ void main() {
                 continue;
             }
             float dist = length(cl.pos.xyz - origin);
-            float bucket_f = clamp(floor(log2(max(dist, 1.0))), 0.0, 6.0);
+            float bucket_f = clamp(floor(log2(max(dist, 1.0))), 0.0, CASCADE_BUCKET_MAX);
             uint bucket = uint(bucket_f);
             float edge = exp2(bucket_f);
-            float frac = clamp((dist - edge) / max(edge, 1.0e-3), 0.0, 1.0);
-            float blend = frac > 0.9 ? (frac - 0.9) / 0.1 : 0.0;
+            float frac = clamp((dist - edge) / max(edge, CASCADE_EDGE_EPS), 0.0, 1.0);
+            float blend = frac > CASCADE_SHELL_BLEND
+                ? (frac - CASCADE_SHELL_BLEND) / CASCADE_BLEND_SPAN
+                : 0.0;
             uint lamp_i = lamp_list_index(list, k);
             float vis = cascade_lamp_vis(cl, origin, n, two_sided, lamp_i, bucket);
-            if (blend > 0.0 && bucket < 6u) {
+            if (blend > 0.0 && bucket < uint(CASCADE_BUCKET_MAX)) {
                 vis = mix(vis, cascade_lamp_vis(cl, origin, n, two_sided, lamp_i, bucket + 1u), blend);
             }
             vec3 cadd = clight * vis;
