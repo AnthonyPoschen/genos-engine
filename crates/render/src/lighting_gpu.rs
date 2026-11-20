@@ -17,19 +17,6 @@
 // and present work as before. This is the only lighting path. The GI v1 path it
 // replaced is gone (docs/systems/lighting/README.md).
 
-/// The spatial, candidate, and split settings still parse. They do not
-/// dispatch. One warning per process, the first time a ReSTIR frame prepares.
-fn warn_restir_passes_retired() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static WARNED: AtomicBool = AtomicBool::new(false);
-    if WARNED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    eprintln!(
-        "lighting: restir_spatial_neighbors, restir_spatial_radius, restir_spatial_checkerboard, restir_candidates, restir_split_passes, and restir_resolution_scale no longer dispatch a pass"
-    );
-}
-
 /// Screen probe tile edge in pixels (Medium and above in the design).
 /// Screen probe tile at 720p and up, pixels (Lumen's size).
 pub(crate) const LIGHTING_TILE: u32 = 16;
@@ -4019,7 +4006,6 @@ impl Gpu {
             return false;
         }
         let resized = self.lighting.restir_w != rw || self.lighting.restir_h != rh;
-        warn_restir_passes_retired();
         if self.lighting.restir_direct.is_null() {
             let start = Instant::now();
             match self.make_compute_pipe_ids(
