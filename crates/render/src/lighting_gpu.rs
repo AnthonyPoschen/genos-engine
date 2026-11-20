@@ -208,15 +208,18 @@ fn lighting_keys_words(pixels: u64) -> u64 {
     lighting_fill_keys_words(pixels) + lighting_reach_words() + lighting_level0_words(pixels)
 }
 
-/// Level-0 surface samples, after the reach words. One count word, then
-/// `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words, then two
-/// words per pixel (radiance, stamp) that picture compose loads. Matches
-/// `lighting_cascade.glsl`.
+/// Level-0 surface samples, after the reach words. One count word, then two
+/// tables of `CASCADE_LEVEL0_CAP` records of `CASCADE_LEVEL0_STRIDE` words,
+/// then four words per pixel: published radiance and stamp, then the insert
+/// slot and the blend slot. Matches `lighting_cascade.glsl`.
 const CASCADE_LEVEL0_CAP: u64 = 16384;
 const CASCADE_LEVEL0_STRIDE: u64 = 12;
+const CASCADE_LEVEL0_TABLES: u64 = 2;
+const CASCADE_LEVEL0_PIXEL_WORDS: u64 = 4;
 
 fn lighting_level0_words(pixels: u64) -> u64 {
-    1 + CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE + pixels * 2
+    1 + CASCADE_LEVEL0_TABLES * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE
+        + pixels * CASCADE_LEVEL0_PIXEL_WORDS
 }
 
 fn lighting_compose_minx() -> u64 {
@@ -1919,6 +1922,79 @@ impl Gpu {
         const WORD: usize = 24 + 11;
         self.read_stats16(self.lighting.stats[self.lighting.last_slot].memory)
             .map_or(0, |w| w[WORD])
+    }
+
+    /// Live level-0 voxels from the table written by the last finished frame.
+    /// Waits for that frame.
+    pub(crate) fn lighting_level0_voxels(&mut self) -> Result<Vec<crate::Level0Voxel>, String> {
+        self.idle_device();
+        if self.lighting.cache_keys.buffer.is_null() {
+            return Ok(Vec::new());
+        }
+        let [width, height, _, _] = self.lighting.dims;
+        let pixels = u64::from(width).saturating_mul(u64::from(height));
+        let start = lighting_fill_keys_words(pixels) + lighting_reach_words();
+        let table = CASCADE_LEVEL0_TABLES
+            .saturating_mul(CASCADE_LEVEL0_CAP)
+            .saturating_mul(CASCADE_LEVEL0_STRIDE);
+        let words = 1 + table;
+        let offset = start.saturating_mul(4);
+        let bytes = words.saturating_mul(4);
+        if offset.saturating_add(bytes) > self.lighting.cache_keys.size {
+            return Err(format!(
+                "level-0 table at {offset}+{bytes} is past keys {}",
+                self.lighting.cache_keys.size
+            ));
+        }
+        let raw = self.copy_device_range(self.lighting.cache_keys.buffer, offset, bytes)?;
+        let keys = u32_words(&raw);
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut latest = 0u32;
+        let mut voxels = Vec::new();
+        let stride = usize::try_from(CASCADE_LEVEL0_STRIDE).map_err(|err| err.to_string())?;
+        let mut at = 1usize;
+        while at + stride <= keys.len() {
+            let rec = &keys[at..at + stride];
+            at += stride;
+            if rec[0] == 0 || rec[1] == 0 {
+                continue;
+            }
+            latest = latest.max(rec[1]);
+        }
+        if latest == 0 {
+            return Ok(Vec::new());
+        }
+        at = 1;
+        while at + stride <= keys.len() {
+            let rec = &keys[at..at + stride];
+            at += stride;
+            if rec[0] == 0 || rec[1] != latest {
+                continue;
+            }
+            let cell = [
+                i32::from_le_bytes(rec[2].to_le_bytes()),
+                i32::from_le_bytes(rec[3].to_le_bytes()),
+                i32::from_le_bytes(rec[4].to_le_bytes()),
+            ];
+            let packed = rec[5];
+            let voxel = crate::Level0Voxel {
+                cell,
+                level: packed & 255,
+                axis: packed >> 8,
+                pos: [
+                    f32::from_bits(rec[6]),
+                    f32::from_bits(rec[7]),
+                    f32::from_bits(rec[8]),
+                ],
+            };
+            if voxels.iter().any(|other: &crate::Level0Voxel| other.key() == voxel.key()) {
+                continue;
+            }
+            voxels.push(voxel);
+        }
+        Ok(voxels)
     }
 
     /// Serial plan iterations (`gstats.pad2`, stats word 20) and the histogram

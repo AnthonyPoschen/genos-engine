@@ -1,4 +1,4 @@
-//! Level-0 rings for the sparse cascade.
+//! Level-0 footprint sizing for the sparse cascade.
 #![allow(dead_code)]
 //!
 //! The shader in `lighting_cascade.glsl` is the copy the picture runs. These
@@ -156,11 +156,176 @@ pub fn overlap_blend(cheb: f32) -> f32 {
     (frac - start) / OVERLAP
 }
 
+
+fn floor_i32(v: f32) -> i32 {
+    crate::cache_probe::floor_i32(v)
+}
+
+fn i32_f32(v: i32) -> f32 {
+    if v == 0 {
+        return 0.0;
+    }
+    let neg = v < 0;
+    let mut n = v.unsigned_abs();
+    let mut acc = 0.0f32;
+    let mut bit = 1.0f32;
+    while n != 0 {
+        if n & 1 == 1 {
+            acc += bit;
+        }
+        bit += bit;
+        n >>= 1;
+    }
+    if neg { -acc } else { acc }
+}
+
+/// Finest world-grid size. `2^n / 16` m, n from 0 to [`L0_MAX`].
+pub const GRID_BASE: f32 = 0.0625;
+/// Last level-0 index. Size is 32 m.
+pub const L0_MAX: u32 = 9;
+/// Angular size of a level-0 box.
+pub const FOOTPRINT_K: f32 = 0.03125;
+/// Floor on `|n · v|`. Caps the grazing boost at four times, two grid levels.
+pub const GRAZE_MIN: f32 = 0.0625;
+/// Lower edge of the quarter-level hysteresis band, `2^-0.25`.
+pub const HYST_LO: f32 = 0.840_896_4;
+/// Upper edge of the quarter-level hysteresis band, `2^1.25`.
+pub const HYST_HI: f32 = 2.378_414_2;
+
+/// Dominant axis and sign. Matches `lighting_axis`.
+#[must_use]
+pub fn axis(n: [f32; 3]) -> u32 {
+    let ax = n[0].abs();
+    let ay = n[1].abs();
+    let az = n[2].abs();
+    if ax >= ay && ax >= az {
+        u32::from(n[0] < 0.0)
+    } else if ay >= az {
+        2 + u32::from(n[1] < 0.0)
+    } else {
+        4 + u32::from(n[2] < 0.0)
+    }
+}
+
+/// Unit vector for [`axis`].
+#[must_use]
+pub fn axis_vec(axis: u32) -> [f32; 3] {
+    let mut v = [0.0; 3];
+    let component = usize::try_from(axis >> 1).unwrap_or(0).min(2);
+    v[component] = if axis & 1 == 0 { 1.0 } else { -1.0 };
+    v
+}
+
+/// World size of a level-0 cell at `level`.
+#[must_use]
+pub fn l0_size(level: u32) -> f32 {
+    let mut size = GRID_BASE;
+    let mut left = level.min(L0_MAX);
+    while left > 0 {
+        size *= 2.0;
+        left -= 1;
+    }
+    size
+}
+
+/// Wanted cube size at the cell centre, using the axis normal.
+#[must_use]
+pub fn want(centre: [f32; 3], n_axis: [f32; 3], eye: [f32; 3]) -> f32 {
+    let rel = [centre[0] - eye[0], centre[1] - eye[1], centre[2] - eye[2]];
+    let dist = (rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]).sqrt();
+    let inv = if dist > 1.0e-6 { 1.0 / dist } else { 0.0 };
+    let view = [rel[0] * inv, rel[1] * inv, rel[2] * inv];
+    let cos = (n_axis[0] * view[0] + n_axis[1] * view[1] + n_axis[2] * view[2])
+        .abs()
+        .max(GRAZE_MIN);
+    FOOTPRINT_K * dist / cos.sqrt()
+}
+
+/// Cell after a half-cell inset along `n_axis`.
+#[must_use]
+pub fn l0_cell(pos: [f32; 3], n_axis: [f32; 3], size: f32) -> [i32; 3] {
+    [
+        floor_i32(pos[0] / size - n_axis[0] * 0.5),
+        floor_i32(pos[1] / size - n_axis[1] * 0.5),
+        floor_i32(pos[2] / size - n_axis[2] * 0.5),
+    ]
+}
+
+/// Centre of an axis-aligned cell of `size`.
+#[must_use]
+pub fn l0_centre(cell: [i32; 3], size: f32) -> [f32; 3] {
+    [
+        (i32_f32(cell[0]) + 0.5) * size,
+        (i32_f32(cell[1]) + 0.5) * size,
+        (i32_f32(cell[2]) + 0.5) * size,
+    ]
+}
+
+/// Largest grid level with `S <= want` at that cell's centre.
+#[must_use]
+pub fn l0_level_plain(pos: [f32; 3], n: [f32; 3], eye: [f32; 3]) -> u32 {
+    let n_axis = axis_vec(axis(n));
+    let mut level = L0_MAX;
+    loop {
+        let size = l0_size(level);
+        let cell = l0_cell(pos, n_axis, size);
+        let centre = l0_centre(cell, size);
+        if size <= want(centre, n_axis, eye) {
+            return level;
+        }
+        if level == 0 {
+            return 0;
+        }
+        level -= 1;
+    }
+}
+
+/// A live leaf from last frame keeps its size while `want / S` stays in
+/// [`HYST_LO`], [`HYST_HI`]. `prev` is that size's level, if any.
+#[must_use]
+pub fn l0_level(pos: [f32; 3], n: [f32; 3], eye: [f32; 3], prev: Option<u32>) -> u32 {
+    let plain = l0_level_plain(pos, n, eye);
+    let Some(prev) = prev else {
+        return plain;
+    };
+    if prev > L0_MAX {
+        return plain;
+    }
+    let n_axis = axis_vec(axis(n));
+    let size = l0_size(prev);
+    let cell = l0_cell(pos, n_axis, size);
+    let centre = l0_centre(cell, size);
+    let ratio = want(centre, n_axis, eye) / size;
+    if (HYST_LO..=HYST_HI).contains(&ratio) {
+        prev
+    } else {
+        plain
+    }
+}
+
+/// One live level-0 record from the current table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Level0Voxel {
+    pub cell: [i32; 3],
+    pub level: u32,
+    pub axis: u32,
+    pub pos: [f32; 3],
+}
+
+impl Level0Voxel {
+    /// Key used to compare leaves across frames.
+    #[must_use]
+    pub fn key(self) -> (i32, i32, i32, u32, u32) {
+        (self.cell[0], self.cell[1], self.cell[2], self.level, self.axis)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        cell_size, chebyshev, interval, keeps_sample, merge, overlap_blend, ring, shown_sample,
-        FINE, OVERLAP, PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
+        axis, axis_vec, cell_size, chebyshev, interval, keeps_sample, l0_cell, l0_centre,
+        l0_level, l0_level_plain, l0_size, merge, overlap_blend, ring, shown_sample, want, FINE,
+        L0_MAX, OVERLAP, PROJ, RING_MAX, RING_NEAR, TRACE_FAR, TRACE_NEAR,
     };
 
     #[test]
@@ -267,9 +432,18 @@ mod tests {
         let gpu = include_str!("lighting_gpu.rs");
         assert!(gpu.contains("CASCADE_LEVEL0_CAP: u64 = 16384"));
         assert!(gpu.contains("CASCADE_LEVEL0_STRIDE: u64 = 12"));
+        assert!(gpu.contains("CASCADE_LEVEL0_TABLES: u64 = 2"));
+        assert!(gpu.contains("CASCADE_LEVEL0_PIXEL_WORDS: u64 = 4"));
+        assert!(gpu.contains(
+            "1 + CASCADE_LEVEL0_TABLES * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE"
+        ));
+        assert!(shader.contains("const float CASCADE_GRID_BASE = 0.0625;"));
+        assert!(shader.contains("const float CASCADE_FOOTPRINT_K = 0.03125;"));
+        assert!(shader.contains("lighting_cascade_l0_level_plain"));
+        assert!(shader.contains("lighting_cascade_l0_cell"));
         let direct = include_str!("../shaders/lighting_direct.comp");
         assert!(
-            direct.contains("lighting_cascade_insert(pos, n)"),
+            direct.contains("lighting_cascade_insert(idx, pos, n)"),
             "the g-buffer pass inserts the surface sample"
         );
         assert!(
@@ -327,5 +501,75 @@ mod tests {
             !probe.contains("lighting_cascade_insert"),
             "picture compose does not insert into the level-0 hash"
         );
+    }
+
+    #[test]
+    fn a_grid_plane_floor_snaps_to_one_cell() {
+        let eye = [0.0, 1.8, 5.0];
+        let n = [0.0, 1.0, 0.0];
+        let n_axis = axis_vec(axis(n));
+        let size = l0_size(0);
+        let a = l0_cell([0.2, 1.0e-4, 1.3], n_axis, size);
+        let b = l0_cell([0.2, -1.0e-4, 1.3], n_axis, size);
+        assert_eq!(a, b, "depth noise on y=0 must not flip the cell");
+        let raw_a = [
+            (0.2 / size).floor(),
+            (1.0e-4 / size).floor(),
+            (1.3 / size).floor(),
+        ];
+        let raw_b = [
+            (0.2 / size).floor(),
+            (-1.0e-4 / size).floor(),
+            (1.3 / size).floor(),
+        ];
+        assert_ne!(raw_a[1], raw_b[1], "the raw snap without an inset does flip");
+        let _ = eye;
+    }
+
+    #[test]
+    fn a_grazing_floor_is_at_most_two_levels_coarser() {
+        let n = [0.0, 1.0, 0.0];
+        let pos = [0.0, 0.0, 0.0];
+        let face = l0_level_plain(pos, n, [0.0, 8.0, 0.0]);
+        let graze = l0_level_plain(pos, n, [0.0, 0.5, 8.0]);
+        assert!(
+            graze <= face + 2,
+            "graze {graze} is more than two levels above face {face} at the same distance"
+        );
+    }
+
+    #[test]
+    fn the_plain_rule_picks_the_largest_size_under_want() {
+        let eye = [0.0, 1.8, 0.0];
+        let n = [0.0, 0.0, 1.0];
+        let pos = [0.0, 1.8, -8.0];
+        let level = l0_level_plain(pos, n, eye);
+        let n_axis = axis_vec(axis(n));
+        let size = l0_size(level);
+        let cell = l0_cell(pos, n_axis, size);
+        let centre = l0_centre(cell, size);
+        let needed = want(centre, n_axis, eye);
+        assert!(size <= needed, "size {size} want {needed}");
+        if level < L0_MAX {
+            let coarse = l0_size(level + 1);
+            let coarse_cell = l0_cell(pos, n_axis, coarse);
+            let coarse_centre = l0_centre(coarse_cell, coarse);
+            let coarse_needed = want(coarse_centre, n_axis, eye);
+            assert!(
+                coarse > coarse_needed,
+                "the next size {coarse} should miss want {coarse_needed}"
+            );
+        }
+    }
+
+    #[test]
+    fn hysteresis_keeps_a_leaf_inside_the_quarter_level_band() {
+        let eye = [0.0, 1.8, 0.0];
+        let n = [0.0, 0.0, 1.0];
+        let pos = [0.0, 1.8, -8.0];
+        let level = l0_level_plain(pos, n, eye);
+        assert_eq!(l0_level(pos, n, eye, Some(level)), level);
+        let kept = l0_level(pos, n, [0.0, 1.8, 0.2], Some(level));
+        assert_eq!(kept, level, "a small eye move must keep the leaf");
     }
 }

@@ -1,12 +1,16 @@
 // Level 0 of the sparse cascade. Rebuilt from the G-buffer each frame.
-// A ring doubles the Chebyshev distance and the cell size together, so the
-// projected size at the ring start stays CASCADE_PROJ. The outer
-// CASCADE_OVERLAP of a ring also inserts the next ring, and the read blends
-// them. GI v1 stays removed.
+// Size is picked on the shared power-of-two world grid (1/16 m base) by
+// screen footprint, not Chebyshev rings. A half-cell inset along the
+// dominant axis stops grid-plane flips. Two tables (this frame and last)
+// keep the previous leaves for quarter-level hysteresis. GI v1 stays
+// removed.
 //
-// The record sits after the reach words. Word 0 is unused. Each record is
-// CASCADE_LEVEL0_STRIDE words: key, stamp, cell x y z, ring, position xyz,
-// packed normal, radiance, weight. The host sizes the same tail.
+// The record sits after the reach words. Word 0 is unused. Two tables of
+// CASCADE_LEVEL0_CAP records, then four words a pixel: published radiance
+// and stamp (compose), then the insert slot and the blend slot. Each
+// record is CASCADE_LEVEL0_STRIDE words: key, stamp, cell x y z, level
+// packed with axis, position xyz, packed normal, radiance, weight. The
+// host sizes the same tail.
 
 const uint CASCADE_LEVEL0_CAP = 16384u;
 const uint CASCADE_LEVEL0_STRIDE = 12u;
@@ -24,6 +28,23 @@ const float CASCADE_VOXEL_VIEW_MIX = 0.88;
 const float CASCADE_VOXEL_VIEW_RING_DIM = 0.08;
 const float CASCADE_VOXEL_VIEW_RING_LINE = 0.03;
 const float CASCADE_VOXEL_VIEW_LINE_MIX = 0.65;
+// Footprint size on the shared world grid. 2^n / 16 m. K is the angular
+// size of a box (about 22 x 40 px at 1440p). The 1/16 graze floor caps
+// the boost at two grid levels. Hysteresis is a quarter level either
+// side of [1, 2). The outer tenth of a level, log scale, also inserts
+// the coarser cell.
+const float CASCADE_GRID_BASE = 0.0625;
+const uint CASCADE_L0_MAX = 9u;
+const float CASCADE_FOOTPRINT_K = 0.03125;
+const float CASCADE_GRAZE_MIN = 0.0625;
+const float CASCADE_HYST_LO = 0.84089641525;
+const float CASCADE_HYST_HI = 2.37841423001;
+const float CASCADE_FOOTPRINT_BLEND = 0.9;
+const uint CASCADE_TABLES = 2u;
+const uint CASCADE_PIXEL_WORDS = 4u;
+const uint CASCADE_AXIS_SHIFT = 8u;
+const uint CASCADE_LEVEL_MASK = 255u;
+const float CASCADE_EPS = 1.0e-6;
 
 uint lighting_cascade_base() {
     return lighting_reach_base()
@@ -32,11 +53,96 @@ uint lighting_cascade_base() {
         + (LIGHTING_CACHE_SLOTS >> 5u);
 }
 
-// Picture compose loads these two words. The hash walk stays out of that
-// compile: running it there faults lavapipe. The publish pass writes them
-// after the lattice fill.
+// Picture compose loads the first two words. The hash walk stays out of
+// that compile: running it there faults lavapipe. Insert writes the slot
+// words. Publish reads those slots and then writes the radiance stamp.
 uint lighting_cascade_pixel_at(uint pixel) {
-    return lighting_cascade_base() + 1u + CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE + pixel * 2u;
+    return lighting_cascade_base() + 1u
+        + CASCADE_TABLES * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE
+        + pixel * CASCADE_PIXEL_WORDS;
+}
+
+uint lighting_cascade_table_base(uint parity) {
+    return lighting_cascade_base() + 1u
+        + (parity & 1u) * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE;
+}
+
+float lighting_cascade_l0_size(uint level) {
+    return CASCADE_GRID_BASE * exp2(float(min(level, CASCADE_L0_MAX)));
+}
+
+uint lighting_cascade_axis(vec3 n) {
+    vec3 a = abs(n);
+    if (a.x >= a.y && a.x >= a.z) {
+        return n.x >= 0.0 ? 0u : 1u;
+    }
+    if (a.y >= a.z) {
+        return n.y >= 0.0 ? 2u : 3u;
+    }
+    return n.z >= 0.0 ? 4u : 5u;
+}
+
+vec3 lighting_cascade_axis_vec(uint a) {
+    vec3 v = vec3(0.0);
+    v[a >> 1u] = (a & 1u) == 0u ? 1.0 : -1.0;
+    return v;
+}
+
+uint lighting_cascade_pack_level(uint level, uint axis) {
+    return (level & CASCADE_LEVEL_MASK) | (axis << CASCADE_AXIS_SHIFT);
+}
+
+uint lighting_cascade_unpack_level(uint packed) {
+    return packed & CASCADE_LEVEL_MASK;
+}
+
+uint lighting_cascade_unpack_axis(uint packed) {
+    return packed >> CASCADE_AXIS_SHIFT;
+}
+
+// Wanted cube size at `centre`, using the axis normal. The graze floor
+// caps the boost at 4x, two grid levels.
+float lighting_cascade_want(vec3 centre, vec3 n_axis) {
+    vec3 rel = centre - scene.eye.xyz;
+    float dist = length(rel);
+    vec3 view = rel / max(dist, CASCADE_EPS);
+    float cosang = max(abs(dot(n_axis, view)), CASCADE_GRAZE_MIN);
+    return CASCADE_FOOTPRINT_K * dist / sqrt(cosang);
+}
+
+ivec3 lighting_cascade_l0_cell(vec3 pos, vec3 n_axis, float size) {
+    return ivec3(floor(pos / size - n_axis * LIGHTING_CELL_HALF));
+}
+
+vec3 lighting_cascade_l0_centre(ivec3 cell, float size) {
+    return (vec3(cell) + vec3(LIGHTING_CELL_HALF)) * size;
+}
+
+// Largest grid level S with S <= want at the S-cell centre. Math only, so
+// compose can call it. The previous-table hysteresis is in the walk compile.
+uint lighting_cascade_l0_level_plain(vec3 pos, vec3 n) {
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    for (int i = int(CASCADE_L0_MAX); i >= 0; i--) {
+        float size = lighting_cascade_l0_size(uint(i));
+        ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+        vec3 centre = lighting_cascade_l0_centre(cell, size);
+        if (size <= lighting_cascade_want(centre, n_axis)) {
+            return uint(i);
+        }
+    }
+    return 0u;
+}
+
+float lighting_cascade_footprint_blend(float want, float size) {
+    float ratio = log2(max(want / max(size, CASCADE_EPS), CASCADE_EPS));
+    if (ratio < CASCADE_FOOTPRINT_BLEND) {
+        return 0.0;
+    }
+    if (ratio >= 1.0) {
+        return 1.0;
+    }
+    return (ratio - CASCADE_FOOTPRINT_BLEND) / (1.0 - CASCADE_FOOTPRINT_BLEND);
 }
 
 vec4 lighting_cascade_published(uint pixel) {
@@ -47,25 +153,26 @@ vec4 lighting_cascade_published(uint pixel) {
     return vec4(max(lighting_unpack_rgb9e5(ckeys.key[at]), vec3(0.0)), 1.0);
 }
 
-// Level-0 surface voxel projection. Same ring and cell as insert. Math only:
-// compose can call this. A hash walk here faults lavapipe.
-vec3 lighting_cascade_debug_voxels(vec3 pos) {
-    vec3 rel = abs(pos - scene.eye.xyz);
-    float cheb = max(rel.x, max(rel.y, rel.z));
-    float level = log2(max(cheb, CASCADE_RING_NEAR) / CASCADE_RING_NEAR);
-    uint ring = uint(clamp(floor(level), 0.0, float(CASCADE_RING_MAX)));
-    float size = CASCADE_PROJ * CASCADE_RING_NEAR * exp2(float(ring));
-    ivec3 cell = ivec3(floor(pos / size));
-    uint h = hash_cell3(cell, CASCADE_LEVEL0_SALT ^ ring);
+// Level-0 surface voxel projection. Same size and cell as insert's plain
+// rule. Math only: compose can call this. A hash walk here faults lavapipe.
+vec3 lighting_cascade_debug_voxels(vec3 pos, vec3 n) {
+    uint level = lighting_cascade_l0_level_plain(pos, n);
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(level);
+    ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+    uint h = hash_cell3(cell, CASCADE_LEVEL0_SALT ^ lighting_cascade_pack_level(level, axis));
     vec3 col = vec3(
         lighting_unit(h),
         lighting_unit(lighting_hash(h ^ 0x9E3779B9u)),
         lighting_unit(lighting_hash(h ^ 0x85EBCA6Bu))
     );
     col = mix(vec3(CASCADE_VOXEL_VIEW_FLOOR), col, CASCADE_VOXEL_VIEW_MIX);
-    col *= 1.0 - CASCADE_VOXEL_VIEW_RING_DIM * float(ring);
-    float frac = level - floor(level);
-    if (ring > 0u && frac < CASCADE_VOXEL_VIEW_RING_LINE) {
+    col *= 1.0 - CASCADE_VOXEL_VIEW_RING_DIM * float(level);
+    vec3 centre = lighting_cascade_l0_centre(cell, size);
+    float want = lighting_cascade_want(centre, n_axis);
+    float frac = log2(max(want / max(size, CASCADE_EPS), CASCADE_EPS));
+    if (level > 0u && frac < CASCADE_VOXEL_VIEW_RING_LINE) {
         col = mix(col, vec3(1.0), CASCADE_VOXEL_VIEW_LINE_MIX);
     }
     return col;
@@ -100,17 +207,85 @@ float lighting_cascade_blend(float cheb) {
     return (frac - start) / CASCADE_OVERLAP;
 }
 
-uint lighting_cascade_insert_ring(vec3 pos, vec3 n, uint ring) {
-    float size = lighting_cascade_cell_size(ring);
-    ivec3 cell = ivec3(floor(pos / size));
-    uint key = hash_cell3(cell, CASCADE_LEVEL0_SALT ^ ring);
+uint lighting_cascade_l0_key(ivec3 cell, uint level, uint axis) {
+    uint key = hash_cell3(cell, CASCADE_LEVEL0_SALT ^ lighting_cascade_pack_level(level, axis));
     if (key == 0u) {
         key = 1u;
     }
+    return key;
+}
+
+uint lighting_cascade_find_in(uint parity, uint stamp, ivec3 cell, uint level, uint axis) {
+    uint key = lighting_cascade_l0_key(cell, level, axis);
+    uint packed = lighting_cascade_pack_level(level, axis);
+    uint mask = CASCADE_LEVEL0_CAP - 1u;
+    uint home = key & mask;
+    uint base = lighting_cascade_table_base(parity);
+    [[dont_unroll]] for (uint i = 0u; i < CASCADE_LEVEL0_PROBE; i++) {
+        uint word = base + ((home + i) & mask) * CASCADE_LEVEL0_STRIDE;
+        if (ckeys.key[word] != key || ckeys.key[word + 1u] != stamp) {
+            continue;
+        }
+        if (ckeys.key[word + 2u] != uint(cell.x) || ckeys.key[word + 3u] != uint(cell.y)) {
+            continue;
+        }
+        if (ckeys.key[word + 4u] != uint(cell.z) || ckeys.key[word + 5u] != packed) {
+            continue;
+        }
+        return word;
+    }
+    return ~0u;
+}
+
+bool lighting_cascade_was_leaf(vec3 pos, vec3 n, uint level) {
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(level);
+    ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+    uint prev = (lighting_frame() + 1u) & 1u;
+    uint stamp = lighting_frame();
+    return lighting_cascade_find_in(prev, stamp, cell, level, axis) != ~0u;
+}
+
+uint lighting_cascade_l0_level(vec3 pos, vec3 n) {
+    uint plain = lighting_cascade_l0_level_plain(pos, n);
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    uint kept = ~0u;
+    for (int d = -1; d <= 1; d++) {
+        int cand = int(plain) + d;
+        if (cand < 0 || cand > int(CASCADE_L0_MAX)) {
+            continue;
+        }
+        uint level = uint(cand);
+        if (!lighting_cascade_was_leaf(pos, n, level)) {
+            continue;
+        }
+        float size = lighting_cascade_l0_size(level);
+        ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+        vec3 centre = lighting_cascade_l0_centre(cell, size);
+        float ratio = lighting_cascade_want(centre, n_axis) / size;
+        if (ratio >= CASCADE_HYST_LO && ratio <= CASCADE_HYST_HI) {
+            kept = level;
+        }
+    }
+    if (kept != ~0u) {
+        return kept;
+    }
+    return plain;
+}
+
+uint lighting_cascade_insert_level(vec3 pos, vec3 n, uint level) {
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(level);
+    ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+    uint key = lighting_cascade_l0_key(cell, level, axis);
+    uint packed = lighting_cascade_pack_level(level, axis);
     uint frame = lighting_frame() + 1u;
     uint mask = CASCADE_LEVEL0_CAP - 1u;
     uint home = key & mask;
-    uint base = lighting_cascade_base() + 1u;
+    uint base = lighting_cascade_table_base(lighting_frame() & 1u);
     [[dont_unroll]] for (uint i = 0u; i < CASCADE_LEVEL0_PROBE; i++) {
         uint slot = (home + i) & mask;
         uint word = base + slot * CASCADE_LEVEL0_STRIDE;
@@ -121,8 +296,8 @@ uint lighting_cascade_insert_ring(vec3 pos, vec3 n, uint ring) {
             && ckeys.key[word + 2u] == uint(cell.x)
             && ckeys.key[word + 3u] == uint(cell.y)
             && ckeys.key[word + 4u] == uint(cell.z)
-            && ckeys.key[word + 5u] == ring) {
-            return ~0u;
+            && ckeys.key[word + 5u] == packed) {
+            return word;
         }
         if (live && cur != 0u) {
             continue;
@@ -135,7 +310,7 @@ uint lighting_cascade_insert_ring(vec3 pos, vec3 n, uint ring) {
         ckeys.key[word + 2u] = uint(cell.x);
         ckeys.key[word + 3u] = uint(cell.y);
         ckeys.key[word + 4u] = uint(cell.z);
-        ckeys.key[word + 5u] = ring;
+        ckeys.key[word + 5u] = packed;
         ckeys.key[word + 6u] = floatBitsToUint(pos.x);
         ckeys.key[word + 7u] = floatBitsToUint(pos.y);
         ckeys.key[word + 8u] = floatBitsToUint(pos.z);
@@ -422,29 +597,9 @@ void lighting_cascade_ray_range(uint ray, out float t0, out float t1) {
     lighting_cascade_interval(cache.v[3u * slot + 1u].w, t0, t1);
 }
 
-uint lighting_cascade_find(ivec3 cell, uint ring) {
-    uint key = hash_cell3(cell, CASCADE_LEVEL0_SALT ^ ring);
-    if (key == 0u) {
-        key = 1u;
-    }
-    uint frame = lighting_frame() + 1u;
-    uint mask = CASCADE_LEVEL0_CAP - 1u;
-    uint home = key & mask;
-    uint base = lighting_cascade_base() + 1u;
-    [[dont_unroll]] for (uint i = 0u; i < CASCADE_LEVEL0_PROBE; i++) {
-        uint word = base + ((home + i) & mask) * CASCADE_LEVEL0_STRIDE;
-        if (ckeys.key[word] != key || ckeys.key[word + 1u] != frame) {
-            continue;
-        }
-        if (ckeys.key[word + 2u] != uint(cell.x) || ckeys.key[word + 3u] != uint(cell.y)) {
-            continue;
-        }
-        if (ckeys.key[word + 4u] != uint(cell.z) || ckeys.key[word + 5u] != ring) {
-            continue;
-        }
-        return word;
-    }
-    return ~0u;
+uint lighting_cascade_find(ivec3 cell, uint level, uint axis) {
+    return lighting_cascade_find_in(
+        lighting_frame() & 1u, lighting_frame() + 1u, cell, level, axis);
 }
 
 vec4 lighting_cascade_record(uint word, vec3 pos, vec3 n) {
@@ -456,7 +611,7 @@ vec4 lighting_cascade_record(uint word, vec3 pos, vec3 n) {
         uintBitsToFloat(ckeys.key[word + 7u]),
         uintBitsToFloat(ckeys.key[word + 8u]));
     vec3 sn = lighting_unpack_normal(ckeys.key[word + 9u]);
-    float size = lighting_cascade_cell_size(ckeys.key[word + 5u]);
+    float size = lighting_cascade_l0_size(lighting_cascade_unpack_level(ckeys.key[word + 5u]));
     if (dot(sn, n) <= 0.0) {
         return vec4(0.0);
     }
@@ -470,22 +625,29 @@ vec4 lighting_cascade_record(uint word, vec3 pos, vec3 n) {
     return vec4(max(lighting_unpack_rgb9e5(ckeys.key[word + 10u]), vec3(0.0)), 1.0);
 }
 
-vec4 lighting_cascade_at(vec3 pos, vec3 n, uint ring) {
-    float size = lighting_cascade_cell_size(ring);
-    return lighting_cascade_record(lighting_cascade_find(ivec3(floor(pos / size)), ring), pos, n);
+vec4 lighting_cascade_at(vec3 pos, vec3 n, uint level) {
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(level);
+    ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+    return lighting_cascade_record(lighting_cascade_find(cell, level, axis), pos, n);
 }
 
-// This ring, blended with the next ring across the outer tenth. A refused
-// sample is skipped. The next ring out shows through, so one empty cell is
-// not black while a coarser ring has data.
+// This level, blended with the next coarser level across the outer tenth.
+// A refused sample is skipped. The next level out shows through, so one
+// empty cell is not black while a coarser cell has data.
 vec4 lighting_cascade_picture(vec3 pos, vec3 n) {
-    float cheb = lighting_cascade_cheb(pos);
-    uint ring = lighting_cascade_ring(cheb);
-    float blend = lighting_cascade_blend(cheb);
-    vec4 near = lighting_cascade_at(pos, n, ring);
+    uint level = lighting_cascade_l0_level(pos, n);
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(level);
+    ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+    vec3 centre = lighting_cascade_l0_centre(cell, size);
+    float blend = lighting_cascade_footprint_blend(lighting_cascade_want(centre, n_axis), size);
+    vec4 near = lighting_cascade_at(pos, n, level);
     vec4 far = vec4(0.0);
-    if (ring < CASCADE_RING_MAX) {
-        far = lighting_cascade_at(pos, n, ring + 1u);
+    if (level < CASCADE_L0_MAX) {
+        far = lighting_cascade_at(pos, n, level + 1u);
     }
     bool near_ok = near.w > LIGHTING_CACHE_HAS_W;
     bool far_ok = far.w > LIGHTING_CACHE_HAS_W;
@@ -500,7 +662,7 @@ vec4 lighting_cascade_picture(vec3 pos, vec3 n) {
     if (far_ok) {
         return far;
     }
-    [[dont_unroll]] for (uint up = ring + 2u; up <= CASCADE_RING_MAX; up++) {
+    [[dont_unroll]] for (uint up = level + 2u; up <= CASCADE_L0_MAX; up++) {
         vec4 coarser = lighting_cascade_at(pos, n, up);
         if (coarser.w > LIGHTING_CACHE_HAS_W) {
             return coarser;
@@ -512,22 +674,36 @@ vec4 lighting_cascade_picture(vec3 pos, vec3 n) {
 void lighting_cascade_publish(uint pixel, uvec2 p, vec3 pos, vec3 n) {
     // This pixel's merge, after the lattice fill. Writing the shared cell
     // from every pixel raced and painted it black on a camera turn. The
-    // picture loads this pixel's own word.
-    vec4 shown = lighting_cascade_merge(p, pos, n);
+    // picture loads this pixel's own word. The slots were written at insert;
+    // publish reads them so the size is the one insert chose, then writes
+    // the radiance the compose pass loads.
     uint at = lighting_cascade_pixel_at(pixel);
+    uint word = ckeys.key[at + 2u];
+    uint word_next = ckeys.key[at + 3u];
+    vec4 shown = lighting_cascade_merge(p, pos, n);
     ckeys.key[at] = lighting_pack_rgb9e5(max(shown.rgb, vec3(0.0)));
     ckeys.key[at + 1u] = shown.w > LIGHTING_CACHE_HAS_W ? lighting_frame() + 1u : 0u;
+    ckeys.key[at + 2u] = word;
+    ckeys.key[at + 3u] = word_next;
 }
 
-void lighting_cascade_insert(vec3 pos, vec3 n) {
-    float cheb = lighting_cascade_cheb(pos);
-    uint ring = lighting_cascade_ring(cheb);
-    uint word = lighting_cascade_insert_ring(pos, n, ring);
+void lighting_cascade_insert(uint pixel, vec3 pos, vec3 n) {
+    uint level = lighting_cascade_l0_level(pos, n);
+    uint axis = lighting_cascade_axis(n);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(level);
+    ivec3 cell = lighting_cascade_l0_cell(pos, n_axis, size);
+    vec3 centre = lighting_cascade_l0_centre(cell, size);
+    float want = lighting_cascade_want(centre, n_axis);
+    uint word = lighting_cascade_insert_level(pos, n, level);
     uint word_next = ~0u;
-    float blend = lighting_cascade_blend(cheb);
-    if (blend > 0.0 && ring < CASCADE_RING_MAX) {
-        word_next = lighting_cascade_insert_ring(pos, n, ring + 1u);
+    float blend = lighting_cascade_footprint_blend(want, size);
+    if (blend > 0.0 && level < CASCADE_L0_MAX) {
+        word_next = lighting_cascade_insert_level(pos, n, level + 1u);
     }
+    uint at = lighting_cascade_pixel_at(pixel);
+    ckeys.key[at + 2u] = word;
+    ckeys.key[at + 3u] = word_next;
     if (word == ~0u && word_next == ~0u) {
         return;
     }
