@@ -17,6 +17,13 @@ const float CASCADE_RING_NEAR = 1.0;
 const uint CASCADE_RING_MAX = 6u;
 const float CASCADE_OVERLAP = 0.1;
 const float CASCADE_PARENT_SCALE = 2.0;
+// Voxel debug view (lighting_cascade_debug_voxels). Floor and mix keep
+// hashed colours visible; ring dim and line mark distance rings.
+const float CASCADE_VOXEL_VIEW_FLOOR = 0.12;
+const float CASCADE_VOXEL_VIEW_MIX = 0.88;
+const float CASCADE_VOXEL_VIEW_RING_DIM = 0.08;
+const float CASCADE_VOXEL_VIEW_RING_LINE = 0.03;
+const float CASCADE_VOXEL_VIEW_LINE_MIX = 0.65;
 
 uint lighting_cascade_base() {
     return lighting_reach_base()
@@ -38,6 +45,30 @@ vec4 lighting_cascade_published(uint pixel) {
         return vec4(0.0);
     }
     return vec4(max(lighting_unpack_rgb9e5(ckeys.key[at]), vec3(0.0)), 1.0);
+}
+
+// Level-0 surface voxel projection. Same ring and cell as insert. Math only:
+// compose can call this. A hash walk here faults lavapipe.
+vec3 lighting_cascade_debug_voxels(vec3 pos) {
+    vec3 rel = abs(pos - scene.eye.xyz);
+    float cheb = max(rel.x, max(rel.y, rel.z));
+    float level = log2(max(cheb, CASCADE_RING_NEAR) / CASCADE_RING_NEAR);
+    uint ring = uint(clamp(floor(level), 0.0, float(CASCADE_RING_MAX)));
+    float size = CASCADE_PROJ * CASCADE_RING_NEAR * exp2(float(ring));
+    ivec3 cell = ivec3(floor(pos / size));
+    uint h = hash_cell3(cell, CASCADE_LEVEL0_SALT ^ ring);
+    vec3 col = vec3(
+        lighting_unit(h),
+        lighting_unit(lighting_hash(h ^ 0x9E3779B9u)),
+        lighting_unit(lighting_hash(h ^ 0x85EBCA6Bu))
+    );
+    col = mix(vec3(CASCADE_VOXEL_VIEW_FLOOR), col, CASCADE_VOXEL_VIEW_MIX);
+    col *= 1.0 - CASCADE_VOXEL_VIEW_RING_DIM * float(ring);
+    float frac = level - floor(level);
+    if (ring > 0u && frac < CASCADE_VOXEL_VIEW_RING_LINE) {
+        col = mix(col, vec3(1.0), CASCADE_VOXEL_VIEW_LINE_MIX);
+    }
+    return col;
 }
 
 #ifndef GENOS_COMPOSE_NO_WALK

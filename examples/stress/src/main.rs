@@ -78,7 +78,7 @@ use std::time::{Duration, Instant};
 
 use genos_debug::{png, Host};
 use genos_input::{character_controller, debug_keys, InputCode, InputSystem};
-use genos_render::{Renderer, ScreenLine, ScreenRect, World};
+use genos_render::{Renderer, ScreenLine, ScreenRect, ViewMode, World};
 use genos_scene::{
     look_direction, update, Actions, Camera, DebugSettings, EventLoopSettings, Floor, FogSettings,
     FpsCounterSettings, LightingPreset, LightingSettings, MenuSettings, ParticleSettings,
@@ -299,20 +299,18 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
 const LIGHT_STEPS: [usize; 4] = [5, 25, 50, 100];
 /// Panel ids. Each row's buttons count up from its base.
 const ID_SCALE: u32 = 300;
-const ID_SUN: u32 = 400;
+const ID_VIEW: u32 = 400;
 const ID_BOXES: u32 = 500;
 const ID_LAYOUT: u32 = 600;
 const ID_SKY: u32 = 700;
 const ID_OUT: u32 = 800;
 /// Sliders, one per knob.
 const ID_KNOB: u32 = 1000;
-const PANEL_KNOBS: [&str; 6] = [
+const PANEL_KNOBS: [&str; 4] = [
     "time_of_day",
     "sun_speed",
     "lights",
     "dynamic",
-    "unfilled",
-    "unfilled_tint",
 ];
 /// A hitch longer than this does not replay the missed time.
 const MAX_FRAME_SECONDS: f32 = 0.25;
@@ -1345,7 +1343,11 @@ fn run() -> Result<i32, String> {
                 &mut ui,
                 &panel_title(&stage, &fps),
                 &[
-                    panel_rows(&stage, &renderer.debug_settings(&stage.world.scene).out),
+                    panel_rows(
+                        &stage,
+                        &renderer.debug_settings(&stage.world.scene).out,
+                        tools.view_mode(),
+                    ),
                     knob_rows(&stage),
                 ]
                 .concat(),
@@ -1360,7 +1362,7 @@ fn run() -> Result<i32, String> {
             );
             for action in &ui_frame.actions {
                 match *action {
-                    Action::Press(id) => press(&mut stage, id),
+                    Action::Press(id) => press(&mut stage, &mut tools, id),
                     Action::Slide { id, value } => slide(&mut stage, id, value),
                     _ => {}
                 }
@@ -1839,7 +1841,7 @@ fn button(id: u32, text: String, selected: bool) -> PanelButton {
     PanelButton { id, text, selected }
 }
 
-fn panel_rows(stage: &Stage, out_dir: &str) -> Vec<PanelRow> {
+fn panel_rows(stage: &Stage, out_dir: &str, view: ViewMode) -> Vec<PanelRow> {
     vec![
         row(
             "Out",
@@ -1871,10 +1873,10 @@ fn panel_rows(stage: &Stage, out_dir: &str) -> Vec<PanelRow> {
             ],
         ),
         row(
-            "Sun",
+            "View",
             vec![
-                button(ID_SUN, "run".into(), !stage.sun_frozen),
-                button(ID_SUN + 1, "freeze".into(), stage.sun_frozen),
+                button(ID_VIEW, "lit".into(), view != ViewMode::Voxels),
+                button(ID_VIEW + 1, "voxels".into(), view == ViewMode::Voxels),
             ],
         ),
         row(
@@ -1894,7 +1896,7 @@ fn panel_rows(stage: &Stage, out_dir: &str) -> Vec<PanelRow> {
     ]
 }
 
-fn press(stage: &mut Stage, id: u32) {
+fn press(stage: &mut Stage, tools: &mut genos_debug::Tools, id: u32) {
     let pick = |base: u32, len: usize| {
         (base..base + len as u32)
             .contains(&id)
@@ -1902,8 +1904,12 @@ fn press(stage: &mut Stage, id: u32) {
     };
     if let Some(i) = pick(ID_SCALE, 2) {
         stage.set_scale([Scale::SMALL, Scale::BIG][i]);
-    } else if let Some(i) = pick(ID_SUN, 2) {
-        stage.sun_frozen = i == 1;
+    } else if let Some(i) = pick(ID_VIEW, 2) {
+        tools.set_view(if i == 1 {
+            ViewMode::Voxels
+        } else {
+            ViewMode::Full
+        });
     } else if let Some(i) = pick(ID_SKY, 2) {
         stage.sky_on = i == 0;
     } else if let Some(i) = pick(ID_BOXES, 2) {
