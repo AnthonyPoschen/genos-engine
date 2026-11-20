@@ -1577,6 +1577,11 @@ impl Renderer {
         self.gpu.lighting_level0_voxels()
     }
 
+    /// Level-0 voxels inserted and traced last frame. Waits for that frame.
+    pub fn lighting_level0_counts(&mut self) -> Result<(u32, u32), String> {
+        self.gpu.lighting_level0_counts()
+    }
+
     /// Fill scheduler work from the last frame: serial plan iterations, then
     /// the histogram dispatch's group count. Waits for that frame.
     pub fn lighting_fill_compact_work(&mut self) -> [u32; 2] {

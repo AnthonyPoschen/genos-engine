@@ -1,0 +1,247 @@
+#version 450
+// Level-0 merge and EMA. Each live voxel shades its 32 rays: a hit is
+// direct light plus the bounce stored at the hit, a miss is the parent SH
+// in that direction. The cosine-weighted sum is the voxel's value. A
+// one-frame EMA smooths against the same key from last frame. This
+// compile's only trace site is trace_occluded.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 32) in;
+#include "lighting_common.glsl"
+#include "lighting_cascade.glsl"
+
+shared vec3 sh_e;
+shared vec3 sh_axis;
+shared vec3 sh_c0;
+shared vec3 sh_cx;
+shared vec3 sh_cy;
+shared vec3 sh_cz;
+shared bool sh_ok;
+shared vec3 sh_sum[32];
+shared float sh_cos[32];
+
+const vec3 CASCADE_LUMA = vec3(0.2126, 0.7152, 0.0722);
+
+vec3 lighting_cascade_sh_eval(vec3 dir) {
+    if (!sh_ok) {
+        return has_sky() ? scene.sky.rgb : vec3(0.0);
+    }
+    vec3 d = dir - sh_axis;
+    return max(sh_e + (LIGHTING_SH_A1 * LIGHTING_SH_Y1) * (sh_cx * d.x + sh_cy * d.y + sh_cz * d.z), vec3(0.0));
+}
+
+void lighting_cascade_parent_fetch(vec3 pos, vec3 n, float child_size) {
+    sh_ok = false;
+    sh_e = vec3(0.0);
+    sh_axis = n;
+    sh_c0 = vec3(0.0);
+    sh_cx = vec3(0.0);
+    sh_cy = vec3(0.0);
+    sh_cz = vec3(0.0);
+    float size = child_size * CASCADE_PARENT_SCALE;
+    float plane = CASCADE_FOOTPRINT_K * max(length(pos - scene.eye.xyz), CASCADE_EPS);
+    vec3 base_p = pos / size - vec3(LIGHTING_CELL_HALF);
+    ivec3 base = ivec3(floor(base_p));
+    vec3 f = fract(base_p);
+    vec3 e = vec3(0.0);
+    vec3 c0 = vec3(0.0);
+    vec3 cx = vec3(0.0);
+    vec3 cy = vec3(0.0);
+    vec3 cz = vec3(0.0);
+    vec3 axis = vec3(0.0);
+    float wsum = 0.0;
+    [[dont_unroll]] for (uint i = 0u; i < 8u; i++) {
+        ivec3 o = ivec3(int(i & 1u), int((i >> 1u) & 1u), int((i >> 2u) & 1u));
+        vec3 wt = mix(1.0 - f, f, vec3(o));
+        float w = wt.x * wt.y * wt.z;
+        if (!(w > 0.0)) {
+            continue;
+        }
+        vec3 q = (vec3(base + o) + vec3(LIGHTING_CELL_HALF)) * size;
+        uint s = lighting_cache_find_sized(q, n, false, size, q);
+        vec4 g = lighting_cascade_gated(s, pos, n, plane);
+        if (!(g.w > LIGHTING_CACHE_HAS_W)) {
+            continue;
+        }
+        vec3 c0i;
+        vec3 cxi;
+        vec3 cyi;
+        vec3 czi;
+        lighting_sh_get(s, c0i, cxi, cyi, czi);
+        e += w * cache.v[3u * s + 2u].rgb;
+        c0 += w * c0i;
+        cx += w * cxi;
+        cy += w * cyi;
+        cz += w * czi;
+        axis += w * cache.v[3u * s + 1u].xyz;
+        wsum += w;
+    }
+    if (wsum > 0.0) {
+        sh_e = e / wsum;
+        sh_c0 = c0 / wsum;
+        sh_cx = cx / wsum;
+        sh_cy = cy / wsum;
+        sh_cz = cz / wsum;
+        sh_axis = normalize(axis);
+        if (dot(sh_axis, sh_axis) < 0.25) {
+            sh_axis = n;
+        }
+        sh_ok = true;
+    }
+}
+
+vec3 lighting_cascade_direct_at(vec3 origin, vec3 n) {
+    if (scene_inside(origin)) {
+        return vec3(0.0);
+    }
+    LampList list = lamps_at(origin);
+    uint count = lamp_list_size(list);
+    vec3 e = vec3(0.0);
+    bool shadows_on = (gstats.ctrl_bits & 2u) != 0u;
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        if (gstats.ctrl_max_lights != 0u && k >= gstats.ctrl_max_lights) {
+            break;
+        }
+        Lamp lamp = lamp_list_get(list, k);
+        vec3 target;
+        vec3 light = lamp_light(lamp, origin, n, false, target);
+        if (light.r + light.g + light.b <= 0.0) {
+            continue;
+        }
+        bool lit = true;
+        if (shadows_on) {
+            uint li = lamp_list_index(list, k);
+            float sc = lighting_world_mode() == 3u ? lighting_shadow_get(origin, n, li) : -1.0;
+            if (sc >= 0.0) {
+                lit = sc > 0.5;
+            } else {
+                lit = !trace_occluded(origin, target);
+            }
+        }
+        if (lit) {
+            e += light;
+        }
+    }
+    return e;
+}
+
+float lighting_cascade_ema_w(vec3 cur, vec3 prior, vec3 pos) {
+    float lc = dot(cur, CASCADE_LUMA);
+    float lp = dot(prior, CASCADE_LUMA);
+    float spread = max(abs(lc), CASCADE_EPS) * inversesqrt(float(CASCADE_L0_RAYS));
+    float gap = abs(lc - lp);
+    float w = 0.5;
+    w = max(w, clamp(gap / max(3.0 * spread, CASCADE_EPS), 0.5, 1.0));
+    float delta = lighting_lamp_delta(pos, lighting_frame());
+    if (delta > 0.0) {
+        w = max(w, clamp(0.5 + 0.5 * clamp(delta, 0.0, 1.0), 0.5, 1.0));
+    }
+    vec4 head = work.v[lighting_change_at()];
+    uint changes = min(uint(head.x), LIGHTING_CHANGES);
+    [[dont_unroll]] for (uint j = 0u; j < changes; j++) {
+        vec4 b = work.v[lighting_change_at() + LIGHTING_CHANGE_HEAD + j];
+        vec3 d = pos - b.xyz;
+        if (dot(d, d) < b.w * b.w) {
+            w = max(w, 0.85);
+        }
+    }
+    return clamp(w, 0.5, 1.0);
+}
+
+void main() {
+    if (!lighting_gi_on()) {
+        return;
+    }
+    uint slot = gl_WorkGroupID.x;
+    uint k = gl_LocalInvocationID.x;
+    if (slot >= CASCADE_LEVEL0_CAP || k >= CASCADE_L0_RAYS) {
+        return;
+    }
+    uint word = lighting_cascade_table_base(lighting_frame() & 1u)
+        + slot * CASCADE_LEVEL0_STRIDE;
+    uint frame = lighting_frame() + 1u;
+    bool live = ckeys.key[word] != 0u && ckeys.key[word + 1u] == frame;
+    vec3 pos = vec3(0.0);
+    vec3 n = vec3(0.0, 1.0, 0.0);
+    float size = CASCADE_GRID_BASE;
+    uint level = 0u;
+    uint axis = 0u;
+    if (live) {
+        pos = vec3(
+            uintBitsToFloat(ckeys.key[word + 6u]),
+            uintBitsToFloat(ckeys.key[word + 7u]),
+            uintBitsToFloat(ckeys.key[word + 8u]));
+        n = lighting_unpack_normal(ckeys.key[word + 9u]);
+        uint packed = ckeys.key[word + 5u];
+        level = lighting_cascade_unpack_level(packed);
+        axis = lighting_cascade_unpack_axis(packed);
+        size = lighting_cascade_l0_size(level);
+    }
+    if (k == 0u && live) {
+        lighting_cascade_parent_fetch(pos, n, size);
+    }
+    barrier();
+    memoryBarrierShared();
+    vec3 li = vec3(0.0);
+    float cw = 0.0;
+    if (live) {
+        uint key = ckeys.key[word];
+        vec3 dir = lighting_dir(key, n, k, CASCADE_L0_RAYS);
+        float ang = float(lighting_frame()) * CASCADE_GOLDEN;
+        float ca = cos(ang);
+        float sa = sin(ang);
+        dir = dir * ca + cross(n, dir) * sa + n * dot(n, dir) * (1.0 - ca);
+        float nd = dot(dir, n);
+        if (nd <= 0.0) {
+            dir = normalize(dir - n * nd + n * CASCADE_EPS);
+            nd = max(dot(dir, n), 0.0);
+        }
+        uint at = lighting_cascade_hit_at(slot, k);
+        float t = uintBitsToFloat(ckeys.key[at]);
+        if (t < 0.0) {
+            li = lighting_cascade_sh_eval(dir);
+        } else {
+            vec3 hp = pos + n * 0.02 + dir * t;
+            vec3 hn = lighting_unpack_normal(ckeys.key[at + 1u]);
+            vec3 reflectance = unpackUnorm4x8(ckeys.key[at + 2u]).rgb * (1.0 / LIGHTING_PI);
+            vec3 glow = max(lighting_unpack_rgb9e5(ckeys.key[at + 3u]), vec3(0.0));
+            vec3 bounce = lighting_cache_irradiance_at(hp, hn, t);
+            vec3 e = lighting_cascade_direct_at(hp + hn * 0.02, hn);
+            li = reflectance * (e + bounce) + glow;
+        }
+        cw = max(nd, 0.0);
+    }
+    sh_sum[k] = li * cw;
+    sh_cos[k] = cw;
+    barrier();
+    memoryBarrierShared();
+    if (!live || k != 0u) {
+        return;
+    }
+    vec3 sum = vec3(0.0);
+    [[dont_unroll]] for (uint i = 0u; i < CASCADE_L0_RAYS; i++) {
+        sum += sh_sum[i];
+    }
+    // Uniform-hemisphere estimator for irradiance: 2π / N Σ L cosθ.
+    vec3 cur = (LIGHTING_TAU / float(CASCADE_L0_RAYS)) * sum;
+    cur = max(cur, vec3(0.0));
+    ivec3 cell = ivec3(
+        int(ckeys.key[word + 2u]),
+        int(ckeys.key[word + 3u]),
+        int(ckeys.key[word + 4u]));
+    uint prev = lighting_cascade_find_in(
+        (lighting_frame() + 1u) & 1u, lighting_frame(), cell, level, axis);
+    vec3 shown = cur;
+    if (prev != ~0u) {
+        vec3 pn = lighting_unpack_normal(ckeys.key[prev + 9u]);
+        uint prev_level = lighting_cascade_unpack_level(ckeys.key[prev + 5u]);
+        float pw = uintBitsToFloat(ckeys.key[prev + 11u]);
+        if (dot(pn, n) > 0.0 && prev_level == level && pw > LIGHTING_CACHE_HAS_W) {
+            vec3 prior = max(lighting_unpack_rgb9e5(ckeys.key[prev + 10u]), vec3(0.0));
+            float nw = lighting_cascade_ema_w(cur, prior, pos);
+            shown = mix(prior, cur, nw);
+        }
+    }
+    ckeys.key[word + 10u] = lighting_pack_rgb9e5(shown);
+    ckeys.key[word + 11u] = floatBitsToUint(1.0);
+    atomicAdd(ckeys.key[lighting_cascade_counts_at() + 1u], 1u);
+}
