@@ -17,6 +17,13 @@ const float CASCADE_RING_NEAR = 1.0;
 const uint CASCADE_RING_MAX = 6u;
 const float CASCADE_OVERLAP = 0.1;
 const float CASCADE_PARENT_SCALE = 2.0;
+// Voxel debug view (lighting_cascade_debug_voxels). Floor and mix keep
+// hashed colours visible; ring dim and line mark distance rings.
+const float CASCADE_VOXEL_VIEW_FLOOR = 0.12;
+const float CASCADE_VOXEL_VIEW_MIX = 0.88;
+const float CASCADE_VOXEL_VIEW_RING_DIM = 0.08;
+const float CASCADE_VOXEL_VIEW_RING_LINE = 0.03;
+const float CASCADE_VOXEL_VIEW_LINE_MIX = 0.65;
 
 uint lighting_cascade_base() {
     return lighting_reach_base()
@@ -55,11 +62,11 @@ vec3 lighting_cascade_debug_voxels(vec3 pos) {
         lighting_unit(lighting_hash(h ^ 0x9E3779B9u)),
         lighting_unit(lighting_hash(h ^ 0x85EBCA6Bu))
     );
-    col = mix(vec3(0.12), col, 0.88);
-    col *= 1.0 - 0.08 * float(ring);
+    col = mix(vec3(CASCADE_VOXEL_VIEW_FLOOR), col, CASCADE_VOXEL_VIEW_MIX);
+    col *= 1.0 - CASCADE_VOXEL_VIEW_RING_DIM * float(ring);
     float frac = level - floor(level);
-    if (ring > 0u && frac < 0.03) {
-        col = mix(col, vec3(1.0), 0.65);
+    if (ring > 0u && frac < CASCADE_VOXEL_VIEW_RING_LINE) {
+        col = mix(col, vec3(1.0), CASCADE_VOXEL_VIEW_LINE_MIX);
     }
     return col;
 }
