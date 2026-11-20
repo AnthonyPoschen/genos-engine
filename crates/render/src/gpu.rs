@@ -3280,7 +3280,7 @@ impl Gpu {
 
     fn create_pipeline_cache(&mut self) -> Result<(), String> {
         let path = pipeline_cache_path();
-        let bytes = path.as_ref().and_then(|p| std::fs::read(p).ok());
+        let bytes = std::fs::read(&path).ok();
         let initial_len = bytes.as_ref().map_or(0, Vec::len);
         #[repr(C)]
         struct Info {
@@ -3310,17 +3310,13 @@ impl Gpu {
                 "pipeline cache",
             )?;
         }
-        match (path.as_ref(), initial_len) {
-            (Some(path), 0) => {
-                eprintln!("genos-startup pipeline cache: new {}", path.display());
-            }
-            (Some(path), n) => {
-                eprintln!(
-                    "genos-startup pipeline cache: loaded {n} B from {}",
-                    path.display()
-                );
-            }
-            (None, _) => eprintln!("genos-startup pipeline cache: disabled"),
+        if initial_len == 0 {
+            eprintln!("genos-startup pipeline cache: new {}", path.display());
+        } else {
+            eprintln!(
+                "genos-startup pipeline cache: loaded {initial_len} B from {}",
+                path.display()
+            );
         }
         Ok(())
     }
@@ -3329,9 +3325,7 @@ impl Gpu {
         if self.pipeline_cache.is_null() || self.device.is_null() {
             return;
         }
-        let Some(path) = pipeline_cache_path() else {
-            return;
-        };
+        let path = pipeline_cache_path();
         let mut size = 0usize;
         unsafe {
             if (self.fns.get_pipeline_cache_data)(
@@ -10912,22 +10906,12 @@ fn note_startup(name: &str, start: Instant) {
     );
 }
 
-/// `GENOS_PIPELINE_CACHE` is the file, or `0`/`off` to disable. Otherwise
-/// `$XDG_CACHE_HOME/genos/vk-pipeline-cache.bin` when that variable is set,
-/// or `./genos-debug/pipeline-cache/vk-pipeline-cache.bin`.
-fn pipeline_cache_path() -> Option<PathBuf> {
-    match std::env::var_os("GENOS_PIPELINE_CACHE") {
-        Some(val) if val.is_empty() || val == "0" || val == "off" => None,
-        Some(val) => Some(PathBuf::from(val)),
-        None => match std::env::var_os("XDG_CACHE_HOME") {
-            Some(base) => Some(PathBuf::from(base).join("genos").join("vk-pipeline-cache.bin")),
-            None => Some(
-                PathBuf::from("genos-debug")
-                    .join("pipeline-cache")
-                    .join("vk-pipeline-cache.bin"),
-            ),
-        },
-    }
+/// Driver pipeline cache file. Lives under ./genos-debug so the renderer
+/// does not read the environment to choose a path.
+fn pipeline_cache_path() -> PathBuf {
+    PathBuf::from("genos-debug")
+        .join("pipeline-cache")
+        .join("vk-pipeline-cache.bin")
 }
 
 fn teardown_phase(name: &str, f: impl FnOnce()) {
