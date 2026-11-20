@@ -29,6 +29,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "light",
             "Edit a light: add (position, color, intensity), or index with on, color, intensity, position, path [[x,y,z],..] + frames (+ loop), remove, reset, solo; solo_off clears a solo and does not need an index.",
         ),
+        spec("level0_voxels", "Level-0 cascade voxels within radius (default 0.75 m) of around [x,y,z]: cell, level, axis, position, radiance, filled ring slots, and the four parent cells at twice the size (found, position, weight, radiance). Reply only; writes no file."),
         spec("objects", "Every solid: index, position, yaw, size, colour, edited."),
         spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), roughness and metallic (0-1, reference trace only until the specular pass lands), reset. Unknown fields are an error."),
         spec("camera", "Set position [x,y,z], yaw, pitch, look_at [x,y,z], or path [[x,y,z,yaw,pitch],..] over frames. Returns the pose."),

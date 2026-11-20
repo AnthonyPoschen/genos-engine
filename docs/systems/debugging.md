@@ -630,6 +630,9 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
 - The command catalogue already answers status, knobs, lights, objects, camera,
   time, view, capture, diff, flicker, compare (with a heatmap), and timing.
   `Tools::overlay`, `profile_overlay`, and `inspect_region` draw for a person.
+  `level0_voxels` (around [x,y,z], radius) replies with the level-0 cascade
+  voxels near a point and their four parent cells: position, radiance, filled
+  ring slots, and whether each parent was found and filled. It writes no file.
   Lighting's dump, counters, isolate toggles, and pop checks are the reference
   set in [the lighting debug standard](lighting/debug-standard.md). A dump and
   a snapshot plus restore for every other subsystem are not shared commands yet.

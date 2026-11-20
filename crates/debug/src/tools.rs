@@ -1519,6 +1519,11 @@ impl Tools {
                 }))
             }
             "timing" => reply(self.timing_value(args.u32("frames")?.unwrap_or(60) as usize)),
+            "level0_voxels" => {
+                let around = args.vec3("around")?.ok_or("level0_voxels needs around [x,y,z]")?;
+                let radius = args.f32("radius")?.unwrap_or(0.75);
+                reply(level0_voxels_value(ctx.renderer, [around.x, around.y, around.z], radius)?)
+            }
             "gi_metrics" => {
                 if !ctx.renderer.gi_metrics_enabled() {
                     return Err(crate::gi_metrics::disabled_error());
@@ -1955,6 +1960,57 @@ fn yaw_pitch(d: Vec3) -> (f32, f32) {
     let pitch = (d.y / len).clamp(-1.0, 1.0).asin();
     let yaw = d.x.atan2(-d.z);
     (yaw, pitch)
+}
+
+/// Level-0 voxels within `radius` of `around`, each with its four parent
+/// cells at twice its size on the voxel's axis plane.
+fn level0_voxels_value(renderer: &mut Renderer, around: [f32; 3], radius: f32) -> Result<Value, String> {
+    let voxels = renderer.lighting_level0_voxels()?;
+    let near: Vec<_> = voxels
+        .into_iter()
+        .filter(|v| {
+            let d = [v.pos[0] - around[0], v.pos[1] - around[1], v.pos[2] - around[2]];
+            d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius
+        })
+        .collect();
+    let mut items = Vec::with_capacity(near.len());
+    for v in &near {
+        let ax = (v.axis >> 1) as usize;
+        let mut normal = [0.0f32; 3];
+        normal[ax] = if v.axis & 1 == 0 { 1.0 } else { -1.0 };
+        let size = 0.0625 * 2f32.powi(v.level as i32 + 1);
+        let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
+        let queries: Vec<_> = (0..4)
+            .map(|i| {
+                let mut q = v.pos;
+                q[a1] = ((v.pos[a1] / size - 0.5).floor() + (i & 1) as f32 + 0.5) * size;
+                q[a2] = ((v.pos[a2] / size - 0.5).floor() + ((i >> 1) & 1) as f32 + 0.5) * size;
+                genos_render::CacheQuery { position: q, normal, size }
+            })
+            .collect();
+        let cells = renderer.read_cache_cells(&queries)?;
+        let parents = cells
+            .iter()
+            .map(|c| {
+                obj(vec![
+                    ("found", Value::Bool(c.hit.slot.is_some())),
+                    ("position", vec3(c.position)),
+                    ("weight", num(f64::from(c.weight))),
+                    ("radiance", vec3(c.radiance)),
+                ])
+            })
+            .collect();
+        items.push(obj(vec![
+            ("cell", list(v.cell.iter().map(|c| num(f64::from(*c))).collect())),
+            ("level", num(f64::from(v.level))),
+            ("axis", num(f64::from(v.axis))),
+            ("position", vec3(v.pos)),
+            ("radiance", vec3(v.radiance)),
+            ("slots", num(f64::from(v.weight))),
+            ("parents", list(parents)),
+        ]));
+    }
+    Ok(obj(vec![("count", num(near.len() as f64)), ("voxels", list(items))]))
 }
 
 fn camera_value(c: &Camera) -> Value {
