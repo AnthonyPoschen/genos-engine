@@ -359,19 +359,20 @@ float cascade_lamp_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp
 #endif
 
 // Pixel exact-shadow mean, two frames. Two vec4s a slot: mean.rgb and count,
-// then depth, packed normal, the unshadowed sum, and a short relative
-// disagreement. The shade writes this pixel's current slot and reads the
+// then depth, packed normal, the unshadowed sum, and the short mean. The shade writes this pixel's current slot and reads the
 // previous frame at the reprojected pixel (lamp_pick_history_pixel, then
 // the same 2% / 5 cm / 0.9 tolerances as lamp_pick_reproject_at). A failed
 // reprojection is a new surface and starts from the fresh sample. A
 // visibility flip is the penumbra and does not reset. Invalid data does: a
 // bad surface, a sum that appears or vanishes, or a non-finite sample with
 // nothing stored. The count stops growing at RESTIR_MEAN_CAP. One sample
-// still folds in, so a later shadow is not frozen. A short disagreement
-// past AREA_MOVE shortens the count by that fraction.
+// still folds in, so a later shadow is not frozen. A short mean of the
+// sample (about four frames) that drifts from the long mean by more than
+// AREA_MOVE of the peak shortens the count by that fraction: a moving
+// shadow edge (the sun, a box) is a drift, a still penumbra is noise.
 const vec3 AREA_LUMA = vec3(0.2126, 0.7152, 0.0722);
 const float AREA_SHORT = 0.25;
-const float AREA_MOVE = 0.75;
+const float AREA_MOVE = 0.5;
 const float AREA_FLOOR = 8.0;
 layout(std430, set = 0, binding = 20) buffer AreaMean {
     vec4 v[];
@@ -447,12 +448,16 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
     if (!now_on && !stored_ok) {
         return vec3(0.0);
     }
-    float peak = max(max(open, dot(max(mean, vec3(0.0)), AREA_LUMA)), DISC_EPS);
-    float rel = dot(abs(sample_rgb - mean), AREA_LUMA) / peak;
-    float short_rel = reset ? rel : mix(geo.w, rel, AREA_SHORT);
+    vec3 lit_mean = max(mean, vec3(0.0));
+    vec3 lit_sample = max(sample_rgb, vec3(0.0));
+    float long_sum = lit_mean.r + lit_mean.g + lit_mean.b;
+    float sample_sum = lit_sample.r + lit_sample.g + lit_sample.b;
+    float peak = max(max(open, long_sum), DISC_EPS);
+    float short_mean = reset || !(geo.w == geo.w) ? sample_sum : mix(geo.w, sample_sum, AREA_SHORT);
+    float drift = abs(short_mean - long_sum) / peak;
     bool capped = !reset && count >= float(RESTIR_MEAN_CAP);
-    if (capped && short_rel > AREA_MOVE) {
-        count = max(count * (1.0 - short_rel), AREA_FLOOR);
+    if (!reset && drift > AREA_MOVE && count > AREA_FLOOR) {
+        count = max(count * (1.0 - min(drift, 1.0)), AREA_FLOOR);
         capped = false;
     }
     if (capped) {
@@ -462,7 +467,7 @@ vec3 area_history(uint idx, vec3 pos, vec3 n, vec3 sample_rgb, float open) {
         mean += (sample_rgb - mean) / count;
     }
     area_mean.v[out_base] = vec4(mean, count);
-    area_mean.v[out_base + 1u] = vec4(z, uintBitsToFloat(packed), open, short_rel);
+    area_mean.v[out_base + 1u] = vec4(z, uintBitsToFloat(packed), open, short_mean);
     return mean;
 }
 
