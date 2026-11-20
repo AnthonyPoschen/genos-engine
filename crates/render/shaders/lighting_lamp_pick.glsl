@@ -195,15 +195,13 @@ float lamp_pick_depth(vec3 pos) {
     return dot(pos - scene.eye.xyz, scene.view_forward.xyz);
 }
 
-// Motion vector into the previous frame. The returned pixel is in bounds.
-// Depth (2% and 5 cm) and normal (dot > 0.9) rejection use the stored geo.
-// A mover bound does not reject on its own. GI off has no last camera.
-// `only_px` of ~0u accepts any in-bounds pixel. Any other value returns
-// before the geo load when the pixel is not that one, so a one-slot mean
-// does not read a neighbour this dispatch is writing.
-bool lamp_pick_reproject_at(vec3 pos, vec3 nrm, uint only_px, out uint hist_pixel, out float z_now) {
+// Previous-frame pixel for `pos`. Depth is along the last camera. No geo
+// load, so a caller can test its own history. GI off, a missing last
+// camera, a point behind that camera, or a pixel off the previous frame
+// all fail.
+bool lamp_pick_history_pixel(vec3 pos, out uint hist_pixel, out float z_prev) {
     hist_pixel = 0u;
-    z_now = 0.0;
+    z_prev = 0.0;
     if (!lighting_gi_on()) {
         return false;
     }
@@ -221,7 +219,7 @@ bool lamp_pick_reproject_at(vec3 pos, vec3 nrm, uint only_px, out uint hist_pixe
     }
     vec3 rel = pos - eye.xyz;
     float z = dot(rel, fwd);
-    z_now = z;
+    z_prev = z;
     if (z <= 1.0e-3) {
         return false;
     }
@@ -231,6 +229,21 @@ bool lamp_pick_reproject_at(vec3 pos, vec3 nrm, uint only_px, out uint hist_pixe
         return false;
     }
     hist_pixel = uint(floor(px.y)) * pc.dims.x + uint(floor(px.x));
+    return true;
+}
+
+// Motion vector into the previous frame. The returned pixel is in bounds.
+// Depth (2% and 5 cm) and normal (dot > 0.9) rejection use the stored geo.
+// A mover bound does not reject on its own. GI off has no last camera.
+// `only_px` of ~0u accepts any in-bounds pixel. Any other value returns
+// before the geo load when the pixel is not that one, so a one-slot mean
+// does not read a neighbour this dispatch is writing.
+bool lamp_pick_reproject_at(vec3 pos, vec3 nrm, uint only_px, out uint hist_pixel, out float z_now) {
+    hist_pixel = 0u;
+    z_now = 0.0;
+    if (!lamp_pick_history_pixel(pos, hist_pixel, z_now)) {
+        return false;
+    }
     if (only_px != ~0u && hist_pixel != only_px) {
         return false;
     }
@@ -239,8 +252,8 @@ bool lamp_pick_reproject_at(vec3 pos, vec3 nrm, uint only_px, out uint hist_pixe
     if (!(z_prev > 0.0)) {
         return false;
     }
-    float gap = abs(z - z_prev);
-    if (gap / z > LAMP_PICK_DEPTH_REL && gap > LAMP_PICK_DEPTH_ABS) {
+    float gap = abs(z_now - z_prev);
+    if (gap / z_now > LAMP_PICK_DEPTH_REL && gap > LAMP_PICK_DEPTH_ABS) {
         return false;
     }
     vec3 n_prev = lighting_unpack_normal(geo.y);
