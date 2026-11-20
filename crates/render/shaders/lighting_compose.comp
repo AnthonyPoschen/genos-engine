@@ -127,7 +127,7 @@ void main() {
         n = -n;
     }
     // Debug view (debug_view.rs ViewMode): 0 full, 1 direct, 2 bounce, 3 albedo,
-    // 4 normal, 5 depth, 6 light, 7 texels, 8 variance, 9 path.
+    // 4 normal, 5 depth, 6 light, 7 texels, 8 variance, 9 path, 10 voxels.
     uint mode = scene.grid_at.w & 255u;
     vec3 shown;
     if (mode == 3u || mode == 4u || mode == 5u) {
@@ -136,6 +136,15 @@ void main() {
         outc.px[index] = pack_rgb(shown);
         return;
     }
+#ifndef GENOS_COMPOSE_MAINT
+    if (mode == 10u) {
+        // Level-0 surface voxels (debug_view.rs ViewMode::Voxels). No dither:
+        // the colour is the cell and ring hash, with a line at each ring start.
+        shown = lighting_cascade_debug_voxels(pos);
+        outc.px[index] = pack_rgb(shown);
+        return;
+    }
+#endif
     if (mode == 8u) {
         // Short-term relative standard deviation (debug_view.rs ViewMode::Variance).
         // Missing or unallocated entries are grey. Quiet is blue, noisy is red.

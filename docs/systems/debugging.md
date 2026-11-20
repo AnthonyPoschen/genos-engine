@@ -65,7 +65,7 @@ that system's features. The agent rubric scores this.
   - `knobs.rs`: named knobs (`Knob`).
   - `script.rs`: the Rhai runner and its report.
 - `crates/render/src/debug_view.rs`: view modes (full, direct, bounce, albedo,
-  normal, depth, light, texels) and `lamp_report`.
+  normal, depth, light, texels, variance, path, voxels) and `lamp_report`.
 - `crates/render/src/trace.rs`: the CPU surfaces and direct light the reference uses.
 - `examples/stress/src/knobs.rs`: the stress knobs (time of day, sun, lights, ...).
 - `examples/stress/scripts/*.rhai`: regression scripts. `reference.rhai` holds noon
@@ -293,7 +293,9 @@ replaced by a later one.
 
 `full`, `direct` (lamps and sun, shadowed), `bounce` (indirect only), `nobounce`
 (the same as `direct`), `albedo`, `normal`, `depth`, `light:I` (one lamp and its
-shadow), `texels` (the surface cache texel each pixel reads, dim under 4 sets). The
+shadow), `texels` (the surface cache texel each pixel reads, dim under 4 sets),
+`variance`, `path`, `voxels` (level-0 surface voxel projection: each pixel is a
+hash of the cell and ring it maps to, with a bright line at each ring start). The
 v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
 
 ## Ground truth
