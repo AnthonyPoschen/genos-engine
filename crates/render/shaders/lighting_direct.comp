@@ -33,6 +33,9 @@ const float RESTIR_TAIL_EPS = 1.0e-6;
 const uint CASCADE_DIRECT_AT = 164032u;
 const uint CASCADE_DIRECT_CAP = 16384u;
 const float CASCADE_LAMP_FINE = 0.25;
+// Visibility means. 4096 frames is a stuck shadow on a moving lamp. 32 lets a
+// still penumbra settle and a shortened count catch a move in a few frames.
+const float CASCADE_VIS_CAP = 32.0;
 // The shade sets this before a tail read. The helpers below are only
 // called for a restir pixel, and the load has to sit under that test.
 bool restir_pix = false;
@@ -281,14 +284,9 @@ float cascade_lamp_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp
     float size = CASCADE_LAMP_FINE * exp2(float(bucket));
     ivec3 cell = ivec3(floor(origin / max(size, 0.25)));
     uint axis = lighting_pack_normal(n);
-    // The lamp pose is part of the key. A move inside the same shell must not
-    // keep the old visibility mean: after RESTIR_MEAN_CAP that mean moves at
-    // one sample in 4096. A new pose starts a new mean.
-    uint salt = bucket * 16u + lamp_i * 131u + axis * 4096u + 0xC35Cu;
-    salt ^= floatBitsToUint(lamp.pos.x);
-    salt ^= lighting_hash(floatBitsToUint(lamp.pos.y));
-    salt ^= lighting_hash(floatBitsToUint(lamp.pos.z));
-    uint key = hash_cell3(cell, salt);
+    // The key stays on the cell, the shell, and the lamp. A move does not
+    // start a new mean. It shortens the count below.
+    uint key = hash_cell3(cell, bucket * 16u + lamp_i * 131u + axis * 4096u + 0xC35Cu);
     if (key == 0u) {
         key = 1u;
     }
@@ -300,6 +298,34 @@ float cascade_lamp_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp
     if (frame > 0u && restir_words[prev_at] == key && restir_words[prev_at + 1u] + 1u == frame) {
         vis = uintBitsToFloat(restir_words[prev_at + 2u]);
     }
+    // Shell cell, metres. A move of that size keeps half the count. A small
+    // move keeps most. A move of many cells keeps little. The old mean stays;
+    // only a missing slot starts over.
+    float shell = CASCADE_LAMP_FINE * exp2(float(bucket));
+    float keep = 1.0;
+    if (restir_words[39u] != 0u) {
+        uint nlamps = restir_words[0u];
+        uint base = restir_words[1u];
+        uint prev_base = restir_words[37u];
+        uint bits_at = restir_words[38u];
+        [[dont_unroll]] for (uint i = 0u; i < nlamps; i++) {
+            if (restir_words[base + i * 8u + 7u] != lamp_i) {
+                continue;
+            }
+            uint bits = restir_words[bits_at + (i >> 5u)];
+            if (((bits >> (i & 31u)) & 1u) == 0u) {
+                break;
+            }
+            uint pat = prev_base + i * 8u;
+            vec3 was = vec3(
+                uintBitsToFloat(restir_words[pat]),
+                uintBitsToFloat(restir_words[pat + 1u]),
+                uintBitsToFloat(restir_words[pat + 2u]));
+            float moved = length(lamp.pos.xyz - was);
+            keep = shell / (shell + moved);
+            break;
+        }
+    }
     uint seen = atomicExchange(restir_words[at + 1u], frame);
     if (seen != frame || restir_words[at] != key) {
         float sample_vis = cascade_disc_vis(lamp, origin, n, two_sided, lamp_i, cell);
@@ -308,7 +334,7 @@ float cascade_lamp_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp
         if (vis >= 0.0) {
             float ncount = uintBitsToFloat(restir_words[prev_at + 3u]);
             if (ncount >= 1.0) {
-                count = min(ncount, float(RESTIR_MEAN_CAP) - 1.0) + 1.0;
+                count = min(ncount, CASCADE_VIS_CAP - 1.0) * keep + 1.0;
                 mean = vis + (sample_vis - vis) / count;
             }
         }
