@@ -651,6 +651,7 @@ Lamp lamp_list_get(LampList list, uint k) {
 // A unit white lamp 7 m above a white painted floor stays near 0.37.
 const float LAMP_UNIT = 72.0;
 // Radius of a lamp bulb. Outside it a lamp falls off with the inverse square.
+// The pixel exact shadow uses the same radius as the lamp's disc.
 const float LAMP_RADIUS = 0.1;
 
 // Light a lamp brings to a face at origin before any shadow test (zero out of its
