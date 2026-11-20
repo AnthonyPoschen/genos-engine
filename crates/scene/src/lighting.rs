@@ -851,23 +851,27 @@ pub struct LightingSettings {
     /// Weighted lamp picking for hits and for the noise-gate sample.
     /// Production screen pixels use [`Self::restir_di`].
     pub lamp_pick: LampPickSettings,
-    /// Screen-pixel ReSTIR DI. On in every preset. Off is the labelled exact
-    /// sum for a pixel mode that used to sample. Mode off already sums.
+    /// Screen-pixel direct. On in every preset: the sun and the brightest near
+    /// lamp keep a disc ray, and every other near lamp comes from the cascade
+    /// visibility table. Off is the labelled exact sum.
     pub restir_di: bool,
-    /// Spatial reservoirs merged per pixel. 0 skips the spatial pass. 1..=16.
+    /// Deprecated. The spatial pass is deleted. The value still parses and logs
+    /// once that it no longer dispatches. 0..=16.
     pub restir_spatial_neighbors: u32,
-    /// Chebyshev radius of that window, in reservoir pixels. 0..=8.
+    /// Deprecated. The spatial pass is deleted. The value still parses and logs
+    /// once that it no longer dispatches. 0..=8.
     pub restir_spatial_radius: u32,
-    /// Screen pixels along one edge of a reservoir cell. 1 is one reservoir
-    /// per pixel. 2 is one reservoir per 2×2. Each screen pixel still traces
-    /// its own shadow ray.
+    /// Deprecated. The reservoir grid is deleted. The value still parses and
+    /// logs once that it no longer dispatches. 1..=4.
     pub restir_resolution_scale: u32,
-    /// Initial candidates per reservoir. 1..=32. The header word the shader reads.
+    /// Deprecated. The initial pass is deleted. The value still parses and logs
+    /// once that it no longer dispatches. 1..=32.
     pub restir_candidates: u32,
-    /// 1 shades odd reservoir pixels with the even neighbour's spatial sample.
+    /// Deprecated. The spatial pass is deleted. The value still parses and logs
+    /// once that it no longer dispatches. 0 or 1.
     pub restir_spatial_checkerboard: u32,
-    /// 1 keeps initial and temporal as two dispatches so each GPU stamp is one
-    /// pass. 0 runs temporal in the initial invocation.
+    /// Deprecated. The initial and temporal dispatches are deleted. The value
+    /// still parses and logs once that it no longer dispatches. 0 or 1.
     pub restir_split_passes: u32,
     /// Experiment and debug knobs. Defaults in every preset.
     pub experiments: LightingExperimentSettings,
@@ -2121,12 +2125,30 @@ impl LightingSettings {
                 }
             }
             "restir_di" => self.restir_di = on(value)?,
-            "restir_spatial_neighbors" => self.restir_spatial_neighbors = num_u32(value)?,
-            "restir_spatial_radius" => self.restir_spatial_radius = num_u32(value)?,
-            "restir_resolution_scale" => self.restir_resolution_scale = num_u32(value)?,
-            "restir_candidates" => self.restir_candidates = num_u32(value)?,
-            "restir_spatial_checkerboard" => self.restir_spatial_checkerboard = num_u32(value)?,
-            "restir_split_passes" => self.restir_split_passes = num_u32(value)?,
+            "restir_spatial_neighbors" => {
+                warn_restir_pass_retired("restir_spatial_neighbors");
+                self.restir_spatial_neighbors = num_u32(value)?;
+            }
+            "restir_spatial_radius" => {
+                warn_restir_pass_retired("restir_spatial_radius");
+                self.restir_spatial_radius = num_u32(value)?;
+            }
+            "restir_resolution_scale" => {
+                warn_restir_pass_retired("restir_resolution_scale");
+                self.restir_resolution_scale = num_u32(value)?;
+            }
+            "restir_candidates" => {
+                warn_restir_pass_retired("restir_candidates");
+                self.restir_candidates = num_u32(value)?;
+            }
+            "restir_spatial_checkerboard" => {
+                warn_restir_pass_retired("restir_spatial_checkerboard");
+                self.restir_spatial_checkerboard = num_u32(value)?;
+            }
+            "restir_split_passes" => {
+                warn_restir_pass_retired("restir_split_passes");
+                self.restir_split_passes = num_u32(value)?;
+            }
             _ => return Err(format!("unknown lighting setting {key}")),
         }
         self.sanitize();
@@ -2983,6 +3005,22 @@ fn warn_lamp_pick_reuse_alias() {
             "warning: lamp_pick value \"reuse (experimental)\" is deprecated; use \"reuse\" (alias kept for one release)"
         );
     });
+}
+
+fn warn_restir_pass_retired(key: &'static str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(key) {
+        eprintln!(
+            "warning: {key} is deprecated; it no longer dispatches a pass \
+             (alias kept for one release)"
+        );
+    }
 }
 
 fn warn_gi2_alias(old: &'static str, neu: &'static str) {

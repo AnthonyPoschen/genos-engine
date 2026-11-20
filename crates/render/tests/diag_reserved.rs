@@ -4,11 +4,10 @@
 //! ad-hoc instrumentation on 61..63 changed the lit picture when `LIGHTING_DIAG` was on.
 
 const RESERVED: [u32; 5] = [40, 41, 61, 62, 63];
-const SHADERS: [(&str, &str); 4] = [
+const SHADERS: [(&str, &str); 3] = [
     ("lighting_cache.glsl", include_str!("../shaders/lighting_cache.glsl")),
     ("lighting_direct.comp", include_str!("../shaders/lighting_direct.comp")),
     ("lighting_compact.comp", include_str!("../shaders/lighting_compact.comp")),
-    ("restir_live.comp", include_str!("../shaders/restir_live.comp")),
 ];
 
 fn literal_after(src: &str, pat: &str) -> Vec<(usize, u32)> {
@@ -158,40 +157,29 @@ fn restir_counters_stay_off_compact_diag_words() {
             }
         }
     }
-    for index in [5u32, 6, 13, 14, 32, 36, 38, 39, 40, 41, 43, 44, 45, 48, 61] {
+    for index in [14u32, 36, 38, 39, 43, 44, 45, 48, 61] {
         assert!(
             occupied.contains(&index),
-            "occupied set missed diag[{index}]; the scan no longer sees both compile modes"
+            "occupied set missed diag[{index}]; the scan no longer sees the product shaders"
         );
     }
-    let live = SHADERS[3].1;
     let direct = SHADERS[1].1;
-    let compact = SHADERS[2].1;
-    assert!(compact.contains("lighting_dg(hinted ? 5u : 6u, 1u);"));
-    assert!(compact.contains("on_screen ? 13u : 14u"));
     assert!(SHADERS[0].1.contains("lighting_dg(43u, 1u);"));
     assert!(SHADERS[0].1.contains("lighting_dg(44u, 1u);"));
     assert!(SHADERS[0].1.contains("lighting_dg(45u, 1u);"));
     assert!(SHADERS[0].1.contains("const bool LIGHTING_DIAG = false;"));
-    let accept = named_u32(live, "RESTIR_DIAG_HIST_ACCEPT");
-    let reject = named_u32(live, "RESTIR_DIAG_HIST_REJECT");
     let point = named_u32(direct, "RESTIR_DIAG_POINT_ADD");
-    for index in [accept, reject, point] {
-        assert!(
-            !PARENT_DIAG.contains(&index),
-            "restir header word {index} is parent diag 8, 38, or 39"
-        );
-        assert!(
-            !RESERVED.contains(&index),
-            "restir header word {index} is a screen working word"
-        );
-    }
-    assert_eq!((accept, reject, point), (43, 44, 45));
-    assert!(live.contains("atomicAdd(restir_words[RESTIR_DIAG_HIST_ACCEPT], 1u);"));
-    assert!(live.contains("atomicAdd(restir_words[RESTIR_DIAG_HIST_REJECT], 1u);"));
-    assert!(!live.contains("atomicAdd(gstats.diag"));
-    assert!(!live.contains("gstats.diag[RESTIR_DIAG_HIST_ACCEPT]"));
-    assert!(!live.contains("gstats.diag[RESTIR_DIAG_HIST_REJECT]"));
+    assert!(
+        !PARENT_DIAG.contains(&point),
+        "restir header word {point} is parent diag 8, 38, or 39"
+    );
+    assert!(
+        !RESERVED.contains(&point),
+        "restir header word {point} is a screen working word"
+    );
+    assert_eq!(point, 45);
     assert!(direct.contains("atomicAdd(restir_words[RESTIR_DIAG_POINT_ADD], 1u);"));
     assert!(!direct.contains("atomicAdd(gstats.diag[13u], 1u);"));
+    assert!(!direct.contains("gstats.diag[RESTIR_DIAG_HIST_ACCEPT]"));
+    assert!(!direct.contains("gstats.diag[RESTIR_DIAG_HIST_REJECT]"));
 }

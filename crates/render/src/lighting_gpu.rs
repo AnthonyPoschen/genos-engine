@@ -1300,7 +1300,7 @@ impl Gpu {
         self.lighting.world_busy = false;
     }
 
-    /// Specialization constants for the four ReSTIR pipelines.
+    /// Specialization constants for `restir-direct`.
     ///
     /// `(constant id, value)`. Constant 0 is the few-lamp cap. Constant 2
     /// keeps history. `[0, 0]` is `moving_lamp_wall` knocked out.
@@ -4006,54 +4006,6 @@ impl Gpu {
             return false;
         }
         let resized = self.lighting.restir_w != rw || self.lighting.restir_h != rh;
-        if self.lighting.restir_pipe.is_null() {
-            let start = Instant::now();
-            match self.make_compute_pipe_ids(
-                RESTIR_LIVE_SPV,
-                self.lighting.layout,
-                "restir-di",
-                &Self::moving_lamp_wall_spec(),
-            ) {
-                Ok(pipe) => self.lighting.restir_pipe = pipe,
-                Err(err) => {
-                    eprintln!("lighting: restir prepare failed: restir-di pipeline: {err}");
-                    return false;
-                }
-            }
-            self.note_pipeline_time("restir-di", start);
-        }
-        if self.lighting.restir_spatial_pipe.is_null() {
-            let start = Instant::now();
-            match self.make_compute_pipe_ids(
-                RESTIR_SPATIAL_SPV,
-                self.lighting.layout,
-                "restir-spatial",
-                &Self::moving_lamp_wall_spec(),
-            ) {
-                Ok(pipe) => self.lighting.restir_spatial_pipe = pipe,
-                Err(err) => {
-                    eprintln!("lighting: restir prepare failed: restir-spatial pipeline: {err}");
-                    return false;
-                }
-            }
-            self.note_pipeline_time("restir-spatial", start);
-        }
-        if self.lighting.restir_spatial_wide.is_null() {
-            let start = Instant::now();
-            match self.make_compute_pipe_ids(
-                RESTIR_SPATIAL_WIDE_SPV,
-                self.lighting.layout,
-                "restir-spatial-wide",
-                &Self::moving_lamp_wall_spec(),
-            ) {
-                Ok(pipe) => self.lighting.restir_spatial_wide = pipe,
-                Err(err) => {
-                    eprintln!("lighting: restir prepare failed: restir-spatial-wide pipeline: {err}");
-                    return false;
-                }
-            }
-            self.note_pipeline_time("restir-spatial-wide", start);
-        }
         if self.lighting.restir_direct.is_null() {
             let start = Instant::now();
             match self.make_compute_pipe_ids(
@@ -4166,539 +4118,23 @@ impl Gpu {
         self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
         self.lighting.restir_w = rw;
         self.lighting.restir_h = rh;
-        self.lighting.restir_frame = prefix.total_words.saturating_mul(4) <= self.lighting.restir_buf.size;
+        let prefix_words = u64::try_from(prefix.words.len()).unwrap_or(u64::MAX);
+        self.lighting.restir_frame = prefix_words <= crate::restir_live::PREFIX_CAP_WORDS
+            && prefix.total_words >= prefix_words
+            && crate::restir_live::buffer_bytes(0) <= self.lighting.restir_buf.size;
         self.lighting.restir_frame
     }
 
-    /// `restir-spatial` for 0–4 neighbours, `restir-spatial-wide` above that.
-    /// The frame dispatch and the fixed-reservoir oracle both use this.
-    fn restir_spatial_for(&mut self, neighbors: u32) -> Handle {
-        if neighbors > 4 {
-            self.lighting.restir_spatial_bound = 2;
-            self.lighting.restir_spatial_wide
-        } else {
-            self.lighting.restir_spatial_bound = 1;
-            self.lighting.restir_spatial_pipe
-        }
-    }
 
-    fn restir_oracle_pipes(&mut self) -> Result<(), String> {
-        if self.lighting.layout.is_null() {
-            return Err("lighting layout is not ready".to_string());
-        }
-        if self.lighting.restir_spatial_pipe.is_null() {
-            let start = Instant::now();
-            let pipe = self.make_compute_pipe(RESTIR_SPATIAL_SPV, self.lighting.layout, "restir-spatial")?;
-            self.lighting.restir_spatial_pipe = pipe;
-            self.note_pipeline_time("restir-spatial", start);
-        }
-        if self.lighting.restir_spatial_wide.is_null() {
-            let start = Instant::now();
-            let pipe = self.make_compute_pipe(
-                RESTIR_SPATIAL_WIDE_SPV,
-                self.lighting.layout,
-                "restir-spatial-wide",
-            )?;
-            self.lighting.restir_spatial_wide = pipe;
-            self.note_pipeline_time("restir-spatial-wide", start);
-        }
-        Ok(())
-    }
-
-    fn restir_merge_oracle(
-        &mut self,
-        neighbors: u32,
-        scene: &[u32],
-        gbuf: &[u32],
-        restir: &[u32],
-    ) -> Result<Vec<u32>, String> {
-        self.restir_oracle_pipes()?;
-        let pipe = self.restir_spatial_for(neighbors);
-        if pipe.is_null() {
-            return Err("spatial pipeline was not created".to_string());
-        }
-        self.dispatch_restir_oracle(pipe, scene, gbuf, restir)
-    }
-
-    fn oracle_words(&self, words: &[u32]) -> Result<Buffer, String> {
-        let bytes = u64::try_from(words.len().saturating_mul(4)).unwrap_or(0).max(16);
-        let buffer = self.make_buffer(bytes, 0x20, Memory::Upload)?;
-        let mut raw = Vec::with_capacity(words.len().saturating_mul(4));
-        for word in words {
-            raw.extend_from_slice(&word.to_ne_bytes());
-        }
-        self.write_buffer(&buffer, &raw)?;
-        Ok(buffer)
-    }
-
-    fn dispatch_restir_oracle(
-        &self,
-        pipe: Handle,
-        scene: &[u32],
-        gbuf: &[u32],
-        restir: &[u32],
-    ) -> Result<Vec<u32>, String> {
-        let scene_b = self.oracle_words(scene)?;
-        let gbuf_b = self.oracle_words(gbuf)?;
-        let restir_b = self.oracle_words(restir)?;
-        let dummy = self.oracle_words(&[0u32; 4])?;
-        let read = self.record_restir_oracle(pipe, &scene_b, &gbuf_b, &restir_b, &dummy, restir);
-        self.destroy_oracle_buffers(scene_b, gbuf_b, restir_b, dummy);
-        read
-    }
-
-    fn destroy_oracle_buffers(&self, mut scene: Buffer, mut gbuf: Buffer, mut restir: Buffer, mut dummy: Buffer) {
-        self.destroy_buffer(&mut scene);
-        self.destroy_buffer(&mut gbuf);
-        self.destroy_buffer(&mut restir);
-        self.destroy_buffer(&mut dummy);
-    }
-
-    fn record_restir_oracle(
-        &self,
-        pipe: Handle,
-        scene: &Buffer,
-        gbuf: &Buffer,
-        restir: &Buffer,
-        dummy: &Buffer,
-        words: &[u32],
-    ) -> Result<Vec<u32>, String> {
-        let width = words.get(7).copied().unwrap_or(0);
-        let height = words.get(8).copied().unwrap_or(0);
-        let pixels = width.saturating_mul(height);
-        if pixels == 0 {
-            return Err("oracle grid is empty".to_string());
-        }
-        let set = self.oracle_descriptors(scene, gbuf, restir, dummy)?;
-        let cmd = self.oracle_commands(pipe, set.1, restir, words, pixels);
-        self.destroy_oracle_sets(set.0, set.1);
-        cmd
-    }
-
-    fn oracle_descriptors(
-        &self,
-        scene: &Buffer,
-        gbuf: &Buffer,
-        restir: &Buffer,
-        dummy: &Buffer,
-    ) -> Result<(Handle, Handle), String> {
-        #[repr(C)]
-        struct Size {
-            kind: u32,
-            count: u32,
-        }
-        #[repr(C)]
-        struct PoolInfo {
-            s_type: i32,
-            next: *const c_void,
-            flags: u32,
-            max_sets: u32,
-            size_count: u32,
-            sizes: *const Size,
-        }
-        let size = Size { kind: 7, count: 16 };
-        let pool_info = PoolInfo {
-            s_type: 33,
-            next: std::ptr::null(),
-            flags: 0,
-            max_sets: 1,
-            size_count: 1,
-            sizes: &size,
-        };
-        let mut pool = std::ptr::null_mut();
-        unsafe {
-            check(
-                (self.fns.create_desc_pool)(
-                    self.device,
-                    &pool_info as *const PoolInfo as *const u8,
-                    std::ptr::null(),
-                    &mut pool,
-                ),
-                "oracle descriptor pool",
-            )?;
-        }
-        #[repr(C)]
-        struct Alloc {
-            s_type: i32,
-            next: *const c_void,
-            pool: Handle,
-            count: u32,
-            layouts: *const Handle,
-        }
-        let layouts = [self.lighting.desc_layout];
-        let alloc = Alloc {
-            s_type: 34,
-            next: std::ptr::null(),
-            pool,
-            count: 1,
-            layouts: layouts.as_ptr(),
-        };
-        let mut set = std::ptr::null_mut();
-        unsafe {
-            check(
-                (self.fns.alloc_desc)(
-                    self.device,
-                    &alloc as *const Alloc as *const u8,
-                    &mut set,
-                ),
-                "oracle descriptor set",
-            )?;
-        }
-        self.write_oracle_set(set, scene, gbuf, restir, dummy)?;
-        Ok((pool, set))
-    }
-
-    fn write_oracle_set(
-        &self,
-        set: Handle,
-        scene: &Buffer,
-        gbuf: &Buffer,
-        restir: &Buffer,
-        dummy: &Buffer,
-    ) -> Result<(), String> {
-        #[repr(C)]
-        struct BufInfo {
-            buffer: Handle,
-            offset: u64,
-            range: u64,
-        }
-        #[repr(C)]
-        struct Write {
-            s_type: i32,
-            next: *const c_void,
-            set: Handle,
-            binding: u32,
-            element: u32,
-            count: u32,
-            kind: u32,
-            image: *const c_void,
-            buffer: *const BufInfo,
-            texel: *const c_void,
-        }
-        let bindings = [
-            (0u32, scene.buffer),
-            (5, dummy.buffer),
-            (6, gbuf.buffer),
-            (7, dummy.buffer),
-            (8, dummy.buffer),
-            (9, dummy.buffer),
-            (10, dummy.buffer),
-            (11, dummy.buffer),
-            (12, dummy.buffer),
-            (13, dummy.buffer),
-            (14, dummy.buffer),
-            (15, dummy.buffer),
-            (16, dummy.buffer),
-            (17, dummy.buffer),
-            (18, dummy.buffer),
-            (19, restir.buffer),
-        ];
-        let infos: Vec<BufInfo> = bindings
-            .iter()
-            .map(|(_, buffer)| BufInfo {
-                buffer: *buffer,
-                offset: 0,
-                range: u64::MAX,
-            })
-            .collect();
-        let writes: Vec<Write> = bindings
-            .iter()
-            .zip(&infos)
-            .map(|((binding, _), info)| Write {
-                s_type: 35,
-                next: std::ptr::null(),
-                set,
-                binding: *binding,
-                element: 0,
-                count: 1,
-                kind: 7,
-                image: std::ptr::null(),
-                buffer: info,
-                texel: std::ptr::null(),
-            })
-            .collect();
-        unsafe {
-            (self.fns.update_desc)(
-                self.device,
-                u32::try_from(writes.len()).unwrap_or(0),
-                writes.as_ptr().cast::<u8>(),
-                0,
-                std::ptr::null(),
-            );
-        }
-        Ok(())
-    }
-
-    fn destroy_oracle_sets(&self, pool: Handle, _set: Handle) {
-        if !pool.is_null() {
-            unsafe {
-                (self.fns.destroy_desc_pool)(self.device, pool, std::ptr::null());
-            }
-        }
-    }
-
-    fn oracle_commands(
-        &self,
-        pipe: Handle,
-        set: Handle,
-        restir: &Buffer,
-        words: &[u32],
-        pixels: u32,
-    ) -> Result<Vec<u32>, String> {
-        #[repr(C)]
-        struct PoolInfo {
-            s_type: i32,
-            next: *const c_void,
-            flags: u32,
-            family: u32,
-        }
-        let pool_info = PoolInfo {
-            s_type: 39,
-            next: std::ptr::null(),
-            flags: 0,
-            family: self.queue_family,
-        };
-        let mut cmd_pool = std::ptr::null_mut();
-        unsafe {
-            check(
-                (self.fns.create_pool)(
-                    self.device,
-                    &pool_info as *const PoolInfo as *const u8,
-                    std::ptr::null(),
-                    &mut cmd_pool,
-                ),
-                "oracle command pool",
-            )?;
-        }
-        let read = self.submit_restir_oracle(pipe, set, cmd_pool, restir, words, pixels);
-        unsafe {
-            (self.fns.destroy_pool)(self.device, cmd_pool, std::ptr::null());
-        }
-        read
-    }
-
-    fn oracle_barrier(&self, cmd: Handle, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
-        #[repr(C)]
-        struct MemBar {
-            s_type: i32,
-            next: *const c_void,
-            src_access: u32,
-            dst_access: u32,
-        }
-        let bar = MemBar {
-            s_type: 46,
-            next: std::ptr::null(),
-            src_access,
-            dst_access,
-        };
-        unsafe {
-            (self.fns.cmd_barrier)(
-                cmd,
-                src_stage,
-                dst_stage,
-                0,
-                1,
-                &bar as *const MemBar as *const c_void,
-                0,
-                std::ptr::null(),
-                0,
-                std::ptr::null(),
-            );
-        }
-    }
-
-    fn submit_restir_oracle(
-        &self,
-        pipe: Handle,
-        set: Handle,
-        cmd_pool: Handle,
-        restir: &Buffer,
-        words: &[u32],
-        pixels: u32,
-    ) -> Result<Vec<u32>, String> {
-        #[repr(C)]
-        struct AllocInfo {
-            s_type: i32,
-            next: *const c_void,
-            pool: Handle,
-            level: u32,
-            count: u32,
-        }
-        #[repr(C)]
-        struct BeginInfo {
-            s_type: i32,
-            next: *const c_void,
-            flags: u32,
-            inherit: *const c_void,
-        }
-        let alloc = AllocInfo {
-            s_type: 40,
-            next: std::ptr::null(),
-            pool: cmd_pool,
-            level: 0,
-            count: 1,
-        };
-        let begin = BeginInfo {
-            s_type: 42,
-            next: std::ptr::null(),
-            flags: 0,
-            inherit: std::ptr::null(),
-        };
-        let mut cmd = std::ptr::null_mut();
-        unsafe {
-            check(
-                (self.fns.alloc_cmd)(self.device, &alloc as *const AllocInfo as *const u8, &mut cmd),
-                "oracle command",
-            )?;
-            check(
-                (self.fns.begin_cmd)(cmd, &begin as *const BeginInfo as *const u8),
-                "begin oracle",
-            )?;
-        }
-        self.oracle_barrier(cmd, 0x4000, 0x800, 0x4000, 0x20);
-        let mut pc = [0u32; 12];
-        pc[0] = words.get(48).copied().unwrap_or(0);
-        pc[1] = words.get(49).copied().unwrap_or(0);
-        pc[9] = 2u32 << 22;
-        unsafe {
-            (self.fns.cmd_bind_pipe)(cmd, 1, pipe);
-            (self.fns.cmd_bind_set)(cmd, 1, self.lighting.layout, 0, 1, &set, 0, std::ptr::null());
-            (self.fns.cmd_push)(
-                cmd,
-                self.lighting.layout,
-                0x20,
-                0,
-                LIGHTING_PC_BYTES,
-                pc.as_ptr().cast::<c_void>(),
-            );
-            (self.fns.cmd_dispatch)(cmd, pixels.div_ceil(64).max(1), 1, 1);
-        }
-        self.oracle_barrier(cmd, 0x800, 0x4000, 0x40, 0x2000);
-        unsafe {
-            check((self.fns.end_cmd)(cmd), "end oracle")?;
-        }
-        self.oracle_submit(cmd)?;
-        self.read_oracle(restir, words.len())
-    }
-
-    fn oracle_submit(&self, cmd: Handle) -> Result<(), String> {
-        #[repr(C)]
-        struct Submit {
-            s_type: i32,
-            next: *const c_void,
-            wait_count: u32,
-            waits: *const Handle,
-            stages: *const u32,
-            cmd_count: u32,
-            cmds: *const Handle,
-            signal_count: u32,
-            signals: *const Handle,
-        }
-        let cmds = [cmd];
-        let submit = Submit {
-            s_type: 4,
-            next: std::ptr::null(),
-            wait_count: 0,
-            waits: std::ptr::null(),
-            stages: std::ptr::null(),
-            cmd_count: 1,
-            cmds: cmds.as_ptr(),
-            signal_count: 0,
-            signals: std::ptr::null(),
-        };
-        unsafe {
-            check(
-                (self.fns.queue_submit)(
-                    self.queue,
-                    1,
-                    &submit as *const Submit as *const u8,
-                    std::ptr::null_mut(),
-                ),
-                "oracle submit",
-            )?;
-            check((self.fns.device_wait)(self.device), "oracle wait")?;
-        }
-        Ok(())
-    }
-
-    fn read_oracle(&self, buffer: &Buffer, words: usize) -> Result<Vec<u32>, String> {
-        let bytes = u64::try_from(words.saturating_mul(4)).unwrap_or(0);
-        if bytes == 0 || bytes > buffer.size {
-            return Err("oracle read does not fit".to_string());
-        }
-        let mut out = vec![0u32; words];
-        unsafe {
-            let mut mapped = std::ptr::null_mut();
-            check(
-                (self.fns.map_mem)(self.device, buffer.memory, 0, bytes, 0, &mut mapped),
-                "map oracle",
-            )?;
-            std::ptr::copy_nonoverlapping(mapped.cast::<u32>(), out.as_mut_ptr(), words);
-            (self.fns.unmap_mem)(self.device, buffer.memory);
-        }
-        Ok(out)
-    }
-
-    fn dispatch_restir_pass(&mut self, pixels: u32, pass: u32, pc: &[u32; 12]) {
-        // Pass 2 and the checker copy are the spatial pipeline. The initial
-        // pipeline does not contain that pass, so the tree walk does not keep
-        // the merge lists in its live range. Four neighbours is the scalar
-        // shader. Above that, the wide shader keeps the 17-wide lists.
-        let pipe = if pass < 2 {
-            self.lighting.restir_pipe
-        } else {
-            self.restir_spatial_for(self.lighting.settings.restir_spatial_neighbors)
-        };
-        let mut base = 0u32;
-        let span = crate::restir_live::GROUP_LIMIT.saturating_mul(crate::restir_live::GROUP_SIZE);
-        while base < pixels {
-            let count = (pixels - base).min(span);
-            let groups = count.div_ceil(crate::restir_live::GROUP_SIZE).max(1);
-            let mut rpc = *pc;
-            rpc[9] = (rpc[9] & !(3 << 22)) | (pass << 22) | (1 << 21);
-            rpc[11] = base;
-            unsafe {
-                (self.fns.cmd_push)(
-                    self.cmd,
-                    self.lighting.layout,
-                    0x20,
-                    0,
-                    LIGHTING_PC_BYTES,
-                    rpc.as_ptr().cast::<std::ffi::c_void>(),
-                );
-                (self.fns.cmd_bind_pipe)(self.cmd, 1, pipe);
-                (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
-            }
-            base = base.saturating_add(span);
-        }
-    }
-
-    /// Initial, then temporal, then spatial. One dispatch covers 1440p
-    /// (`GROUP_LIMIT` groups of `GROUP_SIZE`). A larger reservoir continues
-    /// from `pc.lamp.w`. `restir_split_passes` clear runs temporal in the
-    /// initial invocation (one dispatch). The temporal stamp is then empty
-    /// and `restir_initial` is both passes. Checkerboard copies after spatial
-    /// and is included in the spatial stamp. Four queries, no fifth slot.
+    /// The initial, temporal, and spatial passes are gone. The four stamps
+    /// stay so a timing read still has a slot; the intervals are empty.
+    /// Shade is `restir-direct`: the sun, the brightest lamp, and the cascade.
     fn dispatch_restir_di(&mut self, slot: usize, pc: &[u32; 12], pool: Handle, first: u32) {
-        let width = self.lighting.restir_w;
-        let height = self.lighting.restir_h;
-        let Some(pixels) = u32::try_from(u64::from(width).saturating_mul(u64::from(height))).ok()
-        else {
-            return;
-        };
-        if self.lighting.restir_pipe.is_null()
-            || self.lighting.restir_spatial_pipe.is_null()
-            || self.lighting.restir_spatial_wide.is_null()
-            || pixels == 0
-        {
-            return;
-        }
+        let _ = pc;
         let stamp = !pool.is_null();
         if !stamp {
             self.lighting.restir_query[slot] = u32::MAX;
         }
-        let split = self.lighting.settings.restir_split_passes != 0;
-        let checker = self.lighting.settings.restir_spatial_checkerboard != 0;
         let write_stamp = |this: &Self, at: u32| {
             if stamp {
                 unsafe {
@@ -4710,30 +4146,9 @@ impl Gpu {
             self.lighting.restir_query[slot] = first + RESTIR_STAMP_AT;
         }
         write_stamp(self, 0);
-        self.dispatch_restir_pass(pixels, 0, pc);
         write_stamp(self, 1);
-        if split {
-            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
-            self.dispatch_restir_pass(pixels, 1, pc);
-        }
         write_stamp(self, 2);
-        self.memory_barrier(0x800, 0x800, 0x40, 0x20);
-        self.dispatch_restir_pass(pixels, 2, pc);
-        if checker {
-            self.memory_barrier(0x800, 0x800, 0x40, 0x20);
-            self.dispatch_restir_pass(pixels, 3, pc);
-        }
         write_stamp(self, 3);
-        unsafe {
-            (self.fns.cmd_push)(
-                self.cmd,
-                self.lighting.layout,
-                0x20,
-                0,
-                LIGHTING_PC_BYTES,
-                pc.as_ptr().cast::<std::ffi::c_void>(),
-            );
-        }
         self.lighting.restir_prev = self.lighting.restir_view;
         self.lighting.restir_have_prev = true;
         self.lighting.restir_slot ^= 1;
@@ -7808,6 +7223,76 @@ impl Gpu {
         };
         self.destroy_buffer(&mut dst);
         bytes
+    }
+
+    fn oracle_barrier(&self, cmd: Handle, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
+        #[repr(C)]
+        struct MemBar {
+            s_type: i32,
+            next: *const c_void,
+            src_access: u32,
+            dst_access: u32,
+        }
+        let bar = MemBar {
+            s_type: 46,
+            next: std::ptr::null(),
+            src_access,
+            dst_access,
+        };
+        unsafe {
+            (self.fns.cmd_barrier)(
+                cmd,
+                src_stage,
+                dst_stage,
+                0,
+                1,
+                &bar as *const MemBar as *const c_void,
+                0,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+            );
+        }
+    }
+
+    fn oracle_submit(&self, cmd: Handle) -> Result<(), String> {
+        #[repr(C)]
+        struct Submit {
+            s_type: i32,
+            next: *const c_void,
+            wait_count: u32,
+            waits: *const Handle,
+            stages: *const u32,
+            cmd_count: u32,
+            cmds: *const Handle,
+            signal_count: u32,
+            signals: *const Handle,
+        }
+        let cmds = [cmd];
+        let submit = Submit {
+            s_type: 4,
+            next: std::ptr::null(),
+            wait_count: 0,
+            waits: std::ptr::null(),
+            stages: std::ptr::null(),
+            cmd_count: 1,
+            cmds: cmds.as_ptr(),
+            signal_count: 0,
+            signals: std::ptr::null(),
+        };
+        unsafe {
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    std::ptr::null_mut(),
+                ),
+                "oracle submit",
+            )?;
+            check((self.fns.device_wait)(self.device), "oracle wait")?;
+        }
+        Ok(())
     }
 
     fn record_region_copy(&self, src: Handle, dst: Handle, regions: &[(u64, u64)]) -> Result<(), String> {

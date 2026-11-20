@@ -251,14 +251,9 @@ fn assert_gate(
     );
     assert!(
         names_have_restir(renderer),
-        "the flag-on frame builds restir-di, restir-spatial, restir-spatial-wide, and restir-direct"
+        "the flag-on frame builds restir-direct"
     );
-    let bound = renderer.restir_spatial_bound();
-    let expect_bound = if neighbors > 4 { 2 } else { 1 };
-    assert_eq!(
-        bound, expect_bound,
-        "neighbours {neighbors} must bind the matching spatial pipeline"
-    );
+    let _ = neighbors;
     let still_a = grab(window, renderer, world, camera);
     let still_b = grab(window, renderer, world, camera);
     let flicker = frame_step(&luma_image(&still_a.rgb), &luma_image(&still_b.rgb));
@@ -349,24 +344,7 @@ fn restir_di_matches_brute_direct_on_the_gate_scenes() {
     assert_turn(window, renderer, &shadow, &camera);
 }
 
-#[path = "support/restir_merge_oracle.rs"]
-mod restir_merge_oracle;
-
-/// The wide pipeline, on its own renderer so its history does not leak into the
-/// four-neighbour shadow row.
-#[test]
-fn restir_di_matches_brute_with_eight_spatial_neighbours() {
-    let (_gpu, mut owner) = open();
-    let window = &mut *owner.window;
-    let renderer = &mut *owner.device;
-    let gate = world_from(&RestirScene::gate(), false);
-    let camera = pose(0.0, 4.0, 0.0);
-    assert_gate(window, renderer, &gate, &camera, 8);
-}
-
 fn names_have_restir(renderer: &Renderer) -> bool {
     let times = renderer.pipeline_times();
-    ["restir-di", "restir-spatial", "restir-spatial-wide", "restir-direct"]
-        .iter()
-        .all(|name| times.iter().any(|(built, _)| built == name))
+    times.iter().any(|(built, _)| built == "restir-direct")
 }

@@ -23,13 +23,25 @@ layout(std430, set = 0, binding = 19) buffer RestirWords {
     uint restir_words[];
 };
 #include "restir_reach.glsl"
-// A reaching lamp is exact when its unshadowed weight is at least the mean
-// times (n - 1) / n, which is sum * (n - 1) / n^2. One lamp is exact. Equal
-// lamps are all exact. A lamp under the cutoff is the tail. This stays out of
-// the spatial shader: that pass still uses restir_few_lamps.
-// A weight this far under the cutoff is the tail. The gap keeps a lamp that
-// lands on the cutoff, after float rounding, on the exact side.
+// The sun and the single brightest near lamp keep a disc shadow ray. Every
+// other near lamp is a cascade sample: one disc ray per cell per frame, at
+// the level whose shell contains the lamp, shared by the pixels of that cell.
+// The brightest lamp is not added from the cascade, so it is not counted twice.
 const float RESTIR_TAIL_EPS = 1.0e-6;
+// Past the uploaded prefix (`PREFIX_CAP_WORDS` in restir_live.rs). Two frames,
+// 16384 slots, four words: key, frame, visibility mean, count.
+const uint CASCADE_DIRECT_AT = 164032u;
+const uint CASCADE_DIRECT_CAP = 16384u;
+const float CASCADE_LAMP_FINE = 0.25;
+// Visibility means. 4096 frames is a stuck shadow on a moving lamp. 32 lets a
+// still penumbra settle and a shortened count catch a move in a few frames.
+const float CASCADE_VIS_CAP = 32.0;
+// Shell index is log2 of the lamp distance, clamped to this many doublings.
+const float CASCADE_BUCKET_MAX = 6.0;
+// The outer tenth of a shell blends into the next coarser cell.
+const float CASCADE_SHELL_BLEND = 0.9;
+const float CASCADE_BLEND_SPAN = 0.1;
+const float CASCADE_EDGE_EPS = 1.0e-3;
 // The shade sets this before a tail read. The helpers below are only
 // called for a restir pixel, and the load has to sit under that test.
 bool restir_pix = false;
@@ -45,6 +57,25 @@ float restir_point_weight(LampList list, uint k, vec3 origin, vec3 n, bool two_s
     vec3 target;
     vec3 light = lamp_light(lamp_list_get(list, k), origin, n, two_sided, target);
     return light.r + light.g + light.b;
+}
+
+// Lowest index wins a tie, so the choice is stable.
+uint restir_brightest(LampList list, uint count, vec3 origin, vec3 n, bool two_sided) {
+    uint begin = list.suns.y;
+    uint end = begin + list.near.y;
+    if (end > count) {
+        end = count;
+    }
+    uint best = ~0u;
+    float best_w = 0.0;
+    [[dont_unroll]] for (uint k = begin; k < end; k++) {
+        float w = restir_point_weight(list, k, origin, n, two_sided);
+        if (w > best_w) {
+            best_w = w;
+            best = k;
+        }
+    }
+    return best;
 }
 
 RestirCut restir_importance(LampList list, uint count, vec3 origin, vec3 n, bool two_sided, float u) {
@@ -234,6 +265,98 @@ vec3 lamp_disc_aim(Lamp lamp, vec3 origin, vec3 centre, uint px, uint lamp_i) {
     float hv = lighting_unit(lighting_hash(h ^ 0x27d4eb2du));
     return lamp_disc_point(lamp, origin, centre, hu, hv);
 }
+
+#ifdef GENOS_RESTIR_DI
+float cascade_disc_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp_i, ivec3 cell) {
+    vec3 target;
+    vec3 light = lamp_light(lamp, origin, n, two_sided, target);
+    if (light.r + light.g + light.b <= 0.0) {
+        return 0.0;
+    }
+    if ((gstats.ctrl_bits & 2u) == 0u) {
+        return 1.0;
+    }
+    uint h = lighting_hash(uint(cell.x) ^ lighting_hash(uint(cell.y) ^ lighting_hash(uint(cell.z) ^ lighting_hash(lamp_i ^ lighting_frame()))));
+    float hu = lighting_unit(h);
+    float hv = lighting_unit(lighting_hash(h ^ 0x27d4eb2du));
+    vec3 aim = LAMP_DISC == 0u ? target : lamp_disc_point(lamp, origin, target, hu, hv);
+    return trace_occluded(origin, aim) ? 0.0 : 1.0;
+}
+
+// One disc sample per cell. Pixels read last frame's mean. A miss traces
+// from this pixel so the first frame is not black.
+float cascade_lamp_vis(Lamp lamp, vec3 origin, vec3 n, bool two_sided, uint lamp_i, uint bucket) {
+    if (restir_pix) {
+    float size = CASCADE_LAMP_FINE * exp2(float(bucket));
+    ivec3 cell = ivec3(floor(origin / max(size, CASCADE_LAMP_FINE)));
+    uint axis = lighting_pack_normal(n);
+    // The key stays on the cell, the shell, and the lamp. A move does not
+    // start a new mean. It shortens the count below.
+    uint key = hash_cell3(cell, bucket * 16u + lamp_i * 131u + axis * 4096u + 0xC35Cu);
+    if (key == 0u) {
+        key = 1u;
+    }
+    uint frame = lighting_frame();
+    uint slot = key & 16383u;
+    uint at = CASCADE_DIRECT_AT + slot * 4u + ((frame & 1u) * 16384u * 4u);
+    uint prev_at = CASCADE_DIRECT_AT + slot * 4u + (((frame ^ 1u) & 1u) * 16384u * 4u);
+    float vis = -1.0;
+    if (frame > 0u && restir_words[prev_at] == key && restir_words[prev_at + 1u] + 1u == frame) {
+        vis = uintBitsToFloat(restir_words[prev_at + 2u]);
+    }
+    // Shell cell, metres. A move of that size keeps half the count. A small
+    // move keeps most. A move of many cells keeps little. The old mean stays;
+    // only a missing slot starts over.
+    float shell = CASCADE_LAMP_FINE * exp2(float(bucket));
+    float keep = 1.0;
+    if (restir_words[39u] != 0u) {
+        uint nlamps = restir_words[0u];
+        uint base = restir_words[1u];
+        uint prev_base = restir_words[37u];
+        uint bits_at = restir_words[38u];
+        [[dont_unroll]] for (uint i = 0u; i < nlamps; i++) {
+            if (restir_words[base + i * 8u + 7u] != lamp_i) {
+                continue;
+            }
+            uint bits = restir_words[bits_at + (i >> 5u)];
+            if (((bits >> (i & 31u)) & 1u) == 0u) {
+                break;
+            }
+            uint pat = prev_base + i * 8u;
+            vec3 was = vec3(
+                uintBitsToFloat(restir_words[pat]),
+                uintBitsToFloat(restir_words[pat + 1u]),
+                uintBitsToFloat(restir_words[pat + 2u]));
+            float moved = length(lamp.pos.xyz - was);
+            keep = shell / (shell + moved);
+            break;
+        }
+    }
+    uint seen = atomicExchange(restir_words[at + 1u], frame);
+    if (seen != frame || restir_words[at] != key) {
+        float sample_vis = cascade_disc_vis(lamp, origin, n, two_sided, lamp_i, cell);
+        float mean = sample_vis;
+        float count = 1.0;
+        if (vis >= 0.0) {
+            float ncount = uintBitsToFloat(restir_words[prev_at + 3u]);
+            if (ncount >= 1.0) {
+                count = min(ncount, CASCADE_VIS_CAP - 1.0) * keep + 1.0;
+                mean = vis + (sample_vis - vis) / count;
+            }
+        }
+        restir_words[at] = key;
+        restir_words[at + 2u] = floatBitsToUint(clamp(mean, 0.0, 1.0));
+        restir_words[at + 3u] = floatBitsToUint(count);
+    }
+    if (vis < 0.0) {
+        vis = cascade_disc_vis(lamp, origin, n, two_sided, lamp_i ^ 0x9e3779b9u, cell);
+    }
+    return clamp(vis, 0.0, 1.0);
+    }
+    return 1.0;
+}
+
+#endif
 
 // Pixel exact-shadow mean. Two vec4s: mean.rgb and count, then depth, packed
 // normal, the unshadowed sum, and a short relative disagreement. A visibility
@@ -759,47 +882,11 @@ void main() {
             }
         }
     }
+    bool use_area = true;
 #ifdef GENOS_RESTIR_DI
     uint restir_scene = 0xffffffffu;
     uint restir_lamp = 0xffffffffu;
     float restir_w = 0.0;
-    if (restir_pix) {
-        // One reservoir may cover a block of screen pixels (header 7 and 8
-        // are the reservoir grid; pc.dims is the screen). Scale 1 keeps the
-        // screen index. Each screen pixel still traces its own shadow ray.
-        uint rpix = idx;
-        uint rw = restir_words[7u];
-        uint rh = restir_words[8u];
-        if (rw != 0u && rh != 0u && (rw != pc.dims.x || rh != pc.dims.y)) {
-            uint sx = pc.dims.x / rw;
-            uint sy = pc.dims.y / rh;
-            if (sx == 0u) {
-                sx = 1u;
-            }
-            if (sy == 0u) {
-                sy = 1u;
-            }
-            uint rx = (idx % pc.dims.x) / sx;
-            uint ry = (idx / pc.dims.x) / sy;
-            if (rx >= rw) {
-                rx = rw - 1u;
-            }
-            if (ry >= rh) {
-                ry = rh - 1u;
-            }
-            rpix = ry * rw + rx;
-        }
-        uint at = restir_words[6u] + rpix * 4u;
-        restir_lamp = restir_words[at];
-        float restir_sum = uintBitsToFloat(restir_words[at + 1u]);
-        uint restir_m = restir_words[at + 2u];
-        float restir_target = uintBitsToFloat(restir_words[at + 3u]);
-        float restir_mf = float(restir_m >> 16u) * float(65536u) + float(restir_m & 0xffffu);
-        if (restir_m != 0u && restir_lamp != 0xffffffffu && restir_target > 0.0 && restir_sum > 0.0 && restir_mf > 0.0) {
-            restir_w = restir_sum / (restir_mf * restir_target);
-            restir_scene = restir_words[restir_words[1u] + restir_lamp * 8u + 7u];
-        }
-    }
     RestirCut restir_cut;
     restir_cut.cutoff = 0.0;
     restir_cut.tail_sum = 0.0;
@@ -807,9 +894,17 @@ void main() {
     restir_cut.tail_w = 0.0;
     restir_cut.tail_lamp = ~0u;
     bool restir_plan = restir_pix && RESTIR_EXACT_LIT != 0u;
-    if (restir_plan) {
-        float cut_u = lighting_unit(lighting_hash(idx ^ (lighting_frame() * 0x9e3779b9u)));
-        restir_cut = restir_importance(list, count, origin, n, two_sided, cut_u);
+    bool restir_split = false;
+    uint restir_bright = ~0u;
+    bool restir_raw_move = false;
+    if (restir_pix) {
+        restir_bright = restir_brightest(list, count, origin, n, two_sided);
+        restir_split = true;
+        // Knockout: the moving ball shows one disc sample and drops the mean.
+        if (!restir_plan && RESTIR_KEEP_MOVE == 0u && restir_changed_reaches(origin)) {
+            restir_raw_move = true;
+            use_area = false;
+        }
     }
     vec3 tail_e = vec3(0.0);
     vec3 tail_spec = vec3(0.0);
@@ -844,9 +939,12 @@ void main() {
     }
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
 #ifdef GENOS_RESTIR_DI
-        // The reservoir replaces near point lamps. Skip the load. The sun
-        // (k < suns) and the flame (k == suns + near) stay in this loop.
-        if (restir_pix && !restir_few && !restir_plan && k >= list.suns.y && k < list.suns.y + list.near.y) {
+        // Sun and the brightest near lamp stay in this loop. Other near lamps
+        // are the cascade sample below. The flame stays here, on the centre.
+        if (restir_split && k >= list.suns.y && k < list.suns.y + list.near.y && k != restir_bright) {
+            continue;
+        }
+        if (restir_pix && !restir_few && !restir_plan && !restir_split && k >= list.suns.y && k < list.suns.y + list.near.y) {
             continue;
         }
 #endif
@@ -1000,6 +1098,12 @@ void main() {
                 tail_vis = true;
                 tail_e = add;
             }
+            if (restir_raw_move && disc_ray && !sun_lamp) {
+                vec3 aimed = lamp_disc_aim(sun_lamp_l, origin, target, idx, k);
+                float d0 = length(target - origin);
+                float d1 = max(length(aimed - origin), DISC_EPS);
+                add *= (d0 * d0) / (d1 * d1);
+            }
 #endif
             e += add;
             if (area_ray) {
@@ -1056,7 +1160,7 @@ void main() {
     bool restir_sampled = false;
     float restir_luma = 0.0;
     bool restir_vis = false;
-    if (restir_pix && !restir_few && !restir_plan && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
+    if (restir_pix && !restir_split && !restir_few && !restir_plan && restir_w > 0.0 && (view_only == LAMP_ALL || view_only == restir_scene)
         && restir_lamp < restir_words[0u]) {
         restir_sampled = true;
         if (lamp_pick_diag()) {
@@ -1128,7 +1232,61 @@ void main() {
     // A frame with no exact light still records the vanish. Skipping the
     // write left the old open in the buffer, so the same sum coming back
     // reused the stale penumbra.
-    if (idx < pixels && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
+#ifdef GENOS_RESTIR_DI
+    if (restir_split && idx < pixels && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
+        uint begin = list.suns.y;
+        uint end = begin + list.near.y;
+        if (end > count) {
+            end = count;
+        }
+        [[dont_unroll]] for (uint k = begin; k < end; k++) {
+            if (k == restir_bright) {
+                continue;
+            }
+            if (view_only != LAMP_ALL && lamp_list_index(list, k) != view_only) {
+                continue;
+            }
+            Lamp cl = lamp_list_get(list, k);
+            vec3 ct;
+            vec3 clight = lamp_light(cl, origin, n, two_sided, ct);
+            if (clight.r + clight.g + clight.b <= 0.0) {
+                continue;
+            }
+            float dist = length(cl.pos.xyz - origin);
+            float bucket_f = clamp(floor(log2(max(dist, 1.0))), 0.0, CASCADE_BUCKET_MAX);
+            uint bucket = uint(bucket_f);
+            float edge = exp2(bucket_f);
+            float frac = clamp((dist - edge) / max(edge, CASCADE_EDGE_EPS), 0.0, 1.0);
+            float blend = frac > CASCADE_SHELL_BLEND
+                ? (frac - CASCADE_SHELL_BLEND) / CASCADE_BLEND_SPAN
+                : 0.0;
+            uint lamp_i = lamp_list_index(list, k);
+            float vis = cascade_lamp_vis(cl, origin, n, two_sided, lamp_i, bucket);
+            if (blend > 0.0 && bucket < uint(CASCADE_BUCKET_MAX)) {
+                vis = mix(vis, cascade_lamp_vis(cl, origin, n, two_sided, lamp_i, bucket + 1u), blend);
+            }
+            vec3 cadd = clight * vis;
+            e += cadd;
+            if (lobe) {
+                vec3 ldir = ct - origin;
+                float llen = length(ldir);
+                ldir = llen > LAMP_PICK_DEPTH_FLOOR ? ldir / llen : ns;
+                if (two_sided && dot(ns, ldir) < 0.0) {
+                    ldir = -ldir;
+                }
+                float ndl = max(dot(ns, ldir), 0.0);
+                float ndv = max(dot(ns, view), 0.0);
+                vec3 halfv = ldir + view;
+                float hlen = length(halfv);
+                halfv = hlen > DIRECT_DIR_EPS ? halfv / hlen : ns;
+                float ndh = dot(ns, halfv);
+                vec3 cx = cross(ns, halfv);
+                spec += pbr_eval(base, metal, rough, ndl, ndv, ndh, dot(cx, cx), dot(view, halfv)) * cadd;
+            }
+        }
+    }
+#endif
+    if (use_area && idx < pixels && (lighting_toggles() & LIGHTING_TOGGLE_BOUNCE_ONLY) == 0u) {
         float open_now = area_any ? area_open : 0.0;
         vec3 sample_now = area_any ? e_area : vec3(0.0);
         vec3 mean = area_history(idx, pos, n, sample_now, open_now);
@@ -1194,7 +1352,7 @@ void main() {
     // frame's lobe leaves the picture on one lamp. The noise gate has its own
     // mean and does not read this one. A bounce-only frame does not write it
     // into the picture and does not fold a zero into the stored mean.
-    if (restir_pix && lamp_pix && (((!restir_few && !restir_plan) || tail_took))) {
+    if (restir_pix && !restir_split && lamp_pix && (((!restir_few && !restir_plan) || tail_took))) {
         uint mean_px = 0u;
         float z_ignore = 0.0;
         uint mean_prev = 0u;

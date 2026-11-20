@@ -229,27 +229,26 @@ genos-stress noise-gate [--size WxH] [--settle N] [--frames N] [--preset NAME]
                             (GENOS_LIGHTING_LAMP_PICK_RADIUS)
   --lamp-pick-history N     biased-merge M cap, 1..64 (GENOS_LIGHTING_LAMP_PICK_HISTORY)
   --lamp-pick-unbiased on|off  pairwise MIS when on (GENOS_LIGHTING_LAMP_PICK_UNBIASED)
-  --restir-di on|off        screen-pixel ReSTIR DI (GENOS_RESTIR_DI). On by default. Off is the exact sum.
-                            The argument wins. The picture is the mean of the unbiased sample.
+  --restir-di on|off        screen-pixel direct (GENOS_RESTIR_DI). On by default: the sun and the
+                            brightest near lamp keep a disc ray, and every other near lamp comes
+                            from the cascade visibility table. Off is the exact sum. The argument wins.
   --restir-spatial-neighbors N
-                            spatial reservoirs merged per pixel, 0..16 (GENOS_RESTIR_SPATIAL_NEIGHBORS).
-                            0 skips the spatial pass. Default 4
+                            Deprecated. The spatial pass is deleted. The value still parses and logs
+                            once that it no longer dispatches (GENOS_RESTIR_SPATIAL_NEIGHBORS). Default 4
   --restir-spatial-radius N
-                            Chebyshev radius of that window, in reservoir pixels, 0..8
-                            (GENOS_RESTIR_SPATIAL_RADIUS). Default 2
+                            Deprecated. The spatial pass is deleted. The value still parses and logs
+                            once that it no longer dispatches (GENOS_RESTIR_SPATIAL_RADIUS). Default 2
   --restir-resolution-scale N
-                            screen pixels along one edge of a reservoir cell, 1..4
-                            (GENOS_RESTIR_RESOLUTION_SCALE). Default 1 is one reservoir per pixel.
-                            2 is one reservoir per 2×2. Each screen pixel still traces its own shadow ray
-  --restir-candidates N     initial candidates per reservoir, 1..32 (GENOS_RESTIR_CANDIDATES).
-                            Default 4
+                            Deprecated. The reservoir grid is deleted. The value still parses and logs
+                            once that it no longer dispatches (GENOS_RESTIR_RESOLUTION_SCALE). Default 1
+  --restir-candidates N     Deprecated. The initial pass is deleted. The value still parses and logs
+                            once that it no longer dispatches (GENOS_RESTIR_CANDIDATES). Default 4
   --restir-spatial-checkerboard 0|1
-                            odd reservoir pixels copy the even neighbour's spatial sample
-                            (GENOS_RESTIR_SPATIAL_CHECKERBOARD). Default 0
-  --restir-split-passes 0|1 keep initial and temporal as two dispatches so each GPU stamp
-                            is one pass (GENOS_RESTIR_SPLIT_PASSES). Default 0 runs temporal
-                            in the initial invocation. restir_temporal is then empty and
-                            restir_initial is both passes
+                            Deprecated. The spatial pass is deleted. The value still parses and logs
+                            once that it no longer dispatches (GENOS_RESTIR_SPATIAL_CHECKERBOARD). Default 0
+  --restir-split-passes 0|1 Deprecated. The initial and temporal dispatches are deleted. The value still
+                            parses and logs once that it no longer dispatches
+                            (GENOS_RESTIR_SPLIT_PASSES). Default 0. The pass stamps stay empty
   --lighting-cache-async on|off  light cache rounds on the async queue (GENOS_LIGHTING_ASYNC)
   --lighting-cache-hz HZ    light cache rounds per second, 0 every frame (GENOS_LIGHTING_CACHE_HZ)
   --lighting-cache-picks on|off  light cache rays take the lamp pick (GENOS_LIGHTING_CACHE_PICKS)
