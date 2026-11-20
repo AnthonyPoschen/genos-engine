@@ -108,37 +108,6 @@ const PRODUCTION: &[ShaderCompile] = &[
         src: "shaders/lighting_direct.comp",
         flags: &["-DGENOS_RESTIR_DI"],
     },
-    ShaderCompile {
-        label: "restir live",
-        compiler: "glslangValidator",
-        src: "shaders/restir_live.comp",
-        flags: &["-V", "--target-env", "vulkan1.0", "-I../restir-gpu/shaders"],
-    },
-    ShaderCompile {
-        label: "restir spatial",
-        compiler: "glslangValidator",
-        src: "shaders/restir_live.comp",
-        flags: &[
-            "-V",
-            "--target-env",
-            "vulkan1.0",
-            "-I../restir-gpu/shaders",
-            "-DRESTIR_SPATIAL_ONLY",
-            "-DRESTIR_SPATIAL_CAP",
-        ],
-    },
-    ShaderCompile {
-        label: "restir spatial wide",
-        compiler: "glslangValidator",
-        src: "shaders/restir_live.comp",
-        flags: &[
-            "-V",
-            "--target-env",
-            "vulkan1.0",
-            "-I../restir-gpu/shaders",
-            "-DRESTIR_SPATIAL_ONLY",
-        ],
-    },
 ];
 
 #[test]

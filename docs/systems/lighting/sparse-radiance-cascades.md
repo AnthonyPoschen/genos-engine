@@ -32,7 +32,17 @@ History stays one confidence-weighted mean. There is no full reset. A fresh samp
 
 ## Direct light
 
-Direct light stays exact. The sun and every lamp inside the importance cutoff keep their shadow rays. Lamps under that cutoff stay the stochastic tail they already are. Distant lamps, the ones the cutoff leaves out of the exact sum, fold into the upper levels instead of a second full sum. A pixel's exact shadow ray samples the lamp disc. That sample is not this conversion.
+Screen pixels keep an exact disc ray for the sun and for the single brightest near lamp. Every other near lamp is a cascade visibility sample, not a per-pixel shadow ray and not the bounce field. The level is `floor(log2(distance))`, clamped to 0..6, so a lamp inside 2 m uses the 25 cm grid and a lamp in `[2^k, 2^(k+1))` uses the cell of that shell. The outer tenth of the shell blends the next coarser level. The stored value is visibility, 0..1. The pixel multiplies it by its own unshadowed `lamp_light`, so the inverse-square is not quantized. The brightest lamp is left out of that add. The table is 16384 slots in the restir buffer, past the uploaded prefix, two parities. One invocation claims the slot with `atomicExchange` and traces; the other pixels of that cell read the previous frame's mean. A miss traces from the pixel, so the first frame is not black. Bounce rays are unchanged: a cache ray still sums every lamp into the cell. Distant lamps stay in that upper-level shade.
+
+## The sun in the cascade
+
+The exact sun stays. This is the comparison, not a second sun path.
+
+`SUN_DISC` is 0.00465047 rad. A receiver a distance `s` past an occluder sees a penumbra about `s * 0.00465` wide. Level 0 is a 25 cm cell. The penumbra is narrower than that cell until `s` is about `0.25 / 0.00465`, near 54 m. A contact shadow in the hall, a few metres of occluder distance, is a few millimetres to a couple of centimetres. A 25 cm cell would step that edge by a cell. The outer shells are coarser. Putting the sun only in the cascade would replace the disc mean the penumbra gate grades with a cell-sized step.
+
+Cost of a cascade sun: one disc ray per cell per frame, the same claim as a point lamp, instead of one ray per pixel. At 1440p that is a large cut. The edge inside 54 m is what the cut spends.
+
+Recommendation: hybrid. Keep the exact sun for the pixel. A cascade sun is the far field, past the distance where the penumbra is wider than the cell that would store it. That split is not built. The exact disc ray remains the product sun.
 
 ## What this conversion deletes
 
@@ -49,7 +59,7 @@ These existed because the picture read the 25 cm cell directly. They are not a s
 - The papers trace a cascade volume. This conversion reuses the existing world-cell hash and the existing software tracer. There is no hardware ray query.
 - Level 0 is a screen-density hash rebuilt from the G-buffer, not a probe brick stored across frames.
 - SH-L1 is the directional store. The papers' higher-order angular basis is not this conversion.
-- The importance cutoff stays the exact/tail split it already is. A cache ray is not a product pixel (`idx < pixels` is false), so the upper-level shade sums every lamp, distant ones included. The per-pixel tail stays the direct remainder. Removing it would drop hall energy or count the same light twice. Distant lamps are not traced as extra exact lights.
+- Product pixels no longer split near lamps into an exact cutoff and a stochastic tail. The sun and the brightest near lamp stay exact. The other near lamps are the cascade visibility table above. A cache ray is not a product pixel (`idx < pixels` is false), so the upper-level shade still sums every lamp, distant ones included. The bounce merge is not this direct table. Adding a cascade lamp on top of its bounce would count it twice; the direct table is visibility for the pixel's own `lamp_light`, and the bounce stays the indirect field.
 - A pixel's exact shadow samples one point on the lamp disc (or the sun disc) per frame. The running mean is the penumbra. That sample is the direct pass, not this conversion. Hits stay on the centre.
 - The finest bounce cell, 25 cm, keeps the full trace from the ray epsilon out to 200 m. The papers start level 0 near 1 m. A cell at least twice that size has a shell from `2^level` to `2^(level+1)`, and the last shell runs out to 200 m. Clipping the 25 cm cell before the shells are summed raised wall splotch from 0.049 to 0.084, so that cell keeps the full trace.
 - Picture compose loads the per-pixel level-0 word. It claims a 25 cm cell only when that word is empty. It does not walk the hash. That walk faults lavapipe. A publish pass, after the lattice fill, writes the merge into that word. The nearer sample is the lattice centre. The six-ring neighbour walk is not this read. A camera move does not rebuild the lattice. The opening, the 32-frame refresh, and a mover's reach still request it. The lattice holds 16384 records, so a room evicts the farther surfaces and that record is empty while the world cell still has samples. A miss reads that cell, then each coarser size until one passes the plane, facing, stale, and empty gates. A camera move inserts voxels that have no ray and no stored coarser cell yet. Those read the fine cells already traced on that surface, then one neighbour cell toward the image centre, one hash of that surface, in the same frame. Beta is 0 while the nearer sample exists. Black only when none of those has data.

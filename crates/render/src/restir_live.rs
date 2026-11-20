@@ -208,14 +208,17 @@ fn same_lamp(a: &GpuLamp, b: &GpuLamp) -> bool {
         && a.range.to_bits() == b.range.to_bits()
 }
 
-/// Device bytes for `pixels`, including the prefix cap. Reservoirs are not
-/// in the upload; the cap keeps a lamp-list change from moving them.
+/// Device bytes for the prefix and the cascade direct table.
+///
+/// The table starts at [`PREFIX_CAP_WORDS`]: two parities, 16384 slots, four
+/// words (key, frame, visibility mean, count). `pixels` is unused. The
+/// reservoir histories that used to follow the prefix are gone.
 #[must_use]
 pub fn buffer_bytes(pixels: u64) -> u64 {
-    let reservoirs = pixels.saturating_mul(u64::from(HIST_STRIDE) * 2 + 4) * 4;
-    PREFIX_CAP_WORDS
-        .saturating_mul(4)
-        .saturating_add(reservoirs)
+    let _ = pixels;
+    const CASCADE_DIRECT_CAP: u64 = 16384;
+    let table = 2 * CASCADE_DIRECT_CAP * 4 * 4;
+    PREFIX_CAP_WORDS.saturating_mul(4).saturating_add(table)
 }
 
 fn push_f(words: &mut Vec<u32>, value: f32) {
@@ -593,20 +596,13 @@ mod tests {
                 .unwrap_or(0),
             0
         );
-        let live = include_str!("../shaders/restir_live.comp");
         let direct = include_str!("../shaders/lighting_direct.comp");
-        assert!(live.contains(&format!(
-            "const uint RESTIR_DIAG_HIST_ACCEPT = {}u;",
-            super::HIST_ACCEPT_WORD
-        )));
-        assert!(live.contains(&format!(
-            "const uint RESTIR_DIAG_HIST_REJECT = {}u;",
-            super::HIST_REJECT_WORD
-        )));
         assert!(direct.contains(&format!(
             "const uint RESTIR_DIAG_POINT_ADD = {}u;",
             super::POINT_ADD_WORD
         )));
+        assert!(direct.contains("const uint CASCADE_DIRECT_AT = 164032u;"));
+        assert_eq!(super::PREFIX_CAP_WORDS, 164032);
     }
 
     #[test]
@@ -820,269 +816,6 @@ mod tests {
         assert_eq!(a.words[46], 1, "scale 1 is full resolution");
         assert_eq!(a.words[7], 32);
         assert_eq!(a.words[13], 4);
-    }
-
-    /// `uniform_index`: n ≤ 1 returns 0 and does not draw.
-    fn uniform_index(n: u32, rng: &mut dyn FnMut() -> u32) -> u32 {
-        if n <= 1 {
-            return 0;
-        }
-        let limit = u32::MAX - (u32::MAX % n);
-        loop {
-            let draw = rng();
-            if draw < limit {
-                return draw % n;
-            }
-        }
-    }
-
-    fn neighbor_pool(x: u32, y: u32, width: u32, height: u32, reach: u32) -> Vec<u32> {
-        let x0 = x.saturating_sub(reach);
-        let y0 = y.saturating_sub(reach);
-        let x1 = (x + reach).min(width - 1);
-        let y1 = (y + reach).min(height - 1);
-        let mut pool = Vec::new();
-        for row in y0..=y1 {
-            for col in x0..=x1 {
-                if col == x && row == y {
-                    continue;
-                }
-                pool.push(row * width + col);
-            }
-        }
-        pool
-    }
-
-    fn shuffle_pool(mut pool: Vec<u32>, take: usize, rng: &mut dyn FnMut() -> u32) -> Vec<u32> {
-        let take = take.min(pool.len()).min(16);
-        for slot in 0..take {
-            let span = u32::try_from(pool.len() - slot).unwrap_or(0);
-            let pick = slot + usize::try_from(uniform_index(span, rng)).unwrap_or(0);
-            pool.swap(slot, pick);
-        }
-        pool.truncate(take);
-        pool
-    }
-
-    fn window_cell(i: u32, x0: u32, y0: u32, span_x: u32, width: u32, centre: u32) -> u32 {
-        let cell = if i >= centre { i + 1 } else { i };
-        (y0 + cell / span_x) * width + (x0 + cell % span_x)
-    }
-
-    /// The live swap table. `nswap` stays within the 32 entries the shader stores.
-    fn shuffle_table(
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        reach: u32,
-        take: u32,
-        rng: &mut dyn FnMut() -> u32,
-    ) -> (Vec<u32>, u32) {
-        let x0 = x.saturating_sub(reach);
-        let y0 = y.saturating_sub(reach);
-        let x1 = (x + reach).min(width - 1);
-        let y1 = (y + reach).min(height - 1);
-        let span_x = x1 - x0 + 1;
-        let span_y = y1 - y0 + 1;
-        let cells = span_x * span_y;
-        if cells <= 1 {
-            return (Vec::new(), 0);
-        }
-        let pool_n = cells - 1;
-        let centre = (y - y0) * span_x + (x - x0);
-        let take = take.min(pool_n).min(16);
-        let mut sw_i = [0u32; 32];
-        let mut sw_v = [0u32; 32];
-        let mut nswap = 0u32;
-        let mut picked = Vec::new();
-        for slot in 0..take {
-            let span = pool_n - slot;
-            let pick = slot + uniform_index(span, rng);
-            let mut a = 0u32;
-            let mut b = 0u32;
-            let mut a_hit = false;
-            let mut b_hit = false;
-            for s in 0..nswap {
-                let si = usize::try_from(s).unwrap_or(0);
-                if sw_i[si] == slot {
-                    a = sw_v[si];
-                    a_hit = true;
-                }
-                if sw_i[si] == pick {
-                    b = sw_v[si];
-                    b_hit = true;
-                }
-            }
-            if !a_hit {
-                a = window_cell(slot, x0, y0, span_x, width, centre);
-            }
-            if !b_hit {
-                b = window_cell(pick, x0, y0, span_x, width, centre);
-            }
-            let mut wrote_slot = false;
-            let mut wrote_pick = false;
-            for s in 0..nswap {
-                let si = usize::try_from(s).unwrap_or(0);
-                if sw_i[si] == slot {
-                    sw_v[si] = b;
-                    wrote_slot = true;
-                }
-                if sw_i[si] == pick {
-                    sw_v[si] = a;
-                    wrote_pick = true;
-                }
-            }
-            if !wrote_slot {
-                let at = usize::try_from(nswap).unwrap_or(0);
-                assert!(at < 32, "swap table overflow");
-                sw_i[at] = slot;
-                sw_v[at] = b;
-                nswap += 1;
-            }
-            if !wrote_pick && pick != slot {
-                let at = usize::try_from(nswap).unwrap_or(0);
-                assert!(at < 32, "swap table overflow");
-                sw_i[at] = pick;
-                sw_v[at] = a;
-                nswap += 1;
-            }
-            picked.push(b);
-        }
-        (picked, nswap)
-    }
-
-    fn lcg(seed: u32) -> impl FnMut() -> u32 {
-        let mut state = seed;
-        move || {
-            state = state
-                .wrapping_mul(1_664_525)
-                .wrapping_add(1_013_904_223);
-            state
-        }
-    }
-
-    /// Lengths of arrays stored in a function, not buffer structs.
-    fn spirv_private_array_lengths(bytes: &[u8]) -> Vec<u32> {
-        let words = bytes.len() / 4;
-        let word = |index: usize| {
-            let start = index.saturating_mul(4);
-            let Some(raw) = bytes.get(start..start + 4) else {
-                return 0;
-            };
-            u32::from_le_bytes(raw.try_into().unwrap_or([0; 4]))
-        };
-        let mut constants = std::collections::HashMap::<u32, u32>::new();
-        let mut arrays = std::collections::HashMap::<u32, u32>::new();
-        let mut pointers = std::collections::HashMap::<u32, (u32, u32)>::new();
-        let mut variables = Vec::new();
-        let mut index = 5usize;
-        while index < words {
-            let header = word(index);
-            let count = usize::try_from(header >> 16).unwrap_or(0);
-            let op = header & 0xffff;
-            if count == 0 || index.saturating_add(count) > words {
-                break;
-            }
-            if op == 43 && count >= 4 {
-                constants.insert(word(index + 2), word(index + 3));
-            } else if op == 28 && count >= 4 {
-                let length = constants.get(&word(index + 3)).copied().unwrap_or(u32::MAX);
-                arrays.insert(word(index + 1), length);
-            } else if op == 32 && count >= 4 {
-                pointers.insert(word(index + 1), (word(index + 2), word(index + 3)));
-            } else if op == 59 && count >= 4 {
-                variables.push((word(index + 1), word(index + 3)));
-            }
-            index = index.saturating_add(count);
-        }
-        variables
-            .iter()
-            .filter_map(|(ty, storage)| {
-                // Function storage is 7. The variable's type is a pointer.
-                if *storage != 7 {
-                    return None;
-                }
-                let (_, pointee) = pointers.get(ty)?;
-                arrays.get(pointee).copied()
-            })
-            .collect()
-    }
-
-    /// The scalar spatial module has no 16/17/32 private arrays. The wide
-    /// module still has the swap table and the 17-wide merge lists.
-    #[test]
-    fn the_restir_scalar_spatial_module_has_no_swap_table() {
-        let scalar = include_bytes!(concat!(env!("OUT_DIR"), "/restir_spatial.comp.spv"));
-        let wide = include_bytes!(concat!(env!("OUT_DIR"), "/restir_spatial_wide.comp.spv"));
-        let scalar_lengths = spirv_private_array_lengths(scalar);
-        assert!(
-            scalar_lengths.iter().all(|len| *len < 16),
-            "scalar spatial SPIR-V still has a private array: {scalar_lengths:?}"
-        );
-        let wide_lengths = spirv_private_array_lengths(wide);
-        assert!(
-            wide_lengths.contains(&32),
-            "wide spatial SPIR-V lost the swap table: {wide_lengths:?}"
-        );
-        assert!(
-            wide_lengths.contains(&17),
-            "wide spatial SPIR-V lost the 17-wide lists: {wide_lengths:?}"
-        );
-    }
-
-    #[test]
-    fn the_swap_table_matches_neighbor_count_and_stays_in_32_entries() {
-        let live = include_str!("../shaders/restir_live.comp");
-        let sample = include_str!("../../restir-gpu/shaders/restir_sample.glsl");
-        let direct = include_str!("../shaders/lighting_direct.comp");
-        let tree_at = live.find("#define RESTIR_TREE_ONLY").unwrap_or(usize::MAX);
-        let include_at = live.find("#include \"restir_sample.glsl\"").unwrap_or(0);
-        assert!(tree_at < include_at, "RESTIR_TREE_ONLY must hide initial_at");
-        assert!(sample.contains("#ifdef RESTIR_TREE_ONLY"));
-        assert!(sample.contains("void initial_tree("));
-        assert!(
-            live.contains(
-                "if (restir_hdr(50u) == 0u) {\n            restir_rng(pixel, 1u);\n            restir_temporal_from(pixel, lamp, w_sum, m, target);"
-            ),
-            "header 50 clear must pass the initial sample in registers"
-        );
-        assert!(live.contains("uint sw_i[32]"));
-        assert!(live.contains("uint sw_v[32]"));
-        assert!(
-            direct.contains("hold && pc.lamp.x != 4u && ((pc.lamp.y >> 19u) & 1u) != 0u"),
-            "bit 19 must not clear the mode-4 exact hold"
-        );
-        for reach in [1u32, 2, 4] {
-            for take in [1u32, 4, 16] {
-                for y in [0u32, 3, 20] {
-                    for x in [0u32, 1, 15] {
-                        let width = 32u32;
-                        let height = 24u32;
-                        if x >= width || y >= height {
-                            continue;
-                        }
-                        let pool = neighbor_pool(x, y, width, height, reach);
-                        for seed in [1u32, 7, 99, 1_000_003] {
-                            let mut rng_a = lcg(seed);
-                            let mut rng_b = lcg(seed);
-                            let from_pool = shuffle_pool(
-                                pool.clone(),
-                                usize::try_from(take).unwrap_or(0),
-                                &mut rng_a,
-                            );
-                            let (from_table, nswap) =
-                                shuffle_table(x, y, width, height, reach, take, &mut rng_b);
-                            assert!(nswap <= 32, "nswap {nswap}");
-                            assert_eq!(
-                                from_table, from_pool,
-                                "reach {reach} take {take} pixel {x},{y} seed {seed}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
     }
 
     fn function_body<'a>(src: &'a str, name: &str) -> &'a str {

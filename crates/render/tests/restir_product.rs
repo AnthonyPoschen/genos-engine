@@ -147,17 +147,12 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     // counters move. Neither is a per-pixel depth or normal threshold.
     // The picture is the cumulative mean of the unbiased sample. It is not
     // the raw sample, and it is not the exact-sum mean the review rejected.
-    let live = include_str!("../shaders/restir_live.comp");
     let direct = include_str!("../shaders/lighting_direct.comp");
     let pick = include_str!("../shaders/lighting_lamp_pick.glsl");
-    assert!(live.contains("const float RESTIR_DEPTH_REL = 0.02;"));
-    assert!(live.contains("const float RESTIR_DEPTH_ABS = 0.05;"));
-    assert!(live.contains("const float RESTIR_NORMAL_MIN = 0.9;"));
-    assert!(live.contains("const uint RESTIR_TEMPORAL_TRIES = 1u;"));
-    assert!(live.contains("const ivec2 RESTIR_TEMPORAL_OFFSETS[1]"));
-    assert!(live.contains("const uint RESTIR_DIAG_HIST_ACCEPT = 43u;"));
-    assert!(live.contains("const uint RESTIR_DIAG_HIST_REJECT = 44u;"));
-    assert!(live.contains("atomicAdd(restir_words[RESTIR_DIAG_HIST_ACCEPT], 1u);"));
+    assert!(direct.contains("const uint CASCADE_DIRECT_AT = 164032u;"));
+    assert!(direct.contains("const uint CASCADE_DIRECT_CAP = 16384u;"));
+    assert!(direct.contains("restir_brightest("));
+    assert!(direct.contains("cascade_lamp_vis("));
     assert!(direct.contains("const uint RESTIR_DIAG_POINT_ADD = 45u;"));
     assert!(direct.contains("atomicAdd(restir_words[RESTIR_DIAG_POINT_ADD], 1u);"));
     assert!(!direct.contains("atomicAdd(gstats.diag[13u], 1u);"));
@@ -172,9 +167,6 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(reach.contains("bool restir_changed_reaches"));
     assert!(direct.contains("restir_changed_reaches(origin)"));
     assert!(direct.contains("restir_change_weight(origin, n, two_sided, ratio, confidence)"));
-    assert!(live.contains(
-        "restir_change_weight(pos + nrm * RESTIR_ORIGIN_LIFT, nrm, sided, ratio, confidence)"
-    ));
     assert!(!direct.contains("RESTIR_CHANGE_DROP_STEPS"));
     assert!(!direct.contains("RESTIR_CHANGE_FADE"));
     assert!(!reach.contains("RESTIR_CHANGE_DROP_STEPS"));
@@ -187,12 +179,8 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     assert!(direct.contains(
         "lamp_hit && !shade_exact && point_lit > 0u && point_lit <= LAMP_PICK_EXACT_LIT"
     ));
-    assert!(live.contains("!restir_pixel_few(pixel)"));
     assert!(!direct.contains("RESTIR_CHANGE_LEAVE"));
     assert!(!reach.contains("RESTIR_CHANGE_LEAVE"));
-    assert!(!direct.contains("restir_words[39u] == 0u"));
-    assert!(live.contains("restir_changed_reaches(pos + nrm * RESTIR_ORIGIN_LIFT)"));
-    assert!(!live.contains("restir_hdr(39u) != 0u"));
     assert!(pick.contains("const uint RESTIR_MEAN_CAP = 4096u;"));
 }
 
@@ -286,9 +274,8 @@ fn assert_lamp_counts(window: &mut Window, renderer: &mut Renderer, camera: &Cam
     }
     let built = names(renderer);
     assert!(
-        built.iter().any(|name| name == "restir-di")
-            && built.iter().any(|name| name == "restir-direct"),
-        "flag on did not build restir-di and restir-direct: {built:?}"
+        built.iter().any(|name| name == "restir-direct"),
+        "flag on did not build restir-direct: {built:?}"
     );
 }
 
@@ -307,13 +294,10 @@ fn assert_still(
         held.history_accepts, held.history_rejects, held.exact, held.restir, held.restir_point_adds
     );
     assert_cutoff_sum(&held, "a still view");
-    assert!(
-        held.history_accepts > 0,
-        "a still view kept no live history ({held:?})"
-    );
     assert_eq!(
-        held.history_rejects, 0,
-        "a still view rejected live history ({held:?})"
+        (held.history_accepts, held.history_rejects),
+        (0, 0),
+        "a still view ran the deleted temporal pass ({held:?})"
     );
     held
 }
@@ -327,17 +311,10 @@ fn assert_yaw(window: &mut Window, renderer: &mut Renderer, lit: &World, held: &
         turn.history_accepts, turn.history_rejects, turn.exact, turn.restir, turn.restir_point_adds
     );
     assert_cutoff_sum(&turn, "a yaw");
-    assert!(
-        turn.history_accepts > 0,
-        "a yaw kept no live history ({turn:?})"
-    );
-    assert!(
-        turn.history_rejects > 0,
-        "a yaw rejected no live history ({turn:?})"
-    );
-    assert!(
-        turn.history_accepts < held.history_accepts,
-        "a yaw kept as much history as the still view ({turn:?} vs {held:?})"
+    assert_eq!(
+        (turn.history_accepts, turn.history_rejects),
+        (held.history_accepts, held.history_rejects),
+        "a yaw started the deleted temporal pass ({turn:?} vs {held:?})"
     );
 }
 
@@ -346,7 +323,7 @@ fn assert_lift(
     renderer: &mut Renderer,
     lit: &World,
     still: &Camera,
-    held: &LampPickCounts,
+    _held: &LampPickCounts,
 ) -> LampPickCounts {
     // Same floor, camera 2 m higher. The assert is accepts > rejects.
     // The reject count is not identified as depth, off-screen, or empty.
@@ -364,18 +341,15 @@ fn assert_lift(
         mismatch.restir_point_adds
     );
     assert_cutoff_sum(&mismatch, "a coplanar lift");
-    assert!(
-        mismatch.history_accepts > mismatch.history_rejects,
-        "a coplanar lift kept no more history than it rejected ({mismatch:?})"
-    );
-    assert!(
-        mismatch.history_rejects < held.history_accepts,
-        "a coplanar lift rejected more pixels than the still view kept ({mismatch:?})"
+    assert_eq!(
+        (mismatch.history_accepts, mismatch.history_rejects),
+        (0, 0),
+        "a coplanar lift ran the deleted temporal pass ({mismatch:?})"
     );
     mismatch
 }
 
-fn assert_wall(window: &mut Window, renderer: &mut Renderer, mismatch: &LampPickCounts) {
+fn assert_wall(window: &mut Window, renderer: &mut Renderer, _mismatch: &LampPickCounts) {
     // Depth and normal change together. The lamps are behind the face, so
     // the reservoir sample count is 0. That is the fixture.
     let lifted = pose_at(0.0, 3.6, 3.0, 0.0);
@@ -408,17 +382,14 @@ fn assert_wall(window: &mut Window, renderer: &mut Renderer, mismatch: &LampPick
         surface.restir_point_adds, 0,
         "a facing wall summed a lamp that sits behind that face ({surface:?})"
     );
-    assert!(
-        surface.history_rejects > surface.history_accepts,
-        "a facing wall kept at least as much history as it rejected ({surface:?})"
+    assert_eq!(
+        (surface.history_accepts, surface.history_rejects),
+        (0, 0),
+        "a facing wall ran the deleted temporal pass ({surface:?})"
     );
     assert_eq!(
         surface.restir, 0,
         "a facing wall shaded a reservoir sample; the lamps sit behind that face ({surface:?})"
-    );
-    assert!(
-        surface.history_rejects > mismatch.history_rejects,
-        "a facing wall rejected no more than the coplanar lift ({surface:?})"
     );
 }
 
@@ -454,14 +425,11 @@ fn assert_exact_gate(window: &mut Window, renderer: &mut Renderer, lit: &World, 
 }
 
 /// `restir_di` off is the labelled exact sum and builds no ReSTIR pipeline.
-/// Flag on, equal lamps at every count are at or above the importance cutoff,
-/// so the direct loop sums them and the reservoir sample count stays 0. The
-/// labelled exact gate still sums and does not take that loop.
-/// A still view keeps live history. A yaw keeps some and rejects some. A
-/// coplanar lift keeps more surfaced pixels than it rejects. A facing wall
-/// rejects more than it keeps, and the lamps sit behind that face so the
-/// reservoir sample count is 0. Those rows are counter movement. They are
-/// not a depth-only or normal-only threshold.
+/// Flag on, the direct loop adds the brightest near lamp and the reservoir
+/// sample count stays 0. The labelled exact gate still sums and does not take
+/// that loop. The temporal pass is deleted, so history accepts and rejects
+/// stay 0 on a still view, a yaw, a coplanar lift, and a facing wall. The
+/// lamps sit behind that wall, so the point-add count stays 0.
 #[test]
 fn restir_di_product_shades_every_lamp_count_without_the_exact_sum() {
     let _diag = LampDiag;
