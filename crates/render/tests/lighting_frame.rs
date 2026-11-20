@@ -803,7 +803,7 @@ fn adaptive_skip_keeps_the_bounce_bright() {
         renderer.set_lighting_settings(adaptive_settings("0.1"));
         view_at(renderer, ViewMode::Bounce);
         let mut frames = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..64 {
             frames.push(draw(window, renderer, &world, &camera));
         }
         frames.pop().expect("adaptive frame")
@@ -820,7 +820,7 @@ fn adaptive_skip_keeps_the_bounce_bright() {
         renderer.set_lighting_settings(settings);
         view_at(renderer, ViewMode::Bounce);
         let mut frames = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..64 {
             frames.push(draw(window, renderer, &world, &camera));
         }
         frames.pop().expect("one-iter frame")
@@ -834,15 +834,15 @@ fn adaptive_skip_keeps_the_bounce_bright() {
     eprintln!(
         "adaptive skip vs 1 iter mean {mean:.3} p99 {p99:.3} luma {y_skip:.2} one {y_one:.2}"
     );
-    // The bounce view on this hall is dim (luma about 2.6). A black frame is
-    // not a comparison. Leaving A unpublished measured mean 0.133 p99 1.0
-    // here; the 4070's unpublished A was mean 15.9 p99 41. Both fail below.
+    // The bounce view on this hall is dim (luma about 7.3 settled). A black
+    // frame is not a comparison. Leaving A unpublished measured 5% of luma
+    // (mean 0.133 at luma 2.6); the 4070's was mean 15.9 p99 41. Both fail below.
     assert!(y_one > 1.0, "one-iteration bounce is empty ({y_one:.2})");
     assert_bounce_is_shaded("one-iteration bounce", &one);
     assert_bounce_is_shaded("adaptive skip", &adaptive);
     assert!(
-        mean < 0.05,
-        "adaptive skip mean error {mean:.3} against one wavelet"
+        mean < 0.019 * y_one,
+        "adaptive skip mean error {mean:.3} against one wavelet (limit 1.9% of luma {y_one:.2})"
     );
     assert!(
         p99 < 2.0,
