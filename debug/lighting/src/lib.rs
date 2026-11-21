@@ -1620,6 +1620,16 @@ impl Host for App {
                             });
                         }
                         knobs.push(Knob {
+                            name: "mesh_play".into(),
+                            label: "Play clip".into(),
+                            value: f64::from(u8::from(view.is_playing())),
+                            min: 0.0,
+                            max: 1.0,
+                            step: 1.0,
+                            choices: vec!["off".into(), "on".into()],
+                            text: if view.is_playing() { "on".into() } else { "off".into() },
+                        });
+                        knobs.push(Knob {
                             name: "mesh_surfaces".into(),
                             label: "Mesh surfaces".into(),
                             value: f64::from(u8::from(view.surfaces)),
@@ -1652,6 +1662,19 @@ impl Host for App {
                     });
                     // The scrubber: 0 is the session start, each step a
                     // command, and the last step is the live mesh.
+                    if view.replay_span().is_ok() {
+                        let on = view.replay_playing.is_some();
+                        knobs.push(Knob {
+                            name: "mesh_replay_play".into(),
+                            label: "Play replay".into(),
+                            value: f64::from(u8::from(on)),
+                            min: 0.0,
+                            max: 1.0,
+                            step: 1.0,
+                            choices: vec!["off".into(), "on".into()],
+                            text: if on { "on".into() } else { "off".into() },
+                        });
+                    }
                     if let Ok((_, last)) = view.replay_span() {
                         let at = view.replay.as_ref().map_or(last + 1, |r| r.event);
                         knobs.push(Knob {
@@ -1685,6 +1708,31 @@ impl Host for App {
     }
 
     fn set_knob(&mut self, name: &str, value: f64) -> Result<(), String> {
+        if name == "mesh_replay_play" {
+            let view = self.mesh.as_mut().ok_or("mesh_replay_play needs a mesh scene")?;
+            if value >= 0.5 {
+                if view.replay.is_none() {
+                    view.scrub(0)?;
+                }
+                view.replay_playing = Some(0.7);
+            } else {
+                view.replay_playing = None;
+            }
+            self.follow_mesh();
+            self.refresh_mesh_overlay();
+            return Ok(());
+        }
+        if name == "mesh_play" {
+            let view = self.mesh.as_mut().ok_or("mesh_play needs a mesh scene")?;
+            let clip = view
+                .pose
+                .as_ref()
+                .map(|(clip, _)| clip.clone())
+                .or_else(|| view.workspace.as_ref().and_then(|w| w.clips.first().map(|c| c.name.clone())));
+            view.play(if value >= 0.5 { clip } else { None })?;
+            self.refresh_mesh_overlay();
+            return Ok(());
+        }
         if name == "mesh_clip" || name == "mesh_time" || name == "mesh_bones" || name == "mesh_surfaces" {
             let view = self.mesh.as_mut().ok_or("the animation knobs need a mesh scene")?;
             if name == "mesh_surfaces" {

@@ -68,12 +68,14 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
 - [ ] Grid on the ground plane; contact shadow (the mesh casts no shadow); bloom and auto exposure soften the picture and could be off for a mesh scene.
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
-- [ ] Objects panel: collections and objects as a tree, search, show all, hide matching, solo matching.
+- [x] Show all, hide matching and solo matching by name (`mesh_view show_all`, `hide_match`, `solo_match`).
+- [ ] Objects panel in the window: collections and objects as a tree with a search box.
 - [x] Replay: show the state after a command (`mesh_view replay`).
 - [x] Replay steps and scrubber: `replay: "next"`, `"previous"`, `"live"`, and the menu's "Replay" slider (0 is the session start, the last step is live).
-- [ ] Replay panel: session picker, play, command filter, the event's input and reply.
+- [x] Replay play (`replay: "play"`, `"stop"`, the menu's "Play replay"): a step every 0.7 s to the live mesh.
+- [ ] Replay panel: session picker, command filter, the event's input and reply.
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
-- [ ] Animation play button. Each pose is one recorded `animation_sample` command, so a 30 Hz player would fill the session's recordings; see "For Nathan".
+- [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
 - [ ] Posed normals (the pose keeps the rest normals), and picking and the selection highlight on the posed mesh (they use the rest positions).
 - [ ] Workspace picker; connection and revision readout; statistics footer.
 

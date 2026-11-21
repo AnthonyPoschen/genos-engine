@@ -136,6 +136,10 @@ pub struct MeshView {
     posed: Option<Posed>,
     /// The pose has to be sampled again: the mesh was reloaded.
     repose: bool,
+    /// The clip is playing: poses sampled once across it, and the play time.
+    playing: Option<Playback>,
+    /// The replay is stepping forward on its own: seconds to the next step.
+    pub replay_playing: Option<f32>,
     /// Draw the bones over the mesh.
     pub bones: bool,
     /// Draw the mesh's surfaces. Off leaves the wireframe and the bones.
@@ -197,6 +201,37 @@ struct Posed {
     vertices: std::collections::BTreeMap<u64, [f32; 3]>,
     joints: std::collections::BTreeMap<String, [f32; 3]>,
 }
+
+/// A clip being played: poses sampled across it, blended by the play time.
+struct Playback {
+    clip: String,
+    length: f32,
+    time: f32,
+    samples: Vec<(f32, Posed)>,
+}
+
+impl Playback {
+    /// The pose at the play time: the two samples around it, blended.
+    fn blend(&self) -> Option<Posed> {
+        let after = self.samples.iter().position(|(time, _)| *time >= self.time).unwrap_or(self.samples.len().checked_sub(1)?);
+        let before = after.saturating_sub(1);
+        let (t0, from) = self.samples.get(before)?;
+        let (t1, to) = self.samples.get(after)?;
+        let share = if t1 > t0 { ((self.time - t0) / (t1 - t0)).clamp(0.0, 1.0) } else { 0.0 };
+        let mix = |a: [f32; 3], b: [f32; 3]| [a[0] + (b[0] - a[0]) * share, a[1] + (b[1] - a[1]) * share, a[2] + (b[2] - a[2]) * share];
+        Some(Posed {
+            vertices: from.vertices.iter().map(|(id, a)| (*id, to.vertices.get(id).map_or(*a, |b| mix(*a, *b)))).collect(),
+            joints: from.joints.iter().map(|(name, a)| (name.clone(), to.joints.get(name).map_or(*a, |b| mix(*a, *b)))).collect(),
+        })
+    }
+}
+
+/// Poses sampled per second of clip for playback.
+const PLAY_RATE: f32 = 12.0;
+/// The most poses sampled for one clip.
+const PLAY_SAMPLES_MAX: usize = 48;
+/// Seconds between replay steps while it plays. The web viewer uses 700 ms.
+const REPLAY_STEP_SECONDS: f32 = 0.7;
 
 /// Vertices or bones asked for in one `animation_sample` page: the most
 /// mesh-workbench gives.
@@ -315,6 +350,8 @@ impl MeshView {
             pose: None,
             posed: None,
             repose: false,
+            playing: None,
+            replay_playing: None,
             bones: false,
             surfaces: true,
             replay: None,
@@ -322,6 +359,99 @@ impl MeshView {
             display_stale: true,
             bridge: None,
         }
+    }
+
+    /// Whether the clip is playing.
+    pub fn is_playing(&self) -> bool {
+        self.playing.is_some()
+    }
+
+    /// Play `clip` in a loop, or stop with `None` (the mesh keeps its pose).
+    /// The clip is sampled once, `PLAY_RATE` times a second of clip, and the
+    /// frames between are blended from those samples: asking mesh-workbench
+    /// for every drawn frame would record a command each time.
+    pub fn play(&mut self, clip: Option<String>) -> Result<(), String> {
+        let Some(clip) = clip else {
+            self.playing = None;
+            return Ok(());
+        };
+        let length = self
+            .workspace
+            .iter()
+            .flat_map(|w| &w.clips)
+            .find(|c| c.name == clip)
+            .map(|c| c.duration)
+            .ok_or_else(|| format!("unknown clip {clip}"))?;
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small frame count")]
+        let count = ((length * PLAY_RATE).ceil() as usize).clamp(1, PLAY_SAMPLES_MAX);
+        let mut samples = Vec::with_capacity(count + 1);
+        for index in 0..=count {
+            #[expect(clippy::cast_precision_loss, reason = "a small frame count")]
+            let time = length * index as f32 / count as f32;
+            self.set_pose(Some((clip.clone(), time)))?;
+            if let Some(posed) = self.posed.clone() {
+                samples.push((time, posed));
+            }
+        }
+        self.playing = Some(Playback { clip, length, time: 0.0, samples });
+        Ok(())
+    }
+
+    /// One frame of time: advance a playing clip and a playing replay.
+    pub fn tick(&mut self, dt: f32) {
+        if let Some(playback) = &mut self.playing {
+            playback.time = if playback.length > 0.0 { (playback.time + dt) % playback.length } else { 0.0 };
+            if let Some(posed) = playback.blend() {
+                self.pose = Some((playback.clip.clone(), playback.time));
+                self.posed = Some(posed);
+                self.display_stale = true;
+                self.overlay_stale = true;
+            }
+        }
+        if let Some(wait) = &mut self.replay_playing {
+            *wait -= dt;
+            if *wait <= 0.0 {
+                // The same pace as the mesh-workbench web viewer.
+                *wait = REPLAY_STEP_SECONDS;
+                let at_live = match self.replay_span() {
+                    Ok((_, last)) => self.replay.as_ref().is_none_or(|r| r.event >= last),
+                    Err(_) => true,
+                };
+                let next = self.replay.as_ref().map_or(0, |r| r.event + 1);
+                if at_live || self.scrub(next).is_err() {
+                    // Reached the last command: show the live mesh and stop.
+                    self.replay_playing = None;
+                    if self.replay.take().is_some() {
+                        self.rebuild = true;
+                    }
+                    set_source(None);
+                }
+            }
+        }
+    }
+
+    /// Show only the objects whose name contains `text`, or hide them.
+    /// Letter case is ignored.
+    fn match_names(&mut self, text: &str, solo: bool) {
+        let want = text.to_lowercase();
+        let hit: Vec<u64> = self
+            .workspace
+            .iter()
+            .flat_map(|w| &w.parts)
+            .filter(|part| part.name.to_lowercase().contains(&want))
+            .map(|part| part.object)
+            .collect();
+        if solo {
+            self.hidden = self
+                .workspace
+                .iter()
+                .flat_map(|w| w.parts.iter().map(|p| p.object))
+                .filter(|object| !hit.contains(object))
+                .collect();
+        } else {
+            self.hidden.extend(hit);
+        }
+        self.display_stale = true;
     }
 
     /// Pose the mesh at `time` seconds of `clip`, or at rest with `None`.
@@ -587,6 +717,7 @@ impl MeshView {
                 wrote: pose,
             });
         }
+        self.tick(input.dt);
         if input.frame_key {
             self.frame(camera);
         }
@@ -834,7 +965,13 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces"])?;
+                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces", "solo_match", "hide_match"])?;
+                if let Some(name) = args.str("solo_match")? {
+                    self.match_names(&name, true);
+                }
+                if let Some(name) = args.str("hide_match")? {
+                    self.match_names(&name, false);
+                }
                 if let Some(on) = args.bool("surfaces")? {
                     self.surfaces = on;
                     self.display_stale = true;
@@ -844,14 +981,23 @@ impl MeshView {
                     self.overlay_stale = true;
                 }
                 match args.0.get("pose") {
-                    Some(Value::String(rest)) if rest == "rest" => self.set_pose(None)?,
+                    Some(Value::String(rest)) if rest == "rest" => {
+                        self.playing = None;
+                        self.set_pose(None)?;
+                    }
+                    Some(Value::String(stop)) if stop == "stop" => self.playing = None,
+                    Some(value @ Value::Object(_)) if value.get("play").and_then(Value::as_bool) == Some(true) => {
+                        let clip = value.get("clip").and_then(Value::as_str).ok_or("pose needs clip: a clip name")?.to_string();
+                        self.play(Some(clip))?;
+                    }
                     Some(value @ Value::Object(_)) => {
+                        self.playing = None;
                         let clip = value.get("clip").and_then(Value::as_str).ok_or("pose needs clip: a clip name")?.to_string();
                         #[expect(clippy::cast_possible_truncation, reason = "a time in seconds")]
                         let time = value.get("time").and_then(Value::as_f64).unwrap_or(0.0) as f32;
                         self.set_pose(Some((clip, time)))?;
                     }
-                    Some(_) => return Err("pose is \"rest\" or {clip, time}".into()),
+                    Some(_) => return Err("pose is \"rest\", \"stop\", {clip, time}, or {clip, play: true}".into()),
                     None => {}
                 }
                 if let Some(on) = args.bool("turntable")? {
@@ -862,8 +1008,18 @@ impl MeshView {
                 }
                 match args.0.get("replay") {
                     Some(Value::String(live)) if live == "live" => {
+                        self.replay_playing = None;
                         self.rebuild = self.replay.take().is_some();
                     }
+                    Some(Value::String(play)) if play == "play" => {
+                        // From the session start, unless a state is already shown.
+                        if self.replay.is_none() {
+                            let (session, _) = self.replay_span()?;
+                            self.replay_at(&session, 0)?;
+                        }
+                        self.replay_playing = Some(REPLAY_STEP_SECONDS);
+                    }
+                    Some(Value::String(stop)) if stop == "stop" => self.replay_playing = None,
                     Some(Value::String(step)) if step == "next" || step == "previous" => {
                         let (session, last) = self.replay_span()?;
                         let at = self.replay.as_ref().map_or(last, |r| r.event);
@@ -879,7 +1035,7 @@ impl MeshView {
                         let event = value.get("event").and_then(Value::as_u64).ok_or("replay needs event: a command number, 0 for the session start")?;
                         self.replay_at(&session, event)?;
                     }
-                    Some(_) => return Err("replay is \"live\", \"next\", \"previous\", or {session, event}".into()),
+                    Some(_) => return Err("replay is \"live\", \"next\", \"previous\", \"play\", \"stop\", or {session, event}".into()),
                     None => {}
                 }
                 set_source(self.replay.as_ref().map(|r| genos_workbench::state_path(&self.dir, &r.session, r.snapshot)));
@@ -1055,6 +1211,8 @@ impl MeshView {
             ("pick", text(self.pick_mode.clone())),
             ("shade", text(self.shade.clone())),
             ("turntable", Value::Bool(self.turntable)),
+            ("playing", Value::Bool(self.playing.is_some())),
+            ("replay_playing", Value::Bool(self.replay_playing.is_some())),
             ("bones", Value::Bool(self.bones)),
             ("surfaces", Value::Bool(self.surfaces)),
             (
