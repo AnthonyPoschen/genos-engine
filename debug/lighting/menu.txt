@@ -15,6 +15,7 @@ Scene | - | - | open | view
 Scene | - | - | open | lighting_preset
 Scene | - | - | open | sky
 Scene | - | - | open | mesh_pick
+Scene | - | - | open | mesh_note
 Scene | - | - | open | mesh_shade
 Scene | - | - | open | mesh_solo
 Scene | - | - | open | mesh_turntable

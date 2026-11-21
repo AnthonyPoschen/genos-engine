@@ -1,6 +1,6 @@
 # Mesh workbench
 
-Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Also in the tree: orbit, pan and zoom, selecting with a click, and mesh-workbench linked in for edits. Objects hide, show and solo; the shade modes are `shaded`, `wireframe`, `vertex_colors`, `object_ids` and `face_ids`; the axis views; replay of a session's recorded states; and menu controls for the pick mode, the shading and which object shows. Animation poses and bones are in too. The engine's `view` modes `normal`, `depth` and `albedo` work on a mesh scene. Clips and replays play. Not yet: the orthographic view, textures, an objects tree in the window, and a text box for the note. The stages are listed under Plan.
+Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Also in the tree: orbit, pan and zoom, selecting with a click, and mesh-workbench linked in for edits. Objects hide, show and solo; the shade modes are `shaded`, `wireframe`, `vertex_colors`, `object_ids` and `face_ids`; the axis views; replay of a session's recorded states; and menu controls for the pick mode, the shading and which object shows. Animation poses and bones are in too. The engine's `view` modes `normal`, `depth` and `albedo` work on a mesh scene. Clips and replays play. The note is typed in the window. Not yet: the orthographic view, textures, and an objects tree in the window. The stages are listed under Plan.
 
 The scene program shows and edits the meshes that [mesh-workbench](https://github.com/NathanChambers/mesh-workbench) makes. A person looks at a mesh in the engine, selects part of it, and tells an agent what to change. The agent reads the selection from the engine's agent endpoint and sends the edit to mesh-workbench.
 
@@ -58,6 +58,7 @@ In a mesh scene the fly camera is off and the pointer works on the mesh:
 - A click (a press that moves under 4 pixels) selects what is under the pointer and clears the rest. Shift and a click adds it, or removes it when it was selected.
 - What a click selects is the pick mode: `face` (default), `object`, or `vertex`. `mesh_view` with `pick` sets it, and its reply reports it. The knob `mesh_pick` is the same value, and the menu's Scene tab shows it as "Click selects".
 - A press on the menu is the menu's.
+- `T` starts typing the note. Letters, digits and the space bar type into it (Shift gives capitals), Backspace removes a letter, Enter ends, and Escape ends and clears it. While typing, the hotkeys are off. The Scene tab shows the note. An agent reads it with `mesh_selection`.
 
 When a checkpoint, a script, or an agent moves the camera, the orbit continues about the point in front of that new pose.
 

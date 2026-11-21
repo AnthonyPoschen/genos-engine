@@ -23,7 +23,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Selection highlight: faces, objects, vertex markers.
 - [x] Agent commands: `mesh_view`, `mesh_pick`, `mesh_selection` (with the note and the camera), `mesh_command`.
 - [x] Display: hide, show, solo; `shaded`, `object_ids`, `wireframe`; axis views; replay of a recorded state.
-- [x] Menu: "Click selects", "Mesh shading", "Show object".
+- [x] Menu: the Scene tab shows the mesh controls in a mesh scene. A test checks them. Until 22 Nov 2026 only the on/off ones were drawn: a slider or a dropdown needs its knob name in `SLIDER_KNOBS` or `DROP_KNOBS`.
 - [x] mesh-workbench linked in (`genos-meshbench`); `mesh_command` runs on its session.
 - [x] Checks: `debug/lighting/scripts/mesh_selection.rhai`; unit tests in `genos-workbench` and `debug/lighting/src/mesh_view.rs`; clippy clean on both.
 
@@ -82,7 +82,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 ### E. Beyond the web viewer
 
 - [x] Select with a click; the selection over the agent endpoint.
-- [ ] A text box in the window for the note.
+- [x] The note typed in the window: `T` starts, letters, digits and the space bar type, Backspace removes, Enter ends, Escape clears. Hotkeys are off while typing. The Scene tab shows it as "Note".
+- [ ] Punctuation in the typed note (the window gives key codes, not text).
 - [ ] Box and lasso selection; select loop and select connected in the viewer.
 - [ ] Preview of a pending edit (mesh-workbench `transaction` with `preview_id`) before it is committed.
 

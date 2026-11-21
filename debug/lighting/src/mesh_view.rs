@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
+use genos_input::InputCode;
 use genos_mcp::json::{self, Value};
 use genos_scene::Camera;
 use genos_workbench::{Part, Workspace};
@@ -117,6 +118,8 @@ pub struct MeshView {
     pub looked: Instant,
     pub workspace: Option<Workspace>,
     pub selection: Selection,
+    /// The person is typing the note: keys go to the note, not to hotkeys.
+    pub typing: bool,
     /// The picture's overlay no longer matches `selection`.
     pub overlay_stale: bool,
     /// What a click picks: `face`, `object`, or `vertex`.
@@ -201,6 +204,48 @@ struct Posed {
     vertices: std::collections::BTreeMap<u64, [f32; 3]>,
     joints: std::collections::BTreeMap<String, [f32; 3]>,
 }
+
+/// The longest note the window takes. An agent can set a longer one.
+const NOTE_MAX: usize = 200;
+/// The keys that type a letter or a digit into the note.
+const NOTE_KEYS: [(InputCode, char); 36] = [
+    (InputCode::key_a, 'a'),
+    (InputCode::key_b, 'b'),
+    (InputCode::key_c, 'c'),
+    (InputCode::key_d, 'd'),
+    (InputCode::key_e, 'e'),
+    (InputCode::key_f, 'f'),
+    (InputCode::key_g, 'g'),
+    (InputCode::key_h, 'h'),
+    (InputCode::key_i, 'i'),
+    (InputCode::key_j, 'j'),
+    (InputCode::key_k, 'k'),
+    (InputCode::key_l, 'l'),
+    (InputCode::key_m, 'm'),
+    (InputCode::key_n, 'n'),
+    (InputCode::key_o, 'o'),
+    (InputCode::key_p, 'p'),
+    (InputCode::key_q, 'q'),
+    (InputCode::key_r, 'r'),
+    (InputCode::key_s, 's'),
+    (InputCode::key_t, 't'),
+    (InputCode::key_u, 'u'),
+    (InputCode::key_v, 'v'),
+    (InputCode::key_w, 'w'),
+    (InputCode::key_x, 'x'),
+    (InputCode::key_y, 'y'),
+    (InputCode::key_z, 'z'),
+    (InputCode::key_0, '0'),
+    (InputCode::key_1, '1'),
+    (InputCode::key_2, '2'),
+    (InputCode::key_3, '3'),
+    (InputCode::key_4, '4'),
+    (InputCode::key_5, '5'),
+    (InputCode::key_6, '6'),
+    (InputCode::key_7, '7'),
+    (InputCode::key_8, '8'),
+    (InputCode::key_9, '9'),
+];
 
 /// A clip being played: poses sampled across it, blended by the play time.
 struct Playback {
@@ -341,6 +386,7 @@ impl MeshView {
             looked: Instant::now(),
             workspace,
             selection: Selection::default(),
+            typing: false,
             overlay_stale: true,
             pick_mode: "face".into(),
             orbit: None,
@@ -359,6 +405,37 @@ impl MeshView {
             display_stale: true,
             bridge: None,
         }
+    }
+
+    /// The note keys for one frame. `T` starts typing, Enter ends it, Escape
+    /// ends it and clears the note, Backspace removes a letter. While typing,
+    /// letters, digits and the space bar go to the note; Shift gives capitals.
+    /// Returns whether the keys were the note's this frame.
+    pub fn type_note(&mut self, pressed: &dyn Fn(InputCode) -> bool, shift: bool) -> bool {
+        if !self.typing {
+            if pressed(InputCode::key_t) {
+                self.typing = true;
+                return true;
+            }
+            return false;
+        }
+        if pressed(InputCode::key_enter) {
+            self.typing = false;
+        } else if pressed(InputCode::key_escape) {
+            self.typing = false;
+            self.selection.note.clear();
+        } else if pressed(InputCode::key_backspace) {
+            self.selection.note.pop();
+        } else if pressed(InputCode::key_space) {
+            self.selection.note.push(' ');
+        } else if self.selection.note.len() < NOTE_MAX {
+            for (code, letter) in NOTE_KEYS {
+                if pressed(code) {
+                    self.selection.note.push(if shift { letter.to_ascii_uppercase() } else { letter });
+                }
+            }
+        }
+        true
     }
 
     /// Whether the clip is playing.
@@ -1590,6 +1667,26 @@ mod tests {
         let wrong = genos_mcp::json::parse(r#"{"command":"rig_set"}"#).expect("json");
         let err = view.command("mesh_animation", &wrong, &mut camera, 1.0).expect_err("refused");
         assert!(err.contains("mesh_rig"), "{err}");
+    }
+
+    #[test]
+    fn t_starts_the_note_letters_fill_it_and_enter_ends_it() {
+        use genos_input::InputCode;
+        let mut view = view();
+        let key = |want: InputCode| move |code: InputCode| code == want;
+        assert!(!view.type_note(&key(InputCode::key_a), false), "a letter before T is not the note's");
+        assert!(view.type_note(&key(InputCode::key_t), false));
+        assert!(view.typing && view.selection.note.is_empty(), "T starts typing and is not typed");
+        view.type_note(&key(InputCode::key_h), true);
+        view.type_note(&key(InputCode::key_i), false);
+        view.type_note(&key(InputCode::key_space), false);
+        view.type_note(&key(InputCode::key_2), false);
+        view.type_note(&key(InputCode::key_x), false);
+        view.type_note(&key(InputCode::key_backspace), false);
+        assert_eq!(view.selection.note, "Hi 2");
+        assert!(view.type_note(&key(InputCode::key_enter), false));
+        assert!(!view.typing);
+        assert_eq!(view.selection.note, "Hi 2", "Enter keeps the note");
     }
 
     #[test]

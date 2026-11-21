@@ -341,6 +341,10 @@ const SLIDER_KNOBS: &[&str] = &[
     "thickness",
     "albedo",
     "phase_g",
+    // The mesh viewer's sliders. New names go at the end: the menu ID is the index.
+    "mesh_replay",
+    "mesh_time",
+    "mesh_note",
 ];
 /// Unordered choices. A long list of scenes uses the same dropdown.
 const DROP_KNOBS: &[&str] = &[
@@ -349,6 +353,11 @@ const DROP_KNOBS: &[&str] = &[
     "lighting_lamp_pick",
     "lighting_surface_cache_blend",
     "fog_view",
+    // The mesh viewer's choices. New names go at the end: the menu ID is the index.
+    "mesh_pick",
+    "mesh_shade",
+    "mesh_solo",
+    "mesh_clip",
 ];
 const VIEWS: [&str; 10] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance", "path",
@@ -675,7 +684,16 @@ fn run() -> Result<i32, String> {
             &mut tracked_collapsed,
             &mut tracked_tab,
         );
-        hotkeys(&mut app, &input, &keys, &mut camera, &mut tools, renderer)?;
+        // While the note is being typed in a mesh scene the keys are the note's.
+        let shift = input.keyboard.down(InputCode::key_shift_left)
+            || input.keyboard.down(InputCode::key_shift_right);
+        let typed = app
+            .mesh
+            .as_mut()
+            .is_some_and(|view| view.type_note(&|code| input.keyboard.pressed(code), shift));
+        if !typed {
+            hotkeys(&mut app, &input, &keys, &mut camera, &mut tools, renderer)?;
+        }
         let move_axis = controls.axis_2d(&input, "move");
         let look_axis = controls.axis_2d(&input, "look");
         let page_keys = !camera.captured && menu_open;
@@ -799,7 +817,7 @@ fn run() -> Result<i32, String> {
                 over_ui: !look_capture,
                 add: input.keyboard.down(InputCode::key_shift_left)
                     || input.keyboard.down(InputCode::key_shift_right),
-                frame_key: input.keyboard.pressed(InputCode::key_f),
+                frame_key: !typed && input.keyboard.pressed(InputCode::key_f),
                 dt,
             };
             if let Some(view) = &mut app.mesh {
@@ -1691,6 +1709,21 @@ impl Host for App {
                                 .map_or_else(|| "live".to_string(), |r| format!("{} {}", r.event, r.command)),
                         });
                     }
+                    // Read-only: the note is typed with T, or set by mesh_selection.
+                    knobs.push(Knob {
+                        name: "mesh_note".into(),
+                        label: if view.typing { "Note (Enter ends)".into() } else { "Note (T types)".into() },
+                        value: 0.0,
+                        min: 0.0,
+                        max: 0.0,
+                        step: 0.0,
+                        choices: Vec::new(),
+                        text: if view.typing {
+                            format!("{}_", view.selection.note)
+                        } else {
+                            view.selection.note.clone()
+                        },
+                    });
                     knobs.push(Knob {
                         name: "mesh_pick".into(),
                         label: "Click selects".into(),
@@ -1708,6 +1741,9 @@ impl Host for App {
     }
 
     fn set_knob(&mut self, name: &str, value: f64) -> Result<(), String> {
+        if name == "mesh_note" {
+            return Err("mesh_note is read-only: type it with T in the window, or set it with mesh_selection".into());
+        }
         if name == "mesh_replay_play" {
             let view = self.mesh.as_mut().ok_or("mesh_replay_play needs a mesh scene")?;
             if value >= 0.5 {
@@ -4059,6 +4095,50 @@ mod tests {
             }
         }
         (width, height, rgb)
+    }
+
+    #[test]
+    fn a_mesh_scene_puts_its_controls_on_the_scene_tab_and_other_scenes_do_not() {
+        use genos_debug::Host as _;
+        let root = genos_scene_lib::repo_root();
+        let entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir()).expect("scenes");
+        let log = std::fs::File::create(std::env::temp_dir().join("genos-editor-mesh-menu.log"))
+            .expect("log");
+        let mut app = super::App::open(entries, root, log).expect("app");
+        let fps = genos_scene::FpsCounterSettings::default();
+        let menu = super::load_menu_layout().expect("layout");
+        let labels = |app: &super::App| -> Vec<String> {
+            let blocks = super::panel_blocks(app, ViewMode::Full, &fps, &menu);
+            let genos_ui::PanelBlock::Tabs(tabs) = &blocks[0] else {
+                panic!("the menu is one tab strip");
+            };
+            let scene = tabs.tabs.iter().find(|tab| tab.title == "Scene").expect("Scene tab");
+            scene
+                .blocks
+                .iter()
+                .flat_map(|block| match block {
+                    genos_ui::PanelBlock::Rows(rows) => rows.iter().map(|row| row.label.clone()).collect(),
+                    genos_ui::PanelBlock::Section(section) => {
+                        section.rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>()
+                    }
+                    genos_ui::PanelBlock::Tabs(_) => Vec::new(),
+                })
+                .collect()
+        };
+        assert!(!labels(&app).iter().any(|label| label == "Click selects"), "not a mesh scene yet");
+        app.load_scene("mesh").expect("mesh scene");
+        app.follow_mesh();
+        let shown = labels(&app);
+        for want in ["Click selects", "Mesh shading", "Show object", "Note (T types)"] {
+            assert!(shown.iter().any(|label| label == want), "{want} is missing from {shown:?}");
+        }
+        // The on/off controls are check boxes on the tab.
+        let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu);
+        let checks: Vec<String> = super::flatten_blocks(&blocks)
+            .iter()
+            .flat_map(|row| row.checks.iter().map(|check| check.text.clone()))
+            .collect();
+        assert!(checks.iter().any(|text| text == "Turntable"), "{checks:?}");
     }
 
     #[test]
