@@ -1581,7 +1581,20 @@ impl Tools {
                     text(ctx.renderer.material_settings().to_text()),
                 )]))
             }
-            "get_material_stats" => reply(material_stats_value(ctx.renderer.material_stats())),
+            "get_material_stats" => {
+                // The stats, plus how many textures the streamer holds and the
+                // finest mip of the first that is resident (0 is full detail).
+                let mut value = material_stats_value(ctx.renderer.material_stats());
+                let (textures, finest) = ctx.renderer.material_residency();
+                if let Value::Object(pairs) = &mut value {
+                    pairs.push(("textures".to_string(), num(textures as f64)));
+                    pairs.push((
+                        "finest_resident".to_string(),
+                        finest.map_or(Value::Null, |level| num(f64::from(level))),
+                    ));
+                }
+                reply(value)
+            }
             "set_material_settings" => {
                 let mut settings = ctx.renderer.material_settings();
                 apply_material_update(&mut settings, args.0)?;

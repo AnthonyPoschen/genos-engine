@@ -215,6 +215,8 @@ const VK_TIMEOUT: i32 = 2;
 /// `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
 const VK_ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
 const FRAME_BUDGET_MS: f32 = 16.0;
+/// The streamer's frame time before any draw has been timed.
+const STREAM_FIRST_FRAME_MS: f32 = 8.0;
 /// A fence wait on the frame thread before the seat pump takes over.
 const FENCE_BUDGET_NS: u64 = 50_000_000;
 /// A mapped copy above this runs while the seat pump answers pings.
@@ -1008,6 +1010,25 @@ impl Renderer {
     /// When `wireframe` is true, each floor, wall, and solid draws its vertices and its edges.
     /// The filled shaded triangles stay in use when `wireframe` is false.
     pub fn draw_with_overlay(
+        &mut self,
+        world: &World,
+        camera: &Camera,
+        overlay: &[ScreenRect],
+        readback: bool,
+        wireframe: bool,
+    ) -> Result<Option<Vec<u8>>, String> {
+        // The texture streamer admits new mips from the time this call leaves
+        // under the frame budget. The time between two calls is not that
+        // time: a 60 Hz display paces them 16.7 ms apart however short the
+        // draw was, the leftover under 16 ms was always zero, and no texture
+        // ever left its coarsest mip (Sponza stayed at mip 12 of its atlas).
+        let began = Instant::now();
+        let result = self.draw_frame(world, camera, overlay, readback, wireframe);
+        self.gpu.draw_ms = Some(began.elapsed().as_secs_f32() * 1000.0);
+        result
+    }
+
+    fn draw_frame(
         &mut self,
         world: &World,
         camera: &Camera,
@@ -2156,7 +2177,8 @@ struct Gpu {
     heap_override: Option<(u64, u64)>,
     budget_extension: bool,
     memory_budget_query: Option<FnMemProps>,
-    frame_mark: Option<Instant>,
+    /// Milliseconds the last draw call took, for the streamer's budget.
+    draw_ms: Option<f32>,
     /// Host staging for device uploads. One slot per reused command buffer.
     /// Reset when that buffer's fence has retired, so the copy memory is not
     /// allocated again each frame.
@@ -3061,7 +3083,7 @@ impl Gpu {
                 heap_override: None,
                 budget_extension,
                 memory_budget_query,
-                frame_mark: None,
+                draw_ms: None,
                 stage: stage::StageSet::empty(),
             };
             let _ = (destroy_instance, surface_support);
@@ -8055,11 +8077,8 @@ impl Gpu {
         accounted: u64,
         views: &[genos_load::TextureView],
     ) -> Result<(), String> {
-        let now = Instant::now();
-        let base_ms = self.frame_mark.map_or(8.0, |then| {
-            now.saturating_duration_since(then).as_secs_f32() * 1000.0
-        });
-        self.frame_mark = Some(now);
+        // The last draw call's own time, not the gap between calls.
+        let base_ms = self.draw_ms.unwrap_or(STREAM_FIRST_FRAME_MS);
         let pixels = u64::from(self.extent_w)
             .saturating_mul(u64::from(self.extent_h))
             .saturating_mul(16);
