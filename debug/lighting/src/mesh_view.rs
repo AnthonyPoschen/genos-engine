@@ -55,6 +55,8 @@ const ORBIT_NEAR: f32 = 0.05;
 const ORBIT_FRAME: f32 = 1.8;
 /// A press that moves fewer pixels than this before release is a click.
 const CLICK_PIXELS: f32 = 4.0;
+/// Radians a second the turntable turns: one turn in about 20 seconds.
+const TURNTABLE_RATE: f32 = 0.314;
 /// The camera counts as moved by someone else past this, metres or radians.
 const ORBIT_SLACK: f32 = 1.0e-4;
 
@@ -72,6 +74,8 @@ pub struct OrbitInput {
     /// Shift is down: a click adds to the selection.
     pub add: bool,
     pub frame_key: bool,
+    /// Seconds since the last frame, for the turntable.
+    pub dt: f32,
 }
 
 /// Orbit about a point: left drag turns, right drag pans, the wheel zooms.
@@ -124,6 +128,8 @@ pub struct MeshView {
     /// `shaded` (one colour), `object_ids` (a colour per object), or
     /// `wireframe` (the polygon edges drawn over the shaded mesh).
     pub shade: String,
+    /// The camera turns about the mesh on its own, as on a turntable.
+    pub turntable: bool,
     /// The recorded state the picture shows in place of the live mesh.
     pub replay: Option<Replay>,
     /// The picture has to be rebuilt from [`MeshView::load`].
@@ -248,6 +254,7 @@ impl MeshView {
             orbit: None,
             hidden: BTreeSet::new(),
             shade: "shaded".into(),
+            turntable: false,
             replay: None,
             rebuild: false,
             display_stale: true,
@@ -295,6 +302,31 @@ impl MeshView {
             }
         }
         (positions, normals)
+    }
+
+    /// The session a step moves in (the replayed one, else the latest) and
+    /// the number of its last command.
+    pub fn replay_span(&self) -> Result<(String, u64), String> {
+        let sessions = genos_workbench::sessions(&self.dir);
+        let found = match &self.replay {
+            Some(replay) => sessions.iter().find(|s| s.id == replay.session),
+            None => sessions.last(),
+        }
+        .ok_or_else(|| format!("no session recorded under {}", self.dir.display()))?;
+        Ok((found.id.clone(), found.events.last().map_or(0, |event| event.id)))
+    }
+
+    /// Move the replay to command `event` of the current session; past its
+    /// last command is the live mesh. For the menu's scrubber.
+    pub fn scrub(&mut self, event: u64) -> Result<(), String> {
+        let (session, last) = self.replay_span()?;
+        if event > last {
+            self.rebuild = self.replay.take().is_some();
+        } else {
+            self.replay_at(&session, event)?;
+        }
+        set_source(self.replay.as_ref().map(|r| genos_workbench::state_path(&self.dir, &r.session, r.snapshot)));
+        Ok(())
     }
 
     /// Show a recorded state: `session` is a session ID or `latest`, `event`
@@ -400,6 +432,8 @@ impl MeshView {
         if input.frame_key {
             self.frame(camera);
         }
+        // A press takes the camera back from the turntable for that frame.
+        let turning = self.turntable && !input.left && !input.right;
         let Some(orbit) = &mut self.orbit else {
             return;
         };
@@ -444,6 +478,10 @@ impl MeshView {
         }
         if input.wheel != 0.0 && !input.over_ui {
             orbit.distance = (orbit.distance * (-input.wheel * ORBIT_ZOOM).exp()).max(ORBIT_NEAR);
+            changed = true;
+        }
+        if turning {
+            camera.yaw += TURNTABLE_RATE * input.dt;
             changed = true;
         }
         if changed {
@@ -623,7 +661,10 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay"])?;
+                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable"])?;
+                if let Some(on) = args.bool("turntable")? {
+                    self.turntable = on;
+                }
                 if let Some(look) = args.str("look")? {
                     self.look(camera, &look)?;
                 }
@@ -631,12 +672,22 @@ impl MeshView {
                     Some(Value::String(live)) if live == "live" => {
                         self.rebuild = self.replay.take().is_some();
                     }
+                    Some(Value::String(step)) if step == "next" || step == "previous" => {
+                        let (session, last) = self.replay_span()?;
+                        let at = self.replay.as_ref().map_or(last, |r| r.event);
+                        let to = if step == "next" { at + 1 } else { at.saturating_sub(1) };
+                        if to > last {
+                            self.rebuild = self.replay.take().is_some();
+                        } else {
+                            self.replay_at(&session, to)?;
+                        }
+                    }
                     Some(value @ Value::Object(_)) => {
                         let session = value.get("session").and_then(Value::as_str).unwrap_or("latest").to_string();
                         let event = value.get("event").and_then(Value::as_u64).ok_or("replay needs event: a command number, 0 for the session start")?;
                         self.replay_at(&session, event)?;
                     }
-                    Some(_) => return Err("replay is \"live\" or {session, event}".into()),
+                    Some(_) => return Err("replay is \"live\", \"next\", \"previous\", or {session, event}".into()),
                     None => {}
                 }
                 set_source(self.replay.as_ref().map(|r| genos_workbench::state_path(&self.dir, &r.session, r.snapshot)));
@@ -811,6 +862,7 @@ impl MeshView {
             ("objects", list(objects)),
             ("pick", text(self.pick_mode.clone())),
             ("shade", text(self.shade.clone())),
+            ("turntable", Value::Bool(self.turntable)),
             (
                 "replay",
                 self.replay.as_ref().map_or(Value::Null, |r| {
@@ -1099,6 +1151,13 @@ mod tests {
         view.pointer(&mut camera, size, OrbitInput { x: 740.0, left: true, over_ui: true, ..at });
         view.pointer(&mut camera, size, OrbitInput { x: 840.0, left: true, over_ui: true, ..at });
         assert!((camera.yaw - yaw).abs() < 1.0e-6);
+        // The turntable turns with time and keeps the distance.
+        view.pointer(&mut camera, size, OrbitInput { x: 840.0, ..at });
+        view.turntable = true;
+        let (yaw, distance) = (camera.yaw, far(&camera));
+        view.pointer(&mut camera, size, OrbitInput { x: 840.0, dt: 1.0, ..at });
+        assert!(camera.yaw - yaw > 0.3, "the turntable turned {}", camera.yaw - yaw);
+        assert!((far(&camera) - distance).abs() < 1.0e-3);
     }
 
     #[test]

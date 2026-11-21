@@ -800,6 +800,7 @@ fn run() -> Result<i32, String> {
                 add: input.keyboard.down(InputCode::key_shift_left)
                     || input.keyboard.down(InputCode::key_shift_right),
                 frame_key: input.keyboard.pressed(InputCode::key_f),
+                dt,
             };
             if let Some(view) = &mut app.mesh {
                 view.pointer(&mut camera, [size.0 as f32, size.1 as f32], orbit);
@@ -1567,6 +1568,34 @@ impl Host for App {
                         choices,
                     });
                     knobs.push(Knob {
+                        name: "mesh_turntable".into(),
+                        label: "Turntable".into(),
+                        value: f64::from(u8::from(view.turntable)),
+                        min: 0.0,
+                        max: 1.0,
+                        step: 1.0,
+                        choices: vec!["off".into(), "on".into()],
+                        text: if view.turntable { "on".into() } else { "off".into() },
+                    });
+                    // The scrubber: 0 is the session start, each step a
+                    // command, and the last step is the live mesh.
+                    if let Ok((_, last)) = view.replay_span() {
+                        let at = view.replay.as_ref().map_or(last + 1, |r| r.event);
+                        knobs.push(Knob {
+                            name: "mesh_replay".into(),
+                            label: "Replay".into(),
+                            value: at as f64,
+                            min: 0.0,
+                            max: (last + 1) as f64,
+                            step: 1.0,
+                            choices: Vec::new(),
+                            text: view
+                                .replay
+                                .as_ref()
+                                .map_or_else(|| "live".to_string(), |r| format!("{} {}", r.event, r.command)),
+                        });
+                    }
+                    knobs.push(Knob {
                         name: "mesh_pick".into(),
                         label: "Click selects".into(),
                         value: at as f64,
@@ -1583,6 +1612,18 @@ impl Host for App {
     }
 
     fn set_knob(&mut self, name: &str, value: f64) -> Result<(), String> {
+        if name == "mesh_turntable" {
+            let view = self.mesh.as_mut().ok_or("mesh_turntable needs a mesh scene")?;
+            view.turntable = value >= 0.5;
+            return Ok(());
+        }
+        if name == "mesh_replay" {
+            let view = self.mesh.as_mut().ok_or("mesh_replay needs a mesh scene")?;
+            view.scrub(value.round().max(0.0) as u64)?;
+            self.follow_mesh();
+            self.refresh_mesh_overlay();
+            return Ok(());
+        }
         if name == "mesh_shade" {
             let view = self.mesh.as_mut().ok_or("mesh_shade needs a mesh scene")?;
             let at = (value.round().max(0.0) as usize).min(mesh_view::SHADES.len() - 1);

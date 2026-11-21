@@ -57,7 +57,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 
 - [x] Orbit, pan, zoom, frame, axis views.
 - [ ] Orthographic view. The engine's projection is perspective only (`genos_scene::view_proj`).
-- [ ] Auto-rotate turntable.
+- [x] Auto-rotate turntable (`mesh_view turntable`, the menu's "Turntable").
 - [x] Shaded, wireframe, object IDs.
 - [ ] Shaded vertex colours; textured lit (material); base colour; unlit vertex colour.
 - [ ] Debug views: normals, depth, silhouette, face orientation, face IDs, collection IDs, UV checker.
@@ -65,7 +65,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [ ] Objects panel: collections and objects as a tree, search, show all, hide matching, solo matching.
 - [x] Replay: show the state after a command (`mesh_view replay`).
-- [ ] Replay panel: session picker, previous, play, next, go live, scrubber, command filter, the event's input and reply.
+- [x] Replay steps and scrubber: `replay: "next"`, `"previous"`, `"live"`, and the menu's "Replay" slider (0 is the session start, the last step is live).
+- [ ] Replay panel: session picker, play, command filter, the event's input and reply.
 - [ ] Animation: clip picker, play and scrub, bones, hierarchy and joint overlays, mesh toggle.
 - [ ] Workspace picker; connection and revision readout; statistics footer.
 
