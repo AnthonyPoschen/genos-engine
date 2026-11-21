@@ -33,7 +33,7 @@ void main() {
         return;
     }
     uint key = ckeys.key[slot];
-    vec3 dir = lighting_cascade_bin_dir(key, n, k);
+    vec3 dir = lighting_cascade_bin_dir(key, n, k, lighting_cascade_bin_seed(slot));
     vec3 origin = pos + n * 0.02;
     float t0;
     float t1;

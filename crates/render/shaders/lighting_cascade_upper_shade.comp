@@ -114,7 +114,7 @@ void main() {
     float nd = 0.0;
     if (live && k < rays) {
         uint key = ckeys.key[slot];
-        vec3 dir = lighting_cascade_bin_dir(key, n, k);
+        vec3 dir = lighting_cascade_bin_dir(key, n, k, lighting_cascade_bin_seed(slot));
         nd = max(dot(dir, n), 0.0);
         uint at = lighting_cascade_upper_hit_at(due, k);
         float t = uintBitsToFloat(ckeys.key[at]);
@@ -157,9 +157,10 @@ void main() {
         && lighting_cascade_finite3(cur)
         && !scene_inside(pos + n * 0.02)) {
         // A refresh moves a shaded cell CASCADE_UPPER_RATE of the way to the
-        // new estimate. One to four rays a bin, replaced outright, kept a
-        // still scene popping: cells feed each other's bounce and each
-        // refresh moved the wall by a visible step. A change of more than
+        // new estimate, and its rays take new directions each refresh, so the
+        // bins average many refreshes. One to four rays a bin, replaced
+        // outright, kept a still scene popping: cells feed each other's
+        // bounce and each refresh moved the wall by a visible step. A change of more than
         // CASCADE_UPPER_JUMP of the cell's irradiance is a real change (a
         // lamp, a mover) and takes the new estimate.
         vec4 had = cache.v[3u * slot + 2u];
@@ -168,7 +169,8 @@ void main() {
         // .w counts refreshes up to CASCADE_UPPER_WARM (1 is the first). The
         // first refreshes take the new estimate whole: a cold start builds its
         // bounce through the chain of parents, and damping each link slowed a
-        // cut to full brightness.
+        // cut to full brightness. They trace fixed directions
+        // (lighting_cascade_bin_seed), so taking them whole does not shimmer.
         bool warm = had.w > CASCADE_UPPER_WARM - 0.5;
         bool keep = warm
             && abs(l_new - l_old) <= CASCADE_UPPER_JUMP * max(max(l_new, l_old), CASCADE_EPS);

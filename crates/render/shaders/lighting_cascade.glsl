@@ -170,10 +170,13 @@ const uint CASCADE_UPPER_CAP = 16384u;
 const uint CASCADE_UPPER_RAYS_MAX = 64u;
 const float CASCADE_EXTENT_FACTOR = 16.0;
 // Share of a refresh an upper cell takes, and the irradiance change past
-// which it takes all of it (lighting_cascade_upper_shade.comp).
-const float CASCADE_UPPER_RATE = 0.25;
+// which it takes all of it (lighting_cascade_upper_shade.comp). 0.05 keeps a
+// still night scene from shimmering now that each refresh traces new
+// directions; a moving lamp is followed by the jump.
+const float CASCADE_UPPER_RATE = 0.05;
 const float CASCADE_UPPER_JUMP = 0.9;
-// Refreshes an upper cell takes whole before it is damped.
+// Refreshes an upper cell takes whole, with fixed directions, before it is
+// damped and its directions change each refresh.
 const float CASCADE_UPPER_WARM = 8.0;
 
 uint lighting_cascade_claimed_at() {
@@ -255,11 +258,23 @@ void lighting_cascade_bin_frame(vec3 n, out vec3 tx, out vec3 ty) {
     ty = cross(n, tx);
 }
 
+// Jitter seed of an upper cell's refresh. A warm cell (CASCADE_UPPER_WARM
+// refreshes) takes new directions each frame, which the damped refresh
+// (CASCADE_UPPER_RATE) averages. A jitter fixed per cell kept the same one to
+// four rays a bin, and a ray that hit a small bright patch (the ceiling
+// 0.4 m over a lamp) kept its bin bright: a fixed bright patch on the floor
+// under the cell. A cold cell keeps the fixed jitter: its running mean has few
+// refreshes, and new directions made a still wall shimmer in its first frames.
+uint lighting_cascade_bin_seed(uint slot) {
+    bool warm = cache.v[3u * slot + 2u].w > CASCADE_UPPER_WARM - 0.5;
+    return warm ? lighting_hash(lighting_frame()) : 0u;
+}
+
 // Direction of ray k of an upper cell's refresh: bin k % 16, jittered per
-// key and ray only, so a still refresh repeats the same directions.
-vec3 lighting_cascade_bin_dir(uint key, vec3 n, uint k) {
+// key, ray and seed (lighting_cascade_bin_seed).
+vec3 lighting_cascade_bin_dir(uint key, vec3 n, uint k, uint seed) {
     uint b = k % CASCADE_BINS;
-    uint h = lighting_hash(key ^ (k * 0x9e3779b9u));
+    uint h = lighting_hash(key ^ (k * 0x9e3779b9u) ^ seed);
     float j1 = lighting_unit(h);
     float j2 = lighting_unit(lighting_hash(h ^ 0x27d4eb2fu));
     float u = (float(b / 4u) + j1) / CASCADE_BIN_SIDE;
