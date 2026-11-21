@@ -18,7 +18,7 @@ On Wayland, Win32, and Cocoa, the camera moves only while the window has keyboar
 
 ## Frame
 
-`examples/camera` owns the frame. When a second program needs the same loop, add a shared runtime crate.
+`examples/camera` owns the frame. When a second program needs the same loop, add a shared runtime crate. `crates/scene-program` is that crate for the authoring programs: `genos-lighting` (`debug/lighting`) and `genos-editor` (`editor/`) are two binaries on its loop, told apart by a `Program` value. `examples/camera` and `examples/stress` still own their own loops.
 
 When the scene starts, load `scene.rhai` once.
 

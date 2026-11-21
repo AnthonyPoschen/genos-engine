@@ -7,6 +7,7 @@ members = [
     "crates/json",
     "crates/workbench",
     "crates/meshbench",
+    "crates/scene-program",
     "crates/mesh",
     "crates/bake",
     "crates/physics",

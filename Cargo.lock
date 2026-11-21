@@ -265,7 +265,7 @@ dependencies = [
 name = "genos-editor"
 version = "0.1.0"
 dependencies = [
- "genos-lighting",
+ "genos-scene-program",
 ]
 
 [[package]]
@@ -331,18 +331,7 @@ version = "0.1.0"
 name = "genos-lighting"
 version = "0.1.0"
 dependencies = [
- "genos-debug",
- "genos-input",
- "genos-load",
- "genos-mcp",
- "genos-meshbench",
- "genos-render",
- "genos-scene",
- "genos-scene-lib",
- "genos-stress",
- "genos-ui",
- "genos-window",
- "genos-workbench",
+ "genos-scene-program",
 ]
 
 [[package]]
@@ -471,6 +460,24 @@ dependencies = [
 [[package]]
 name = "genos-scene-lib"
 version = "0.1.0"
+
+[[package]]
+name = "genos-scene-program"
+version = "0.1.0"
+dependencies = [
+ "genos-debug",
+ "genos-input",
+ "genos-load",
+ "genos-mcp",
+ "genos-meshbench",
+ "genos-render",
+ "genos-scene",
+ "genos-scene-lib",
+ "genos-stress",
+ "genos-ui",
+ "genos-window",
+ "genos-workbench",
+]
 
 [[package]]
 name = "genos-stress"

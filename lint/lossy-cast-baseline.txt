@@ -84,7 +84,7 @@ crates/ui/src/slider.rs 5
 crates/ui/tests/aa_camera.rs 8
 crates/ui/tests/profile.rs 3
 crates/window/src/lib.rs 6
-debug/lighting/src/main.rs 17
+crates/scene-program/src/lib.rs 17
 debug/scene-lib/src/lib.rs 2
 examples/camera/src/main.rs 7
 examples/stress/src/bench.rs 2

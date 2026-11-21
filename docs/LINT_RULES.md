@@ -58,7 +58,7 @@ Do not refactor these in a drive-by. Delete the `expect` when the sites in that 
 - `unwrap_used` / `expect_used` / `panic`: production sites are the totals above minus the test-only column. Build scripts stay allowed.
 - `wildcard_enum_match_arm`: 37 sites, 17 files.
 - `pedantic`: 3068 sites under per-lint expects. A file that expects `cast_possible_truncation` still fails a different pedantic lint it did not already expect.
-- `disallowed_methods` (`std::env::set_var`): 24 sites in `debug/lighting/src/main.rs`, `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. These push a CLI flag into the environment so another crate will read it. Write the settings value instead.
+- `disallowed_methods` (`std::env::set_var`): 24 sites in `crates/scene-program/src/lib.rs`, `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. These push a CLI flag into the environment so another crate will read it. Write the settings value instead.
 
 One real bug found while turning the lints on: `crates/ui/src/profile.rs` computed `1.0_f32.min(plot_w.max(1.0))`, which is always `1.0`. The mark width is now `1.0_f32.min(plot_w)`.
 
@@ -78,7 +78,7 @@ One real bug found while turning the lints on: `crates/ui/src/profile.rs` comput
 
 `std::env::var` and `std::env::var_os` are denied in every crate. Existing reads carry a function `#[allow(clippy::disallowed_methods, reason = "...")]`. A new read in a function that does not already have that allow fails. Build scripts are allowed at the file: Cargo passes `OUT_DIR` and the target triple. `GENOS_MCP_PORT` stays allowed on `listen_port` because the discovery directory is the primary path and that variable is the documented override. `HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, and `WAYLAND_DISPLAY` stay allowed on the one function that reads them.
 
-These files already `expect` `disallowed_methods` for `set_var`, so a new `env::var` in the same file is not gated yet: `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `debug/lighting/src/main.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. They are binaries and tests. The renderer library is gated per function.
+These files already `expect` `disallowed_methods` for `set_var`, so a new `env::var` in the same file is not gated yet: `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `crates/scene-program/src/lib.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. They are binaries and tests. The renderer library is gated per function.
 
 ### TODO: renderer tuning reads
 
@@ -293,7 +293,7 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 |---|---|---|
 | `mirror` | 93 | A CLI argument exists and wins when both are set. `detail` is the flag. |
 | `todo` | 82 | Read today, and still has no argument. |
-| `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
+| `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `crates/scene-program/menu.txt`). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
 | `build` | 5 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, `GENOS_HDR_COMPOSE`, `GENOS_COMPOSE_MAINT`, and `GENOS_COMPOSE_NO_WALK` (shader compile defines, not process environment variables). |

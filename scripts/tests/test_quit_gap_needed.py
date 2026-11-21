@@ -73,7 +73,7 @@ class QuitGapFilter(unittest.TestCase):
             "crates/mcp/src/lib.rs",
             "crates/input/src/lib.rs",
             "examples/stress/src/main.rs",
-            "debug/lighting/src/main.rs",
+            "crates/scene-program/src/lib.rs",
             "Cargo.lock",
             ".github/workflows/lint.yml",
         ):

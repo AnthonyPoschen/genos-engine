@@ -1,0 +1,24 @@
+[package]
+name = "genos-scene-program"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+# The frame loop genos-lighting and genos-editor both run: scenes from
+# debug/scenes, the menu, the debug tools, and the mesh viewer.
+[dependencies]
+genos-debug = { path = "../debug" }
+genos-input = { path = "../input" }
+genos-load = { path = "../load" }
+genos-mcp = { path = "../mcp" }
+genos-meshbench = { path = "../meshbench" }
+genos-render = { path = "../render" }
+genos-scene = { path = "../scene" }
+genos-scene-lib = { path = "../../debug/scene-lib" }
+genos-stress = { path = "../../examples/stress" }
+genos-ui = { path = "../ui" }
+genos-window = { path = "../window" }
+genos-workbench = { path = "../workbench" }

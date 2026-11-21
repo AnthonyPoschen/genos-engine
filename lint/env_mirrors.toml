@@ -170,7 +170,7 @@ detail = "built-in chords are primary; this file replaces the listed actions"
 [[var]]
 name = "GENOS_MENU_LAYOUT"
 kind = "override"
-detail = "debug/lighting/menu.txt is primary; this path replaces that table"
+detail = "crates/scene-program/menu.txt is primary; this path replaces that table"
 
 [[var]]
 name = "HOME"

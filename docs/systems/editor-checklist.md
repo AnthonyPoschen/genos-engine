@@ -25,7 +25,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Display: hide, show, solo; `shaded`, `object_ids`, `wireframe`; axis views; replay of a recorded state.
 - [x] Menu: the Scene tab shows the mesh controls in a mesh scene. A test checks them. Until 22 Nov 2026 only the on/off ones were drawn: a slider or a dropdown needs its knob name in `SLIDER_KNOBS` or `DROP_KNOBS`.
 - [x] mesh-workbench linked in (`genos-meshbench`); `mesh_command` runs on its session.
-- [x] Checks: `debug/lighting/scripts/mesh_selection.rhai`; unit tests in `genos-workbench` and `debug/lighting/src/mesh_view.rs`; clippy clean on both.
+- [x] Checks: `debug/lighting/scripts/mesh_selection.rhai`; unit tests in `genos-workbench` and `crates/scene-program/src/mesh_view.rs`; clippy clean on both.
 
 ## To do, in order
 
@@ -39,9 +39,10 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 
 ### B. The editor binary (decision 1)
 
-- [x] `editor/` (package `genos-editor`, `make editor`). It runs the same frame loop as `genos-lighting`: that loop is now the library `genos_scene_program` in `debug/lighting`, and a `Program` value gives each binary its name, title, MCP port, opening scene and scene list.
+- [x] `editor/` (package `genos-editor`, `make editor`). It runs the same frame loop as `genos-lighting`: the library `genos_scene_program`, where a `Program` value gives each binary its name, title, MCP port, opening scene and scene list.
 - [x] The editor opens on the mesh scene, lists every scene, and takes MCP port 8765. `genos-lighting` keeps port 8766 and does not list mesh scenes. `make mesh` runs the editor.
-- [ ] Move the library out of `debug/lighting` into its own crate (`crates/scene-program`), and the mesh viewer module with it into an editor-only module. Today the mesh code is compiled into both binaries and only listed by the editor.
+- [x] The frame loop is its own crate, `crates/scene-program` (`genos-scene-program`): the loop, the menu and its layout file, and the mesh viewer. `debug/lighting` and `editor` are two small binaries on it.
+- [ ] Compile the mesh viewer into the editor only. Today both binaries link it and only the editor lists mesh scenes.
 - [ ] The scene picker lists game scenes and mesh workspaces found on disk, not only the files in `debug/scenes`.
 - [ ] ADR note: this starts the editor program of ADR 0002 and ADR 0006, as a thin view over agent commands ([agent-driven editing](agent-driven-editing.md), ADR 0019).
 

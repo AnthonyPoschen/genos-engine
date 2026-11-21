@@ -133,7 +133,7 @@ the camera to the active checkpoint. Grave hides the settings menu and grave sho
 it again. F1 is the same key. `--menu hidden` starts it hidden. `GENOS_MENU`
 applies only when that argument was omitted. `]` and `[` change the menu page. Tab and shift-Tab
 do that while the pointer is over the menu. The pages and folds are
-`debug/lighting/menu.txt`. F toggles the frame-rate overlay. F3 is the same key.
+`crates/scene-program/menu.txt`. F toggles the frame-rate overlay. F3 is the same key.
 U toggles the unfilled count in the stress and camera programs. Shift-U toggles
 the tint. F8 and shift-F8 are the same keys. `GENOS_DEBUG_KEYS` is a text file
 that replaces any of those chords (`menu key_grave key_f1`).

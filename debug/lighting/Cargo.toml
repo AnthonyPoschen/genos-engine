@@ -7,25 +7,9 @@ publish = false
 [lints]
 workspace = true
 
-# The frame loop both genos-lighting and genos-editor run.
-[lib]
-name = "genos_scene_program"
-path = "src/lib.rs"
-
 [[bin]]
 name = "genos-lighting"
 path = "src/main.rs"
 
 [dependencies]
-genos-debug = { path = "../../crates/debug" }
-genos-input = { path = "../../crates/input" }
-genos-load = { path = "../../crates/load" }
-genos-mcp = { path = "../../crates/mcp" }
-genos-meshbench = { path = "../../crates/meshbench" }
-genos-render = { path = "../../crates/render" }
-genos-scene = { path = "../../crates/scene" }
-genos-scene-lib = { path = "../scene-lib" }
-genos-stress = { path = "../../examples/stress" }
-genos-ui = { path = "../../crates/ui" }
-genos-window = { path = "../../crates/window" }
-genos-workbench = { path = "../../crates/workbench" }
+genos-scene-program = { path = "../../crates/scene-program" }

@@ -256,7 +256,7 @@ the menu has the keys. Tab and shift-Tab do that too. F toggles the frame-rate
 plate. F3 is the same key. A section title folds that group.
 The fold is remembered in <out>/menu/collapsed.txt. The open page is remembered
 in <out>/menu/tab.txt.
-The groups are debug/lighting/menu.txt. A section key of - has no fold.
+The groups are crates/scene-program/menu.txt. A section key of - has no fold.
 GENOS_MENU_LAYOUT points at another file. The panel stays within a third of
 the window. The pages are Scene, Pipeline, Lamps, GI, Denoise,
 Shadows, Perf, Output, and Info. Lamps and GI keep folds because those pages

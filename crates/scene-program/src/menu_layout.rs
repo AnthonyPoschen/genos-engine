@@ -23,7 +23,7 @@ pub struct MenuFold {
     pub collapsed: bool,
 }
 
-/// Read `GENOS_MENU_LAYOUT`, then `debug/lighting/menu.txt` in the repo, then the
+/// Read `GENOS_MENU_LAYOUT`, then `crates/scene-program/menu.txt` in the repo, then the
 /// copy compiled into the binary.
 ///
 /// # Errors
@@ -33,7 +33,7 @@ pub fn load_menu_layout() -> Result<Vec<MenuLine>, String> {
     let text = if let Ok(path) = std::env::var("GENOS_MENU_LAYOUT") {
         std::fs::read_to_string(&path).map_err(|err| format!("GENOS_MENU_LAYOUT {path}: {err}"))?
     } else {
-        let path = genos_scene_lib::repo_root().join("debug/lighting/menu.txt");
+        let path = genos_scene_lib::repo_root().join("crates/scene-program/menu.txt");
         if path.is_file() {
             std::fs::read_to_string(&path).map_err(|err| err.to_string())?
         } else {

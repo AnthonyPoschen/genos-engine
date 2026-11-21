@@ -33,7 +33,7 @@ Pending: PR #135 (unmerged) renames `Potato` to `Fallback` (name `fallback`, wit
 
 1. **Field.** Add the field to the feature's settings struct, for example a sub-struct of `LightingSettings`. Give it a `set_key` key and include it in `to_text` and `parse`.
 2. **Per-preset defaults.** Set the High value in the defaults, then override it in `LightingSettings::preset` for each tier that differs. Pick the values from a measured cost on the tier's target hardware, not from a guess.
-3. **CLI.** If a tool needs it at launch, add an argument that goes through `set_key`. The `--preset` handling in `debug/lighting/src/main.rs` is the pattern. If you also add an environment variable, it must mirror that argument, and it must be registered in `lint/env_mirrors.toml` as `mirror`.
+3. **CLI.** If a tool needs it at launch, add an argument that goes through `set_key`. The `--preset` handling in `crates/scene-program/src/lib.rs` is the pattern. If you also add an environment variable, it must mirror that argument, and it must be registered in `lint/env_mirrors.toml` as `mirror`.
 4. **MCP.** Usually you don't need to do anything, because `get_lighting_settings` and `set_lighting_settings` already carry every key. A new feature struct gets its own `get_*` and `set_*` pair in `crates/debug/src/commands.rs`, and the read should return measurements that show the effect.
 5. **Runtime apply.** The renderer reads the value every frame. A size change rebuilds its buffers, and a plain value change takes effect on the next draw. Never cache the value at startup.
 6. **Test.** Add a round-trip and `set_key` test next to `crates/scene/tests/lighting_settings.rs`. If the knob changes the picture, add a check over MCP, following `crates/debug/tests/lighting_mcp.rs`.
