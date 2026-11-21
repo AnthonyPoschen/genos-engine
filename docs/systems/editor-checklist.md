@@ -24,18 +24,18 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Agent commands: `mesh_view`, `mesh_pick`, `mesh_selection` (with the note and the camera), `mesh_command`.
 - [x] Display: hide, show, solo; `shaded`, `object_ids`, `wireframe`; axis views; replay of a recorded state.
 - [x] Menu: "Click selects", "Mesh shading", "Show object".
-- [x] `mesh-server` started and stopped with the mesh scene (to be replaced by the linked library).
+- [x] mesh-workbench linked in (`genos-meshbench`); `mesh_command` runs on its session.
 - [x] Checks: `debug/lighting/scripts/mesh_selection.rhai`; unit tests in `genos-workbench` and `debug/lighting/src/mesh_view.rs`; clippy clean on both.
 
 ## To do, in order
 
 ### A. Link mesh-workbench (decision 4)
 
-- [ ] ADR: mesh-workbench (`gpt-mesh`: `serde`, `serde_json`, `png`, `ufbx`) is linked into the editor. Name the exception to [ADR 0007](../adr/0007-native-calls-go-to-the-system-and-vulkan.md) and add the crates and the git source to `deny.toml`.
-- [ ] A bridge crate over `gpt_mesh::session::Session`: `open_workspace(path)`, `execute(request) -> reply`, `state()`. It converts between `genos_json::Value` and `serde_json::Value`, so no other engine crate sees serde.
-- [ ] `mesh_command` calls the bridge. Remove the child process, the loopback HTTP client, `--mesh-server` and `--mesh-port`.
-- [ ] The viewer reads the mesh from the bridge's state and its revision. Keep the `project.json` reader for a workspace another process owns, and for replay.
-- [ ] If `gpt-mesh` cannot be linked as it stands (its workspace lock, its edition, a private item we need), fork it and note why here.
+- [x] [ADR 0042](../adr/0042-mesh-workbench-is-linked-into-the-editor.md). `deny.toml` allows the one git source.
+- [x] `crates/meshbench` over `gpt_mesh::session::Session`: `open`, `execute` (one command or a batch), `revision`. No other crate sees serde.
+- [x] `mesh_command` calls the bridge. The child process, the HTTP client, `--mesh-server` and `--mesh-port` are removed.
+- [ ] The viewer reads the mesh from the bridge's state when a session is open, in place of re-reading `project.json`. The file reader stays for a workspace another process owns, and for replay.
+- [ ] Run the session on a worker so a long command does not stall the frame.
 
 ### B. The editor binary (decision 1)
 

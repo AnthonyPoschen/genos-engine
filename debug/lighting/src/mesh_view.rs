@@ -2,29 +2,21 @@
 //!
 //! A mesh scene shows a mesh-workbench workspace. This module keeps what the
 //! person selected in that picture (objects, faces, vertices, a point, a typed
-//! note), answers a pick at a screen point, and passes a mesh-workbench command
-//! through to `mesh-server`. The record is `docs/systems/mesh-workbench.md`.
+//! note), answers a pick at a screen point, and runs a mesh-workbench command
+//! on the linked library (`genos-meshbench`, ADR 0042). The record is `docs/systems/mesh-workbench.md`.
 
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Instant, SystemTime};
 
 use genos_mcp::json::{self, Value};
 use genos_scene::Camera;
 use genos_workbench::{Part, Workspace};
 
-/// Port of the mesh-workbench editor server (`mesh-server --workspace DIR
-/// --port N`) when no port is named. mesh-workbench's own editor default.
-pub const SERVER_PORT: u16 = 7879;
-/// A command to `mesh-server` waits this long for the connection and the reply.
-const SERVER_TIMEOUT: Duration = Duration::from_secs(30);
-/// Largest reply taken from `mesh-server`.
-const SERVER_REPLY_MAX: u64 = 64 << 20;
+/// Backdates the last look at the workspace file so the next frame reads it.
+const FOLLOW_NOW: std::time::Duration = std::time::Duration::from_secs(1);
 /// Replies round numbers to five decimals.
 const REPLY_DECIMALS: f64 = 1.0e5;
-/// How long the viewer waits to learn whether a server already has the port.
-const SERVER_PROBE: Duration = Duration::from_millis(200);
 /// The selection overlay sits this far off the surface, metres, so it does
 /// not fight the face under it for depth.
 const OVERLAY_OFFSET: f32 = 0.003;
@@ -138,20 +130,9 @@ pub struct MeshView {
     pub rebuild: bool,
     /// The picture's objects no longer match `hidden` and `shade`.
     pub display_stale: bool,
-    /// The `mesh-server` this viewer started on the workspace. Stopped when
-    /// the mesh scene closes.
-    server: Option<std::process::Child>,
-    /// Why no server was started, or where one answers.
-    pub server_note: String,
-}
-
-impl Drop for MeshView {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.server.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
+    /// The mesh-workbench session on this workspace. Opened by the first
+    /// `mesh_command`, so looking at a workspace writes nothing to it.
+    bridge: Option<genos_meshbench::Bridge>,
 }
 
 /// A recorded state on show.
@@ -212,21 +193,6 @@ fn normalise(v: [f32; 3]) -> [f32; 3] {
 /// The pick modes, in the order the menu lists them.
 pub const PICK_MODES: [&str; 3] = ["face", "object", "vertex"];
 
-/// The `mesh-server` program: `GENOS_MESH_SERVER`, else `mesh-server` on the
-/// path. `off` starts none.
-fn server_program() -> Option<PathBuf> {
-    match std::env::var_os("GENOS_MESH_SERVER") {
-        Some(value) if value == "off" => None,
-        Some(value) if !value.is_empty() => Some(PathBuf::from(value)),
-        _ => Some(PathBuf::from("mesh-server")),
-    }
-}
-
-fn server_answers(port: u16) -> bool {
-    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    std::net::TcpStream::connect_timeout(&address, SERVER_PROBE).is_ok()
-}
-
 impl MeshView {
     pub fn new(dir: PathBuf, stamp: Option<SystemTime>) -> Self {
         let workspace = genos_workbench::load_workspace(&dir).ok();
@@ -245,8 +211,7 @@ impl MeshView {
             replay: None,
             rebuild: false,
             display_stale: true,
-            server: None,
-            server_note: "not started".into(),
+            bridge: None,
         }
     }
 
@@ -334,42 +299,6 @@ impl MeshView {
                 (self.hidden.contains(&part.object), color)
             })
             .collect()
-    }
-
-    /// Start `mesh-server` on this workspace so `mesh_command` has a server,
-    /// unless one already answers on the port. A missing program is not an
-    /// error: the viewer still shows the workspace.
-    pub fn start_server(&mut self) {
-        let port = server_port();
-        if server_answers(port) {
-            self.server_note = format!("a server already answers on 127.0.0.1:{port}");
-            return;
-        }
-        let Some(program) = server_program() else {
-            self.server_note = "GENOS_MESH_SERVER is off".into();
-            return;
-        };
-        let spawned = std::process::Command::new(&program)
-            .arg("--workspace")
-            .arg(&self.dir)
-            .arg("--port")
-            .arg(port.to_string())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        match spawned {
-            Ok(child) => {
-                self.server = Some(child);
-                self.server_note = format!("started {} on 127.0.0.1:{port}", program.display());
-            }
-            Err(err) => {
-                self.server_note = format!(
-                    "{} did not start ({err}). Install mesh-workbench, or name the program with --mesh-server",
-                    program.display()
-                );
-            }
-        }
     }
 
     /// Centre and size of the mesh in the picture (lifted onto the ground).
@@ -771,14 +700,18 @@ impl MeshView {
                 Ok(obj(vec![("hit", picked), ("selection", self.selection_value(camera))]))
             }
             "mesh_command" => {
-                args.only("mesh_command", &["command", "port"])?;
+                args.only("mesh_command", &["command"])?;
                 let command = args.0.get("command").ok_or("mesh_command needs command: one mesh-workbench command object, or a list of them")?;
-                let port = match args.f64("port")? {
-                    Some(port) if (1.0..=65535.0).contains(&port) => port as u16,
-                    Some(port) => return Err(format!("mesh_command port {port} is not a port")),
-                    None => server_port(),
-                };
-                post_command(port, &json::encode(command))
+                if self.bridge.is_none() {
+                    self.bridge = Some(genos_meshbench::Bridge::open(&self.dir)?);
+                }
+                let bridge = self.bridge.as_mut().ok_or("the mesh session did not open")?;
+                let reply = bridge.execute(command)?;
+                // The session wrote project.json: show it on the next frame.
+                if let Some(earlier) = Instant::now().checked_sub(FOLLOW_NOW) {
+                    self.looked = earlier;
+                }
+                Ok(reply)
             }
             other => Err(format!("unknown command {other}")),
         }
@@ -841,8 +774,7 @@ impl MeshView {
                         .collect(),
                 ),
             ),
-            ("server", text(self.server_note.clone())),
-            ("server_port", num(f64::from(server_port()))),
+            ("editing", Value::Bool(self.bridge.is_some())),
             ("lift", num(f64::from(self.lift()))),
         ])
     }
@@ -948,13 +880,6 @@ impl Args<'_> {
         }
     }
 
-    fn f64(&self, key: &str) -> Result<Option<f64>, String> {
-        match self.0.get(key) {
-            None => Ok(None),
-            Some(value) => value.as_f64().map(Some).ok_or_else(|| format!("{key} is a number")),
-        }
-    }
-
     #[expect(clippy::cast_possible_truncation, reason = "a screen coordinate")]
     fn floats(&self, key: &str, count: usize) -> Result<Option<Vec<f32>>, String> {
         let Some(value) = self.0.get(key) else {
@@ -976,38 +901,6 @@ struct Hit {
     vertex: u64,
     point: [f32; 3],
     depth: f32,
-}
-
-/// `GENOS_MESH_PORT`, else [`SERVER_PORT`].
-pub fn server_port() -> u16 {
-    std::env::var("GENOS_MESH_PORT")
-        .ok()
-        .and_then(|port| port.parse().ok())
-        .unwrap_or(SERVER_PORT)
-}
-
-/// `POST /command` on the loopback `mesh-server` and return its JSON reply.
-/// mesh-workbench answers HTTP/1.0 and closes the connection.
-fn post_command(port: u16, body: &str) -> Result<Value, String> {
-    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream = std::net::TcpStream::connect_timeout(&address, SERVER_TIMEOUT).map_err(|err| {
-        format!("mesh-server is not answering on 127.0.0.1:{port} ({err}). Start it with: mesh-server --workspace DIR --port {port}")
-    })?;
-    stream.set_read_timeout(Some(SERVER_TIMEOUT)).map_err(|err| err.to_string())?;
-    stream.set_write_timeout(Some(SERVER_TIMEOUT)).map_err(|err| err.to_string())?;
-    let request = format!(
-        "POST /command HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    stream.write_all(request.as_bytes()).map_err(|err| format!("mesh-server write: {err}"))?;
-    let mut raw = Vec::new();
-    stream
-        .take(SERVER_REPLY_MAX)
-        .read_to_end(&mut raw)
-        .map_err(|err| format!("mesh-server read: {err}"))?;
-    let reply = String::from_utf8_lossy(&raw);
-    let (_, payload) = reply.split_once("\r\n\r\n").ok_or("mesh-server sent no HTTP body")?;
-    json::parse(payload).map_err(|err| format!("mesh-server reply is not JSON: {err}"))
 }
 
 fn id(value: u64) -> Value {

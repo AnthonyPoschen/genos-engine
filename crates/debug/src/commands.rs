@@ -286,7 +286,7 @@ fn host_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "mesh_view",
-            "The mesh-workbench workspace a mesh scene shows: workspace directory, loaded, revision, vertex and face counts, objects (id, name, origin, triangles, hidden), pick, shade, server, server_port, and lift (metres the picture raises the mesh so it stands on the ground). pick (face, object, or vertex) sets what a click selects. hide, show and solo take object ids, and show_all: true shows every object; hiding is local to the viewer. shade is shaded, object_ids, or wireframe. look is +x, -x, +y, -y, +z, -z (the side the camera stands on) or frame. replay: {session (an id, default latest), event} shows the recorded state after that command (0 is the session start) and replay: \"live\" returns to the live mesh; the reply lists sessions with their latest commands. Needs a mesh scene.",
+            "The mesh-workbench workspace a mesh scene shows: workspace directory, loaded, revision, vertex and face counts, objects (id, name, origin, triangles, hidden), pick, shade, replay, sessions, editing (a mesh_command has opened the session), and lift (metres the picture raises the mesh so it stands on the ground). pick (face, object, or vertex) sets what a click selects. hide, show and solo take object ids, and show_all: true shows every object; hiding is local to the viewer. shade is shaded, object_ids, or wireframe. look is +x, -x, +y, -y, +z, -z (the side the camera stands on) or frame. replay: {session (an id, default latest), event} shows the recorded state after that command (0 is the session start) and replay: \"live\" returns to the live mesh; the reply lists sessions with their latest commands. Needs a mesh scene.",
         ),
         spec(
             "mesh_selection",
@@ -298,7 +298,7 @@ fn host_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "mesh_command",
-            "Send command (one mesh-workbench command object such as {\"command\":\"inspect\"}, or a list of up to 1024) to mesh-server on loopback port (default GENOS_MESH_PORT, else 7879) and return its reply. Start the server with: mesh-server --workspace DIR --port 7879. The picture reloads when the workspace file changes.",
+            "Run command (one mesh-workbench command object such as {\"command\":\"inspect\"}, or a list of up to 1024 that stops at the first refusal) on the mesh scene's workspace and return mesh-workbench's reply. The engine links mesh-workbench; the first call opens its session on the workspace, which then holds project.json and the recorded sessions. The picture reloads when the mesh changes.",
         ),
     ]
 }

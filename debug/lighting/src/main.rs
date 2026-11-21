@@ -109,13 +109,6 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --mesh-workspace DIR   mesh-workbench workspace a mesh scene opens, in place
                          of the one its scene file names. GENOS_MESH_WORKSPACE
                          applies only when this is omitted
-  --mesh-server PATH     the mesh-server program a mesh scene starts on its
-                         workspace (default mesh-server on the path; off
-                         starts none). GENOS_MESH_SERVER applies only when
-                         this is omitted
-  --mesh-port N          loopback port of that server and of mesh_command
-                         (default 7879). GENOS_MESH_PORT applies only when
-                         this is omitted
   --checkpoint NAME      jump here at launch
   --eye X,Y,Z            camera position, metres. --eye=X,Y,Z is the same flag.
                          Keeps the checkpoint aim unless --look is set
@@ -1261,11 +1254,7 @@ impl App {
                 watch.rebuild || (watch.replay.is_none() && watch.stamp != stamp)
             }
             _ => {
-                let mut view = mesh_view::MeshView::new(dir, stamp);
-                view.start_server();
-                let note = format!("mesh-server: {}", view.server_note);
-                self.mesh = Some(view);
-                self.note(&note);
+                self.mesh = Some(mesh_view::MeshView::new(dir, stamp));
                 false
             }
         };
@@ -3206,14 +3195,6 @@ fn options() -> Result<Options, String> {
             "--eye" => eye = Some(parse_vec3("--eye", &need_arg(&mut args, "--eye")?)?),
             "--look" => look = Some(parse_vec3("--look", &need_arg(&mut args, "--look")?)?),
             "--preset" => preset = Some(need_arg(&mut args, "--preset")?),
-            "--mesh-server" => {
-                std::env::set_var("GENOS_MESH_SERVER", need_arg(&mut args, "--mesh-server")?);
-            }
-            "--mesh-port" => {
-                let port = need_arg(&mut args, "--mesh-port")?;
-                port.parse::<u16>().map_err(|_| format!("--mesh-port {port} is not a port"))?;
-                std::env::set_var("GENOS_MESH_PORT", port);
-            }
             "--mesh-workspace" => {
                 std::env::set_var("GENOS_MESH_WORKSPACE", need_arg(&mut args, "--mesh-workspace")?);
             }

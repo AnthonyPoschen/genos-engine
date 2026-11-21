@@ -16,6 +16,7 @@ genos-debug = { path = "../../crates/debug" }
 genos-input = { path = "../../crates/input" }
 genos-load = { path = "../../crates/load" }
 genos-mcp = { path = "../../crates/mcp" }
+genos-meshbench = { path = "../../crates/meshbench" }
 genos-render = { path = "../../crates/render" }
 genos-scene = { path = "../../crates/scene" }
 genos-scene-lib = { path = "../scene-lib" }
