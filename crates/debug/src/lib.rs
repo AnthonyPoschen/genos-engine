@@ -16,7 +16,7 @@ pub mod png;
 pub mod reference;
 pub mod script;
 pub mod tools;
-pub mod value;
+mod value;
 
 pub use image::{Diff, Flicker, FlickerReport, Image, Luminance, Region};
 pub use knobs::{CheckpointPose, Host, Knob, LoadPace};

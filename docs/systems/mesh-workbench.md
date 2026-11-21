@@ -1,6 +1,6 @@
 # Mesh workbench
 
-Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Also in the tree: orbit, pan and zoom, selecting with a click, and starting `mesh-server` with the scene. Objects hide, show and solo, and `object_ids` colours each object. Not yet: the axis snaps and the orthographic view, wireframe and the other render modes, an objects list in the menu, textures, replay, animation. The stages are listed under Plan.
+Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Also in the tree: orbit, pan and zoom, selecting with a click, and starting `mesh-server` with the scene. Objects hide, show and solo; the shade modes are `shaded`, `object_ids` and `wireframe`; the axis views; replay of a session's recorded states; and menu controls for the pick mode, the shading and which object shows. Not yet: the orthographic view, vertex colours, textures, the depth, normal and face-ID views, a play button for replay, animation, and a text box for the note. The stages are listed under Plan.
 
 The scene program shows and edits the meshes that [mesh-workbench](https://github.com/NathanChambers/mesh-workbench) makes. A person looks at a mesh in the engine, selects part of it, and tells an agent what to change. The agent reads the selection from the engine's agent endpoint and sends the edit to mesh-workbench.
 
@@ -31,7 +31,7 @@ The engine's agent endpoint is the one place an agent works. It carries three th
 
 Any panel is a view over those commands ([agent-driven editing](agent-driven-editing.md)).
 
-The viewer triangulates the n-gons itself, as the web viewer does: a fan for a convex face, ear clipping for a concave one. It keeps, for every triangle, the face ID and the object ID it came from, so a pick returns mesh-workbench IDs.
+The viewer triangulates the n-gons itself, as the web viewer does: a fan for a convex face, ear clipping for a concave one. Normals follow the web viewer's rule (`geometry.js` `buildCornerNormals`): an object with no smooth angle, or a face in `flat_faces`, is flat; with a smooth angle a corner blends the faces around its vertex that are reached across edges no sharper than that angle, weighted by their corner angles. It keeps, for every triangle, the face ID and the object ID it came from, so a pick returns mesh-workbench IDs.
 
 ## Plan
 
@@ -63,7 +63,7 @@ When a checkpoint, a script, or an agent moves the camera, the orbit continues a
 
 On the agent endpoint (MCP, `POST /cmd/<name>`, and Rhai), while a mesh scene is open:
 
-- `mesh_view`: the workspace directory, the revision shown, the counts, the objects (id, name, origin, triangles, hidden), `pick`, `shade`, the server, and `lift`. `hide`, `show` and `solo` take object IDs and `show_all: true` shows every object. Hiding is local to the viewer, as in the web viewer. `shade` is `shaded` or `object_ids`. The picture raises the mesh by `lift` metres so its lowest point stands on the ground. Every position a command reports is in mesh coordinates.
+- `mesh_view`: the workspace directory, the revision shown, the counts, the objects (id, name, origin, triangles, hidden), `pick`, `shade`, the server, and `lift`. `hide`, `show` and `solo` take object IDs and `show_all: true` shows every object. Hiding is local to the viewer, as in the web viewer. `shade` is `shaded`, `object_ids`, or `wireframe` (the polygon edges over the shaded mesh). `look` is `+x`, `-x`, `+y`, `-y`, `+z`, `-z` (the side the camera stands on) or `frame`. `replay: {session, event}` shows the recorded state after that command of a session (`session` defaults to `latest`, event 0 is the session start), and `replay: "live"` returns to the live mesh. While a state is replayed the picture does not follow `project.json`. The reply lists the sessions and their latest commands. The knobs `mesh_shade` and `mesh_solo` are the menu's "Mesh shading" and "Show object". The picture raises the mesh by `lift` metres so its lowest point stands on the ground. Every position a command reports is in mesh coordinates.
 - `mesh_pick`: the mesh under screen `[x, y]`. `mode` is `face`, `object`, or `vertex`. `select` is `set`, `add`, or `none`. The reply names the object, the face, the face's vertex IDs, the nearest vertex, and the point.
 - `mesh_selection`: the selection (objects, faces, vertices, the last picked point, the note, the revision, the camera). `objects`, `faces` and `vertices` replace that part, `note` sets the note, `clear: true` empties it first. IDs that an edit removes leave the selection at the next reload.
 - `mesh_command`: `command` is one mesh-workbench command object or a list. It goes to `POST /command` on `mesh-server` at `port` (default `GENOS_MESH_PORT`, else 7879). The reply is mesh-workbench's reply. With no server the error says how to start one.

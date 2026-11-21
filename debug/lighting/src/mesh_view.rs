@@ -10,7 +10,6 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-use genos_debug::value::{list, num, obj, text, vec3, Args};
 use genos_mcp::json::{self, Value};
 use genos_scene::Camera;
 use genos_workbench::{Part, Workspace};
@@ -22,6 +21,8 @@ pub const SERVER_PORT: u16 = 7879;
 const SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Largest reply taken from `mesh-server`.
 const SERVER_REPLY_MAX: u64 = 64 << 20;
+/// Replies round numbers to five decimals.
+const REPLY_DECIMALS: f64 = 1.0e5;
 /// How long the viewer waits to learn whether a server already has the port.
 const SERVER_PROBE: Duration = Duration::from_millis(200);
 /// The selection overlay sits this far off the surface, metres, so it does
@@ -128,8 +129,13 @@ pub struct MeshView {
     /// Objects the picture leaves out. Local to the viewer, as in the
     /// mesh-workbench web viewer: the workspace is not changed.
     pub hidden: BTreeSet<u64>,
-    /// `shaded` (one colour) or `object_ids` (a colour per object).
+    /// `shaded` (one colour), `object_ids` (a colour per object), or
+    /// `wireframe` (the polygon edges drawn over the shaded mesh).
     pub shade: String,
+    /// The recorded state the picture shows in place of the live mesh.
+    pub replay: Option<Replay>,
+    /// The picture has to be rebuilt from [`MeshView::load`].
+    pub rebuild: bool,
     /// The picture's objects no longer match `hidden` and `shade`.
     pub display_stale: bool,
     /// The `mesh-server` this viewer started on the workspace. Stopped when
@@ -145,6 +151,61 @@ impl Drop for MeshView {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+/// A recorded state on show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Replay {
+    pub session: String,
+    /// The command the picture stands after. 0 is the session start.
+    pub event: u64,
+    pub snapshot: u64,
+    pub command: String,
+}
+
+/// The shade modes, in the order the menu lists them.
+pub const SHADES: [&str; 3] = ["shaded", "object_ids", "wireframe"];
+/// Half the width of a wireframe strip, as a share of the mesh size.
+const WIRE_WIDTH: f32 = 0.0025;
+pub const WIRE_COLOR: [f32; 3] = [0.04, 0.04, 0.05];
+/// `mesh_view` lists this many of a session's latest commands.
+const REPLAY_LISTED: usize = 12;
+
+/// The state file the picture is built from in place of `project.json`, for
+/// the world builder in `main.rs`.
+static SOURCE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+fn set_source(path: Option<PathBuf>) {
+    if let Ok(mut source) = SOURCE.lock() {
+        *source = path;
+    }
+}
+
+/// The workspace a mesh scene draws: the replayed state, else `project.json`.
+pub fn load_shown(dir: &std::path::Path) -> Result<Workspace, String> {
+    let source = SOURCE.lock().ok().and_then(|source| source.clone());
+    match source {
+        Some(path) => {
+            let text = std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+            let mut workspace = genos_workbench::parse_project(&text)?;
+            workspace.dir = dir.to_path_buf();
+            Ok(workspace)
+        }
+        None => genos_workbench::load_workspace(dir),
+    }
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+fn normalise(v: [f32; 3]) -> [f32; 3] {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len > 0.0 {
+        [v[0] / len, v[1] / len, v[2] / len]
+    } else {
+        [0.0, 1.0, 0.0]
     }
 }
 
@@ -169,6 +230,7 @@ fn server_answers(port: u16) -> bool {
 impl MeshView {
     pub fn new(dir: PathBuf, stamp: Option<SystemTime>) -> Self {
         let workspace = genos_workbench::load_workspace(&dir).ok();
+        set_source(None);
         Self {
             dir,
             stamp,
@@ -180,10 +242,81 @@ impl MeshView {
             orbit: None,
             hidden: BTreeSet::new(),
             shade: "shaded".into(),
+            replay: None,
+            rebuild: false,
             display_stale: true,
             server: None,
             server_note: "not started".into(),
         }
+    }
+
+    /// Polygon edges as thin crossed strips, for the wireframe mode. Empty in
+    /// the other modes. Positions then normals, three per triangle.
+    pub fn wire(&self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let Some(workspace) = &self.workspace else {
+            return (positions, normals);
+        };
+        if self.shade != "wireframe" {
+            return (positions, normals);
+        }
+        let size = (0..3).map(|a| workspace.max[a] - workspace.min[a]).fold(0.0f32, f32::max);
+        let half = (size * WIRE_WIDTH).max(OVERLAY_OFFSET * 0.5);
+        for part in &workspace.parts {
+            if self.hidden.contains(&part.object) {
+                continue;
+            }
+            for [a, b] in &part.edges {
+                let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let helper = if d[1].abs() > d[0].abs().max(d[2].abs()) { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+                let u = normalise(cross(d, helper));
+                let v = normalise(cross(d, u));
+                for side in [u, v] {
+                    let off = [side[0] * half, side[1] * half, side[2] * half];
+                    let quad = [
+                        [a[0] - off[0], a[1] - off[1], a[2] - off[2]],
+                        [a[0] + off[0], a[1] + off[1], a[2] + off[2]],
+                        [b[0] + off[0], b[1] + off[1], b[2] + off[2]],
+                        [b[0] - off[0], b[1] - off[1], b[2] - off[2]],
+                    ];
+                    let n = normalise(cross(d, side));
+                    // Both windings: a strip is seen from either side.
+                    for corner in [0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2] {
+                        positions.push(quad[corner]);
+                        normals.push(n);
+                    }
+                }
+            }
+        }
+        (positions, normals)
+    }
+
+    /// Show a recorded state: `session` is a session ID or `latest`, `event`
+    /// the command to stand after (0 is the state the session opened with).
+    fn replay_at(&mut self, session: &str, event: u64) -> Result<(), String> {
+        let sessions = genos_workbench::sessions(&self.dir);
+        let found = if session == "latest" {
+            sessions.last()
+        } else {
+            sessions.iter().find(|s| s.id == session)
+        }
+        .ok_or_else(|| format!("no session {session} under {}", self.dir.display()))?;
+        // The state after `event` is the last snapshot at or before it.
+        let mut snapshot = found.initial_snapshot;
+        let mut command = String::from("session start");
+        for item in found.events.iter().filter(|item| item.id <= event) {
+            if let Some(after) = item.snapshot {
+                snapshot = after;
+            }
+            command.clone_from(&item.command);
+        }
+        if event > found.events.last().map_or(0, |item| item.id) {
+            return Err(format!("session {} has {} events", found.id, found.events.len()));
+        }
+        self.replay = Some(Replay { session: found.id.clone(), event, snapshot, command });
+        self.rebuild = true;
+        Ok(())
     }
 
     /// For each object of the workspace, in order: whether the picture
@@ -197,6 +330,7 @@ impl MeshView {
             .iter()
             .map(|part| {
                 let color = if self.shade == "object_ids" { id_color(part.object) } else { MESH_COLOR };
+                // The edge strips of a hidden object are left out in `wire`.
                 (self.hidden.contains(&part.object), color)
             })
             .collect()
@@ -245,9 +379,9 @@ impl MeshView {
         };
         let lift = -w.min[1];
         let centre = [
-            (w.min[0] + w.max[0]) * 0.5,
-            (w.min[1] + w.max[1]) * 0.5 + lift,
-            (w.min[2] + w.max[2]) * 0.5,
+            f32::midpoint(w.min[0], w.max[0]),
+            f32::midpoint(w.min[1], w.max[1]) + lift,
+            f32::midpoint(w.min[2], w.max[2]),
         ];
         let size = (0..3).map(|a| w.max[a] - w.min[a]).fold(0.0f32, f32::max);
         (centre, size.max(0.1))
@@ -369,7 +503,11 @@ impl MeshView {
     /// Read the workspace again. IDs the mesh no longer has leave the selection.
     pub fn reload(&mut self, stamp: Option<SystemTime>) {
         self.stamp = stamp;
-        self.workspace = genos_workbench::load_workspace(&self.dir).ok();
+        self.rebuild = false;
+        self.workspace = match &self.replay {
+            Some(replay) => genos_workbench::load_state(&self.dir, &replay.session, replay.snapshot).ok(),
+            None => genos_workbench::load_workspace(&self.dir).ok(),
+        };
         if let Some(workspace) = &self.workspace {
             let objects: BTreeSet<u64> = workspace.parts.iter().map(|p| p.object).collect();
             let faces: BTreeSet<u64> = workspace.parts.iter().flat_map(|p| p.face_ids.iter().copied()).collect();
@@ -432,10 +570,9 @@ impl MeshView {
             for triangle in 0..part.triangles() {
                 let mut screen = [[0.0f32; 3]; 3];
                 let mut ahead = true;
-                for k in 0..3 {
-                    let p = part.positions[triangle * 3 + k];
+                for (slot, p) in screen.iter_mut().zip(&part.positions[triangle * 3..triangle * 3 + 3]) {
                     match project(&m, [p[0], p[1] + lift, p[2]]) {
-                        Some(s) => screen[k] = s,
+                        Some(s) => *slot = s,
                         None => ahead = false,
                     }
                 }
@@ -450,10 +587,9 @@ impl MeshView {
                     continue;
                 }
                 let mut point = [0.0f32; 3];
-                for k in 0..3 {
-                    let p = part.positions[triangle * 3 + k];
-                    for axis in 0..3 {
-                        point[axis] += w[k] * p[axis];
+                for (weight, p) in w.iter().zip(&part.positions[triangle * 3..triangle * 3 + 3]) {
+                    for (sum, c) in point.iter_mut().zip(p) {
+                        *sum += weight * c;
                     }
                 }
                 let nearest = (0..3)
@@ -491,11 +627,50 @@ impl MeshView {
     }
 
     /// Run one of the `mesh_*` commands.
-    pub fn command(&mut self, name: &str, args: &Value, camera: &Camera, aspect: f32) -> Result<Value, String> {
+    /// Look along an axis at the mesh, or frame it: `+x`, `-x`, `+y`, `-y`,
+    /// `+z`, `-z` name the side the camera stands on. `frame` keeps the
+    /// direction.
+    fn look(&mut self, camera: &mut Camera, side: &str) -> Result<(), String> {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let steep = genos_scene::PITCH_LIMIT;
+        // Yaw 0 looks along -Z and positive yaw turns toward +X.
+        let (yaw, pitch) = match side {
+            "+z" => (0.0, 0.0),
+            "-z" => (PI, 0.0),
+            "+x" => (-FRAC_PI_2, 0.0),
+            "-x" => (FRAC_PI_2, 0.0),
+            "+y" => (camera.yaw, -steep),
+            "-y" => (camera.yaw, steep),
+            "frame" => (camera.yaw, camera.pitch),
+            other => return Err(format!("mesh_view look is +x, -x, +y, -y, +z, -z, or frame, not {other}")),
+        };
+        camera.yaw = yaw;
+        camera.pitch = pitch;
+        self.frame(camera);
+        Ok(())
+    }
+
+    pub fn command(&mut self, name: &str, args: &Value, camera: &mut Camera, aspect: f32) -> Result<Value, String> {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade"])?;
+                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay"])?;
+                if let Some(look) = args.str("look")? {
+                    self.look(camera, &look)?;
+                }
+                match args.0.get("replay") {
+                    Some(Value::String(live)) if live == "live" => {
+                        self.rebuild = self.replay.take().is_some();
+                    }
+                    Some(value @ Value::Object(_)) => {
+                        let session = value.get("session").and_then(Value::as_str).unwrap_or("latest").to_string();
+                        let event = value.get("event").and_then(Value::as_u64).ok_or("replay needs event: a command number, 0 for the session start")?;
+                        self.replay_at(&session, event)?;
+                    }
+                    Some(_) => return Err("replay is \"live\" or {session, event}".into()),
+                    None => {}
+                }
+                set_source(self.replay.as_ref().map(|r| genos_workbench::state_path(&self.dir, &r.session, r.snapshot)));
                 if args.bool("show_all")?.unwrap_or(false) {
                     self.hidden.clear();
                     self.display_stale = true;
@@ -521,8 +696,8 @@ impl MeshView {
                     self.display_stale = true;
                 }
                 if let Some(shade) = args.str("shade")? {
-                    if !matches!(shade.as_str(), "shaded" | "object_ids") {
-                        return Err(format!("mesh_view shade is shaded or object_ids, not {shade}"));
+                    if !SHADES.contains(&shade.as_str()) {
+                        return Err(format!("mesh_view shade is shaded, object_ids, or wireframe, not {shade}"));
                     }
                     self.shade = shade;
                     self.display_stale = true;
@@ -638,6 +813,34 @@ impl MeshView {
             ("objects", list(objects)),
             ("pick", text(self.pick_mode.clone())),
             ("shade", text(self.shade.clone())),
+            (
+                "replay",
+                self.replay.as_ref().map_or(Value::Null, |r| {
+                    obj(vec![
+                        ("session", text(r.session.clone())),
+                        ("event", id(r.event)),
+                        ("command", text(r.command.clone())),
+                    ])
+                }),
+            ),
+            (
+                "sessions",
+                list(
+                    genos_workbench::sessions(&self.dir)
+                        .iter()
+                        .map(|s| {
+                            obj(vec![
+                                ("id", text(s.id.clone())),
+                                ("events", num(s.events.len() as f64)),
+                                (
+                                    "commands",
+                                    list(s.events.iter().rev().take(REPLAY_LISTED).rev().map(|e| text(format!("{} {}", e.id, e.command))).collect()),
+                                ),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
             ("server", text(self.server_note.clone())),
             ("server_port", num(f64::from(server_port()))),
             ("lift", num(f64::from(self.lift()))),
@@ -693,6 +896,76 @@ fn toggle(set: &mut BTreeSet<u64>, id: u64, add: bool) {
         set.remove(&id);
     } else {
         set.insert(id);
+    }
+}
+
+fn obj(pairs: Vec<(&str, Value)>) -> Value {
+    Value::Object(pairs.into_iter().map(|(key, value)| (key.to_string(), value)).collect())
+}
+
+fn num(value: f64) -> Value {
+    // Short decimals keep replies readable.
+    json::float((value * REPLY_DECIMALS).round() / REPLY_DECIMALS)
+}
+
+fn vec3(v: [f32; 3]) -> Value {
+    json::array(v.iter().map(|c| num(f64::from(*c))).collect())
+}
+
+fn list(items: Vec<Value>) -> Value {
+    json::array(items)
+}
+
+fn text(value: impl Into<String>) -> Value {
+    json::string(value)
+}
+
+/// The arguments of one command, with errors that name the field.
+struct Args<'a>(&'a Value);
+
+impl Args<'_> {
+    /// Fail on a key that is not in `known`, so a misspelt field is an error.
+    fn only(&self, command: &str, known: &[&str]) -> Result<(), String> {
+        if let Value::Object(pairs) = self.0 {
+            if let Some((key, _)) = pairs.iter().find(|(key, _)| !known.contains(&key.as_str())) {
+                return Err(format!("{command} has no field {key}; it takes {}", known.join(", ")));
+            }
+        }
+        Ok(())
+    }
+
+    fn str(&self, key: &str) -> Result<Option<String>, String> {
+        match self.0.get(key) {
+            None => Ok(None),
+            Some(value) => value.as_str().map(|s| Some(s.to_string())).ok_or_else(|| format!("{key} is text")),
+        }
+    }
+
+    fn bool(&self, key: &str) -> Result<Option<bool>, String> {
+        match self.0.get(key) {
+            None => Ok(None),
+            Some(value) => value.as_bool().map(Some).ok_or_else(|| format!("{key} is true or false")),
+        }
+    }
+
+    fn f64(&self, key: &str) -> Result<Option<f64>, String> {
+        match self.0.get(key) {
+            None => Ok(None),
+            Some(value) => value.as_f64().map(Some).ok_or_else(|| format!("{key} is a number")),
+        }
+    }
+
+    #[expect(clippy::cast_possible_truncation, reason = "a screen coordinate")]
+    fn floats(&self, key: &str, count: usize) -> Result<Option<Vec<f32>>, String> {
+        let Some(value) = self.0.get(key) else {
+            return Ok(None);
+        };
+        let items = value.as_array().filter(|items| items.len() == count).ok_or_else(|| format!("{key} is {count} numbers"))?;
+        items
+            .iter()
+            .map(|item| item.as_f64().map(|n| n as f32).ok_or_else(|| format!("{key} is {count} numbers")))
+            .collect::<Result<Vec<f32>, String>>()
+            .map(Some)
     }
 }
 
@@ -764,7 +1037,7 @@ fn project(m: &[f32; 16], p: [f32; 3]) -> Option<[f32; 3]> {
         return None;
     }
     // Vulkan clip space: +Y is the lower half of the picture.
-    Some([(row(0) / w + 1.0) * 0.5, (row(1) / w + 1.0) * 0.5, row(2) / w])
+    Some([f32::midpoint(row(0) / w, 1.0), f32::midpoint(row(1) / w, 1.0), row(2) / w])
 }
 
 /// Weights of `at` inside the screen triangle, or `None` outside it.
@@ -876,15 +1149,25 @@ mod tests {
         let camera = Camera::opening();
         let none = genos_mcp::json::parse("{}").expect("json");
         assert!(view.display().iter().all(|(hidden, color)| !hidden && *color == super::MESH_COLOR));
+        let mut camera = camera;
         let solo = genos_mcp::json::parse(r#"{"solo":[2],"shade":"object_ids"}"#).expect("json");
-        view.command("mesh_view", &solo, &camera, 1.0).expect("solo");
+        view.command("mesh_view", &solo, &mut camera, 1.0).expect("solo");
         let shown = view.display();
         assert_eq!((shown[0].0, shown[1].0), (true, false), "the cube is hidden, the bracket stays");
         assert_ne!(shown[0].1, shown[1].1, "two objects, two colours");
         let all = genos_mcp::json::parse(r#"{"show_all":true}"#).expect("json");
-        view.command("mesh_view", &all, &camera, 1.0).expect("show all");
+        view.command("mesh_view", &all, &mut camera, 1.0).expect("show all");
         assert!(view.display().iter().all(|(hidden, _)| !hidden));
-        assert!(view.command("mesh_view", &none, &camera, 1.0).is_ok());
+        assert!(view.command("mesh_view", &none, &mut camera, 1.0).is_ok());
+        // Wireframe: the cube has 12 edges and the bracket 18, two strips each.
+        assert!(view.wire().0.is_empty());
+        let wire = genos_mcp::json::parse(r#"{"shade":"wireframe"}"#).expect("json");
+        view.command("mesh_view", &wire, &mut camera, 1.0).expect("wireframe");
+        assert_eq!(view.wire().0.len(), (12 + 18) * 2 * 12);
+        // Looking from +X puts the camera on the +X side, level with the mesh.
+        let side = genos_mcp::json::parse(r#"{"look":"+x"}"#).expect("json");
+        view.command("mesh_view", &side, &mut camera, 1.0).expect("look");
+        assert!(camera.position.x > 2.4 && camera.pitch.abs() < 1.0e-6, "{:?}", camera.position);
     }
 
     #[test]

@@ -35,6 +35,9 @@ pub struct Part {
     pub vertex_ids: Vec<u64>,
     /// mesh-workbench face ID of each triangle.
     pub face_ids: Vec<u64>,
+    /// The polygon edges, each once: the outline of every face, not the
+    /// triangulation.
+    pub edges: Vec<[[f32; 3]; 2]>,
 }
 
 impl Part {
@@ -102,6 +105,83 @@ pub fn load_workspace(dir: &Path) -> Result<Workspace, String> {
     Ok(workspace)
 }
 
+/// One recorded command of a session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Event {
+    pub id: u64,
+    pub command: String,
+    pub ok: bool,
+    /// The state snapshot after this command, when it changed the mesh.
+    pub snapshot: Option<u64>,
+}
+
+/// One mesh-workbench session: the commands one server run recorded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Session {
+    pub id: String,
+    pub initial_snapshot: u64,
+    pub events: Vec<Event>,
+}
+
+/// The sessions recorded under `<dir>/sessions`, oldest first. A workspace
+/// with none gives an empty list.
+#[must_use]
+pub fn sessions(dir: &Path) -> Vec<Session> {
+    let mut found = Vec::new();
+    let Ok(items) = std::fs::read_dir(dir.join("sessions")) else {
+        return found;
+    };
+    for item in items.flatten() {
+        let Ok(text) = std::fs::read_to_string(item.path().join("index.json")) else {
+            continue;
+        };
+        let Ok(index) = genos_json::parse(&text) else {
+            continue;
+        };
+        let events = index
+            .get("events")
+            .and_then(Value::as_array)
+            .unwrap_or(&[])
+            .iter()
+            .map(|event| Event {
+                id: event.get("id").and_then(Value::as_u64).unwrap_or(0),
+                command: event.get("command").and_then(Value::as_str).unwrap_or("").to_string(),
+                ok: event.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                snapshot: event.get("snapshot").and_then(Value::as_u64),
+            })
+            .collect();
+        found.push(Session {
+            id: index
+                .get("id")
+                .and_then(Value::as_str)
+                .map_or_else(|| item.file_name().to_string_lossy().into_owned(), str::to_string),
+            initial_snapshot: index.get("initial_snapshot").and_then(Value::as_u64).unwrap_or(0),
+            events,
+        });
+    }
+    // A session ID starts with its start time, so name order is time order.
+    found.sort_by(|a, b| a.id.cmp(&b.id));
+    found
+}
+
+/// `<dir>/sessions/<session>/states/<snapshot>.json`.
+#[must_use]
+pub fn state_path(dir: &Path, session: &str, snapshot: u64) -> PathBuf {
+    dir.join("sessions").join(session).join("states").join(format!("{snapshot}.json"))
+}
+
+/// Read one recorded state snapshot. It holds the mesh as `project.json` does.
+///
+/// # Errors
+/// The file is missing or is not a state.
+pub fn load_state(dir: &Path, session: &str, snapshot: u64) -> Result<Workspace, String> {
+    let path = state_path(dir, session, snapshot);
+    let text = std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut workspace = parse_project(&text).map_err(|err| format!("{}: {err}", path.display()))?;
+    workspace.dir = dir.to_path_buf();
+    Ok(workspace)
+}
+
 /// Triangulate the text of a `project.json`.
 ///
 /// # Errors
@@ -134,20 +214,15 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
             parts.insert(id, (empty_part(id, name, origin), smooth));
         }
     }
-    // Vertex normals: the area-weighted sum of the faces at each vertex.
     let mut face_normal: BTreeMap<u64, [f64; 3]> = BTreeMap::new();
-    let mut vertex_normal: BTreeMap<u64, [f64; 3]> = BTreeMap::new();
+    let mut faces_at: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for (&face, corners) in &faces {
         let Some(points) = corner_points(corners, &vertices) else {
             continue;
         };
-        let n = newell(&points);
-        face_normal.insert(face, unit(n));
+        face_normal.insert(face, unit(newell(&points)));
         for vertex in corners {
-            let sum = vertex_normal.entry(*vertex).or_insert([0.0; 3]);
-            for (s, c) in sum.iter_mut().zip(n) {
-                *s += c;
-            }
+            faces_at.entry(*vertex).or_default().push(face);
         }
     }
     let mut min = [f64::INFINITY; 3];
@@ -162,6 +237,7 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
         min = [0.0; 3];
         max = [0.0; 3];
     }
+    let mut seen_edges: BTreeSet<(u64, u64)> = BTreeSet::new();
     for (&face, corners) in &faces {
         let Some(points) = corner_points(corners, &vertices) else {
             continue;
@@ -170,15 +246,30 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
         let (part, smooth) = parts
             .entry(object)
             .or_insert_with(|| (empty_part(object, String::new(), [0.0; 3]), None));
+        for (i, &a) in corners.iter().enumerate() {
+            let b = corners[(i + 1) % corners.len()];
+            if seen_edges.insert((a.min(b), a.max(b))) {
+                part.edges.push([narrow(points[i]), narrow(points[(i + 1) % corners.len()])]);
+            }
+        }
         let flat_normal = face_normal.get(&face).copied().unwrap_or([0.0, 1.0, 0.0]);
-        // No smooth angle shades the whole object smooth, as the web viewer does.
-        let limit = smooth.map_or(-1.0, |degrees| degrees.to_radians().cos());
+        // The mesh-workbench web viewer's rule (geometry.js buildCornerNormals):
+        // no smooth angle, an angle of 0, or a face in flat_faces is flat.
+        let limit = match smooth {
+            Some(degrees) if *degrees != 0.0 && !flat.contains(&face) => Some(degrees.to_radians().cos()),
+            _ => None,
+        };
+        let corner_normals: Vec<[f64; 3]> = corners
+            .iter()
+            .map(|vertex| match limit {
+                Some(cosine) => smooth_corner(face, *vertex, cosine, &faces, &faces_at, &face_normal, &vertices),
+                None => flat_normal,
+            })
+            .collect();
         for triangle in triangulate(&points) {
             for corner in triangle {
                 let vertex = corners[corner];
-                let smooth_normal = unit(vertex_normal.get(&vertex).copied().unwrap_or(flat_normal));
-                let keep_flat = flat.contains(&face) || dot(smooth_normal, flat_normal) < limit;
-                let normal = if keep_flat { flat_normal } else { smooth_normal };
+                let normal = corner_normals[corner];
                 part.positions.push(narrow(points[corner]));
                 part.normals.push(narrow(normal));
                 part.vertex_ids.push(vertex);
@@ -236,6 +327,61 @@ pub fn triangulate(points: &[[f64; 3]]) -> Vec<[usize; 3]> {
 }
 
 const EDGE_EPS: f64 = 1.0e-12;
+/// Slack on the smooth-angle cosine, as in the web viewer.
+const SMOOTH_EPS: f64 = 1.0e-10;
+
+/// The normal of `vertex` as seen from `face`: the faces around the vertex
+/// reached from `face` across edges no sharper than the smooth angle, each
+/// weighted by its corner angle at the vertex.
+fn smooth_corner(
+    face: u64,
+    vertex: u64,
+    cosine: f64,
+    faces: &BTreeMap<u64, Vec<u64>>,
+    faces_at: &BTreeMap<u64, Vec<u64>>,
+    face_normal: &BTreeMap<u64, [f64; 3]>,
+    vertices: &BTreeMap<u64, [f64; 3]>,
+) -> [f64; 3] {
+    let around = faces_at.get(&vertex).map_or(&[][..], Vec::as_slice);
+    let mut pending = vec![face];
+    let mut seen = BTreeSet::new();
+    let mut sum = [0.0; 3];
+    while let Some(current) = pending.pop() {
+        if !seen.insert(current) {
+            continue;
+        }
+        let (Some(polygon), Some(normal), Some(at)) = (faces.get(&current), face_normal.get(&current), vertices.get(&vertex)) else {
+            continue;
+        };
+        let Some(i) = polygon.iter().position(|v| *v == vertex) else {
+            continue;
+        };
+        let before = polygon[(i + polygon.len() - 1) % polygon.len()];
+        let after = polygon[(i + 1) % polygon.len()];
+        let (Some(pb), Some(pa)) = (vertices.get(&before), vertices.get(&after)) else {
+            continue;
+        };
+        let weight = dot(unit(sub(*pb, *at)), unit(sub(*pa, *at))).clamp(-1.0, 1.0).acos();
+        for axis in 0..3 {
+            sum[axis] += normal[axis] * weight;
+        }
+        for neighbour in [before, after] {
+            for adjacent in around {
+                let shares = faces.get(adjacent).is_some_and(|other| other.contains(&neighbour));
+                let near = face_normal.get(adjacent).is_some_and(|other| dot(*normal, *other) >= cosine - SMOOTH_EPS);
+                if *adjacent != current && shares && near {
+                    pending.push(*adjacent);
+                }
+            }
+        }
+    }
+    let len = dot(sum, sum).sqrt();
+    if len > 0.0 {
+        [sum[0] / len, sum[1] / len, sum[2] / len]
+    } else {
+        face_normal.get(&face).copied().unwrap_or([0.0, 1.0, 0.0])
+    }
+}
 
 fn inside(points: &[[f64; 3]], normal: [f64; 3], triangle: [usize; 3], p: usize) -> bool {
     (0..3).all(|k| {
@@ -254,6 +400,7 @@ fn empty_part(object: u64, name: String, origin: [f64; 3]) -> Part {
         normals: Vec::new(),
         vertex_ids: Vec::new(),
         face_ids: Vec::new(),
+        edges: Vec::new(),
     }
 }
 
@@ -329,7 +476,7 @@ fn unit(v: [f64; 3]) -> [f64; 3] {
     }
 }
 
-#[expect(clippy::cast_possible_truncation, reason = "the renderer draws f32 positions")]
+#[expect(clippy::as_conversions, clippy::cast_possible_truncation, reason = "the renderer draws f32 positions")]
 fn narrow(v: [f64; 3]) -> [f32; 3] {
     [v[0] as f32, v[1] as f32, v[2] as f32]
 }
@@ -351,6 +498,7 @@ mod tests {
         let part = &workspace.parts[0];
         assert_eq!((part.object, part.name.as_str()), (5, "panel"));
         assert_eq!(part.face_ids, vec![7, 7]);
+        assert_eq!(part.edges.len(), 4, "the outline, not the diagonal");
         assert_eq!(part.vertex_ids, vec![1, 2, 3, 1, 3, 4]);
         // Counter-clockwise seen from +Z: the normal is +Z on every corner.
         assert!(part.normals.iter().all(|n| *n == [0.0, 0.0, 1.0]), "{:?}", part.normals);
@@ -403,6 +551,12 @@ mod tests {
             let big = n.iter().filter(|c| c.abs() > 0.99).count();
             assert_eq!(big, 1, "normal {n:?} is not a face normal");
         }
+        // With no smooth angle the cube is flat. Past 90 degrees every corner
+        // blends its three faces.
+        let plain = parse_project(&cube.replace(",\"smooth_angle\":30", "")).expect("parse");
+        assert!(plain.parts[0].normals.iter().all(|n| n.iter().filter(|c| c.abs() > 0.99).count() == 1));
+        let round = parse_project(&cube.replace("\"smooth_angle\":30", "\"smooth_angle\":120")).expect("parse");
+        assert!(round.parts[0].normals.iter().all(|n| n.iter().all(|c| (c.abs() - 0.577_35).abs() < 1.0e-3)), "{:?}", round.parts[0].normals[0]);
         let newer = cube.replace("\"version\":8", "\"version\":9");
         assert!(parse_project(&newer).expect_err("refused").contains("newer"));
     }

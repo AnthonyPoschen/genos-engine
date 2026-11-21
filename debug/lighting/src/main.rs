@@ -1042,7 +1042,8 @@ struct App {
     load: Option<LoadJob>,
     /// Set while a mesh scene is open: the workspace file being followed.
     mesh: Option<mesh_view::MeshView>,
-    /// Index of the selection overlay in the world's objects.
+    /// How many of the world's objects are the scene itself. The viewer's
+    /// extra objects (wireframe, selection) come after them.
     mesh_overlay: Option<usize>,
     /// Last GI pass times, milliseconds. Numbers only.
     gi_passes: String,
@@ -1084,7 +1085,7 @@ fn mesh_workspace_dir(root: &Path, named: &str) -> PathBuf {
 /// on a ground plane. The mesh is lifted so its lowest point is on the ground.
 /// It has no baked distance field, so it does not block or bounce light.
 fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lamp]) -> Result<World, String> {
-    let workspace = genos_workbench::load_workspace(dir)?;
+    let workspace = mesh_view::load_shown(dir)?;
     let size = (0..3)
         .map(|axis| workspace.max[axis] - workspace.min[axis])
         .fold(0.0f32, f32::max);
@@ -1093,9 +1094,9 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
     let mut scene = Scene {
         floor: Floor {
             position: Vec3::new(
-                (workspace.min[0] + workspace.max[0]) * 0.5,
+                f32::midpoint(workspace.min[0], workspace.max[0]),
                 0.0,
-                (workspace.min[2] + workspace.max[2]) * 0.5,
+                f32::midpoint(workspace.min[2], workspace.max[2]),
             ),
             half_x: reach,
             half_z: reach,
@@ -1139,9 +1140,9 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
             affects_light: false,
             bounds: genos_render::Bounds {
                 center: [
-                    (low[0] + high[0]) * 0.5,
-                    (low[1] + high[1]) * 0.5 + lift,
-                    (low[2] + high[2]) * 0.5,
+                    f32::midpoint(low[0], high[0]),
+                    f32::midpoint(low[1], high[1]) + lift,
+                    f32::midpoint(low[2], high[2]),
                 ],
                 half: [
                     (high[0] - low[0]) * 0.5,
@@ -1232,7 +1233,7 @@ impl App {
     /// A mesh scene follows its workspace: when `project.json` changes on
     /// disk, read it again. mesh-workbench replaces the file by rename and
     /// pushes nothing, so this looks at the modification time
-    /// MESH_POLL_SECONDS apart. A file that does not parse (caught half
+    /// `MESH_POLL_SECONDS` apart. A file that does not parse (caught half
     /// written) keeps the picture and is tried again.
     fn follow_mesh(&mut self) {
         if self.load.is_some() {
@@ -1246,7 +1247,7 @@ impl App {
         let dir = mesh_workspace_dir(&self.root, workspace);
         let now = Instant::now();
         if let Some(watch) = &self.mesh {
-            if watch.dir == dir && now.duration_since(watch.looked).as_secs_f32() < MESH_POLL_SECONDS {
+            if watch.dir == dir && !watch.rebuild && now.duration_since(watch.looked).as_secs_f32() < MESH_POLL_SECONDS {
                 return;
             }
         }
@@ -1256,7 +1257,8 @@ impl App {
         let changed = match &mut self.mesh {
             Some(watch) if watch.dir == dir => {
                 watch.looked = now;
-                watch.stamp != stamp
+                // A replayed state does not follow the live file.
+                watch.rebuild || (watch.replay.is_none() && watch.stamp != stamp)
             }
             _ => {
                 let mut view = mesh_view::MeshView::new(dir, stamp);
@@ -1297,90 +1299,77 @@ impl App {
         }
     }
 
-    /// Draw the viewer's selection: one extra object over the mesh, replaced
-    /// when the selection or the mesh changes. Also applies the viewer's
-    /// hidden objects and its colour mode to the mesh objects.
+    /// Bring the picture's mesh objects up to the viewer's state: hidden
+    /// objects and the colour mode on the workspace's objects, then the extra
+    /// objects after them (the wireframe strips, the selection).
     fn refresh_mesh_overlay(&mut self) {
         let Some(view) = &mut self.mesh else {
             return;
         };
-        if view.display_stale {
-            view.display_stale = false;
-            let display = view.display();
-            if let Show::Still(world) = &mut self.show {
-                // The workspace's objects are the mesh draws, in order, before
-                // the selection overlay.
-                let overlay = self.mesh_overlay;
-                let meshes = world
-                    .objects
-                    .iter_mut()
-                    .enumerate()
-                    .filter(|(index, object)| Some(*index) != overlay && matches!(object.kind, DrawKind::Mesh { .. }))
-                    .map(|(_, object)| object);
-                for (object, (hidden, shade)) in meshes.zip(display) {
-                    object.hidden = hidden;
-                    if let DrawKind::Mesh { color, .. } = &mut object.kind {
-                        *color = shade;
-                    }
-                }
-            }
-        }
-        let Some(view) = &mut self.mesh else {
-            return;
-        };
-        if !view.overlay_stale {
+        if !view.overlay_stale && !view.display_stale {
             return;
         }
         view.overlay_stale = false;
-        let (positions, normals) = view.overlay();
+        view.display_stale = false;
+        let display = view.display();
         let lift = view.lift();
+        let extras = [(view.wire(), mesh_view::WIRE_COLOR), (view.overlay(), mesh_view::OVERLAY_COLOR)];
         let Show::Still(world) = &mut self.show else {
             return;
         };
-        if let Some(index) = self.mesh_overlay.take() {
-            if index < world.objects.len() {
-                world.objects.remove(index);
-            }
-        }
-        if positions.is_empty() {
-            return;
-        }
-        let mut low = [f32::INFINITY; 3];
-        let mut high = [f32::NEG_INFINITY; 3];
-        for p in &positions {
-            for axis in 0..3 {
-                low[axis] = low[axis].min(p[axis]);
-                high[axis] = high[axis].max(p[axis]);
+        // The extras sit after the workspace's objects. Drop the old ones.
+        let base = *self.mesh_overlay.get_or_insert(world.objects.len());
+        world.objects.truncate(base);
+        let meshes = world
+            .objects
+            .iter_mut()
+            .filter(|object| matches!(object.kind, DrawKind::Mesh { .. }));
+        for (object, (hidden, shade)) in meshes.zip(display) {
+            object.hidden = hidden;
+            if let DrawKind::Mesh { color, .. } = &mut object.kind {
+                *color = shade;
             }
         }
         let mut pose = identity_pose();
         pose[13] = lift;
-        self.mesh_overlay = Some(world.objects.len());
-        world.objects.push(genos_render::Object {
-            hidden: false,
-            affects_light: false,
-            bounds: genos_render::Bounds {
-                center: [
-                    (low[0] + high[0]) * 0.5,
-                    (low[1] + high[1]) * 0.5 + lift,
-                    (low[2] + high[2]) * 0.5,
-                ],
-                half: [
-                    (high[0] - low[0]) * 0.5,
-                    (high[1] - low[1]) * 0.5,
-                    (high[2] - low[2]) * 0.5,
-                ],
-            },
-            kind: DrawKind::Mesh {
-                vertices: positions,
-                normals,
-                texcoords: Vec::new(),
-                color: mesh_view::OVERLAY_COLOR,
-                pose,
-                emission: [0.0; 3],
-                surface: None,
-            },
-        });
+        for ((positions, normals), color) in extras {
+            if positions.is_empty() {
+                continue;
+            }
+            let mut low = [f32::INFINITY; 3];
+            let mut high = [f32::NEG_INFINITY; 3];
+            for p in &positions {
+                for axis in 0..3 {
+                    low[axis] = low[axis].min(p[axis]);
+                    high[axis] = high[axis].max(p[axis]);
+                }
+            }
+            world.objects.push(genos_render::Object {
+                hidden: false,
+                affects_light: false,
+                bounds: genos_render::Bounds {
+                    center: [
+                        f32::midpoint(low[0], high[0]),
+                        f32::midpoint(low[1], high[1]) + lift,
+                        f32::midpoint(low[2], high[2]),
+                    ],
+                    half: [
+                        (high[0] - low[0]) * 0.5,
+                        (high[1] - low[1]) * 0.5,
+                        (high[2] - low[2]) * 0.5,
+                    ],
+                },
+                kind: DrawKind::Mesh {
+                    vertices: positions,
+                    normals,
+                    texcoords: Vec::new(),
+                    color,
+                    pose,
+                    emission: [0.0; 3],
+                    surface: None,
+                },
+            });
+        }
     }
 
     fn note(&mut self, line: &str) {
@@ -1502,6 +1491,40 @@ impl Host for App {
                         .iter()
                         .position(|mode| *mode == view.pick_mode)
                         .unwrap_or(0);
+                    let shade = mesh_view::SHADES.iter().position(|mode| *mode == view.shade).unwrap_or(0);
+                    knobs.push(Knob {
+                        name: "mesh_shade".into(),
+                        label: "Mesh shading".into(),
+                        value: shade as f64,
+                        min: 0.0,
+                        max: (mesh_view::SHADES.len() - 1) as f64,
+                        step: 1.0,
+                        choices: mesh_view::SHADES.iter().map(|mode| (*mode).to_string()).collect(),
+                        text: view.shade.clone(),
+                    });
+                    // "all", then each object: choosing one shows it alone.
+                    let parts: Vec<(u64, String)> = view
+                        .workspace
+                        .iter()
+                        .flat_map(|w| w.parts.iter().map(|p| (p.object, format!("{} {}", p.object, p.name))))
+                        .collect();
+                    let shown: Vec<&(u64, String)> = parts.iter().filter(|(id, _)| !view.hidden.contains(id)).collect();
+                    let solo = match shown.as_slice() {
+                        [only] if parts.len() > 1 => parts.iter().position(|p| p.0 == only.0).map_or(0, |i| i + 1),
+                        _ => 0,
+                    };
+                    let mut choices = vec!["all".to_string()];
+                    choices.extend(parts.iter().map(|p| p.1.clone()));
+                    knobs.push(Knob {
+                        name: "mesh_solo".into(),
+                        label: "Show object".into(),
+                        value: solo as f64,
+                        min: 0.0,
+                        max: parts.len() as f64,
+                        step: 1.0,
+                        text: choices[solo].clone(),
+                        choices,
+                    });
                     knobs.push(Knob {
                         name: "mesh_pick".into(),
                         label: "Click selects".into(),
@@ -1519,6 +1542,24 @@ impl Host for App {
     }
 
     fn set_knob(&mut self, name: &str, value: f64) -> Result<(), String> {
+        if name == "mesh_shade" {
+            let view = self.mesh.as_mut().ok_or("mesh_shade needs a mesh scene")?;
+            let at = (value.round().max(0.0) as usize).min(mesh_view::SHADES.len() - 1);
+            view.shade = mesh_view::SHADES[at].to_string();
+            view.display_stale = true;
+            return Ok(());
+        }
+        if name == "mesh_solo" {
+            let view = self.mesh.as_mut().ok_or("mesh_solo needs a mesh scene")?;
+            let objects: Vec<u64> = view.workspace.iter().flat_map(|w| w.parts.iter().map(|p| p.object)).collect();
+            let at = value.round().max(0.0) as usize;
+            view.hidden = match at.checked_sub(1).and_then(|i| objects.get(i)) {
+                Some(keep) => objects.iter().copied().filter(|id| id != keep).collect(),
+                None => std::collections::BTreeSet::new(),
+            };
+            view.display_stale = true;
+            return Ok(());
+        }
         if name == "mesh_pick" {
             let view = self.mesh.as_mut().ok_or("mesh_pick needs a mesh scene")?;
             let at = (value.round().max(0.0) as usize).min(mesh_view::PICK_MODES.len() - 1);
@@ -1583,11 +1624,19 @@ impl Host for App {
         &mut self,
         name: &str,
         args: &genos_mcp::json::Value,
-        camera: &Camera,
+        camera: &mut Camera,
         aspect: f32,
     ) -> Option<Result<genos_mcp::json::Value, String>> {
         self.follow_mesh();
-        let result = self.mesh.as_mut()?.command(name, args, camera, aspect);
+        let mut result = self.mesh.as_mut()?.command(name, args, camera, aspect);
+        // A replay step or a return to the live mesh rebuilds the picture now,
+        // and the reply reports the mesh that is then on show.
+        let rebuilt = self.mesh.as_ref().is_some_and(|view| view.rebuild);
+        self.follow_mesh();
+        if rebuilt && result.is_ok() {
+            let none = genos_mcp::json::Value::Object(Vec::new());
+            result = self.mesh.as_mut()?.command(name, &none, camera, aspect);
+        }
         self.refresh_mesh_overlay();
         Some(result)
     }

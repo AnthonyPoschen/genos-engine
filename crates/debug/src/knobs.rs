@@ -168,7 +168,7 @@ pub trait Host {
         &mut self,
         _name: &str,
         _args: &genos_mcp::json::Value,
-        _camera: &genos_scene::Camera,
+        _camera: &mut genos_scene::Camera,
         _aspect: f32,
     ) -> Option<Result<genos_mcp::json::Value, String>> {
         None
