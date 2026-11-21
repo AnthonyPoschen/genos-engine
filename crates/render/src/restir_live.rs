@@ -210,12 +210,12 @@ fn same_lamp(a: &GpuLamp, b: &GpuLamp) -> bool {
 
 /// Device bytes for the prefix and the cascade direct table.
 ///
-/// The table starts at [`PREFIX_CAP_WORDS`]: two parities, 16384 slots, four
-/// words (key, frame, visibility mean, count). `pixels` is unused. The
-/// reservoir histories that used to follow the prefix are gone.
+/// The table starts at [`PREFIX_CAP_WORDS`]: two parities, 262144 slots, four
+/// words (key over frame, unused, visibility mean, count), 8 MiB. `pixels`
+/// is unused. The reservoir histories that used to follow the prefix are gone.
 #[must_use]
 pub fn buffer_bytes(pixels: u64) -> u64 {
-    const CASCADE_DIRECT_CAP: u64 = 16384;
+    const CASCADE_DIRECT_CAP: u64 = 262_144;
     let _ = pixels;
     let table = 2 * CASCADE_DIRECT_CAP * 4 * 4;
     PREFIX_CAP_WORDS.saturating_mul(4).saturating_add(table)
@@ -602,6 +602,8 @@ mod tests {
             super::POINT_ADD_WORD
         )));
         assert!(direct.contains("const uint CASCADE_DIRECT_AT = 164032u;"));
+        assert!(direct.contains("const uint CASCADE_DIRECT_CAP = 262144u;"));
+        assert_eq!(super::buffer_bytes(0), 164_032 * 4 + 2 * 262_144 * 16);
         assert_eq!(super::PREFIX_CAP_WORDS, 164_032);
     }
 

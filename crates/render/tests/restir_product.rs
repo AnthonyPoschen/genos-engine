@@ -150,7 +150,7 @@ fn restir_live_keeps_the_product_history_test_and_the_sample_mean() {
     let direct = include_str!("../shaders/lighting_direct.comp");
     let pick = include_str!("../shaders/lighting_lamp_pick.glsl");
     assert!(direct.contains("const uint CASCADE_DIRECT_AT = 164032u;"));
-    assert!(direct.contains("const uint CASCADE_DIRECT_CAP = 16384u;"));
+    assert!(direct.contains("const uint CASCADE_DIRECT_CAP = 262144u;"));
     assert!(direct.contains("restir_brightest("));
     assert!(direct.contains("cascade_lamp_vis("));
     assert!(direct.contains("const uint RESTIR_DIAG_POINT_ADD = 45u;"));
