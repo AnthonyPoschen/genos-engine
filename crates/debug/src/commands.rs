@@ -19,8 +19,47 @@ fn spec(name: &str, description: &str) -> CommandSpec {
     }
 }
 
-/// Every command [`crate::Tools`] runs. Shared by MCP, `POST /cmd/<name>` and scripts.
+/// The sections of the catalogue, in the order `list_commands` gives them.
+pub const SECTIONS: [&str; 6] = ["scene", "lighting", "render", "capture", "editor", "mesh"];
+
+/// The section a command belongs to, by its name. `lighting` is lights, GI and
+/// the lighting settings. `render` is reflections, HDR, fog, particles and
+/// materials. `scene` is what is loaded and how time runs. `capture` reads the
+/// picture. `editor` is the program's own knobs and windows. `mesh` is the
+/// mesh viewer and mesh-workbench.
+pub fn section_of(name: &str) -> &'static str {
+    let has = |words: &[&str]| words.iter().any(|word| name.contains(word));
+    if name.starts_with("mesh_") {
+        "mesh"
+    } else if has(&["reflection", "hdr", "fog", "particle", "material"]) || name.starts_with("fx") {
+        "render"
+    } else if has(&["lighting", "preset", "gi_metrics", "level0"]) || name == "lights" || name == "light" {
+        "lighting"
+    } else if has(&["capture", "luminance", "flicker", "reference", "compare"]) || ["view", "diff", "timing"].contains(&name) {
+        "capture"
+    } else if has(&["debug_settings", "fps_counter", "event_loop", "menu_settings", "list_commands"]) || name == "knobs" {
+        "editor"
+    } else {
+        "scene"
+    }
+}
+
+/// Every command [`crate::Tools`] runs. Shared by MCP, `POST /cmd/<name>` and
+/// scripts. Each description starts with its section in brackets, so a flat
+/// tool list still reads in groups.
 pub fn specs() -> Vec<CommandSpec> {
+    let mut specs = plain_specs();
+    specs.push(spec(
+        "list_commands",
+        "The command catalogue grouped by section (scene, lighting, render, capture, editor, mesh): each command's name and description. section (optional) gives one section only.",
+    ));
+    for spec in &mut specs {
+        spec.description = format!("[{}] {}", section_of(&spec.name), spec.description);
+    }
+    specs
+}
+
+fn plain_specs() -> Vec<CommandSpec> {
     vec![
         spec("status", "Frame, pause state, view, camera, and whether the lighting has settled (stable, still_frames, picture_settled, cache_rays)."),
         spec("knobs", "List every knob the example publishes, with range and step. With name and value, set one first."),
@@ -337,4 +376,41 @@ fn host_specs() -> Vec<CommandSpec> {
             "Run command (one mesh-workbench command object such as {\"command\":\"inspect\"}, or a list of up to 1024 that stops at the first refusal) on the mesh scene's workspace and return mesh-workbench's reply. The engine links mesh-workbench; the first call opens its session on the workspace, which then holds project.json and the recorded sessions. The picture reloads when the mesh changes.",
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{section_of, specs, SECTIONS};
+
+    #[test]
+    fn every_command_is_in_one_known_section_and_says_so() {
+        let specs = specs();
+        for spec in &specs {
+            let section = section_of(&spec.name);
+            assert!(SECTIONS.contains(&section), "{} has section {section}", spec.name);
+            assert!(spec.description.starts_with(&format!("[{section}] ")), "{}", spec.name);
+        }
+        for (name, section) in [
+            ("set_lighting_settings", "lighting"),
+            ("lights", "lighting"),
+            ("apply_preset", "lighting"),
+            ("lighting_cascade_gaps", "lighting"),
+            ("set_fog_settings", "render"),
+            ("fx.spawn", "render"),
+            ("load_scene", "scene"),
+            ("camera", "scene"),
+            ("capture", "capture"),
+            ("flicker", "capture"),
+            ("knobs", "editor"),
+            ("set_menu_settings", "editor"),
+            ("mesh_rig", "mesh"),
+            ("mesh_selection", "mesh"),
+        ] {
+            assert_eq!(section_of(name), section, "{name}");
+        }
+        // No section is empty.
+        for section in SECTIONS {
+            assert!(specs.iter().any(|spec| section_of(&spec.name) == section), "{section} is empty");
+        }
+    }
 }

@@ -1738,6 +1738,36 @@ impl Tools {
                     ("camera", camera_value(ctx.camera)),
                 ]))
             }
+            "list_commands" => {
+                let only = args.str("section")?;
+                if let Some(section) = &only {
+                    if !crate::commands::SECTIONS.contains(&section.as_str()) {
+                        return Err(format!(
+                            "list_commands section is one of {}",
+                            crate::commands::SECTIONS.join(", ")
+                        ));
+                    }
+                }
+                let specs = crate::commands::specs();
+                let groups = crate::commands::SECTIONS
+                    .iter()
+                    .filter(|section| only.as_deref().is_none_or(|want| want == **section))
+                    .map(|section| {
+                        let commands = specs
+                            .iter()
+                            .filter(|spec| crate::commands::section_of(&spec.name) == *section)
+                            .map(|spec| {
+                                obj(vec![
+                                    ("name", text(spec.name.clone())),
+                                    ("description", text(spec.description.clone())),
+                                ])
+                            })
+                            .collect();
+                        (*section, list(commands))
+                    })
+                    .collect();
+                reply(obj(groups))
+            }
             scene_command if scene_command.starts_with("mesh_") => {
                 let aspect = ctx.renderer.width() as f32 / ctx.renderer.height().max(1) as f32;
                 match ctx.host.scene_command(name, args.0, ctx.camera, aspect) {

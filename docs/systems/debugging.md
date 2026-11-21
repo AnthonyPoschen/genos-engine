@@ -86,6 +86,8 @@ curl -s -X POST localhost:8801/cmd/capture -d '{"mode":"direct","path":"/tmp/dir
 curl -s -X POST localhost:8801/cmd/compare -d '{"width":160,"noise":0.03,"prefix":"/tmp/noon"}'
 ```
 
+The catalogue is in six sections: `scene`, `lighting`, `render`, `capture`, `editor` and `mesh`. Every command's description starts with its section in brackets, so a flat MCP tool list reads in groups. `list_commands` returns the catalogue grouped by section, and `section` gives one section.
+
 `capture` and `captures` take `ui` (default false). The same default is `DebugSettings.ui`, read and written by `get_debug_settings` and `set_debug_settings`. A false value leaves the debug menu, the menu tab, the frame-rate plate, and tool overlays out of the PNG. `ui: true` on the command keeps them for that shot. `--ui` forces the setting on for `genos-lighting --frames` and `genos-stress --shot`.
 
 Do not stop a `genos-stress` someone else bound to port 8765; pick another
