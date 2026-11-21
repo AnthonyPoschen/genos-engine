@@ -61,7 +61,7 @@ cargo run --release -p genos-lighting -- --scene sponza --gpu-times 30
 Phase 0 gate scripts live in `debug/lighting/scripts/gates/`. Run them on this binary, port 8766, not on `genos-stress`:
 
 ```sh
-genos-lighting --headless --menu hidden --scene stress --checkpoint hall \
+genos-lighting --headless --menu hidden --scene lighting-stress --checkpoint hall \
   --preset high --gi-metrics --size 1920x1080 \
   --script debug/lighting/scripts/gates/s1-spin.rhai \
   --report genos-debug/gi/s1-spin

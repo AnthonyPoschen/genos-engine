@@ -6,7 +6,14 @@ run:
 room:
 	cargo run -p genos-camera -- --scene room.rhai
 
+# The lighting stress scene in the scene program. Page Up and Page Down, the
+# Scene tab, and the MCP load_scene command switch to the other scenes in
+# debug/scenes.
 stress:
+	cargo run --release -p genos-lighting -- --scene lighting-stress
+
+# The single-scene stress program the regression scripts and tests run on.
+stress-solo:
 	cargo run --release -p genos-stress
 
 stress-big:
@@ -15,9 +22,9 @@ stress-big:
 stress-bench:
 	cargo run --release -p genos-stress -- --bench 10
 
-# Lighting debug binary. SCENE picks debug/scenes/<name> (default stress).
+# Lighting debug binary. SCENE picks debug/scenes/<name> (default lighting-stress).
 # This is the Sponza benchmark: make lighting SCENE=sponza
-SCENE ?= stress
+SCENE ?= lighting-stress
 lighting:
 	cargo run --release -p genos-lighting -- --scene $(SCENE) --gpu-times 30
 

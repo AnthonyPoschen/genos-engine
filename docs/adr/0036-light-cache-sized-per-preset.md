@@ -38,7 +38,7 @@ Findings:
 **Not measured (gaps):**
 - 1440p. The reruns failed at once (MCP port bind clash), and the box was then busy with the #98 oracle run.
 - Sponza.
-- A full spin, turn and switch with the `hall` checkpoint. These need `genos-lighting --scene stress --checkpoint hall`.
+- A full spin, turn and switch with the `hall` checkpoint. These need `genos-lighting --scene lighting-stress --checkpoint hall`.
 - Medium, Low and Ultra occupancy.
 - Any 4070 run.
 

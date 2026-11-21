@@ -1,4 +1,4 @@
-name stress
+name lighting-stress
 kind stress
 scale small
 lights 5

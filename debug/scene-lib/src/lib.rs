@@ -94,6 +94,23 @@ impl Entry {
     }
 }
 
+/// The scene a binary opens when no scene was named: the lighting stress
+/// building.
+pub const DEFAULT_SCENE: &str = "lighting-stress";
+
+/// The name a scene file is stored under. `stress` is the old name of the
+/// lighting stress scene: it still opens that scene and logs a warning once.
+pub fn canonical(name: &str) -> &str {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if name == "stress" {
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("scene name stress is deprecated; use {DEFAULT_SCENE}");
+        }
+        return DEFAULT_SCENE;
+    }
+    name
+}
+
 /// `debug/scene-lib/../../` is the repository root.
 pub fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -368,11 +385,19 @@ mod tests {
     }
 
     #[test]
+    fn the_old_stress_name_opens_the_lighting_stress_scene() {
+        assert_eq!(canonical("stress"), "lighting-stress");
+        assert_eq!(canonical("sponza"), "sponza");
+        assert_eq!(canonical(DEFAULT_SCENE), DEFAULT_SCENE);
+    }
+
+    #[test]
     fn the_shipped_directory_loads() {
         let entries = load_dir(&scenes_dir()).unwrap();
         let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"sponza"), "{names:?}");
-        assert!(names.contains(&"stress"));
+        assert!(names.contains(&DEFAULT_SCENE), "{names:?}");
+        assert!(!names.contains(&"stress"), "the old name is an alias, not a file");
         assert!(names.contains(&"hell"));
         let sponza = entries.iter().find(|e| e.name == "sponza").unwrap();
         assert!(sponza.checkpoint("atrium").is_some());

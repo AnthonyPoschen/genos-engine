@@ -119,7 +119,7 @@ C5, on the owner's 4070, once:
 
 ```sh
 make lighting-oracle PROFILE=full
-cargo run --release -p genos-lighting -- --scene stress --size 2560x1440 --gi-metrics on --gpu-times 30 --frames 120 --out genos-debug/restir-c5
+cargo run --release -p genos-lighting -- --scene lighting-stress --size 2560x1440 --gi-metrics on --gpu-times 30 --frames 120 --out genos-debug/restir-c5
 ```
 
 `ref_err_near` is no worse than master. `grid_worst` ≤ 0.15. The direct pass is ≤ 3 ms at 1440p. Those are the ADR 0022 stage C gates. A miss drops or reworks the stage. It does not land on a promise.

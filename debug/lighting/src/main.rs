@@ -104,7 +104,8 @@ const USAGE: &str = "\
 genos-lighting — lighting scenes, checkpoints, and the debug picture
 
   --scene NAME           scene file name (debug/scenes). Falls back to GENOS_SCENE,
-                         then stress
+                         then lighting-stress. stress is the old name of that
+                         scene and still opens it
   --checkpoint NAME      jump here at launch
   --eye X,Y,Z            camera position, metres. --eye=X,Y,Z is the same flag.
                          Keeps the checkpoint aim unless --look is set
@@ -1098,6 +1099,7 @@ impl App {
 
     /// Read `name` on a worker. The call returns while that read is still running.
     fn start_load(&mut self, name: &str) -> Result<LoadPace, String> {
+        let name = genos_scene_lib::canonical(name);
         if self.entry().name == name && self.load.is_none() {
             return Ok(LoadPace::Ready);
         }
@@ -1219,6 +1221,7 @@ impl Host for App {
     }
 
     fn load_scene(&mut self, name: &str) -> Result<(), String> {
+        let name = genos_scene_lib::canonical(name);
         let menu = self.scene().menu.clone();
         let fps = self.scene().fps_counter;
         let debug = self.scene().debug.clone();
@@ -2958,7 +2961,10 @@ fn options() -> Result<Options, String> {
         }
     });
     Ok(Options {
-        scene: scene.unwrap_or_else(|| "stress".into()),
+        scene: scene.map_or_else(
+            || genos_scene_lib::DEFAULT_SCENE.to_string(),
+            |name| genos_scene_lib::canonical(&name).to_string(),
+        ),
         checkpoint,
         eye,
         look,
@@ -3158,7 +3164,7 @@ mod tests {
     #[test]
     fn eye_and_look_place_the_camera() {
         let mut opts = super::Options {
-            scene: "stress".into(),
+            scene: genos_scene_lib::DEFAULT_SCENE.into(),
             checkpoint: None,
             eye: Some([1.0, 2.0, 3.0]),
             look: Some([1.0, 2.0, 1.0]),

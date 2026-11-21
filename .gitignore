@@ -8,3 +8,5 @@ genos-debug/
 # cpython pyc was an accidental rebuild and must not come back.
 __pycache__/
 *.pyc
+# Bake cache a debug binary writes beside its crate.
+/debug/*/target/

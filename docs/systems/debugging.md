@@ -112,7 +112,10 @@ make lighting SCENE=sponza
 ```
 
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default
-`stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
+`lighting-stress`), and `--gpu-times 30`. `make stress` opens the same program on
+the lighting stress scene. `stress` is the old name of that scene: it still opens
+it and logs a warning once. `make stress-solo` runs `genos-stress`, the
+single-scene program the regression scripts and tests use. `--preset`, `--lighting-debug`, `--unfilled`
 (the existing texels view: own-mean luma, seed luma, and set count),
 `--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
 `--fps-hz`, `--menu shown|hidden`, and `--out DIR` are in `--help`. The default output directory is
