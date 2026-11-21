@@ -286,7 +286,7 @@ fn host_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "mesh_view",
-            "The mesh-workbench workspace a mesh scene shows: workspace directory, loaded, revision, vertex and face counts, objects (id, name, origin, triangles), server_port, and lift (metres the picture raises the mesh so it stands on the ground). Needs a mesh scene.",
+            "The mesh-workbench workspace a mesh scene shows: workspace directory, loaded, revision, vertex and face counts, objects (id, name, origin, triangles, hidden), pick, shade, server, server_port, and lift (metres the picture raises the mesh so it stands on the ground). pick (face, object, or vertex) sets what a click selects. hide, show and solo take object ids, and show_all: true shows every object; hiding is local to the viewer. shade is shaded or object_ids. Needs a mesh scene.",
         ),
         spec(
             "mesh_selection",

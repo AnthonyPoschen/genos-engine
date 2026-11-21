@@ -1,6 +1,6 @@
 # Mesh workbench
 
-Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Also in the tree: orbit, pan and zoom, selecting with a click, and starting `mesh-server` with the scene. Not yet: the axis snaps and the orthographic view, render modes, the objects list, replay, animation. The stages are listed under Plan.
+Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Also in the tree: orbit, pan and zoom, selecting with a click, and starting `mesh-server` with the scene. Objects hide, show and solo, and `object_ids` colours each object. Not yet: the axis snaps and the orthographic view, wireframe and the other render modes, an objects list in the menu, textures, replay, animation. The stages are listed under Plan.
 
 The scene program shows and edits the meshes that [mesh-workbench](https://github.com/NathanChambers/mesh-workbench) makes. A person looks at a mesh in the engine, selects part of it, and tells an agent what to change. The agent reads the selection from the engine's agent endpoint and sends the edit to mesh-workbench.
 
@@ -63,7 +63,7 @@ When a checkpoint, a script, or an agent moves the camera, the orbit continues a
 
 On the agent endpoint (MCP, `POST /cmd/<name>`, and Rhai), while a mesh scene is open:
 
-- `mesh_view`: the workspace directory, the revision shown, the counts, the objects (id, name, origin, triangles), the server port, and `lift`. The picture raises the mesh by `lift` metres so its lowest point stands on the ground. Every position a command reports is in mesh coordinates.
+- `mesh_view`: the workspace directory, the revision shown, the counts, the objects (id, name, origin, triangles, hidden), `pick`, `shade`, the server, and `lift`. `hide`, `show` and `solo` take object IDs and `show_all: true` shows every object. Hiding is local to the viewer, as in the web viewer. `shade` is `shaded` or `object_ids`. The picture raises the mesh by `lift` metres so its lowest point stands on the ground. Every position a command reports is in mesh coordinates.
 - `mesh_pick`: the mesh under screen `[x, y]`. `mode` is `face`, `object`, or `vertex`. `select` is `set`, `add`, or `none`. The reply names the object, the face, the face's vertex IDs, the nearest vertex, and the point.
 - `mesh_selection`: the selection (objects, faces, vertices, the last picked point, the note, the revision, the camera). `objects`, `faces` and `vertices` replace that part, `note` sets the note, `clear: true` empties it first. IDs that an edit removes leave the selection at the next reload.
 - `mesh_command`: `command` is one mesh-workbench command object or a list. It goes to `POST /command` on `mesh-server` at `port` (default `GENOS_MESH_PORT`, else 7879). The reply is mesh-workbench's reply. With no server the error says how to start one.

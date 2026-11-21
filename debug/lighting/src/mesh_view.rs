@@ -30,6 +30,26 @@ const OVERLAY_OFFSET: f32 = 0.003;
 /// A selected vertex is drawn as a marker this share of the mesh size across.
 const VERTEX_MARK: f32 = 0.012;
 pub const OVERLAY_COLOR: [f32; 3] = [1.0, 0.52, 0.08];
+/// Albedo of a mesh-workbench object with no texture.
+pub const MESH_COLOR: [f32; 3] = [0.72, 0.72, 0.75];
+
+/// A steady colour for an object ID: the golden-ratio turn of the hue, so
+/// neighbouring IDs are far apart.
+#[expect(clippy::cast_precision_loss, reason = "an object ID is a small counter")]
+pub fn id_color(object: u64) -> [f32; 3] {
+    let hue = (object as f32 * 0.618_034).fract() * 6.0;
+    let x = 1.0 - (hue % 2.0 - 1.0).abs();
+    let (r, g, b) = match hue as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    // Keep some grey in it so the shading still reads.
+    [0.25 + 0.6 * r, 0.25 + 0.6 * g, 0.25 + 0.6 * b]
+}
 
 /// Radians of orbit per pixel of drag.
 const ORBIT_TURN: f32 = 0.006;
@@ -105,6 +125,13 @@ pub struct MeshView {
     /// What a click picks: `face`, `object`, or `vertex`.
     pub pick_mode: String,
     orbit: Option<Orbit>,
+    /// Objects the picture leaves out. Local to the viewer, as in the
+    /// mesh-workbench web viewer: the workspace is not changed.
+    pub hidden: BTreeSet<u64>,
+    /// `shaded` (one colour) or `object_ids` (a colour per object).
+    pub shade: String,
+    /// The picture's objects no longer match `hidden` and `shade`.
+    pub display_stale: bool,
     /// The `mesh-server` this viewer started on the workspace. Stopped when
     /// the mesh scene closes.
     server: Option<std::process::Child>,
@@ -151,9 +178,28 @@ impl MeshView {
             overlay_stale: true,
             pick_mode: "face".into(),
             orbit: None,
+            hidden: BTreeSet::new(),
+            shade: "shaded".into(),
+            display_stale: true,
             server: None,
             server_note: "not started".into(),
         }
+    }
+
+    /// For each object of the workspace, in order: whether the picture
+    /// leaves it out, and its colour.
+    pub fn display(&self) -> Vec<(bool, [f32; 3])> {
+        let Some(workspace) = &self.workspace else {
+            return Vec::new();
+        };
+        workspace
+            .parts
+            .iter()
+            .map(|part| {
+                let color = if self.shade == "object_ids" { id_color(part.object) } else { MESH_COLOR };
+                (self.hidden.contains(&part.object), color)
+            })
+            .collect()
     }
 
     /// Start `mesh-server` on this workspace so `mesh_command` has a server,
@@ -333,6 +379,7 @@ impl MeshView {
             self.selection.vertices.retain(|id| vertices.contains(id));
         }
         self.overlay_stale = true;
+        self.display_stale = true;
     }
 
     /// Metres the mesh is lifted so its lowest point stands on the ground.
@@ -448,7 +495,38 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick"])?;
+                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade"])?;
+                if args.bool("show_all")?.unwrap_or(false) {
+                    self.hidden.clear();
+                    self.display_stale = true;
+                }
+                if let Some(value) = args.0.get("solo") {
+                    let keep = id_list("solo", value)?;
+                    self.hidden = self
+                        .workspace
+                        .iter()
+                        .flat_map(|w| w.parts.iter().map(|p| p.object))
+                        .filter(|object| !keep.contains(object))
+                        .collect();
+                    self.display_stale = true;
+                }
+                if let Some(value) = args.0.get("hide") {
+                    self.hidden.extend(id_list("hide", value)?);
+                    self.display_stale = true;
+                }
+                if let Some(value) = args.0.get("show") {
+                    for object in id_list("show", value)? {
+                        self.hidden.remove(&object);
+                    }
+                    self.display_stale = true;
+                }
+                if let Some(shade) = args.str("shade")? {
+                    if !matches!(shade.as_str(), "shaded" | "object_ids") {
+                        return Err(format!("mesh_view shade is shaded or object_ids, not {shade}"));
+                    }
+                    self.shade = shade;
+                    self.display_stale = true;
+                }
                 if let Some(mode) = args.str("pick")? {
                     if !matches!(mode.as_str(), "face" | "object" | "vertex") {
                         return Err(format!("mesh_view pick is face, object, or vertex, not {mode}"));
@@ -545,6 +623,7 @@ impl MeshView {
                             ("name", text(p.name.clone())),
                             ("origin", vec3(p.origin)),
                             ("triangles", num(p.triangles() as f64)),
+                            ("hidden", Value::Bool(self.hidden.contains(&p.object))),
                         ])
                     })
                     .collect(),
@@ -558,6 +637,7 @@ impl MeshView {
             ("faces", num(faces as f64)),
             ("objects", list(objects)),
             ("pick", text(self.pick_mode.clone())),
+            ("shade", text(self.shade.clone())),
             ("server", text(self.server_note.clone())),
             ("server_port", num(f64::from(server_port()))),
             ("lift", num(f64::from(self.lift()))),
@@ -788,6 +868,23 @@ mod tests {
         view.pointer(&mut camera, size, OrbitInput { x: 740.0, left: true, over_ui: true, ..at });
         view.pointer(&mut camera, size, OrbitInput { x: 840.0, left: true, over_ui: true, ..at });
         assert!((camera.yaw - yaw).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn solo_hides_the_other_objects_and_object_ids_gives_each_its_own_colour() {
+        let mut view = view();
+        let camera = Camera::opening();
+        let none = genos_mcp::json::parse("{}").expect("json");
+        assert!(view.display().iter().all(|(hidden, color)| !hidden && *color == super::MESH_COLOR));
+        let solo = genos_mcp::json::parse(r#"{"solo":[2],"shade":"object_ids"}"#).expect("json");
+        view.command("mesh_view", &solo, &camera, 1.0).expect("solo");
+        let shown = view.display();
+        assert_eq!((shown[0].0, shown[1].0), (true, false), "the cube is hidden, the bracket stays");
+        assert_ne!(shown[0].1, shown[1].1, "two objects, two colours");
+        let all = genos_mcp::json::parse(r#"{"show_all":true}"#).expect("json");
+        view.command("mesh_view", &all, &camera, 1.0).expect("show all");
+        assert!(view.display().iter().all(|(hidden, _)| !hidden));
+        assert!(view.command("mesh_view", &none, &camera, 1.0).is_ok());
     }
 
     #[test]

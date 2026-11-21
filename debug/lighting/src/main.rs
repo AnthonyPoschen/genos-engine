@@ -1066,8 +1066,6 @@ enum Show {
 /// Seconds between looks at a mesh workspace's `project.json`. The
 /// mesh-workbench web viewer polls at 0.4 s.
 const MESH_POLL_SECONDS: f32 = 0.4;
-/// Albedo of a mesh-workbench object with no texture.
-const MESH_COLOR: [f32; 3] = [0.72, 0.72, 0.75];
 const MESH_GROUND_COLOR: [f32; 3] = [0.30, 0.31, 0.33];
 /// The ground reaches this many mesh sizes out, and at least this far.
 const MESH_GROUND_SCALE: f32 = 4.0;
@@ -1155,7 +1153,7 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
                 vertices: part.positions,
                 normals: part.normals,
                 texcoords: Vec::new(),
-                color: MESH_COLOR,
+                color: mesh_view::MESH_COLOR,
                 pose,
                 emission: [0.0; 3],
                 surface: None,
@@ -1300,8 +1298,33 @@ impl App {
     }
 
     /// Draw the viewer's selection: one extra object over the mesh, replaced
-    /// when the selection or the mesh changes.
+    /// when the selection or the mesh changes. Also applies the viewer's
+    /// hidden objects and its colour mode to the mesh objects.
     fn refresh_mesh_overlay(&mut self) {
+        let Some(view) = &mut self.mesh else {
+            return;
+        };
+        if view.display_stale {
+            view.display_stale = false;
+            let display = view.display();
+            if let Show::Still(world) = &mut self.show {
+                // The workspace's objects are the mesh draws, in order, before
+                // the selection overlay.
+                let overlay = self.mesh_overlay;
+                let meshes = world
+                    .objects
+                    .iter_mut()
+                    .enumerate()
+                    .filter(|(index, object)| Some(*index) != overlay && matches!(object.kind, DrawKind::Mesh { .. }))
+                    .map(|(_, object)| object);
+                for (object, (hidden, shade)) in meshes.zip(display) {
+                    object.hidden = hidden;
+                    if let DrawKind::Mesh { color, .. } = &mut object.kind {
+                        *color = shade;
+                    }
+                }
+            }
+        }
         let Some(view) = &mut self.mesh else {
             return;
         };
