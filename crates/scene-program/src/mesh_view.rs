@@ -329,7 +329,7 @@ pub struct Replay {
 }
 
 /// The shade modes, in the order the menu lists them.
-pub const SHADES: [&str; 5] = ["shaded", "wireframe", "vertex_colors", "object_ids", "face_ids"];
+pub const SHADES: [&str; 6] = ["shaded", "wireframe", "vertex_colors", "object_ids", "face_ids", "collection_ids"];
 /// Half the width of a wireframe strip, as a share of the mesh size.
 const WIRE_WIDTH: f32 = 0.0025;
 pub const WIRE_COLOR: [f32; 3] = [0.04, 0.04, 0.05];
@@ -725,7 +725,16 @@ impl MeshView {
             .parts
             .iter()
             .map(|part| {
-                let color = if self.shade == "object_ids" { id_color(part.object) } else { MESH_COLOR };
+                let color = match self.shade.as_str() {
+                    "object_ids" => id_color(part.object),
+                    // The first collection that holds the object; none is grey.
+                    "collection_ids" => workspace
+                        .collections
+                        .iter()
+                        .find(|collection| collection.objects.contains(&part.object))
+                        .map_or(MESH_COLOR, |collection| id_color(collection.id)),
+                    _ => MESH_COLOR,
+                };
                 // One colour per vertex, or none for the object's one colour.
                 let colors = match self.shade.as_str() {
                     "vertex_colors" => part.colors.clone(),
@@ -1042,7 +1051,36 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces", "solo_match", "hide_match"])?;
+                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces", "solo_match", "hide_match", "solo_collection", "hide_collection", "event"])?;
+                for (key, solo) in [("solo_collection", true), ("hide_collection", false)] {
+                    if let Some(value) = args.0.get(key) {
+                        let want = value.as_u64().ok_or_else(|| format!("{key} is a collection id"))?;
+                        let members: Vec<u64> = self
+                            .workspace
+                            .iter()
+                            .flat_map(|w| &w.collections)
+                            .find(|collection| collection.id == want)
+                            .map(|collection| collection.objects.clone())
+                            .ok_or_else(|| format!("unknown collection {want}"))?;
+                        if solo {
+                            self.hidden = self
+                                .workspace
+                                .iter()
+                                .flat_map(|w| w.parts.iter().map(|p| p.object))
+                                .filter(|object| !members.contains(object))
+                                .collect();
+                        } else {
+                            self.hidden.extend(members);
+                        }
+                        self.display_stale = true;
+                    }
+                }
+                // What a recorded command sent and what came back.
+                if let Some(value) = args.0.get("event") {
+                    let number = value.as_u64().ok_or("event is a command number of the session")?;
+                    let (session, _) = self.replay_span()?;
+                    return genos_workbench::load_event(&self.dir, &session, number);
+                }
                 if let Some(name) = args.str("solo_match")? {
                     self.match_names(&name, true);
                 }
@@ -1288,6 +1326,22 @@ impl MeshView {
             ("pick", text(self.pick_mode.clone())),
             ("shade", text(self.shade.clone())),
             ("turntable", Value::Bool(self.turntable)),
+            (
+                "collections",
+                list(
+                    self.workspace
+                        .iter()
+                        .flat_map(|w| &w.collections)
+                        .map(|collection| {
+                            obj(vec![
+                                ("id", id(collection.id)),
+                                ("name", text(collection.name.clone())),
+                                ("objects", ids(collection.objects.clone())),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
             ("playing", Value::Bool(self.playing.is_some())),
             ("replay_playing", Value::Bool(self.replay_playing.is_some())),
             ("bones", Value::Bool(self.bones)),

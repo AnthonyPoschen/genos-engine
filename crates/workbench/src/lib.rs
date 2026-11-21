@@ -61,6 +61,14 @@ pub struct Bone {
     pub position: [f32; 3],
 }
 
+/// A named group of objects.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Collection {
+    pub id: u64,
+    pub name: String,
+    pub objects: Vec<u64>,
+}
+
 /// One animation clip: its name and its length in seconds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Clip {
@@ -81,6 +89,8 @@ pub struct Workspace {
     pub faces: usize,
     /// The vertex IDs mesh-workbench holds as its own selection.
     pub selection: Vec<u64>,
+    /// The collections, by ID.
+    pub collections: Vec<Collection>,
     /// The rig's bones at rest. Empty when the mesh has no rig.
     pub bones: Vec<Bone>,
     /// The rig's animation clips, by name.
@@ -108,6 +118,7 @@ impl Workspace {
             vertices: 0,
             faces: 0,
             selection: Vec::new(),
+            collections: Vec::new(),
             bones: Vec::new(),
             clips: Vec::new(),
             min: [0.0; 3],
@@ -300,6 +311,7 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
         vertices: vertices.len(),
         faces: faces.len(),
         selection,
+        collections: read_collections(mesh),
         bones: rig_bones(mesh),
         clips: rig_clips(mesh),
         min: narrow(min),
@@ -327,6 +339,37 @@ fn read_objects(mesh: &Value) -> Result<Objects, String> {
         }
     }
     Ok((owner, parts))
+}
+
+fn read_collections(mesh: &Value) -> Vec<Collection> {
+    let Some(Value::Object(collections)) = mesh.get("collections") else {
+        return Vec::new();
+    };
+    collections
+        .iter()
+        .filter_map(|(key, collection)| {
+            Some(Collection {
+                id: key.parse().ok()?,
+                name: collection.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+                objects: collection.get("objects").map(ids).and_then(Result::ok).unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+/// One recorded command of a session: what was sent and the compact reply.
+/// The full reply in the file holds the whole mesh and is left out.
+///
+/// # Errors
+/// The event file is missing or is not JSON.
+pub fn load_event(dir: &Path, session: &str, event: u64) -> Result<Value, String> {
+    let path = dir.join("sessions").join(session).join("events").join(format!("{event}.json"));
+    let text = std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let record = genos_json::parse(&text).map_err(|err| format!("{}: {err}", path.display()))?;
+    let Value::Object(fields) = record else {
+        return Err(format!("{}: not an event record", path.display()));
+    };
+    Ok(Value::Object(fields.into_iter().filter(|(key, _)| key != "full_output").collect()))
 }
 
 fn rig_bones(mesh: &Value) -> Vec<Bone> {
@@ -616,6 +659,9 @@ mod tests {
         assert_eq!(workspace.bones[1].position, [0.0, 1.0, 0.0]);
         assert_eq!((workspace.clips[0].name.as_str(), workspace.clips[0].duration), ("Lean", 2.0));
         assert!(parse_project(PANEL).expect("parse").bones.is_empty());
+        let grouped = PANEL.replace("\"selection\":[2]", "\"selection\":[2],\"collections\":{\"3\":{\"name\":\"props\",\"objects\":[5]}}");
+        let collections = parse_project(&grouped).expect("parse").collections;
+        assert_eq!((collections[0].id, collections[0].name.as_str(), collections[0].objects.clone()), (3, "props", vec![5]));
     }
 
     #[test]

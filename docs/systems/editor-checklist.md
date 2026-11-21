@@ -66,16 +66,19 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [ ] Textured lit (material); base colour; unlit vertex colour.
 - [x] Face IDs (`shade: face_ids`).
 - [x] Normals, depth and base colour: the engine's `view` modes `normal`, `depth` and `albedo`. They showed nothing in the scene program until the HDR compose stored the view's colour in the scene image the display pass draws.
-- [ ] Debug views: silhouette, face orientation, collection IDs, UV checker.
+- [x] Collection IDs (`shade: collection_ids`).
+- [ ] Debug views: silhouette, face orientation, UV checker.
 - [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
 - [ ] Grid on the ground plane; contact shadow (the mesh casts no shadow); bloom and auto exposure soften the picture and could be off for a mesh scene.
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [x] Show all, hide matching and solo matching by name (`mesh_view show_all`, `hide_match`, `solo_match`).
-- [ ] Objects panel in the window: collections and objects as a tree with a search box.
+- [x] Collections: listed by `mesh_view`, with `solo_collection` and `hide_collection`.
+- [ ] Objects panel in the window: collections and objects as a tree with a search box. The menu has one "Show object" dropdown; the rest is commands.
 - [x] Replay: show the state after a command (`mesh_view replay`).
 - [x] Replay steps and scrubber: `replay: "next"`, `"previous"`, `"live"`, and the menu's "Replay" slider (0 is the session start, the last step is live).
 - [x] Replay play (`replay: "play"`, `"stop"`, the menu's "Play replay"): a step every 0.7 s to the live mesh.
-- [ ] Replay panel: session picker, command filter, the event's input and reply.
+- [x] A session by ID (`replay: {session, event}`) and a recorded command's input and reply (`mesh_view event: N`).
+- [ ] Replay panel in the window: a session picker and a command filter.
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
 - [ ] Posed normals (the pose keeps the rest normals), and picking and the selection highlight on the posed mesh (they use the rest positions).
