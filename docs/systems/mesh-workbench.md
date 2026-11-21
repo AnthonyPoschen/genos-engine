@@ -92,7 +92,7 @@ None. This is authoring. A finished mesh leaves mesh-workbench as a GLB and ente
 ## Limits
 
 - The picture is the engine's raster and direct light. The mesh has no baked distance field, so it does not occlude bounce light.
-- Textures are not drawn. The reader has them (`Workspace::textures`, `Part::uvs`, `Part::face_textures`); the engine draws a textured object black in this program, and Sponza untextured, so the textured and UV-checker modes wait on that. A pose keeps the rest normals, and picking and the selection highlight use the rest positions.
+- Textures are not drawn. The reader has them (`Workspace::textures`, `Part::uvs`, `Part::face_textures`); the engine draws a textured object black in this program, and Sponza untextured, so the textured and UV-checker modes wait on that. A pose keeps the rest normals. Picking and the selection highlight follow the pose.
 - The workspace format may change upstream. `load_workspace` reads versions 1 to 8 and refuses a newer one.
 - Nothing is pushed: the viewer polls the file's modification time.
 

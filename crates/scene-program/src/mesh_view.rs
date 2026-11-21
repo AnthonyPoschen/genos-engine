@@ -959,6 +959,16 @@ impl MeshView {
         }
     }
 
+    /// Where a corner of a part is drawn: its posed place when a pose is
+    /// set, else its rest place. Picking and the highlight use this, so
+    /// they follow the pose.
+    fn corner(&self, part: &Part, corner: usize) -> [f32; 3] {
+        self.posed
+            .as_ref()
+            .and_then(|posed| posed.vertices.get(&part.vertex_ids[corner]).copied())
+            .unwrap_or(part.positions[corner])
+    }
+
     /// Metres the mesh is lifted so its lowest point stands on the ground.
     pub fn lift(&self) -> f32 {
         self.workspace.as_ref().map_or(0.0, |w| -w.min[1])
@@ -984,7 +994,7 @@ impl MeshView {
             for (triangle, face) in part.face_ids.iter().enumerate() {
                 if whole || self.selection.faces.contains(face) {
                     for corner in triangle * 3..triangle * 3 + 3 {
-                        let (p, n) = (part.positions[corner], part.normals[corner]);
+                        let (p, n) = (self.corner(part, corner), part.normals[corner]);
                         positions.push([p[0] + n[0] * OVERLAY_OFFSET, p[1] + n[1] * OVERLAY_OFFSET, p[2] + n[2] * OVERLAY_OFFSET]);
                         normals.push(n);
                     }
@@ -992,7 +1002,7 @@ impl MeshView {
             }
             for (corner, vertex) in part.vertex_ids.iter().enumerate() {
                 if self.selection.vertices.contains(vertex) && marked.insert(*vertex) {
-                    octahedron(part.positions[corner], mark, &mut positions, &mut normals);
+                    octahedron(self.corner(part, corner), mark, &mut positions, &mut normals);
                 }
             }
         }
@@ -1009,7 +1019,8 @@ impl MeshView {
             for triangle in 0..part.triangles() {
                 let mut screen = [[0.0f32; 3]; 3];
                 let mut ahead = true;
-                for (slot, p) in screen.iter_mut().zip(&part.positions[triangle * 3..triangle * 3 + 3]) {
+                let corners: [[f32; 3]; 3] = std::array::from_fn(|k| self.corner(part, triangle * 3 + k));
+                for (slot, p) in screen.iter_mut().zip(&corners) {
                     match project(&m, [p[0], p[1] + lift, p[2]]) {
                         Some(s) => *slot = s,
                         None => ahead = false,
@@ -1026,7 +1037,7 @@ impl MeshView {
                     continue;
                 }
                 let mut point = [0.0f32; 3];
-                for (weight, p) in w.iter().zip(&part.positions[triangle * 3..triangle * 3 + 3]) {
+                for (weight, p) in w.iter().zip(&corners) {
                     for (sum, c) in point.iter_mut().zip(p) {
                         *sum += weight * c;
                     }

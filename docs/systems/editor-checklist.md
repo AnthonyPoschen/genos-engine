@@ -83,7 +83,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [ ] Replay panel in the window: a session picker and a command filter.
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
-- [ ] Posed normals (the pose keeps the rest normals), and picking and the selection highlight on the posed mesh (they use the rest positions).
+- [x] Picking and the selection highlight follow the pose.
+- [ ] Posed normals (the pose keeps the rest normals).
 - [ ] Workspace picker; connection and revision readout; statistics footer.
 
 ### E. Beyond the web viewer
