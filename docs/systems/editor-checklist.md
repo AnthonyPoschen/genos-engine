@@ -59,7 +59,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 ### D. Viewer parity with the mesh-workbench web viewer (decision 5)
 
 - [x] Orbit, pan, zoom, frame, axis views.
-- [ ] Orthographic view. The engine's projection is perspective only (`genos_scene::view_proj`).
+- [ ] Orthographic view. Blocked on the engine: the field of view is a fixed 60 degrees in `genos_scene::view_proj`, in the scene block the lighting passes rebuild positions from (`view_right.w`), in the fog passes, and in the references. It needs a field of view (or a projection kind) on `Camera` carried through those, in its own change with the lighting gates run.
 - [x] Auto-rotate turntable (`mesh_view turntable`, the menu's "Turntable").
 - [x] Shaded, wireframe, object IDs.
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).
@@ -69,7 +69,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Collection IDs (`shade: collection_ids`).
 - [ ] Debug views: silhouette, face orientation, UV checker.
 - [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
-- [ ] Grid on the ground plane; contact shadow (the mesh casts no shadow); bloom and auto exposure soften the picture and could be off for a mesh scene.
+- [x] Grid on the ground (`mesh_view grid`, the menu's "Grid"): a line every power of ten of metres that fits the mesh.
+- [ ] Contact shadow (the mesh casts no shadow). Bloom and auto exposure soften the picture and could be off for a mesh scene.
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [x] Show all, hide matching and solo matching by name (`mesh_view show_all`, `hide_match`, `solo_match`).
 - [x] Collections: listed by `mesh_view`, with `solo_collection` and `hide_collection`.

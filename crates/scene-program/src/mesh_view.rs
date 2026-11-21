@@ -147,6 +147,8 @@ pub struct MeshView {
     pub bones: bool,
     /// Draw the mesh's surfaces. Off leaves the wireframe and the bones.
     pub surfaces: bool,
+    /// Draw a grid on the ground.
+    pub grid: bool,
     /// The recorded state the picture shows in place of the live mesh.
     pub replay: Option<Replay>,
     /// The picture has to be rebuilt from [`MeshView::load`].
@@ -281,6 +283,13 @@ const REPLAY_STEP_SECONDS: f32 = 0.7;
 /// Vertices or bones asked for in one `animation_sample` page: the most
 /// mesh-workbench gives.
 const POSE_PAGE: u64 = 256;
+/// The grid reaches this many mesh sizes from the mesh's centre.
+const GRID_REACH: f32 = 2.0;
+/// The most grid lines each way from the centre.
+const GRID_LINES_MAX: f32 = 40.0;
+/// Half the width of a grid line, as a share of the grid step.
+const GRID_WIDTH: f32 = 0.004;
+pub const GRID_COLOR: [f32; 3] = [0.16, 0.17, 0.19];
 /// Half the width of a bone strip, as a share of the mesh size.
 const BONE_WIDTH: f32 = 0.006;
 pub const BONE_COLOR: [f32; 3] = [0.1, 0.85, 0.35];
@@ -400,6 +409,7 @@ impl MeshView {
             replay_playing: None,
             bones: false,
             surfaces: true,
+            grid: true,
             replay: None,
             rebuild: false,
             display_stale: true,
@@ -609,6 +619,38 @@ impl MeshView {
             if let Some(parent) = bone.parent.as_deref().and_then(joint) {
                 strip(parent, at, half, &mut positions, &mut normals);
             }
+        }
+        (positions, normals)
+    }
+
+    /// Grid lines on the ground under the mesh, in mesh coordinates: a line
+    /// every power of ten of metres that fits the mesh (1 m for a mesh a few
+    /// metres across), out to `GRID_REACH` mesh sizes. Empty when the grid is off.
+    pub fn grid_strips(&self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        if !self.grid {
+            return (positions, normals);
+        }
+        let (min, max) = self.workspace.as_ref().map_or(([-0.5, 0.0, -0.5], [0.5, 1.0, 0.5]), |w| (w.min, w.max));
+        let size = (0..3).map(|a| max[a] - min[a]).fold(0.0f32, f32::max).max(0.1);
+        let step = 10f32.powf(size.log10().floor());
+        let reach = (size * GRID_REACH / step).ceil().min(GRID_LINES_MAX);
+        let centre = [
+            (f32::midpoint(min[0], max[0]) / step).round() * step,
+            (f32::midpoint(min[2], max[2]) / step).round() * step,
+        ];
+        // The ground is the mesh's lowest point. Sit just above it.
+        let y = min[1] + OVERLAY_OFFSET;
+        let half = step * GRID_WIDTH;
+        let span = reach * step;
+        #[expect(clippy::cast_possible_truncation, reason = "a small line count")]
+        let lines = reach as i32;
+        for index in -lines..=lines {
+            #[expect(clippy::cast_precision_loss, reason = "a small line count")]
+            let offset = index as f32 * step;
+            strip([centre[0] + offset, y, centre[1] - span], [centre[0] + offset, y, centre[1] + span], half, &mut positions, &mut normals);
+            strip([centre[0] - span, y, centre[1] + offset], [centre[0] + span, y, centre[1] + offset], half, &mut positions, &mut normals);
         }
         (positions, normals)
     }
@@ -1051,7 +1093,7 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces", "solo_match", "hide_match", "solo_collection", "hide_collection", "event"])?;
+                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces", "solo_match", "hide_match", "solo_collection", "hide_collection", "event", "grid"])?;
                 for (key, solo) in [("solo_collection", true), ("hide_collection", false)] {
                     if let Some(value) = args.0.get(key) {
                         let want = value.as_u64().ok_or_else(|| format!("{key} is a collection id"))?;
@@ -1086,6 +1128,10 @@ impl MeshView {
                 }
                 if let Some(name) = args.str("hide_match")? {
                     self.match_names(&name, false);
+                }
+                if let Some(on) = args.bool("grid")? {
+                    self.grid = on;
+                    self.overlay_stale = true;
                 }
                 if let Some(on) = args.bool("surfaces")? {
                     self.surfaces = on;
@@ -1346,6 +1392,7 @@ impl MeshView {
             ("replay_playing", Value::Bool(self.replay_playing.is_some())),
             ("bones", Value::Bool(self.bones)),
             ("surfaces", Value::Bool(self.surfaces)),
+            ("grid", Value::Bool(self.grid)),
             (
                 "pose",
                 self.pose.as_ref().map_or(Value::Null, |(clip, time)| {
@@ -1683,6 +1730,12 @@ mod tests {
         assert!(cube[0] == cube[1] && cube[1] == cube[2]);
         assert_ne!(cube[0], cube[35], "the first and last faces differ");
         assert!(view.command("mesh_view", &none, &mut camera, 1.0).is_ok());
+        // The grid: the sample is 2.9 m across, so lines are 1 m apart, 6 each
+        // way of the centre and both directions, two strips a line.
+        assert_eq!(view.grid_strips().0.len(), 13 * 2 * 2 * 12);
+        let off = genos_mcp::json::parse(r#"{"grid":false}"#).expect("json");
+        view.command("mesh_view", &off, &mut camera, 1.0).expect("grid off");
+        assert!(view.grid_strips().0.is_empty());
         // Wireframe: the cube has 12 edges and the bracket 18, two strips each.
         assert!(view.wire().0.is_empty());
         let wire = genos_mcp::json::parse(r#"{"shade":"wireframe"}"#).expect("json");

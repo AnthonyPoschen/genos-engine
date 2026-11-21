@@ -1377,6 +1377,7 @@ impl App {
         let posed = view.posed_positions();
         let lift = view.lift();
         let extras = [
+            (view.grid_strips(), mesh_view::GRID_COLOR),
             (view.wire(), mesh_view::WIRE_COLOR),
             (view.bone_strips(), mesh_view::BONE_COLOR),
             (view.overlay(), mesh_view::OVERLAY_COLOR),
@@ -1669,6 +1670,16 @@ impl Host for App {
                         });
                     }
                     knobs.push(Knob {
+                        name: "mesh_grid".into(),
+                        label: "Grid".into(),
+                        value: f64::from(u8::from(view.grid)),
+                        min: 0.0,
+                        max: 1.0,
+                        step: 1.0,
+                        choices: vec!["off".into(), "on".into()],
+                        text: if view.grid { "on".into() } else { "off".into() },
+                    });
+                    knobs.push(Knob {
                         name: "mesh_turntable".into(),
                         label: "Turntable".into(),
                         value: f64::from(u8::from(view.turntable)),
@@ -1785,6 +1796,12 @@ impl Host for App {
                 view.set_pose(Some((clip, value.max(0.0) as f32)))?;
             }
             self.refresh_mesh_overlay();
+            return Ok(());
+        }
+        if name == "mesh_grid" {
+            let view = self.mesh.as_mut().ok_or("mesh_grid needs a mesh scene")?;
+            view.grid = value >= 0.5;
+            view.overlay_stale = true;
             return Ok(());
         }
         if name == "mesh_turntable" {
