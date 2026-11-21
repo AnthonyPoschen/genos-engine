@@ -63,11 +63,12 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Auto-rotate turntable (`mesh_view turntable`, the menu's "Turntable").
 - [x] Shaded, wireframe, object IDs.
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).
-- [ ] Textured lit (material); base colour; unlit vertex colour.
+- [ ] Textured lit (material) and the UV checker. `genos-workbench` reads the textures (RGBA from `rgba_base64`), each face's texture, and each corner's UV with V turned to the image's top row. Drawing them is blocked on the engine: built as a hand-made material scene through `World::add_gltf`, the object reaches the atlas correctly on the CPU (128 by 128 rect, the draw carries its UVs) and draws black, and Sponza draws with flat colours and no textures in this program. Find why the colour atlas is not sampled before adding the modes back.
+- [ ] Unlit vertex colour.
 - [x] Face IDs (`shade: face_ids`).
 - [x] Normals, depth and base colour: the engine's `view` modes `normal`, `depth` and `albedo`. They showed nothing in the scene program until the HDR compose stored the view's colour in the scene image the display pass draws.
 - [x] Collection IDs (`shade: collection_ids`).
-- [ ] Debug views: silhouette, face orientation, UV checker.
+- [ ] Debug views: silhouette, face orientation.
 - [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
 - [x] Grid on the ground (`mesh_view grid`, the menu's "Grid"): a line every power of ten of metres that fits the mesh.
 - [ ] Contact shadow (the mesh casts no shadow). Bloom and auto exposure soften the picture and could be off for a mesh scene.

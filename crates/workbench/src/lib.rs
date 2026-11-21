@@ -40,6 +40,13 @@ pub struct Part {
     pub edges: Vec<[[f32; 3]; 2]>,
     /// The two mesh-workbench vertex IDs of each edge, in the order of `edges`.
     pub edge_ids: Vec<[u64; 2]>,
+    /// The texture coordinate of each position, with V turned so 0 is the
+    /// top row of the image (mesh-workbench keeps 0 at the bottom). A corner
+    /// with no UV is at the origin.
+    pub uvs: Vec<[f32; 2]>,
+    /// The texture of each triangle's face: an index into
+    /// [`Workspace::textures`], or `None`.
+    pub face_textures: Vec<Option<usize>>,
     /// The vertex colour of each position (linear RGB). Empty when no vertex
     /// of the object is painted; an unpainted vertex of a painted object is
     /// white.
@@ -59,6 +66,15 @@ pub struct Bone {
     pub name: String,
     pub parent: Option<String>,
     pub position: [f32; 3],
+}
+
+/// One texture image of the mesh: RGBA8, row-major, top row first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextureImage {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
 }
 
 /// A named group of objects.
@@ -89,6 +105,8 @@ pub struct Workspace {
     pub faces: usize,
     /// The vertex IDs mesh-workbench holds as its own selection.
     pub selection: Vec<u64>,
+    /// The texture images, in name order.
+    pub textures: Vec<TextureImage>,
     /// The collections, by ID.
     pub collections: Vec<Collection>,
     /// The rig's bones at rest. Empty when the mesh has no rig.
@@ -118,6 +136,7 @@ impl Workspace {
             vertices: 0,
             faces: 0,
             selection: Vec::new(),
+            textures: Vec::new(),
             collections: Vec::new(),
             bones: Vec::new(),
             clips: Vec::new(),
@@ -237,6 +256,9 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
     let vertices = id_map(mesh.get("vertices"), vec3)?;
     let faces = id_map(mesh.get("faces"), ids)?;
     let painted = id_map(mesh.get("vertex_colors"), vec3)?;
+    let textures = read_textures(mesh);
+    let face_texture = read_face_textures(mesh, &textures);
+    let face_uvs = read_face_uvs(mesh);
     let flat: BTreeSet<u64> = mesh.get("flat_faces").map(ids).transpose()?.unwrap_or_default().into_iter().collect();
     let selection = mesh.get("selection").map(ids).transpose()?.unwrap_or_default();
     let (owner, mut parts) = read_objects(mesh)?;
@@ -290,8 +312,10 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
                 part.normals.push(narrow(normal));
                 part.vertex_ids.push(vertex);
                 part.colors.push(painted.get(&vertex).map_or([1.0; 3], |c| narrow(*c)));
+                part.uvs.push(corner_uv(face_uvs.get(&face).and_then(|corners| corners.get(&vertex))));
             }
             part.face_ids.push(face);
+            part.face_textures.push(face_texture.get(&face).copied());
         }
     }
     Ok(Workspace {
@@ -311,6 +335,7 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
         vertices: vertices.len(),
         faces: faces.len(),
         selection,
+        textures,
         collections: read_collections(mesh),
         bones: rig_bones(mesh),
         clips: rig_clips(mesh),
@@ -339,6 +364,92 @@ fn read_objects(mesh: &Value) -> Result<Objects, String> {
         }
     }
     Ok((owner, parts))
+}
+
+/// Face ID to its texture, as an index into `textures`.
+fn read_face_textures(mesh: &Value, textures: &[TextureImage]) -> BTreeMap<u64, usize> {
+    let Some(Value::Object(pairs)) = mesh.get("face_textures") else {
+        return BTreeMap::new();
+    };
+    pairs
+        .iter()
+        .filter_map(|(face, name)| {
+            let at = textures.iter().position(|texture| Some(texture.name.as_str()) == name.as_str())?;
+            Some((face.parse().ok()?, at))
+        })
+        .collect()
+}
+
+/// Face ID to the UV of each of its corners, by vertex ID.
+fn read_face_uvs(mesh: &Value) -> BTreeMap<u64, BTreeMap<u64, [f64; 2]>> {
+    let Some(Value::Object(pairs)) = mesh.get("uvs") else {
+        return BTreeMap::new();
+    };
+    pairs
+        .iter()
+        .filter_map(|(face, corners)| {
+            let Value::Object(corners) = corners else {
+                return None;
+            };
+            let map = corners
+                .iter()
+                .filter_map(|(vertex, uv)| {
+                    let uv = uv.as_array()?;
+                    Some((vertex.parse().ok()?, [uv.first()?.as_f64()?, uv.get(1)?.as_f64()?]))
+                })
+                .collect();
+            Some((face.parse().ok()?, map))
+        })
+        .collect()
+}
+
+/// A corner's UV with V turned to the image's top row. No UV is the origin.
+#[expect(clippy::as_conversions, clippy::cast_possible_truncation, reason = "a texture coordinate")]
+fn corner_uv(uv: Option<&[f64; 2]>) -> [f32; 2] {
+    uv.map_or([0.0, 0.0], |uv| [uv[0] as f32, (1.0 - uv[1]) as f32])
+}
+
+fn read_textures(mesh: &Value) -> Vec<TextureImage> {
+    let Some(Value::Object(textures)) = mesh.get("textures") else {
+        return Vec::new();
+    };
+    textures
+        .iter()
+        .filter_map(|(name, texture)| {
+            let width = u32::try_from(texture.get("width")?.as_u64()?).ok()?;
+            let height = u32::try_from(texture.get("height")?.as_u64()?).ok()?;
+            let pixels = decode_base64(texture.get("rgba_base64")?.as_str()?)?;
+            let want = usize::try_from(u64::from(width) * u64::from(height) * 4).ok()?;
+            (pixels.len() == want).then(|| TextureImage { name: name.clone(), width, height, pixels })
+        })
+        .collect()
+}
+
+/// Standard base64, with or without padding. `None` on a character outside
+/// the alphabet.
+#[must_use]
+pub fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut bits = 0u32;
+    let mut held = 0u32;
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\n' | b'\r' => continue,
+            _ => return None,
+        };
+        bits = (bits << 6) | u32::from(value);
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            out.push(u8::try_from((bits >> held) & 0xFF).ok()?);
+        }
+    }
+    Some(out)
 }
 
 fn read_collections(mesh: &Value) -> Vec<Collection> {
@@ -530,6 +641,8 @@ fn empty_part(object: u64, name: String, origin: [f64; 3]) -> Part {
         face_ids: Vec::new(),
         edges: Vec::new(),
         edge_ids: Vec::new(),
+        uvs: Vec::new(),
+        face_textures: Vec::new(),
         colors: Vec::new(),
     }
 }
@@ -645,6 +758,27 @@ mod tests {
         let dir = std::env::temp_dir().join("genos-workbench-no-such-workspace");
         let workspace = super::load_workspace(&dir).expect("empty");
         assert_eq!((workspace.parts.len(), workspace.vertices, workspace.revision), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_textured_face_gives_its_image_and_its_uvs_with_v_turned() {
+        // A 2 by 1 image: red then blue. "/wAA/wAA//8=" is ff 00 00 ff 00 00 ff ff.
+        let textured = PANEL.replace(
+            "\"selection\":[2]",
+            "\"selection\":[2],\"textures\":{\"paint\":{\"width\":2,\"height\":1,\"rgba_base64\":\"/wAA/wAA//8=\"}},\"face_textures\":{\"7\":\"paint\"},\"uvs\":{\"7\":{\"1\":[0,0],\"2\":[1,0],\"3\":[1,1],\"4\":[0,1]}}",
+        );
+        let workspace = parse_project(&textured).expect("parse");
+        assert_eq!(workspace.textures.len(), 1);
+        assert_eq!(workspace.textures[0].pixels, vec![255, 0, 0, 255, 0, 0, 255, 255]);
+        let part = &workspace.parts[0];
+        assert_eq!(part.face_textures, vec![Some(0), Some(0)]);
+        // Vertex 1 has UV (0, 0): the bottom left, so V is 1 from the top.
+        assert_eq!(part.uvs[0], [0.0, 1.0]);
+        assert_eq!(part.uvs[2], [1.0, 0.0]);
+        assert_eq!(super::decode_base64("aGk="), Some(b"hi".to_vec()));
+        assert_eq!(super::decode_base64("a?"), None);
+        let plain = parse_project(PANEL).expect("parse");
+        assert!(plain.textures.is_empty() && plain.parts[0].face_textures == vec![None, None]);
     }
 
     #[test]
