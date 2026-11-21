@@ -731,7 +731,30 @@ fn run() -> Result<i32, String> {
         if !loading {
             app.advance(dt);
         }
-        if !loading {
+        // A mesh scene is looked at, not walked through: the pointer orbits
+        // and picks, and the fly camera stays out of it.
+        let mesh_scene = !loading && app.mesh.is_some();
+        if mesh_scene {
+            if camera.captured {
+                camera.captured = false;
+            }
+            let orbit = mesh_view::OrbitInput {
+                x: frame.pointer_x,
+                y: frame.pointer_y,
+                left: gated.mouse_left,
+                right: input.mouse.down(InputCode::mouse_right),
+                wheel: gated.wheel_y,
+                over_ui: !look_capture,
+                add: input.keyboard.down(InputCode::key_shift_left)
+                    || input.keyboard.down(InputCode::key_shift_right),
+                frame_key: input.keyboard.pressed(InputCode::key_f),
+            };
+            if let Some(view) = &mut app.mesh {
+                view.pointer(&mut camera, [size.0 as f32, size.1 as f32], orbit);
+            }
+            app.refresh_mesh_overlay();
+        }
+        if !loading && !mesh_scene {
             fly(
                 &mut camera,
                 app.scene(),

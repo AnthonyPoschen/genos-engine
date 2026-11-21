@@ -29,6 +29,49 @@ const OVERLAY_OFFSET: f32 = 0.003;
 const VERTEX_MARK: f32 = 0.012;
 pub const OVERLAY_COLOR: [f32; 3] = [1.0, 0.52, 0.08];
 
+/// Radians of orbit per pixel of drag.
+const ORBIT_TURN: f32 = 0.006;
+/// Share of the orbit distance one pixel of right drag pans.
+const ORBIT_PAN: f32 = 0.0016;
+/// Each wheel step moves this share of the distance toward or away.
+const ORBIT_ZOOM: f32 = 0.12;
+const ORBIT_NEAR: f32 = 0.05;
+/// The opening view stands this many mesh sizes from its centre.
+const ORBIT_FRAME: f32 = 1.8;
+/// A press that moves fewer pixels than this before release is a click.
+const CLICK_PIXELS: f32 = 4.0;
+/// The camera counts as moved by someone else past this, metres or radians.
+const ORBIT_SLACK: f32 = 1.0e-4;
+
+/// The pointer for one frame of the mesh viewer.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OrbitInput {
+    /// Pointer in pixels, origin top left.
+    pub x: f32,
+    pub y: f32,
+    pub left: bool,
+    pub right: bool,
+    pub wheel: f32,
+    /// The UI has the pointer: a press there is not for the mesh.
+    pub over_ui: bool,
+    /// Shift is down: a click adds to the selection.
+    pub add: bool,
+    pub frame_key: bool,
+}
+
+/// Orbit about a point: left drag turns, right drag pans, the wheel zooms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Orbit {
+    target: [f32; 3],
+    distance: f32,
+    last: [f32; 2],
+    /// Pixels the pointer moved since the left press. `None`: not pressed here.
+    dragged: Option<f32>,
+    panning: bool,
+    /// The camera pose this controller last wrote.
+    wrote: ([f32; 3], f32, f32),
+}
+
 /// What the person selected in the viewer. mesh-workbench IDs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Selection {
@@ -57,6 +100,9 @@ pub struct MeshView {
     pub selection: Selection,
     /// The picture's overlay no longer matches `selection`.
     pub overlay_stale: bool,
+    /// What a click picks: `face`, `object`, or `vertex`.
+    pub pick_mode: String,
+    orbit: Option<Orbit>,
 }
 
 impl MeshView {
@@ -69,6 +115,136 @@ impl MeshView {
             workspace,
             selection: Selection::default(),
             overlay_stale: true,
+            pick_mode: "face".into(),
+            orbit: None,
+        }
+    }
+
+    /// Centre and size of the mesh in the picture (lifted onto the ground).
+    fn extent(&self) -> ([f32; 3], f32) {
+        let Some(w) = &self.workspace else {
+            return ([0.0, 0.5, 0.0], 1.0);
+        };
+        let lift = -w.min[1];
+        let centre = [
+            (w.min[0] + w.max[0]) * 0.5,
+            (w.min[1] + w.max[1]) * 0.5 + lift,
+            (w.min[2] + w.max[2]) * 0.5,
+        ];
+        let size = (0..3).map(|a| w.max[a] - w.min[a]).fold(0.0f32, f32::max);
+        (centre, size.max(0.1))
+    }
+
+    /// Put the whole mesh in view from the camera's current direction.
+    pub fn frame(&mut self, camera: &mut Camera) {
+        let (centre, size) = self.extent();
+        let mut orbit = Orbit {
+            target: centre,
+            distance: size * ORBIT_FRAME,
+            last: [0.0; 2],
+            dragged: None,
+            panning: false,
+            wrote: ([0.0; 3], 0.0, 0.0),
+        };
+        orbit.write(camera);
+        self.orbit = Some(orbit);
+    }
+
+    /// One frame of the pointer. Moves the camera, and on a click picks under
+    /// the pointer with [`MeshView::pick_mode`]. `size` is the picture in pixels.
+    pub fn pointer(&mut self, camera: &mut Camera, size: [f32; 2], input: OrbitInput) {
+        let (centre, extent) = self.extent();
+        let pose = ([camera.position.x, camera.position.y, camera.position.z], camera.yaw, camera.pitch);
+        // A checkpoint, a script or an agent moved the camera: orbit about the
+        // point in front of it at the mesh's distance.
+        let moved = self.orbit.as_ref().is_none_or(|orbit| {
+            (0..3).any(|a| (orbit.wrote.0[a] - pose.0[a]).abs() > ORBIT_SLACK)
+                || (orbit.wrote.1 - pose.1).abs() > ORBIT_SLACK
+                || (orbit.wrote.2 - pose.2).abs() > ORBIT_SLACK
+        });
+        if moved {
+            let to = [centre[0] - pose.0[0], centre[1] - pose.0[1], centre[2] - pose.0[2]];
+            let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
+            let along = (to[0] * forward.x + to[1] * forward.y + to[2] * forward.z).max(extent * 0.25);
+            let previous = self.orbit;
+            self.orbit = Some(Orbit {
+                target: [pose.0[0] + forward.x * along, pose.0[1] + forward.y * along, pose.0[2] + forward.z * along],
+                distance: along,
+                last: previous.map_or([input.x, input.y], |o| o.last),
+                dragged: previous.and_then(|o| o.dragged),
+                panning: previous.is_some_and(|o| o.panning),
+                wrote: pose,
+            });
+        }
+        if input.frame_key {
+            self.frame(camera);
+        }
+        let Some(orbit) = &mut self.orbit else {
+            return;
+        };
+        let delta = [input.x - orbit.last[0], input.y - orbit.last[1]];
+        orbit.last = [input.x, input.y];
+        let mut changed = false;
+        let mut click = false;
+        match (input.left, orbit.dragged) {
+            (true, None) if !input.over_ui => orbit.dragged = Some(0.0),
+            (true, Some(travel)) => {
+                let travel = travel + delta[0].abs() + delta[1].abs();
+                orbit.dragged = Some(travel);
+                if travel >= CLICK_PIXELS {
+                    camera.yaw += delta[0] * ORBIT_TURN;
+                    camera.pitch = (camera.pitch - delta[1] * ORBIT_TURN)
+                        .clamp(-genos_scene::PITCH_LIMIT, genos_scene::PITCH_LIMIT);
+                    changed = true;
+                }
+            }
+            (false, Some(travel)) => {
+                click = travel < CLICK_PIXELS;
+                orbit.dragged = None;
+            }
+            _ => {}
+        }
+        if input.right && !input.left {
+            if orbit.panning {
+                let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
+                let right = forward.cross(genos_scene::Vec3::Y);
+                let length = right.length().max(1.0e-6);
+                let right = right / length;
+                let up = right.cross(forward);
+                let step = orbit.distance * ORBIT_PAN;
+                for (axis, (r, u)) in [(right.x, up.x), (right.y, up.y), (right.z, up.z)].into_iter().enumerate() {
+                    orbit.target[axis] += (-delta[0] * r + delta[1] * u) * step;
+                }
+                changed = true;
+            }
+            orbit.panning = !input.over_ui || orbit.panning;
+        } else {
+            orbit.panning = false;
+        }
+        if input.wheel != 0.0 && !input.over_ui {
+            orbit.distance = (orbit.distance * (-input.wheel * ORBIT_ZOOM).exp()).max(ORBIT_NEAR);
+            changed = true;
+        }
+        if changed {
+            orbit.write(camera);
+        }
+        if click {
+            let at = [input.x / size[0].max(1.0), input.y / size[1].max(1.0)];
+            let aspect = size[0] / size[1].max(1.0);
+            let hit = self.pick(camera, aspect, at);
+            if !input.add {
+                let note = std::mem::take(&mut self.selection.note);
+                self.selection = Selection { note, ..Selection::default() };
+            }
+            if let Some(hit) = hit {
+                match self.pick_mode.as_str() {
+                    "object" => toggle(&mut self.selection.objects, hit.object, input.add),
+                    "vertex" => toggle(&mut self.selection.vertices, hit.vertex, input.add),
+                    _ => toggle(&mut self.selection.faces, hit.face, input.add),
+                }
+                self.selection.point = Some(hit.point);
+            }
+            self.overlay_stale = true;
         }
     }
 
@@ -200,7 +376,13 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &[])?;
+                args.only("mesh_view", &["pick"])?;
+                if let Some(mode) = args.str("pick")? {
+                    if !matches!(mode.as_str(), "face" | "object" | "vertex") {
+                        return Err(format!("mesh_view pick is face, object, or vertex, not {mode}"));
+                    }
+                    self.pick_mode = mode;
+                }
                 Ok(self.view_value())
             }
             "mesh_selection" => {
@@ -303,6 +485,7 @@ impl MeshView {
             ("vertices", num(vertices as f64)),
             ("faces", num(faces as f64)),
             ("objects", list(objects)),
+            ("pick", text(self.pick_mode.clone())),
             ("server_port", num(f64::from(server_port()))),
             ("lift", num(f64::from(self.lift()))),
         ])
@@ -334,6 +517,29 @@ impl MeshView {
                 ]),
             ),
         ])
+    }
+}
+
+impl Orbit {
+    /// Stand `distance` back from the target along the camera's direction.
+    fn write(&mut self, camera: &mut Camera) {
+        let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
+        camera.position = genos_scene::Vec3::new(
+            self.target[0] - forward.x * self.distance,
+            self.target[1] - forward.y * self.distance,
+            self.target[2] - forward.z * self.distance,
+        );
+        self.wrote = ([camera.position.x, camera.position.y, camera.position.z], camera.yaw, camera.pitch);
+    }
+}
+
+/// A plain click selects `id` alone (the caller cleared the set). A shift
+/// click adds it, or removes it when it was already selected.
+fn toggle(set: &mut BTreeSet<u64>, id: u64, add: bool) {
+    if add && set.contains(&id) {
+        set.remove(&id);
+    } else {
+        set.insert(id);
     }
 }
 
@@ -474,6 +680,41 @@ mod tests {
         assert_eq!(hit.face, 2, "the +Z face looks at the camera");
         assert!((hit.point[2] - 0.5).abs() < 1.0e-3, "{:?}", hit.point);
         assert!(view.pick(&camera, 16.0 / 9.0, [0.5, 0.02]).is_none());
+    }
+
+    #[test]
+    fn a_click_selects_a_drag_orbits_about_the_mesh_and_the_wheel_zooms() {
+        use super::OrbitInput;
+        let mut view = view();
+        let mut camera = Camera::opening();
+        camera.position = genos_scene::Vec3::new(0.0, 0.5, 4.0);
+        camera.yaw = 0.0;
+        camera.pitch = 0.0;
+        let size = [1280.0, 720.0];
+        let at = OrbitInput { x: 640.0, y: 360.0, ..OrbitInput::default() };
+        // Press and release in place: a click on the cube's +Z face.
+        view.pointer(&mut camera, size, at);
+        view.pointer(&mut camera, size, OrbitInput { left: true, ..at });
+        view.pointer(&mut camera, size, at);
+        assert_eq!(view.selection.faces.iter().copied().collect::<Vec<_>>(), vec![2]);
+        assert!((camera.position.z - 4.0).abs() < 1.0e-5, "a click does not move the camera");
+        // Press, drag 100 px right, release: the camera turns and keeps its distance.
+        let far = |c: &Camera| ((c.position.x).powi(2) + (c.position.y - 0.5).powi(2) + c.position.z.powi(2)).sqrt();
+        let before = far(&camera);
+        view.pointer(&mut camera, size, OrbitInput { left: true, ..at });
+        view.pointer(&mut camera, size, OrbitInput { left: true, x: 740.0, ..at });
+        view.pointer(&mut camera, size, OrbitInput { x: 740.0, ..at });
+        assert!(camera.yaw > 0.5, "yaw {}", camera.yaw);
+        assert!((far(&camera) - before).abs() < 1.0e-3, "orbit keeps the distance");
+        assert_eq!(view.selection.faces.len(), 1, "a drag is not a click");
+        // One wheel step in moves closer.
+        view.pointer(&mut camera, size, OrbitInput { x: 740.0, wheel: 1.0, ..at });
+        assert!(far(&camera) < before * 0.95);
+        // A press over the UI does nothing here.
+        let yaw = camera.yaw;
+        view.pointer(&mut camera, size, OrbitInput { x: 740.0, left: true, over_ui: true, ..at });
+        view.pointer(&mut camera, size, OrbitInput { x: 840.0, left: true, over_ui: true, ..at });
+        assert!((camera.yaw - yaw).abs() < 1.0e-6);
     }
 
     #[test]
