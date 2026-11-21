@@ -1,6 +1,7 @@
 #version 450
-// Trace this band's due upper cells. Each cell takes 16, 32, or 64
-// hemisphere rays, one bin each in turn, from the surface to 8S. Shade
+// Trace this band's due upper cells. Each cell takes 16, 32, or 56
+// hemisphere rays, one bin each in turn, and 8 lamp-cone rays, from the
+// surface to 8S. A ray with no weight is stored as a miss without a trace. Shade
 // splits them at 4S. This compile's only trace site is trace_ray.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
@@ -29,11 +30,16 @@ void main() {
     vec3 n = cache.v[3u * slot + 1u].xyz;
     float size = cache.v[3u * slot + 1u].w;
     uint rays = lighting_cascade_refresh_rays(size);
-    if (k >= rays) {
+    if (k >= rays + CASCADE_CONE_UPPER) {
         return;
     }
     uint key = ckeys.key[slot];
-    vec3 dir = lighting_cascade_bin_dir(key, n, k, lighting_cascade_bin_seed(slot));
+    vec3 axis;
+    float cos_a;
+    bool has_cone = lighting_cascade_cone(pos + n * 0.02, n, axis, cos_a);
+    bool is_cone = k >= rays;
+    vec3 dir = lighting_cascade_upper_ray(key, n, k, rays, lighting_cascade_bin_seed(slot), axis, cos_a);
+    float w = lighting_cascade_ray_weight(is_cone, has_cone, dir, axis, cos_a, rays, CASCADE_CONE_UPPER);
     vec3 origin = pos + n * 0.02;
     float t0;
     float t1;
@@ -44,7 +50,7 @@ void main() {
     t0 = CASCADE_TRACE_NEAR;
     uint at = lighting_cascade_upper_hit_at(due, k);
     SceneHit hit;
-    if (!trace_ray(origin, dir, t0, t1, hit)) {
+    if (!(w > 0.0) || !(dot(dir, n) > 0.0) || !trace_ray(origin, dir, t0, t1, hit)) {
         ckeys.key[at] = floatBitsToUint(-1.0);
         ckeys.key[at + 1u] = 0u;
         ckeys.key[at + 2u] = 0u;

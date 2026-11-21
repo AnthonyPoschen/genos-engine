@@ -47,4 +47,5 @@ void main() {
     if (i < CASCADE_UPPER_CAP) {
         ckeys.key[lighting_cascade_upper_list_at(band) + i] = slot;
     }
+    atomicMax(ckeys.key[lighting_cascade_upper_args_at(band)], min(i + 1u, CASCADE_UPPER_CAP));
 }

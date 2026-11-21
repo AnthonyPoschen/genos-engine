@@ -4658,9 +4658,25 @@ impl Gpu {
         } else {
             [0; LIGHTING_STATS_WORDS]
         };
+        let cascade = if self.gpu_times.as_ref().is_some_and(|times| times.print) {
+            self.read_cascade_times();
+            Some(self.lighting.cascade_times)
+        } else {
+            None
+        };
         let Some(times) = self.gpu_times.as_mut() else {
             return;
         };
+        if let Some(c) = cascade {
+            let row = [c.claim_ms, c.upper_coarse_ms, c.upper_mid_ms, c.upper_fine_ms, c.l0_ms];
+            // A reset pool reads as a huge wrapped delta. Leave that frame out.
+            if row.iter().all(|v| v.is_finite() && *v >= 0.0 && *v < 1000.0) {
+                for (sum, v) in times.cascade.iter_mut().zip(row) {
+                    *sum += v;
+                }
+                times.cascade_frames += 1;
+            }
+        }
         if !times.written[slot] {
             times.written[slot] = true;
             return;
@@ -4947,6 +4963,19 @@ impl Gpu {
                 } else {
                     String::new()
                 }
+            );
+        }
+        if times.cascade_frames > 0 {
+            let c = times.cascade.map(|v| v / f64::from(times.cascade_frames));
+            eprintln!(
+                "CASCADE_MS frames={} claim={:.3} upper_coarse={:.3} upper_mid={:.3} upper_fine={:.3} l0={:.3} total={:.3} (inside compose=)",
+                times.cascade_frames,
+                c[0],
+                c[1],
+                c[2],
+                c[3],
+                c[4],
+                c.iter().sum::<f64>(),
             );
         }
         if !times.light_spans.is_empty() {
@@ -10787,6 +10816,10 @@ struct GpuTimes {
     /// line, to show how much of that work ran while a frame was on the GPU.
     frame_spans: Vec<(u64, u64)>,
     light_spans: Vec<(u64, u64)>,
+    /// Cascade stamp sums over `cascade_frames`: claim and pick, the coarse,
+    /// mid and fine upper bands, then level 0. They sit inside the compose stamp.
+    cascade: [f64; 5],
+    cascade_frames: u32,
 }
 
 /// Stamps per frame for the GI passes, plus two for bloom and the display pass.
@@ -10890,6 +10923,8 @@ impl Default for GpuTimes {
             prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
+            cascade: [0.0; 5],
+            cascade_frames: 0,
         }
     }
 }

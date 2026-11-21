@@ -1,5 +1,6 @@
 #version 450
-// Shade this band's due upper cells. Every ray is shaded: a hit is exact
+// Shade this band's due upper cells, uniform and lamp-cone rays weighted by
+// the solid angle each stands for. Every ray is shaded: a hit is exact
 // lamp light plus the bounce stored at the hit, a miss is the parent's
 // bins. The cosine-weighted sum of all rays is the cell's irradiance, and
 // each bin is the mean radiance of its rays. A refresh moves both part of
@@ -14,6 +15,8 @@ shared vec3 sh_bins[16];
 shared bool sh_ok;
 shared vec3 sh_sum[64];
 shared vec3 sh_rad[64];
+shared float sh_w[64];
+shared uint sh_bin[64];
 
 bool lighting_cascade_hit_is_lamp(vec3 hp) {
     LampList list = lamps_at(hp);
@@ -112,46 +115,64 @@ void main() {
     memoryBarrierShared();
     vec3 li = vec3(0.0);
     float nd = 0.0;
-    if (live && k < rays) {
+    float w = 0.0;
+    uint bin = 0u;
+    if (live && k < rays + CASCADE_CONE_UPPER) {
         uint key = ckeys.key[slot];
-        vec3 dir = lighting_cascade_bin_dir(key, n, k, lighting_cascade_bin_seed(slot));
+        vec3 axis;
+        float cos_a;
+        bool has_cone = lighting_cascade_cone(pos + n * 0.02, n, axis, cos_a);
+        bool is_cone = k >= rays;
+        vec3 dir = lighting_cascade_upper_ray(key, n, k, rays, lighting_cascade_bin_seed(slot), axis, cos_a);
+        w = lighting_cascade_ray_weight(is_cone, has_cone, dir, axis, cos_a, rays, CASCADE_CONE_UPPER);
         nd = max(dot(dir, n), 0.0);
-        uint at = lighting_cascade_upper_hit_at(due, k);
-        float t = uintBitsToFloat(ckeys.key[at]);
-        vec3 hp = pos + n * 0.02 + dir * t;
-        if (t < 0.0 || lighting_cascade_hit_is_lamp(hp)) {
-            li = lighting_cascade_parent_eval(dir, n);
-        } else {
-            vec3 hn = lighting_unpack_normal(ckeys.key[at + 1u]);
-            vec3 reflectance = unpackUnorm4x8(ckeys.key[at + 2u]).rgb * (1.0 / LIGHTING_PI);
-            vec3 bounce = lighting_cascade_bounce(hp, hn);
-            vec3 e = lighting_cascade_direct_at(hp + hn * 0.02, hn);
-            li = reflectance * (e + bounce);
+        if (!(nd > 0.0)) {
+            w = 0.0;
+        }
+        bin = is_cone ? lighting_cascade_bin_of(dir, n) : k % CASCADE_BINS;
+        if (w > 0.0) {
+            uint at = lighting_cascade_upper_hit_at(due, k);
+            float t = uintBitsToFloat(ckeys.key[at]);
+            vec3 hp = pos + n * 0.02 + dir * t;
+            if (t < 0.0 || lighting_cascade_hit_is_lamp(hp)) {
+                li = lighting_cascade_parent_eval(dir, n);
+            } else {
+                vec3 hn = lighting_unpack_normal(ckeys.key[at + 1u]);
+                vec3 reflectance = unpackUnorm4x8(ckeys.key[at + 2u]).rgb * (1.0 / LIGHTING_PI);
+                vec3 bounce = lighting_cascade_bounce(hp, hn);
+                vec3 e = lighting_cascade_direct_at(hp + hn * 0.02, hn);
+                li = reflectance * (e + bounce);
+            }
         }
     }
-    sh_sum[k] = li * nd;
+    sh_w[k] = w;
+    sh_bin[k] = bin;
+    sh_sum[k] = li * nd * w;
     sh_rad[k] = li;
     barrier();
     memoryBarrierShared();
     if (!live || k != 0u) {
         return;
     }
+    uint traced = rays + CASCADE_CONE_UPPER;
     vec3 s0 = vec3(0.0);
-    [[dont_unroll]] for (uint i = 0u; i < rays; i++) {
+    [[dont_unroll]] for (uint i = 0u; i < traced; i++) {
         s0 += sh_sum[i];
     }
-    float nray = float(max(rays, 1u));
-    vec3 cur = max((LIGHTING_TAU / nray) * s0, vec3(0.0));
+    // Irradiance: Σ w L cosθ, w the solid angle each ray stands for
+    // (lighting_cascade_ray_weight). Without a cone this is 2π / N Σ L cosθ.
+    vec3 cur = max(s0, vec3(0.0));
     vec3 bin_sum[16];
     float bin_n[16];
     for (uint b = 0u; b < CASCADE_BINS; b++) {
         bin_sum[b] = vec3(0.0);
         bin_n[b] = 0.0;
     }
-    [[dont_unroll]] for (uint i = 0u; i < rays; i++) {
-        uint b = i % CASCADE_BINS;
-        bin_sum[b] += sh_rad[i];
-        bin_n[b] += 1.0;
+    // A bin is the solid-angle-weighted mean of its rays, cone rays included.
+    [[dont_unroll]] for (uint i = 0u; i < traced; i++) {
+        uint b = sh_bin[i];
+        bin_sum[b] += sh_rad[i] * sh_w[i];
+        bin_n[b] += sh_w[i];
     }
     if ((lighting_toggles() & LIGHTING_TOGGLE_FREEZE_CACHE) == 0u
         && lighting_cascade_finite3(cur)
@@ -177,8 +198,12 @@ void main() {
         float rate = keep ? CASCADE_UPPER_RATE : 1.0;
         float age = had.w > 0.5 ? min(had.w + 1.0, CASCADE_UPPER_WARM) : 1.0;
         for (uint b = 0u; b < CASCADE_BINS; b++) {
-            vec3 nb = bin_sum[b] / max(bin_n[b], 1.0);
-            lighting_cascade_bin_put(slot, b, mix(lighting_cascade_bin_get(slot, b), nb, rate));
+            // A bin left with no weight (its rays all in the cone, no cone
+            // ray in it) keeps its value.
+            if (bin_n[b] > 0.0) {
+                vec3 nb = bin_sum[b] / bin_n[b];
+                lighting_cascade_bin_put(slot, b, mix(lighting_cascade_bin_get(slot, b), nb, rate));
+            }
         }
         cache.v[3u * slot + 2u] = vec4(mix(had.xyz, cur, rate), age);
         cache.v[3u * slot].w = uintBitsToFloat(lighting_frame());

@@ -1,9 +1,12 @@
 #version 450
 // Level-0 GI rays. Every live voxel traces 32 stratified hemisphere rays
-// each frame, clipped to [ε, 8s]. Hits are stored for the shade pass.
+// and 4 lamp-cone rays each frame, clipped to [ε, 8s]. A ray that carries
+// no weight (a uniform ray inside the cone, a cone ray with no lamp or below
+// the surface) is stored as a miss without a trace. Hits are stored for the
+// shade pass.
 // This compile's only trace site is trace_ray.
 #extension GL_GOOGLE_include_directive : require
-layout(local_size_x = 32) in;
+layout(local_size_x = 36) in;
 #include "lighting_common.glsl"
 #include "lighting_cascade.glsl"
 
@@ -36,12 +39,12 @@ void main() {
     if (!lighting_gi_on()) {
         return;
     }
-    uint slot = gl_WorkGroupID.x;
+    uint slot = lighting_cascade_l0_list_slot(gl_WorkGroupID.x);
     if (slot >= CASCADE_LEVEL0_CAP) {
         return;
     }
     uint k = gl_LocalInvocationID.x;
-    if (k >= CASCADE_L0_RAYS) {
+    if (k >= CASCADE_L0_TRACED) {
         return;
     }
     uint word = lighting_cascade_table_base(lighting_frame() & 1u)
@@ -60,18 +63,25 @@ void main() {
     vec3 n = lighting_unpack_normal(ckeys.key[word + 9u]);
     float size = lighting_cascade_l0_size(lighting_cascade_unpack_level(ckeys.key[word + 5u]));
     uint key = ckeys.key[word];
-    vec3 dir = lighting_cascade_l0_dir(key, n, k);
+    vec3 axis;
+    float cos_a;
+    bool has_cone = lighting_cascade_cone(pos, n, axis, cos_a);
+    bool is_cone = k >= CASCADE_L0_RAYS;
+    vec3 dir = lighting_cascade_l0_ray(key, n, k, has_cone, axis, cos_a);
     float nd = dot(dir, n);
-    if (nd <= 0.0) {
+    if (!is_cone && nd <= 0.0) {
         dir = normalize(dir - n * nd + n * CASCADE_EPS);
+        nd = dot(dir, n);
     }
+    float w = lighting_cascade_ray_weight(is_cone, has_cone, dir, axis, cos_a,
+        CASCADE_L0_RAYS, CASCADE_CONE_L0);
     vec3 origin = pos + n * 0.02;
     float t0;
     float t1;
     lighting_cascade_l0_interval(size, t0, t1);
     uint at = lighting_cascade_hit_at(slot, k);
     SceneHit hit;
-    if (!trace_ray(origin, dir, t0, t1, hit)) {
+    if (!(w > 0.0) || !(nd > 0.0) || !trace_ray(origin, dir, t0, t1, hit)) {
         ckeys.key[at] = floatBitsToUint(-1.0);
         ckeys.key[at + 1u] = 0u;
         ckeys.key[at + 2u] = 0u;

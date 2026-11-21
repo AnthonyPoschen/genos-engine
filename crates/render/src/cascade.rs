@@ -294,12 +294,12 @@ fn i32_f32(v: i32) -> f32 {
     if neg { -acc } else { acc }
 }
 
-/// Finest world-grid size. `2^n / 16` m, n from 0 to [`L0_MAX`].
-pub const GRID_BASE: f32 = 0.0625;
+/// Finest world-grid size. `2^n / 8` m, n from 0 to [`L0_MAX`].
+pub const GRID_BASE: f32 = 0.125;
 /// Last level-0 index. Size is 32 m.
-pub const L0_MAX: u32 = 9;
+pub const L0_MAX: u32 = 8;
 /// Angular size of a level-0 box.
-pub const FOOTPRINT_K: f32 = 0.03125;
+pub const FOOTPRINT_K: f32 = 0.0625;
 /// Floor on `|n · v|`. Caps the grazing boost at four times, two grid levels.
 pub const GRAZE_MIN: f32 = 0.0625;
 /// Lower edge of the quarter-level hysteresis band, `2^-0.25`.
@@ -654,8 +654,8 @@ mod tests {
         assert!(gpu.contains("CASCADE_L0_RAYS: u64 = 32"));
         assert!(gpu.contains("cascade_l0_trace_pipe"));
         assert!(gpu.contains("cascade_l0_shade_pipe"));
-        assert!(shader.contains("const float CASCADE_GRID_BASE = 0.0625;"));
-        assert!(shader.contains("const float CASCADE_FOOTPRINT_K = 0.03125;"));
+        assert!(shader.contains("const float CASCADE_GRID_BASE = 0.125;"));
+        assert!(shader.contains("const float CASCADE_FOOTPRINT_K = 0.0625;"));
         assert!(shader.contains("float lighting_cascade_lod(vec3 pos, vec3 n)"));
         assert!(shader.contains("lighting_cascade_l0_cell"));
         let direct = include_str!("../shaders/lighting_direct.comp");

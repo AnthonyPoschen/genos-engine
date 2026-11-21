@@ -160,7 +160,8 @@ pub(super) fn lighting_fill_keys_words(pixels: u64) -> u64 {
 const CASCADE_CLAIMED_WORDS: u64 = 32768;
 const CASCADE_UPPER_CAP: u64 = 16384;
 const CASCADE_UPPER_RAYS_MAX: u64 = 64;
-const CASCADE_UPPER_HEAD_WORDS: u64 = 4;
+/// Flags, three due counts, three indirect commands, three spare words.
+const CASCADE_UPPER_HEAD_WORDS: u64 = 16;
 const CASCADE_UPPER_BANDS: u64 = 3;
 const CASCADE_TIME_QUERIES: u32 = 6;
 
@@ -193,21 +194,23 @@ fn lighting_keys_words(pixels: u64) -> u64 {
 /// slot, then inserted/traced counts and one four-word hit record per voxel
 /// slot and ray. Matches `lighting_cascade.glsl`.
 const CASCADE_LEVEL0_GROUPS: u32 = 16384;
-const CASCADE_UPPER_GROUPS: u32 = 16384;
 const CASCADE_LEVEL0_CAP: u64 = 16384;
 const CASCADE_LEVEL0_STRIDE: u64 = 16;
 const CASCADE_LEVEL0_TABLES: u64 = 2;
 const CASCADE_LEVEL0_PIXEL_WORDS: u64 = 4;
 const CASCADE_L0_RAYS: u64 = 32;
+/// Uniform rays plus lamp-cone rays a voxel traces. Matches `CASCADE_L0_TRACED`.
+const CASCADE_L0_TRACED: u64 = CASCADE_L0_RAYS + 4;
 const CASCADE_L0_HIT_WORDS: u64 = 4;
-const CASCADE_L0_COUNT_WORDS: u64 = 2;
+/// Inserted and traced counts, the indirect command, the live-slot list.
+const CASCADE_L0_COUNT_WORDS: u64 = 2 + 4 + CASCADE_LEVEL0_CAP;
 
 fn lighting_level0_table_words() -> u64 {
     CASCADE_LEVEL0_TABLES * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE
 }
 
 fn lighting_level0_hits_words() -> u64 {
-    CASCADE_LEVEL0_CAP * CASCADE_L0_RAYS * CASCADE_L0_HIT_WORDS
+    CASCADE_LEVEL0_CAP * CASCADE_L0_TRACED * CASCADE_L0_HIT_WORDS
 }
 
 fn lighting_level0_words(pixels: u64) -> u64 {
@@ -2736,6 +2739,17 @@ impl Gpu {
                 table_bytes,
                 0,
             );
+            // Zero live voxels, one group deep and one wide. The seat pass
+            // counts the groups.
+            self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
+            let args = [0u32, 1, 1, 0];
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.lighting.cache_keys.buffer,
+                offset + 8,
+                16,
+                args.as_ptr().cast::<std::ffi::c_void>(),
+            );
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
         }
     }
@@ -2748,16 +2762,19 @@ impl Gpu {
         if trace.is_null() || shade.is_null() {
             return;
         }
-        let groups = CASCADE_LEVEL0_GROUPS;
+        let [w, h, _, _] = self.lighting.dims;
+        let pixels = u64::from(w).saturating_mul(u64::from(h));
+        let args = (lighting_level0_counts_at(pixels) + 2).saturating_mul(4);
         // SAFETY: the command buffer and both pipelines are the lighting
         // frame's live handles. Insert has already claimed this frame's
-        // voxels. Publish has not run.
+        // voxels and the seat pass listed them. Publish has not run. The
+        // command is three words inside the key buffer.
         unsafe {
             (self.fns.cmd_bind_pipe)(self.cmd, 1, trace);
-            (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
-            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, args);
+            self.memory_barrier(0x800, 0x800 | 0x2, 0x40, 0x20 | 0x40 | 0x1);
             (self.fns.cmd_bind_pipe)(self.cmd, 1, shade);
-            (self.fns.cmd_dispatch)(self.cmd, groups, 1, 1);
+            (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, args);
             self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
         }
     }
@@ -2793,13 +2810,14 @@ impl Gpu {
         }
         self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
         let flags = period & 255;
-        let words = [flags, 0, 0, 0];
+        // Flags, three counts, then (groups, 1, 1) per band. Pick raises groups.
+        let words = [flags, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0];
         unsafe {
             (self.fns.cmd_update_buffer)(
                 self.cmd,
                 self.lighting.cache_keys.buffer,
                 head.saturating_mul(4),
-                16,
+                64,
                 words.as_ptr().cast::<std::ffi::c_void>(),
             );
         }
@@ -2857,19 +2875,24 @@ impl Gpu {
             (self.fns.cmd_bind_pipe)(self.cmd, 1, pick);
             let slots = u32::try_from(LIGHTING_CACHE_SLOTS).unwrap_or(1);
             (self.fns.cmd_dispatch)(self.cmd, slots.div_ceil(64), 1, 1);
-            self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+            self.memory_barrier(0x800, 0x800 | 0x2, 0x40, 0x20 | 0x40 | 0x1);
         }
         self.stamp_cascade(1);
+        let head = lighting_upper_claimed_at(u64::from(w).saturating_mul(u64::from(h)))
+            + CASCADE_CLAIMED_WORDS;
         // Bands coarse (2) to fine (0) so a parent is refreshed before its child.
         for (i, band) in [2u32, 1, 0].into_iter().enumerate() {
             self.set_cascade_upper_band(w, h, band, period);
+            let args = (head + 4 + u64::from(band) * 3).saturating_mul(4);
+            // SAFETY: the command is three words of the header this
+            // function wrote, raised by the pick dispatch above.
             unsafe {
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, trace);
-                (self.fns.cmd_dispatch)(self.cmd, CASCADE_UPPER_GROUPS, 1, 1);
-                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, args);
+                self.memory_barrier(0x800, 0x800 | 0x2, 0x40, 0x20 | 0x40 | 0x1);
                 (self.fns.cmd_bind_pipe)(self.cmd, 1, shade);
-                (self.fns.cmd_dispatch)(self.cmd, CASCADE_UPPER_GROUPS, 1, 1);
-                self.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
+                (self.fns.cmd_dispatch_indirect)(self.cmd, self.lighting.cache_keys.buffer, args);
+                self.memory_barrier(0x800, 0x800 | 0x2, 0x40, 0x20 | 0x40 | 0x1);
             }
             self.stamp_cascade(2 + u32::try_from(i).unwrap_or(0));
         }

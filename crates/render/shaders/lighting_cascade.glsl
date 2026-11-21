@@ -35,13 +35,22 @@ const float CASCADE_VOXEL_VIEW_MIX = 0.88;
 const float CASCADE_VOXEL_VIEW_RING_DIM = 0.08;
 const float CASCADE_VOXEL_VIEW_RING_LINE = 0.03;
 const float CASCADE_VOXEL_VIEW_LINE_MIX = 0.65;
-// Footprint size on the shared world grid. 2^n / 16 m. K is the angular
-// size of a box (about 22 x 40 px at 1440p). The 1/16 graze floor caps
+// Footprint size on the shared world grid. 2^n / 8 m. K is the angular
+// size of a box (about 44 x 80 px at 1440p). The 1/16 graze floor caps
 // the boost at two grid levels.
-const float CASCADE_GRID_BASE = 0.0625;
-const uint CASCADE_L0_MAX = 9u;
-const float CASCADE_FOOTPRINT_K = 0.03125;
+const float CASCADE_GRID_BASE = 0.125;
+const uint CASCADE_L0_MAX = 8u;
+const float CASCADE_FOOTPRINT_K = 0.0625;
 const float CASCADE_GRAZE_MIN = 0.0625;
+// Voxel seat (lighting_cascade_seat). The owner rank spans this many cell
+// sizes from the centre. The shown surface counts as the voxel's own within
+// this share of a cell (plus a floor) of its plane and this facing.
+const float CASCADE_OWNER_SPAN = 1.25;
+const float CASCADE_SEAT_NEAR = 1.0e-3;
+const float CASCADE_SEAT_PROBE = 0.02;
+const float CASCADE_SEAT_FACING = 0.9;
+const float CASCADE_SEAT_PLANE = 0.1;
+const float CASCADE_SEAT_PLANE_MIN = 0.01;
 const uint CASCADE_TABLES = 2u;
 const uint CASCADE_PIXEL_WORDS = 4u;
 const uint CASCADE_AXIS_SHIFT = 8u;
@@ -136,7 +145,12 @@ uint lighting_cascade_table_base(uint parity) {
         + (parity & 1u) * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE;
 }
 
-// Inserted and traced counters, then one hit record per (slot, ray).
+// Inserted and traced counters, the level-0 indirect dispatch command
+// (groups, 1, 1, pad), the list of seated voxel slots it runs over, then one
+// hit record per (slot, ray). The trace and shade passes used to dispatch
+// one group per table slot, 16384 of them, for the 1300 to 5000 that hold a
+// voxel.
+const uint CASCADE_L0_COUNT_WORDS = 2u + 4u + CASCADE_LEVEL0_CAP;
 uint lighting_cascade_counts_at() {
     return lighting_cascade_base() + 1u
         + CASCADE_TABLES * CASCADE_LEVEL0_CAP * CASCADE_LEVEL0_STRIDE
@@ -156,9 +170,118 @@ vec3 lighting_cascade_l0_dir(uint key, vec3 n, uint k) {
     return lighting_hemi_dir(key, n, u, turn);
 }
 
+// Lamp cone. Most bounce indoors comes from the surfaces right around a
+// lamp (the ceiling 0.4 m over it is a small patch a few hundred times
+// brighter than the floor). A probe's uniform rays hit that patch by luck,
+// so each cell came out bright or dark by chance: spots that popped in up
+// close. Each probe now aims extra rays into a cone around its strongest
+// nearby lamp (CASCADE_CONE_REACH metres about it). Uniform rays inside the
+// cone are left out and the cone rays stand for that solid angle, so the sum
+// is the same integral with the bright part sampled densely.
+const uint CASCADE_CONE_L0 = 4u;
+const uint CASCADE_CONE_UPPER = 8u;
+const uint CASCADE_L0_TRACED = CASCADE_L0_RAYS + CASCADE_CONE_L0;
+const float CASCADE_CONE_RANGE = 16.0;
+const float CASCADE_CONE_REACH = 1.5;
+const float CASCADE_CONE_MAX = 1.0;
+
+// The cone of the probe at pos: the lamp with the most light per squared
+// distance within CASCADE_CONE_RANGE whose cone reaches above the surface.
+bool lighting_cascade_cone(vec3 pos, vec3 n, out vec3 axis, out float cos_a) {
+    axis = n;
+    cos_a = 1.0;
+    LampList list = lamps_at(pos);
+    uint count = lamp_list_size(list);
+    float best = 0.0;
+    [[dont_unroll]] for (uint k = 0u; k < count; k++) {
+        Lamp lamp = lamp_list_get(list, k);
+        if (lamp.pos.w > 0.5) {
+            continue;
+        }
+        vec3 d = lamp.pos.xyz - pos;
+        float dist = length(d);
+        if (dist > CASCADE_CONE_RANGE || dist < 1.0e-3) {
+            continue;
+        }
+        float a = min(atan(CASCADE_CONE_REACH, dist), CASCADE_CONE_MAX);
+        vec3 dir = d / dist;
+        if (dot(dir, n) < -sin(a)) {
+            continue;
+        }
+        float score = dot(lamp.color.rgb, vec3(0.2126, 0.7152, 0.0722)) / max(dist * dist, 0.25);
+        if (score > best) {
+            best = score;
+            axis = dir;
+            cos_a = cos(a);
+        }
+    }
+    return best > 0.0;
+}
+
+// Cone ray j of count, stratified on cos(theta) with a golden turn; h jitters.
+vec3 lighting_cascade_cone_dir(vec3 axis, float cos_a, uint j, uint count, uint h) {
+    float u = (float(j) + lighting_unit(h)) / float(count);
+    float ct = 1.0 - u * (1.0 - cos_a);
+    float st = sqrt(max(1.0 - ct * ct, 0.0));
+    float phi = LIGHTING_TAU * fract(float(j) * 0.6180339887 + lighting_unit(lighting_hash(h ^ 0x68bc21ebu)));
+    vec3 helper = abs(axis.y) > 0.9 ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 1.0, 0.0);
+    vec3 tx = normalize(cross(helper, axis));
+    vec3 ty = cross(axis, tx);
+    return normalize(tx * (st * cos(phi)) + ty * (st * sin(phi)) + axis * ct);
+}
+
+// Solid-angle weight of a ray: a uniform ray of `uniform_count` stands for
+// 2pi / uniform_count, or nothing inside the cone; a cone ray of
+// `cone_count` stands for the cone's solid angle over cone_count.
+float lighting_cascade_ray_weight(bool is_cone, bool has_cone, vec3 dir, vec3 axis, float cos_a,
+                                  uint uniform_count, uint cone_count) {
+    if (is_cone) {
+        return has_cone ? LIGHTING_TAU * (1.0 - cos_a) / float(cone_count) : 0.0;
+    }
+    if (has_cone && dot(dir, axis) > cos_a) {
+        return 0.0;
+    }
+    return LIGHTING_TAU / float(uniform_count);
+}
+
+// Direction of level-0 ray k: k < CASCADE_L0_RAYS is the uniform set,
+// the rest are cone rays, fixed per voxel and ring slot like the set.
+vec3 lighting_cascade_l0_ray(uint key, vec3 n, uint k, bool has_cone, vec3 axis, float cos_a) {
+    if (k < CASCADE_L0_RAYS) {
+        return lighting_cascade_l0_dir(key, n, k);
+    }
+    uint j = k - CASCADE_L0_RAYS;
+    uint h = lighting_hash(key ^ lighting_hash(j ^ lighting_hash(lighting_frame() % CASCADE_L0_SLOTS)));
+    return lighting_cascade_cone_dir(axis, cos_a, j, CASCADE_CONE_L0, h);
+}
+
+uint lighting_cascade_l0_args_at() {
+    return lighting_cascade_counts_at() + 2u;
+}
+
+uint lighting_cascade_l0_list_at() {
+    return lighting_cascade_counts_at() + 6u;
+}
+
+// Add a seated voxel to this frame's dispatch list.
+void lighting_cascade_l0_list_add(uint slot) {
+    uint i = atomicAdd(ckeys.key[lighting_cascade_l0_args_at()], 1u);
+    if (i < CASCADE_LEVEL0_CAP) {
+        ckeys.key[lighting_cascade_l0_list_at() + i] = slot;
+    }
+}
+
+// The table slot work group `group` of the trace and shade passes runs.
+uint lighting_cascade_l0_list_slot(uint group) {
+    if (group >= CASCADE_LEVEL0_CAP) {
+        return ~0u;
+    }
+    return ckeys.key[lighting_cascade_l0_list_at() + group];
+}
+
 uint lighting_cascade_hit_at(uint slot, uint k) {
-    return lighting_cascade_counts_at() + 2u
-        + (slot * CASCADE_L0_RAYS + k) * CASCADE_L0_HIT_WORDS;
+    return lighting_cascade_counts_at() + CASCADE_L0_COUNT_WORDS
+        + (slot * CASCADE_L0_TRACED + k) * CASCADE_L0_HIT_WORDS;
 }
 
 // Upper refresh list, after the level-0 hit records. A claimed bit per
@@ -180,8 +303,8 @@ const float CASCADE_UPPER_JUMP = 0.9;
 const float CASCADE_UPPER_WARM = 8.0;
 
 uint lighting_cascade_claimed_at() {
-    return lighting_cascade_counts_at() + 2u
-        + CASCADE_LEVEL0_CAP * CASCADE_L0_RAYS * CASCADE_L0_HIT_WORDS;
+    return lighting_cascade_counts_at() + CASCADE_L0_COUNT_WORDS
+        + CASCADE_LEVEL0_CAP * CASCADE_L0_TRACED * CASCADE_L0_HIT_WORDS;
 }
 
 uint lighting_cascade_upper_head_at() {
@@ -191,12 +314,19 @@ uint lighting_cascade_upper_head_at() {
 // Word 0: period (low 8 bits), current dispatch band (bits 16-17).
 // Words 1..3: due counts for size bands 0 (S<=0.5), 1 (S<=4), 2 (S>4),
 // used only to merge coarse to fine this frame. Every cell shares one P.
+// Words 4..12: one indirect dispatch command (groups, 1, 1) per band, so a
+// band dispatches its due cells and not 16384 groups.
+const uint CASCADE_UPPER_HEAD_WORDS = 16u;
+uint lighting_cascade_upper_args_at(uint band) {
+    return lighting_cascade_upper_head_at() + 4u + band * 3u;
+}
+
 uint lighting_cascade_upper_list_at(uint band) {
-    return lighting_cascade_upper_head_at() + 4u + band * CASCADE_UPPER_CAP;
+    return lighting_cascade_upper_head_at() + CASCADE_UPPER_HEAD_WORDS + band * CASCADE_UPPER_CAP;
 }
 
 uint lighting_cascade_upper_hit_at(uint due, uint k) {
-    return lighting_cascade_upper_head_at() + 4u + 3u * CASCADE_UPPER_CAP
+    return lighting_cascade_upper_head_at() + CASCADE_UPPER_HEAD_WORDS + 3u * CASCADE_UPPER_CAP
         + (due * CASCADE_UPPER_RAYS_MAX + k) * CASCADE_L0_HIT_WORDS;
 }
 
@@ -207,6 +337,9 @@ uint lighting_cascade_refresh_period(uint setting) {
     return 4u;
 }
 
+// Uniform rays of an upper refresh. CASCADE_CONE_UPPER lamp-cone rays
+// follow them (lighting_cascade_upper_ray); the coarse band gives up 8
+// uniform rays for them to stay within CASCADE_UPPER_RAYS_MAX.
 uint lighting_cascade_refresh_rays(float size) {
     if (size <= 0.5) {
         return 16u;
@@ -214,7 +347,7 @@ uint lighting_cascade_refresh_rays(float size) {
     if (size <= 4.0) {
         return 32u;
     }
-    return 64u;
+    return 56u;
 }
 
 uint lighting_cascade_upper_band(float size) {
@@ -284,6 +417,18 @@ vec3 lighting_cascade_bin_dir(uint key, vec3 n, uint k, uint seed) {
     vec3 ty;
     lighting_cascade_bin_frame(n, tx, ty);
     return normalize(tx * (r * cos(phi)) + ty * (r * sin(phi)) + n * u);
+}
+
+// Direction of upper ray k: k < uniform is bin k % 16, the rest are cone
+// rays with the same seed as the bins (lighting_cascade_bin_seed).
+vec3 lighting_cascade_upper_ray(uint key, vec3 n, uint k, uint uniform_count, uint seed,
+                                vec3 axis, float cos_a) {
+    if (k < uniform_count) {
+        return lighting_cascade_bin_dir(key, n, k, seed);
+    }
+    uint j = k - uniform_count;
+    uint h = lighting_hash(key ^ (j * 0x9e3779b9u) ^ seed ^ 0x51ed270bu);
+    return lighting_cascade_cone_dir(axis, cos_a, j, CASCADE_CONE_UPPER, h);
 }
 
 // The bin that holds `dir`. A bin is the mean radiance of its own pi/8 sr,
@@ -522,7 +667,25 @@ uint lighting_cascade_find_layer(uint parity, uint stamp, ivec3 cell, uint ax, u
     return lighting_cascade_find_in(parity, stamp, above, level, axis);
 }
 
-uint lighting_cascade_insert_level(vec3 pos, vec3 n, uint level) {
+// Which pixel seats a voxel. Every pixel of a cell offers a rank: the
+// distance from the cell centre in the high bits (nearer is larger), the
+// pixel index in the low bits. atomicMax keeps the nearest pixel, and the
+// lowest distance step with the highest index on a tie, so a still view
+// seats a voxel from the same pixel every frame. The first pixel to claim
+// the slot used to seat it, and that order is a race.
+uint lighting_cascade_owner_bits() {
+    return uint(findMSB(max(pc.dims.x * pc.dims.y, 2u) - 1u)) + 1u;
+}
+
+uint lighting_cascade_owner_rank(uint pixel, vec3 pos, vec3 centre, float size) {
+    uint pb = lighting_cascade_owner_bits();
+    uint levels = (1u << (32u - pb)) - 1u;
+    float d = clamp(length(pos - centre) / (CASCADE_OWNER_SPAN * size), 0.0, 1.0);
+    uint q = levels - min(uint(d * float(levels - 1u)), levels - 1u);
+    return (q << pb) | pixel;
+}
+
+uint lighting_cascade_insert_level(uint pixel, vec3 pos, vec3 n, uint level) {
     uint axis = lighting_cascade_axis(n);
     vec3 n_axis = lighting_cascade_axis_vec(axis);
     float size = lighting_cascade_l0_size(level);
@@ -533,37 +696,101 @@ uint lighting_cascade_insert_level(vec3 pos, vec3 n, uint level) {
     uint mask = CASCADE_LEVEL0_CAP - 1u;
     uint home = key & mask;
     uint base = lighting_cascade_table_base(lighting_frame() & 1u);
+    uint rank = lighting_cascade_owner_rank(pixel, pos, lighting_cascade_l0_centre(cell, size), size);
     [[dont_unroll]] for (uint i = 0u; i < CASCADE_LEVEL0_PROBE; i++) {
         uint slot = (home + i) & mask;
         uint word = base + slot * CASCADE_LEVEL0_STRIDE;
         uint prev = atomicCompSwap(ckeys.key[word], 0u, key);
+        if (prev != 0u && prev != key) {
+            continue;
+        }
+        // Word 9 holds the owner rank until lighting_cascade_seat replaces it
+        // with the normal. The frame's clear left it 0, below every rank.
+        atomicMax(ckeys.key[word + 9u], rank);
         if (prev == key) {
             return word;
-        }
-        if (prev != 0u) {
-            continue;
         }
         ckeys.key[word + 1u] = frame;
         ckeys.key[word + 2u] = uint(cell.x);
         ckeys.key[word + 3u] = uint(cell.y);
         ckeys.key[word + 4u] = uint(cell.z);
         ckeys.key[word + 5u] = packed;
-        // The cell centre moved along the axis onto this pixel's surface.
-        // The half-cell inset puts the cell behind a surface that sits in
-        // the outer half of its cell, so the +axis face can be inside a
-        // wall that is not on a grid plane; rays from there see nothing.
-        vec3 centre = lighting_cascade_l0_centre(cell, size);
-        float along = dot(pos - centre, n) / max(dot(n_axis, n), CASCADE_EPS);
-        vec3 stored = centre + n_axis * clamp(along, -size, size);
-        ckeys.key[word + 6u] = floatBitsToUint(stored.x);
-        ckeys.key[word + 7u] = floatBitsToUint(stored.y);
-        ckeys.key[word + 8u] = floatBitsToUint(stored.z);
-        ckeys.key[word + 9u] = lighting_pack_normal(n);
-        ckeys.key[word + 10u] = 0u;
-        ckeys.key[word + 11u] = 0u;
         return word;
     }
     return ~0u;
+}
+
+// Seat a claimed voxel: write the point its rays start from and its normal.
+// The point is the cell centre moved along the axis onto the owner pixel's
+// surface, when the picture shows that surface there. The half-cell inset
+// puts the cell behind a surface that sits in the outer half of its cell, so
+// the +axis face can be inside a wall that is not on a grid plane; rays from
+// there see nothing. A centre the picture shows as another surface, and
+// that a short ray finds no surface under (under a floor the wall stands
+// on, inside a box, past an edge), is not on the surface, so the voxel
+// takes the owner pixel's own point. A side-face voxel
+// seated 12 cm under the floor read 0.4 against 3 for one frame, and the
+// pixels over it went dark. A centre off the picture takes the ray test too.
+// True when `p` lies on a surface facing `n`: a short ray from just in
+// front of it, back along the normal, meets one. A centre the picture does
+// not show (behind a wall, behind a box) is still a real point of a floor
+// that carries on there, and keeps the seat it always had.
+bool lighting_cascade_seat_real(vec3 p, vec3 n) {
+    vec3 origin = p + n * CASCADE_SEAT_PROBE;
+    if (scene_inside(origin)) {
+        return false;
+    }
+    SceneHit hit;
+    if (!trace_ray(origin, -n, CASCADE_SEAT_NEAR, 2.0 * CASCADE_SEAT_PROBE, hit)) {
+        return false;
+    }
+    return abs(dot(hit.normal, n)) > CASCADE_SEAT_FACING;
+}
+
+void lighting_cascade_seat(uint word) {
+    uint pb = lighting_cascade_owner_bits();
+    uint pixel = ckeys.key[word + 9u] & ((1u << pb) - 1u);
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    if (pixel >= pc.dims.x * pc.dims.y
+        || !lighting_surface(uvec2(pixel % pc.dims.x, pixel / pc.dims.x), pos, n, albedo, two_sided)) {
+        // No owner surface: leave the voxel unlit rather than seat it at 0.
+        ckeys.key[word] = 0u;
+        return;
+    }
+    uint packed = ckeys.key[word + 5u];
+    uint axis = lighting_cascade_unpack_axis(packed);
+    vec3 n_axis = lighting_cascade_axis_vec(axis);
+    float size = lighting_cascade_l0_size(lighting_cascade_unpack_level(packed));
+    ivec3 cell = ivec3(int(ckeys.key[word + 2u]), int(ckeys.key[word + 3u]), int(ckeys.key[word + 4u]));
+    vec3 centre = lighting_cascade_l0_centre(cell, size);
+    float along = dot(pos - centre, n) / max(dot(n_axis, n), CASCADE_EPS);
+    vec3 stored = centre + n_axis * clamp(along, -size, size);
+    vec3 rel = stored - scene.eye.xyz;
+    float z = dot(rel, scene.view_forward.xyz);
+    float t = scene.view_right.w;
+    float aspect = scene.view_forward.w;
+    bool same = false;
+    if (z > CASCADE_SEAT_NEAR && t > 0.0) {
+        vec2 ndc = vec2(dot(rel, scene.view_right.xyz) / (z * t * aspect), dot(rel, scene.view_up.xyz) / (z * t));
+        vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
+        if (px.x >= 0.0 && px.y >= 0.0 && px.x < float(pc.dims.x) && px.y < float(pc.dims.y)) {
+            vec3 spos;
+            vec3 sn;
+            bool shown = lighting_surface(uvec2(px), spos, sn, albedo, two_sided);
+            same = shown && dot(sn, n) > CASCADE_SEAT_FACING
+                && abs(dot(spos - stored, n)) <= CASCADE_SEAT_PLANE * size + CASCADE_SEAT_PLANE_MIN;
+        }
+    }
+    if (!same && !lighting_cascade_seat_real(stored, n)) {
+        stored = pos;
+    }
+    ckeys.key[word + 6u] = floatBitsToUint(stored.x);
+    ckeys.key[word + 7u] = floatBitsToUint(stored.y);
+    ckeys.key[word + 8u] = floatBitsToUint(stored.z);
+    ckeys.key[word + 9u] = lighting_pack_normal(n);
 }
 
 uint lighting_cascade_find(ivec3 cell, uint level, uint axis);
@@ -879,11 +1106,14 @@ vec3 lighting_cascade_bounce(vec3 pos, vec3 n) {
     if (!(near.w > LIGHTING_CACHE_HAS_W) && level > 0u) {
         near = lighting_cascade_bounce_level(prev, stamp, pos, n, level - 1u);
     }
-    vec4 far = vec4(0.0);
-    if (level < CASCADE_L0_MAX) {
-        far = lighting_cascade_bounce_level(prev, stamp, pos, n, level + 1u);
-    }
-    vec4 shown = lighting_cascade_blend_pair(near, far, blend);
+    // The footprint level, or the finer one, and never the coarser one. A
+    // floor cell twice the size, seated on the lit side of a 40 cm wall,
+    // lit the hits at the wall's foot on the dark side: the base of the back
+    // face read 68 against a limit of 45
+    // (a_close_lamp_does_not_cross_the_wall, with the 12.5 cm base grid).
+    // The picture still blends the two levels. A hit with neither takes the
+    // upper cell below, through its leak gates.
+    vec4 shown = near;
     if (shown.w > LIGHTING_CACHE_HAS_W) {
         return shown.rgb;
     }
@@ -978,10 +1208,10 @@ void lighting_cascade_publish(uint pixel, uvec2 p, vec3 pos, vec3 n) {
 
 void lighting_cascade_insert(uint pixel, vec3 pos, vec3 n) {
     uint level = lighting_cascade_lod_level(lighting_cascade_lod(pos, n));
-    uint word = lighting_cascade_insert_level(pos, n, level);
+    uint word = lighting_cascade_insert_level(pixel, pos, n, level);
     uint word_next = ~0u;
     if (level < CASCADE_L0_MAX) {
-        word_next = lighting_cascade_insert_level(pos, n, level + 1u);
+        word_next = lighting_cascade_insert_level(pixel, pos, n, level + 1u);
     }
     uint at = lighting_cascade_pixel_at(pixel);
     ckeys.key[at + 2u] = word;

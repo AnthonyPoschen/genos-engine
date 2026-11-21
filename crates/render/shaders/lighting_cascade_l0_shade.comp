@@ -1,6 +1,7 @@
 #version 450
 // Level-0 merge and four-slot direction ring. Each live voxel shades
-// its 32 rays: a hit is explicit lamp shading plus the bounce stored at
+// its 32 uniform rays and 4 lamp-cone rays (lighting_cascade_cone), each
+// weighted by the solid angle it stands for: a hit is explicit lamp shading plus the bounce stored at
 // the hit, a miss is the parent's radiance bins in that direction. A ray that hits a lamp already sampled by those shadow rays
 // (mesh glow or a point within LAMP_RADIUS) is a miss, so the emitter is
 // not counted twice. The cosine-weighted sum replaces slot
@@ -8,14 +9,14 @@
 // slots. Non-finite estimates leave that slot unchanged. This compile's
 // only trace site is trace_occluded.
 #extension GL_GOOGLE_include_directive : require
-layout(local_size_x = 32) in;
+layout(local_size_x = 36) in;
 #include "lighting_common.glsl"
 #include "lighting_cascade.glsl"
 
 shared vec3 sh_bins[16];
 shared bool sh_ok;
-shared vec3 sh_sum[32];
-shared float sh_cos[32];
+shared vec3 sh_sum[36];
+shared float sh_cos[36];
 
 // Radiance past this voxel's interval along `dir`: the parent's bins. No ancestor yet is the sky, or nothing indoors.
 vec3 lighting_cascade_parent_eval(vec3 dir, vec3 n_axis) {
@@ -96,9 +97,9 @@ void main() {
     if (!lighting_gi_on()) {
         return;
     }
-    uint slot = gl_WorkGroupID.x;
+    uint slot = lighting_cascade_l0_list_slot(gl_WorkGroupID.x);
     uint k = gl_LocalInvocationID.x;
-    if (slot >= CASCADE_LEVEL0_CAP || k >= CASCADE_L0_RAYS) {
+    if (slot >= CASCADE_LEVEL0_CAP || k >= CASCADE_L0_TRACED) {
         return;
     }
     uint word = lighting_cascade_table_base(lighting_frame() & 1u)
@@ -130,12 +131,19 @@ void main() {
     float cw = 0.0;
     if (live) {
         uint key = ckeys.key[word];
-        vec3 dir = lighting_cascade_l0_dir(key, n, k);
+        vec3 axis;
+        float cos_a;
+        bool has_cone = lighting_cascade_cone(pos, n, axis, cos_a);
+        bool is_cone = k >= CASCADE_L0_RAYS;
+        vec3 dir = lighting_cascade_l0_ray(key, n, k, has_cone, axis, cos_a);
         float nd = dot(dir, n);
-        if (nd <= 0.0) {
+        if (!is_cone && nd <= 0.0) {
             dir = normalize(dir - n * nd + n * CASCADE_EPS);
-            nd = max(dot(dir, n), 0.0);
+            nd = dot(dir, n);
         }
+        nd = max(nd, 0.0);
+        float w = lighting_cascade_ray_weight(is_cone, has_cone, dir, axis, cos_a,
+            CASCADE_L0_RAYS, CASCADE_CONE_L0);
         uint at = lighting_cascade_hit_at(slot, k);
         float t = uintBitsToFloat(ckeys.key[at]);
         if (t < 0.0 || lighting_cascade_hit_is_lamp(pos + n * 0.02 + dir * t, ckeys.key[at + 3u])) {
@@ -148,7 +156,7 @@ void main() {
             vec3 e = lighting_cascade_direct_at(hp + hn * 0.02, hn);
             li = reflectance * (e + bounce);
         }
-        cw = max(nd, 0.0);
+        cw = nd * w;
     }
     sh_sum[k] = li * cw;
     sh_cos[k] = cw;
@@ -158,11 +166,12 @@ void main() {
         return;
     }
     vec3 sum = vec3(0.0);
-    [[dont_unroll]] for (uint i = 0u; i < CASCADE_L0_RAYS; i++) {
+    [[dont_unroll]] for (uint i = 0u; i < CASCADE_L0_TRACED; i++) {
         sum += sh_sum[i];
     }
-    // Uniform-hemisphere estimator for irradiance: 2π / N Σ L cosθ.
-    vec3 cur = max((LIGHTING_TAU / float(CASCADE_L0_RAYS)) * sum, vec3(0.0));
+    // Irradiance: Σ w L cosθ, w the solid angle each ray stands for
+    // (lighting_cascade_ray_weight). Without a cone this is 2π / N Σ L cosθ.
+    vec3 cur = max(sum, vec3(0.0));
     ivec3 cell = ivec3(
         int(ckeys.key[word + 2u]),
         int(ckeys.key[word + 3u]),
