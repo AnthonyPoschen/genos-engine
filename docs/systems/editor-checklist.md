@@ -63,8 +63,10 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).
 - [ ] Textured lit (material); base colour; unlit vertex colour.
 - [x] Face IDs (`shade: face_ids`).
-- [ ] Debug views: normals, depth, silhouette, face orientation, collection IDs, UV checker.
-- [ ] Grid on the ground plane; studio lighting with contrast; contact shadow. The mesh is flat-lit now and casts no shadow.
+- [x] Normals, depth and base colour: the engine's `view` modes `normal`, `depth` and `albedo`. They showed nothing in the scene program until the HDR compose stored the view's colour in the scene image the display pass draws.
+- [ ] Debug views: silhouette, face orientation, collection IDs, UV checker.
+- [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
+- [ ] Grid on the ground plane; contact shadow (the mesh casts no shadow); bloom and auto exposure soften the picture and could be off for a mesh scene.
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [ ] Objects panel: collections and objects as a tree, search, show all, hide matching, solo matching.
 - [x] Replay: show the state after a command (`mesh_view replay`).

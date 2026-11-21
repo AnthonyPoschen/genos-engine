@@ -134,6 +134,11 @@ void main() {
         float depth = clamp(1.0 - length(pos - scene.eye.xyz) / 50.0, 0.0, 1.0);
         shown = mode == 3u ? albedo : (mode == 4u ? n * 0.5 + 0.5 : vec3(depth));
         outc.px[index] = pack_rgb(shown);
+#ifdef GENOS_HDR_COMPOSE
+        // The display pass draws the scene image. Without this store it drew
+        // the lit picture left there, so these three views showed nothing.
+        scene_store(index, vec4(shown, length(pos - scene.eye.xyz)));
+#endif
         return;
     }
 #ifndef GENOS_COMPOSE_MAINT
