@@ -113,7 +113,9 @@ make lighting SCENE=sponza
 
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default
 `lighting-stress`), and `--gpu-times 30`. `make stress` opens the same program on
-the lighting stress scene. `stress` is the old name of that scene: it still opens
+the lighting stress scene. `make mesh` opens it on the `mesh` scene, a
+mesh-workbench workspace ([mesh workbench](mesh-workbench.md)); `WORKSPACE=DIR`
+names another workspace. `stress` is the old name of that scene: it still opens
 it and logs a warning once. `make stress-solo` runs `genos-stress`, the
 single-scene program the regression scripts and tests use. `--preset`, `--lighting-debug`, `--unfilled`
 (the existing texels view: own-mean luma, seed luma, and set count),

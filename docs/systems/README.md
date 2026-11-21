@@ -33,6 +33,7 @@ Each record uses these headings:
 - [Bake](bake.md) owns the import-time GI data per mesh: sparse SDFs, surface cache cards and their cache.
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
 - [Asset loading](asset-loading.md) is the design for import, offline cook, and async streaming of glTF models (ADR 0020).
+- [Mesh workbench](mesh-workbench.md) is the mesh viewer and the agent's path to mesh-workbench: a workspace opens as a `mesh` scene and the picture follows its edits.
 - [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission. The plan for one mix and device-output-only writes is [audio-design.md](audio-design.md) ([ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md), accepted).
 - [Scripting](scripting.md) owns Rhai for games and mods.
 - [Debugging](debugging.md) owns the shared debug scaffolding, the per-system binaries under `debug/<system>/`, the probes, the commands, the scripts, the captures, and the ground-truth reference.

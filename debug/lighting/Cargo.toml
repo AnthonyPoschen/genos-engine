@@ -22,3 +22,4 @@ genos-scene-lib = { path = "../scene-lib" }
 genos-stress = { path = "../../examples/stress" }
 genos-ui = { path = "../../crates/ui" }
 genos-window = { path = "../../crates/window" }
+genos-workbench = { path = "../../crates/workbench" }

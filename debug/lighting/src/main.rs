@@ -106,6 +106,9 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --scene NAME           scene file name (debug/scenes). Falls back to GENOS_SCENE,
                          then lighting-stress. stress is the old name of that
                          scene and still opens it
+  --mesh-workspace DIR   mesh-workbench workspace a mesh scene opens, in place
+                         of the one its scene file names. GENOS_MESH_WORKSPACE
+                         applies only when this is omitted
   --checkpoint NAME      jump here at launch
   --eye X,Y,Z            camera position, metres. --eye=X,Y,Z is the same flag.
                          Keeps the checkpoint aim unless --look is set
@@ -1006,6 +1009,8 @@ struct App {
     root: PathBuf,
     log: std::fs::File,
     load: Option<LoadJob>,
+    /// Set while a mesh scene is open: the workspace file being followed.
+    mesh: Option<MeshWatch>,
     /// Last GI pass times, milliseconds. Numbers only.
     gi_passes: String,
     /// Last GI work counters. Numbers only.
@@ -1025,6 +1030,122 @@ enum Show {
     Still(World),
 }
 
+/// The workspace a mesh scene is showing and the `project.json` time it read.
+struct MeshWatch {
+    dir: PathBuf,
+    stamp: Option<std::time::SystemTime>,
+    looked: Instant,
+}
+
+/// Seconds between looks at a mesh workspace's `project.json`. The
+/// mesh-workbench web viewer polls at 0.4 s.
+const MESH_POLL_SECONDS: f32 = 0.4;
+/// Albedo of a mesh-workbench object with no texture.
+const MESH_COLOR: [f32; 3] = [0.72, 0.72, 0.75];
+const MESH_GROUND_COLOR: [f32; 3] = [0.30, 0.31, 0.33];
+/// The ground reaches this many mesh sizes out, and at least this far.
+const MESH_GROUND_SCALE: f32 = 4.0;
+const MESH_GROUND_MIN: f32 = 6.0;
+
+/// The workspace a mesh scene opens: `--mesh-workspace`, then
+/// `GENOS_MESH_WORKSPACE`, then the scene file's path under the repository.
+fn mesh_workspace_dir(root: &Path, named: &str) -> PathBuf {
+    match std::env::var_os("GENOS_MESH_WORKSPACE") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => root.join(named),
+    }
+}
+
+/// A mesh-workbench workspace as a world: every object a raster mesh, standing
+/// on a ground plane. The mesh is lifted so its lowest point is on the ground.
+/// It has no baked distance field, so it does not block or bounce light.
+fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lamp]) -> Result<World, String> {
+    let workspace = genos_workbench::load_workspace(dir)?;
+    let size = (0..3)
+        .map(|axis| workspace.max[axis] - workspace.min[axis])
+        .fold(0.0f32, f32::max);
+    let reach = (size * MESH_GROUND_SCALE).max(MESH_GROUND_MIN);
+    let lift = -workspace.min[1];
+    let mut scene = Scene {
+        floor: Floor {
+            position: Vec3::new(
+                (workspace.min[0] + workspace.max[0]) * 0.5,
+                0.0,
+                (workspace.min[2] + workspace.max[2]) * 0.5,
+            ),
+            half_x: reach,
+            half_z: reach,
+            color: MESH_GROUND_COLOR,
+        },
+        walls: Vec::new(),
+        solids: Vec::new(),
+        lights: Vec::new(),
+        ceiling: None,
+        sky: sky.map(|color| Sky { color }),
+        lighting: genos_scene::LightingSettings::default(),
+        debug: DebugSettings::default(),
+        fps_counter: FpsCounterSettings::default(),
+        event_loop: EventLoopSettings::default(),
+        reflections: ReflectionSettings::default(),
+        hdr: genos_scene::HdrSettings::legacy_bytes(),
+        fog: FogSettings::default(),
+        particles: ParticleSettings::default(),
+        menu: MenuSettings::default(),
+    };
+    if let Some(sun) = sun {
+        scene.lights.push(sun_light(sun));
+    }
+    for lamp in lamps {
+        scene.lights.push(point_light(lamp));
+    }
+    let mut world = World::from_scene(scene);
+    let mut pose = identity_pose();
+    pose[13] = lift;
+    for part in workspace.parts {
+        let mut low = [f32::INFINITY; 3];
+        let mut high = [f32::NEG_INFINITY; 3];
+        for p in &part.positions {
+            for axis in 0..3 {
+                low[axis] = low[axis].min(p[axis]);
+                high[axis] = high[axis].max(p[axis]);
+            }
+        }
+        world.objects.push(genos_render::Object {
+            hidden: false,
+            affects_light: false,
+            bounds: genos_render::Bounds {
+                center: [
+                    (low[0] + high[0]) * 0.5,
+                    (low[1] + high[1]) * 0.5 + lift,
+                    (low[2] + high[2]) * 0.5,
+                ],
+                half: [
+                    (high[0] - low[0]) * 0.5,
+                    (high[1] - low[1]) * 0.5,
+                    (high[2] - low[2]) * 0.5,
+                ],
+            },
+            kind: DrawKind::Mesh {
+                vertices: part.positions,
+                normals: part.normals,
+                texcoords: Vec::new(),
+                color: MESH_COLOR,
+                pose,
+                emission: [0.0; 3],
+                surface: None,
+            },
+        });
+    }
+    eprintln!(
+        "genos-lighting: mesh workspace {} revision {}: {} vertices, {} faces",
+        dir.display(),
+        workspace.revision,
+        workspace.vertices,
+        workspace.faces
+    );
+    Ok(world)
+}
+
 impl App {
     fn open(entries: Vec<Entry>, root: PathBuf, log: std::fs::File) -> Result<Self, String> {
         let mut show = build_entry(&root, &entries[0])?;
@@ -1037,6 +1158,7 @@ impl App {
             root,
             log,
             load: None,
+            mesh: None,
             gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
             fog_cli: FogCli::default(),
@@ -1078,6 +1200,59 @@ impl App {
     fn advance(&mut self, dt: f32) {
         if let Show::Stress(stage) = &mut self.show {
             stage.advance(dt);
+        }
+        self.follow_mesh();
+    }
+
+    /// A mesh scene follows its workspace: when `project.json` changes on
+    /// disk, read it again. mesh-workbench replaces the file by rename and
+    /// pushes nothing, so this looks at the modification time
+    /// MESH_POLL_SECONDS apart. A file that does not parse (caught half
+    /// written) keeps the picture and is tried again.
+    fn follow_mesh(&mut self) {
+        if self.load.is_some() {
+            return;
+        }
+        let Kind::Mesh { workspace, .. } = &self.entry().kind else {
+            self.mesh = None;
+            return;
+        };
+        let dir = mesh_workspace_dir(&self.root, workspace);
+        let now = Instant::now();
+        if let Some(watch) = &self.mesh {
+            if watch.dir == dir && now.duration_since(watch.looked).as_secs_f32() < MESH_POLL_SECONDS {
+                return;
+            }
+        }
+        let stamp = std::fs::metadata(genos_workbench::project_path(&dir))
+            .and_then(|meta| meta.modified())
+            .ok();
+        let changed = self
+            .mesh
+            .as_ref()
+            .is_some_and(|watch| watch.dir == dir && watch.stamp != stamp);
+        self.mesh = Some(MeshWatch { dir, stamp, looked: now });
+        if !changed {
+            return;
+        }
+        let index = self.index;
+        match build_entry(&self.root, &self.entries[index]) {
+            Ok(mut show) => {
+                let from = self.scene().clone();
+                adopt_show(&mut show);
+                self.show = show;
+                let scene = self.scene();
+                scene.menu = from.menu;
+                scene.fps_counter = from.fps_counter;
+                scene.debug = from.debug;
+                scene.event_loop = from.event_loop;
+                scene.lighting = from.lighting;
+                scene.hdr = from.hdr;
+                self.overlay_fog();
+                self.overlay_particles();
+                self.note("mesh workspace changed; reloaded");
+            }
+            Err(err) => self.note(&format!("mesh workspace changed; kept the picture: {err}")),
         }
     }
 
@@ -1358,6 +1533,17 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
             let scene = genos_scene::load_path(&full)?;
             Ok(Show::Still(World::from_scene(scene)))
         }
+        Kind::Mesh {
+            workspace,
+            sun,
+            sky,
+            lamps,
+        } => Ok(Show::Still(mesh_world(
+            &mesh_workspace_dir(root, workspace),
+            sun.as_ref(),
+            *sky,
+            lamps,
+        )?)),
         Kind::Gltf {
             path,
             sun,
@@ -2809,6 +2995,9 @@ fn options() -> Result<Options, String> {
             "--eye" => eye = Some(parse_vec3("--eye", &need_arg(&mut args, "--eye")?)?),
             "--look" => look = Some(parse_vec3("--look", &need_arg(&mut args, "--look")?)?),
             "--preset" => preset = Some(need_arg(&mut args, "--preset")?),
+            "--mesh-workspace" => {
+                std::env::set_var("GENOS_MESH_WORKSPACE", need_arg(&mut args, "--mesh-workspace")?);
+            }
             "--gpu-times" => {
                 gpu_times = Some(
                     need_arg(&mut args, "--gpu-times")?

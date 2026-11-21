@@ -5,6 +5,7 @@ members = [
     "crates/math",
     "crates/fog-ref",
     "crates/json",
+    "crates/workbench",
     "crates/mesh",
     "crates/bake",
     "crates/physics",

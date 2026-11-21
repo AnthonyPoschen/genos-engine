@@ -12,6 +12,12 @@ room:
 stress:
 	cargo run --release -p genos-lighting -- --scene lighting-stress
 
+# A mesh-workbench workspace in the scene program. WORKSPACE names the
+# directory that holds project.json (default: the sample in debug/scenes/mesh).
+WORKSPACE ?= debug/scenes/mesh/sample
+mesh:
+	cargo run --release -p genos-lighting -- --scene mesh --mesh-workspace $(abspath $(WORKSPACE))
+
 # The single-scene stress program the regression scripts and tests run on.
 stress-solo:
 	cargo run --release -p genos-stress

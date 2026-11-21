@@ -60,6 +60,14 @@ pub enum Kind {
     Stress(StressSpec),
     /// A `.rhai` scene, path relative to the repository root.
     Rhai { path: String },
+    /// A mesh-workbench workspace directory, relative to the repository root
+    /// unless it is absolute, on a ground plane under the lamps the file names.
+    Mesh {
+        workspace: String,
+        sun: Option<Sun>,
+        sky: Option<[f32; 3]>,
+        lamps: Vec<Lamp>,
+    },
     /// A glTF file, path relative to the repository root, plus the lamps the
     /// file names. The analytic floor is not part of the model.
     Gltf {
@@ -159,6 +167,7 @@ pub fn parse_str(text: &str) -> Result<Entry, String> {
     let mut sky_on = true;
     let mut rhai = None;
     let mut gltf = None;
+    let mut workspace = None;
     let mut sun = None;
     let mut sky = None;
     let mut lamps = Vec::new();
@@ -198,6 +207,7 @@ pub fn parse_str(text: &str) -> Result<Entry, String> {
             "no-sky" => sky_on = false,
             "rhai" => rhai = Some(join(&rest)),
             "gltf" => gltf = Some(join(&rest)),
+            "workspace" => workspace = Some(join(&rest)),
             "checkpoint" => checkpoints.push(parse_checkpoint(number + 1, &rest)?),
             "check" => {
                 if check.is_some() {
@@ -238,6 +248,12 @@ pub fn parse_str(text: &str) -> Result<Entry, String> {
         },
         Some("gltf") => Kind::Gltf {
             path: gltf.ok_or("gltf scene needs a gltf path")?,
+            sun,
+            sky,
+            lamps,
+        },
+        Some("mesh") => Kind::Mesh {
+            workspace: workspace.ok_or("mesh scene needs a workspace path")?,
             sun,
             sky,
             lamps,
@@ -389,6 +405,20 @@ mod tests {
         assert_eq!(canonical("stress"), "lighting-stress");
         assert_eq!(canonical("sponza"), "sponza");
         assert_eq!(canonical(DEFAULT_SCENE), DEFAULT_SCENE);
+    }
+
+    #[test]
+    fn a_mesh_file_names_its_workspace() {
+        let entry = parse_str(
+            "name m\nkind mesh\nworkspace some/dir\nsky 0.1 0.2 0.3\n\
+             checkpoint front 0 1 4 look 0 0 0\ncheck front mean 8\n",
+        )
+        .unwrap();
+        let Kind::Mesh { workspace, sun, sky, lamps } = &entry.kind else {
+            panic!("kind");
+        };
+        assert_eq!(workspace, "some/dir");
+        assert_eq!((sun.is_none(), *sky, lamps.len()), (true, Some([0.1, 0.2, 0.3]), 0));
     }
 
     #[test]
