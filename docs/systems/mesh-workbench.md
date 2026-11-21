@@ -70,6 +70,8 @@ On the agent endpoint (MCP, `POST /cmd/<name>`, and Rhai), while a mesh scene is
 - `mesh_selection`: the selection (objects, faces, vertices, the last picked point, the note, the revision, the camera). `objects`, `faces` and `vertices` replace that part, `note` sets the note, `clear: true` empties it first. IDs that an edit removes leave the selection at the next reload.
 - `mesh_command`: `command` is one mesh-workbench command object or a list of up to 1024. A list stops at the first command mesh-workbench refuses and replies `{ok, failed_command, replies}`. The reply is mesh-workbench's reply.
 
+- The family tools `mesh_object`, `mesh_edit`, `mesh_select`, `mesh_material`, `mesh_rig`, `mesh_animation`, `mesh_query` and `mesh_document` each take one mesh-workbench command object (`{"command": "rig_set", ...}`) and refuse a command of another family, naming its tool. The family is read from the command's name (`family_of`). `mesh_help` is mesh-workbench's help: `topic`, `all`, `offset`, `limit`.
+
 The agent's loop: read `mesh_selection`, send `mesh_command`, and the picture reloads when `project.json` changes.
 
 Checked on 22 Nov 2026 with mesh-workbench `c88a38fb`: on an empty workspace, two `object_create_box` commands through `mesh_command` made a crate and a lid, the viewer showed revision 2 with both objects, and a pick on the lid returned object 2, face 8, vertices 13 to 16. `debug/lighting/scripts/mesh_selection.rhai` checks the pick and the selection on the sample workspace without a server.

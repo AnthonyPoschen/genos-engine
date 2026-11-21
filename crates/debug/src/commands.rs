@@ -297,6 +297,42 @@ fn host_specs() -> Vec<CommandSpec> {
             "Pick the mesh under screen [x,y] (0..1, origin top left, default the centre). mode is face (default), object, or vertex. select is set (default: replace the selection with the hit), add, or none (report only). Replies hit (object, object_name, face, face_vertices, vertex, point) or null, and the selection.",
         ),
         spec(
+            "mesh_object",
+            "Mesh section. One mesh-workbench command for objects and collections: object_* and collection_* (create, rename, move, rotate, duplicate, instance, join, separate, delete, stage), and cube. The arguments are the command object itself, for example {\"command\": \"...\", ...}; a command of another family is refused and names its tool. mesh_help reads the parameters. Needs a mesh scene; the first call opens the session on the workspace.",
+        ),
+        spec(
+            "mesh_select",
+            "Mesh section. One mesh-workbench command for mesh-workbench's own vertex selection, which its move, scale and rotate act on: select and select_*. The person's selection in the viewer is mesh_selection. The arguments are the command object itself, for example {\"command\": \"...\", ...}; a command of another family is refused and names its tool. mesh_help reads the parameters. Needs a mesh scene; the first call opens the session on the workspace.",
+        ),
+        spec(
+            "mesh_material",
+            "Mesh section. One mesh-workbench command for UVs, textures and vertex colours (materials): uv_*, texture_* (import, create, assign, layers, masks, bake, maps), vertex_color_*, capture_uv, and their query_ and inspect_ commands. The arguments are the command object itself, for example {\"command\": \"...\", ...}; a command of another family is refused and names its tool. mesh_help reads the parameters. Needs a mesh scene; the first call opens the session on the workspace.",
+        ),
+        spec(
+            "mesh_rig",
+            "Mesh section. One mesh-workbench command for bones and skin weights: rig_set, rig_clear, rig_display_tails_set, skin_weights_set, query_rig. The arguments are the command object itself, for example {\"command\": \"...\", ...}; a command of another family is refused and names its tool. mesh_help reads the parameters. Needs a mesh scene; the first call opens the session on the workspace.",
+        ),
+        spec(
+            "mesh_animation",
+            "Mesh section. One mesh-workbench command for animation clips, tracks and keys: animation_* (set, update, remove, track_set, track_remove, keys_edit, ik_bake, sample) and query_animation. The arguments are the command object itself, for example {\"command\": \"...\", ...}; a command of another family is refused and names its tool. mesh_help reads the parameters. Needs a mesh scene; the first call opens the session on the workspace.",
+        ),
+        spec(
+            "mesh_query",
+            "Mesh section. One mesh-workbench command for reading the mesh without changing it: inspect, inspect_*, query_*, measure_clearance, capture (a rendered PNG), and help. The arguments are the command object itself, for example {\"command\": \"...\", ...}; a command of another family is refused and names its tool. mesh_help reads the parameters. Needs a mesh scene; the first call opens the session on the workspace.",
+        ),
+        spec(
+            "mesh_document",
+            "Mesh section. One mesh-workbench command for the document as a whole: undo, redo, transaction, save, load, import_glb, import_fbx, export, and the workflow_*, review_* and reference commands. The arguments are the command object itself, for example {\"command\": \"...\", ...}; a command of another family is refused and names its tool. mesh_help reads the parameters. Needs a mesh scene; the first call opens the session on the workspace.",
+        ),
+        spec(
+            "mesh_edit",
+            "Mesh section. One mesh-workbench command for geometry edits and generators: move, scale, rotate, extrude, inset, bevel, bridge, split, weld, dissolve, delete_faces, triangulate, bisect_plane, shade_smooth, sweep, revolve, loft, extrude_polygon, and every other command. The arguments are the command object itself, for example {\"command\": \"...\", ...}; a command of another family is refused and names its tool. mesh_help reads the parameters. Needs a mesh scene; the first call opens the session on the workspace.",
+        ),
+        spec(
+            "mesh_help",
+            "Mesh section. mesh-workbench's own help: with no field, the task index; all: true lists every topic; topic reads one (for example rigging-and-animation, uv-editing-and-vertex-painting, command-api); offset and limit page a long topic. Needs a mesh scene.",
+        ),
+        spec(
             "mesh_command",
             "Run command (one mesh-workbench command object such as {\"command\":\"inspect\"}, or a list of up to 1024 that stops at the first refusal) on the mesh scene's workspace and return mesh-workbench's reply. The engine links mesh-workbench; the first call opens its session on the workspace, which then holds project.json and the recorded sessions. The picture reloads when the mesh changes.",
         ),

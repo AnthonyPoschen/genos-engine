@@ -47,10 +47,11 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 
 ### C. The MCP server (decision 2)
 
-- [ ] Group the command catalogue into sections: `lighting`, `scene`, `editor`, `mesh`. Old names stay as deprecated aliases that log a warning for one release (the public-names rule in `AGENTS.md`).
-- [ ] Editor state: the open document, the selection, the camera, the pick mode, the note, recent edits.
-- [ ] Mesh commands as first-class tools with schemas, not only the `mesh_command` pass-through: objects, faces and vertices, generators, UVs and textures (materials), rig and skin weights (bones, weights), animation clips and keys, import and export, undo and redo, transactions.
-- [ ] A context packet for each request: camera pose, a screenshot, the selection, the visible objects.
+- [x] Mesh tools by family, each taking one mesh-workbench command object and refusing a command of another family: `mesh_object`, `mesh_edit`, `mesh_select`, `mesh_material` (UVs, textures, vertex colours), `mesh_rig` (bones, skin weights), `mesh_animation`, `mesh_query`, `mesh_document` (undo, redo, transaction, import, export, workflow). `mesh_help` reads mesh-workbench's help. `mesh_command` still takes any command or a batch. The editor's MCP `tools/list` shows 81 tools, 13 of them `mesh_*`.
+- [x] Editor state over MCP: `mesh_view` (the open workspace, revision, objects, display, replay) and `mesh_selection` (selection, note, camera).
+- [ ] A JSON schema per mesh command. mesh-workbench has no machine-readable command list (its help is prose), so the family tools take a free-form object. See "For Nathan".
+- [ ] Group the whole catalogue into sections (`lighting`, `scene`, `editor`, `mesh`) with the lighting commands under the lighting section. Old names stay as deprecated aliases that log a warning for one release (the public-names rule in `AGENTS.md`). Today only the mesh tools say their section, in their descriptions.
+- [ ] Recent edits in the editor state, and a context packet for each request: camera pose, a screenshot, the selection, the visible objects.
 
 ### D. Viewer parity with the mesh-workbench web viewer (decision 5)
 
@@ -84,6 +85,7 @@ Changes we would like in mesh-workbench. Add to this list as the bridge meets th
 - A user selection separate from the tool selection: faces and objects as well as vertices, not recorded as an undo step, with the viewer's camera.
 - The workflow gates (`export` refused until requirements are met) switchable off for an editor-driven session.
 - The crate, the repository and the docs under one name (`gpt-mesh`, `mesh-workbench`).
+- A machine-readable command list: each command's name, family, parameters and types, so the engine can publish a schema per tool.
 - A reference row for each of the roughly 40 commands that are in the code and not in `docs/command-reference.md`.
 
 ## Open notes

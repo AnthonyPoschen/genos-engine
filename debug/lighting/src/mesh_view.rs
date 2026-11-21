@@ -135,6 +135,46 @@ pub struct MeshView {
     bridge: Option<genos_meshbench::Bridge>,
 }
 
+/// The mesh tools that each take one family of mesh-workbench commands, and
+/// what the family is for. `mesh_command` takes any of them.
+pub const FAMILIES: [(&str, &str); 8] = [
+    ("mesh_object", "objects and collections: object_* and collection_* (create, rename, move, rotate, duplicate, instance, join, separate, delete, stage), and cube"),
+    ("mesh_select", "mesh-workbench's own vertex selection, which its move, scale and rotate act on: select and select_*"),
+    ("mesh_material", "UVs, textures and vertex colours: uv_*, texture_* (import, create, assign, layers, masks, bake, maps), vertex_color_*, capture_uv, and their query_ and inspect_ commands"),
+    ("mesh_rig", "bones and skin weights: rig_set, rig_clear, rig_display_tails_set, skin_weights_set, query_rig"),
+    ("mesh_animation", "animation clips, tracks and keys: animation_* (set, update, remove, track_set, track_remove, keys_edit, ik_bake, sample) and query_animation"),
+    ("mesh_query", "reading the mesh without changing it: inspect, inspect_*, query_*, measure_clearance, capture (a rendered PNG), and help"),
+    ("mesh_document", "the document as a whole: undo, redo, transaction, save, load, import_glb, import_fbx, export, and the workflow_*, review_* and reference commands"),
+    ("mesh_edit", "geometry edits and generators: move, scale, rotate, extrude, inset, bevel, bridge, split, weld, dissolve, delete_faces, triangulate, bisect_plane, shade_smooth, sweep, revolve, loft, extrude_polygon, and every other command"),
+];
+
+/// The family tool a mesh-workbench command belongs to, by its name.
+pub fn family_of(command: &str) -> &'static str {
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|prefix| command.starts_with(prefix));
+    let is = |names: &[&str]| names.contains(&command);
+    if starts(&["rig_", "skin_weights_"]) || is(&["query_rig"]) {
+        "mesh_rig"
+    } else if starts(&["animation_"]) || is(&["query_animation"]) {
+        "mesh_animation"
+    } else if starts(&["uv_", "texture_", "vertex_color_", "query_texture_"])
+        || is(&["query_uv", "inspect_uv", "query_vertex_colors", "capture_uv"])
+    {
+        "mesh_material"
+    } else if starts(&["object_", "collection_"]) || is(&["cube", "query_object_review"]) {
+        "mesh_object"
+    } else if starts(&["select"]) {
+        "mesh_select"
+    } else if starts(&["workflow_", "review_", "reference_", "import_"])
+        || is(&["undo", "redo", "transaction", "save", "load", "export", "fit_reference", "project_reference", "compare_reference", "move_in_reference", "query_reviews"])
+    {
+        "mesh_document"
+    } else if starts(&["inspect", "query_"]) || is(&["measure_clearance", "capture", "help"]) {
+        "mesh_query"
+    } else {
+        "mesh_edit"
+    }
+}
+
 /// A recorded state on show.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Replay {
@@ -702,19 +742,44 @@ impl MeshView {
             "mesh_command" => {
                 args.only("mesh_command", &["command"])?;
                 let command = args.0.get("command").ok_or("mesh_command needs command: one mesh-workbench command object, or a list of them")?;
-                if self.bridge.is_none() {
-                    self.bridge = Some(genos_meshbench::Bridge::open(&self.dir)?);
+                self.run(command)
+            }
+            "mesh_help" => {
+                args.only("mesh_help", &["topic", "all", "offset", "limit"])?;
+                // The same fields as mesh-workbench's help, with its name added.
+                let mut request = vec![("command".to_string(), text("help"))];
+                if let Value::Object(pairs) = args.0 {
+                    request.extend(pairs.iter().cloned());
                 }
-                let bridge = self.bridge.as_mut().ok_or("the mesh session did not open")?;
-                let reply = bridge.execute(command)?;
-                // The session wrote project.json: show it on the next frame.
-                if let Some(earlier) = Instant::now().checked_sub(FOLLOW_NOW) {
-                    self.looked = earlier;
+                self.run(&Value::Object(request))
+            }
+            family if FAMILIES.iter().any(|(tool, _)| *tool == family) => {
+                let command = args.0.get("command").and_then(Value::as_str).ok_or_else(|| {
+                    format!("{family} takes one mesh-workbench command object: {{\"command\": \"...\", ...}}")
+                })?;
+                let belongs = family_of(command);
+                if belongs != family {
+                    return Err(format!("{command} is a {belongs} command, not {family}"));
                 }
-                Ok(reply)
+                self.run(args.0)
             }
             other => Err(format!("unknown command {other}")),
         }
+    }
+
+    /// Run a mesh-workbench command, or a list, on the linked session. The
+    /// first call opens the session on the workspace.
+    fn run(&mut self, command: &Value) -> Result<Value, String> {
+        if self.bridge.is_none() {
+            self.bridge = Some(genos_meshbench::Bridge::open(&self.dir)?);
+        }
+        let bridge = self.bridge.as_mut().ok_or("the mesh session did not open")?;
+        let reply = bridge.execute(command)?;
+        // The session wrote project.json: show it on the next frame.
+        if let Some(earlier) = Instant::now().checked_sub(FOLLOW_NOW) {
+            self.looked = earlier;
+        }
+        Ok(reply)
     }
 
     fn view_value(&self) -> Value {
@@ -1061,6 +1126,35 @@ mod tests {
         let side = genos_mcp::json::parse(r#"{"look":"+x"}"#).expect("json");
         view.command("mesh_view", &side, &mut camera, 1.0).expect("look");
         assert!(camera.position.x > 2.4 && camera.pitch.abs() < 1.0e-6, "{:?}", camera.position);
+    }
+
+    #[test]
+    fn each_mesh_command_has_one_family_and_a_tool_refuses_another_family() {
+        use super::family_of;
+        for (command, family) in [
+            ("rig_set", "mesh_rig"),
+            ("skin_weights_set", "mesh_rig"),
+            ("animation_keys_edit", "mesh_animation"),
+            ("texture_layer_paint", "mesh_material"),
+            ("uv_project", "mesh_material"),
+            ("vertex_color_set", "mesh_material"),
+            ("object_create_box", "mesh_object"),
+            ("select_loop", "mesh_select"),
+            ("undo", "mesh_document"),
+            ("import_glb", "mesh_document"),
+            ("inspect_region", "mesh_query"),
+            ("query_mesh", "mesh_query"),
+            ("extrude", "mesh_edit"),
+            ("bevel_edges", "mesh_edit"),
+        ] {
+            assert_eq!(family_of(command), family, "{command}");
+        }
+        let mut view = view();
+        let mut camera = Camera::opening();
+        // The family check comes before the session opens: nothing is written.
+        let wrong = genos_mcp::json::parse(r#"{"command":"rig_set"}"#).expect("json");
+        let err = view.command("mesh_animation", &wrong, &mut camera, 1.0).expect_err("refused");
+        assert!(err.contains("mesh_rig"), "{err}");
     }
 
     #[test]
