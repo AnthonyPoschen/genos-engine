@@ -7,6 +7,11 @@ publish = false
 [lints]
 workspace = true
 
+# The frame loop both genos-lighting and genos-editor run.
+[lib]
+name = "genos_scene_program"
+path = "src/lib.rs"
+
 [[bin]]
 name = "genos-lighting"
 path = "src/main.rs"

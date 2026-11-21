@@ -16,7 +16,11 @@ stress:
 # directory that holds project.json (default: the sample in debug/scenes/mesh).
 WORKSPACE ?= debug/scenes/mesh/sample
 mesh:
-	cargo run --release -p genos-lighting -- --scene mesh --mesh-workspace $(abspath $(WORKSPACE))
+	cargo run --release -p genos-editor -- --scene mesh --mesh-workspace $(abspath $(WORKSPACE))
+
+# The editor: opens on the mesh scene and lists every scene. MCP port 8765.
+editor:
+	cargo run --release -p genos-editor
 
 # The single-scene stress program the regression scripts and tests run on.
 stress-solo:

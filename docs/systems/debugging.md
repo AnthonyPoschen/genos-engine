@@ -113,7 +113,9 @@ make lighting SCENE=sponza
 
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default
 `lighting-stress`), and `--gpu-times 30`. `make stress` opens the same program on
-the lighting stress scene. `make mesh` opens it on the `mesh` scene, a
+the lighting stress scene. `make editor` runs `genos-editor`, the same frame loop opened on the `mesh` scene
+with MCP port 8765; `genos-lighting` does not list mesh scenes. `make mesh` opens
+the editor on a
 mesh-workbench workspace ([mesh workbench](mesh-workbench.md)); `WORKSPACE=DIR`
 names another workspace. `stress` is the old name of that scene: it still opens
 it and logs a warning once. `make stress-solo` runs `genos-stress`, the

@@ -39,9 +39,10 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 
 ### B. The editor binary (decision 1)
 
-- [ ] `editor/` (package `genos-editor`) on the shared scaffolding. Move the frame loop pieces `debug/lighting` and the editor both need into a shared crate (`docs/architecture.md`: "When a second program needs the same loop, add a shared runtime crate").
-- [ ] Move the mesh viewer (`mesh_view.rs`, `mesh_world`, the pointer) from `debug/lighting` to the editor. `genos-lighting` keeps the lighting scenes.
-- [ ] `make editor`. The scene picker lists game scenes and mesh workspaces.
+- [x] `editor/` (package `genos-editor`, `make editor`). It runs the same frame loop as `genos-lighting`: that loop is now the library `genos_scene_program` in `debug/lighting`, and a `Program` value gives each binary its name, title, MCP port, opening scene and scene list.
+- [x] The editor opens on the mesh scene, lists every scene, and takes MCP port 8765. `genos-lighting` keeps port 8766 and does not list mesh scenes. `make mesh` runs the editor.
+- [ ] Move the library out of `debug/lighting` into its own crate (`crates/scene-program`), and the mesh viewer module with it into an editor-only module. Today the mesh code is compiled into both binaries and only listed by the editor.
+- [ ] The scene picker lists game scenes and mesh workspaces found on disk, not only the files in `debug/scenes`.
 - [ ] ADR note: this starts the editor program of ADR 0002 and ADR 0006, as a thin view over agent commands ([agent-driven editing](agent-driven-editing.md), ADR 0019).
 
 ### C. The MCP server (decision 2)

@@ -33,6 +33,7 @@ members = [
     "examples/stress",
     "debug/scene-lib",
     "debug/lighting",
+    "editor",
     "debug/particles",
     "debug/physics",
     "debug/ecs",

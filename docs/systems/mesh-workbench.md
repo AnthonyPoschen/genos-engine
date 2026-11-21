@@ -6,7 +6,7 @@ The scene program shows and edits the meshes that [mesh-workbench](https://githu
 
 ## Goal
 
-A mesh-workbench workspace opens as a scene in the scene program (`genos-lighting`). The picture follows the workspace as the agent edits it. The viewer gives the same experience as the mesh-workbench web viewer: orbit, pan and zoom, the render modes, the objects list, replay, and animation. The viewer also does what that web viewer does not: a person selects an object, faces, or vertices, and the agent can read that selection.
+A mesh-workbench workspace opens as a scene in the editor (`genos-editor`, `make editor` or `make mesh`). The editor runs the same frame loop as `genos-lighting` (the library `genos_scene_program`); it opens on the mesh scene, lists every scene, and serves MCP on port 8765. The picture follows the workspace as the agent edits it. The viewer gives the same experience as the mesh-workbench web viewer: orbit, pan and zoom, the render modes, the objects list, replay, and animation. The viewer also does what that web viewer does not: a person selects an object, faces, or vertices, and the agent can read that selection.
 
 ## What mesh-workbench is
 

@@ -262,6 +262,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-editor"
+version = "0.1.0"
+dependencies = [
+ "genos-lighting",
+]
+
+[[package]]
 name = "genos-fog-check"
 version = "0.1.0"
 dependencies = [
