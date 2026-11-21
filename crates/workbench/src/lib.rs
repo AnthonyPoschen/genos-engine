@@ -38,6 +38,10 @@ pub struct Part {
     /// The polygon edges, each once: the outline of every face, not the
     /// triangulation.
     pub edges: Vec<[[f32; 3]; 2]>,
+    /// The vertex colour of each position (linear RGB). Empty when no vertex
+    /// of the object is painted; an unpainted vertex of a painted object is
+    /// white.
+    pub colors: Vec<[f32; 3]>,
 }
 
 impl Part {
@@ -198,6 +202,7 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
     let mesh = root.get("mesh").ok_or("no mesh in the project")?;
     let vertices = id_map(mesh.get("vertices"), vec3)?;
     let faces = id_map(mesh.get("faces"), ids)?;
+    let painted = id_map(mesh.get("vertex_colors"), vec3)?;
     let flat: BTreeSet<u64> = mesh.get("flat_faces").map(ids).transpose()?.unwrap_or_default().into_iter().collect();
     let selection = mesh.get("selection").map(ids).transpose()?.unwrap_or_default();
     let mut owner: BTreeMap<u64, u64> = BTreeMap::new();
@@ -225,18 +230,7 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
             faces_at.entry(*vertex).or_default().push(face);
         }
     }
-    let mut min = [f64::INFINITY; 3];
-    let mut max = [f64::NEG_INFINITY; 3];
-    for point in vertices.values() {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(point[axis]);
-            max[axis] = max[axis].max(point[axis]);
-        }
-    }
-    if vertices.is_empty() {
-        min = [0.0; 3];
-        max = [0.0; 3];
-    }
+    let (min, max) = bounds(&vertices);
     let mut seen_edges: BTreeSet<(u64, u64)> = BTreeSet::new();
     for (&face, corners) in &faces {
         let Some(points) = corner_points(corners, &vertices) else {
@@ -273,6 +267,7 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
                 part.positions.push(narrow(points[corner]));
                 part.normals.push(narrow(normal));
                 part.vertex_ids.push(vertex);
+                part.colors.push(painted.get(&vertex).map_or([1.0; 3], |c| narrow(*c)));
             }
             part.face_ids.push(face);
         }
@@ -281,13 +276,38 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
         dir: PathBuf::new(),
         version,
         revision,
-        parts: parts.into_values().map(|(part, _)| part).filter(|part| part.triangles() > 0).collect(),
+        parts: parts
+            .into_values()
+            .map(|(mut part, _)| {
+                if !part.vertex_ids.iter().any(|vertex| painted.contains_key(vertex)) {
+                    part.colors.clear();
+                }
+                part
+            })
+            .filter(|part| part.triangles() > 0)
+            .collect(),
         vertices: vertices.len(),
         faces: faces.len(),
         selection,
         min: narrow(min),
         max: narrow(max),
     })
+}
+
+/// Lowest and highest corner of the vertices. Zero for an empty mesh.
+fn bounds(vertices: &BTreeMap<u64, [f64; 3]>) -> ([f64; 3], [f64; 3]) {
+    if vertices.is_empty() {
+        return ([0.0; 3], [0.0; 3]);
+    }
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for point in vertices.values() {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(point[axis]);
+            max[axis] = max[axis].max(point[axis]);
+        }
+    }
+    (min, max)
 }
 
 /// Triangles of one polygon, as indices into `points`. A convex polygon is a
@@ -401,6 +421,7 @@ fn empty_part(object: u64, name: String, origin: [f64; 3]) -> Part {
         vertex_ids: Vec::new(),
         face_ids: Vec::new(),
         edges: Vec::new(),
+        colors: Vec::new(),
     }
 }
 
@@ -499,6 +520,12 @@ mod tests {
         assert_eq!((part.object, part.name.as_str()), (5, "panel"));
         assert_eq!(part.face_ids, vec![7, 7]);
         assert_eq!(part.edges.len(), 4, "the outline, not the diagonal");
+        assert!(part.colors.is_empty(), "no vertex is painted");
+        let painted = parse_project(&PANEL.replace("\"selection\":[2]", "\"selection\":[2],\"vertex_colors\":{\"2\":[1,0,0]}")).expect("parse");
+        let colors = &painted.parts[0].colors;
+        assert_eq!(colors.len(), 6);
+        // Positions are vertices 1 2 3 1 3 4: only vertex 2 is red.
+        assert_eq!((colors[0], colors[1]), ([1.0, 1.0, 1.0], [1.0, 0.0, 0.0]));
         assert_eq!(part.vertex_ids, vec![1, 2, 3, 1, 3, 4]);
         // Counter-clockwise seen from +Z: the normal is +Z on every corner.
         assert!(part.normals.iter().all(|n| *n == [0.0, 0.0, 1.0]), "{:?}", part.normals);

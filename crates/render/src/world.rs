@@ -164,6 +164,9 @@ pub enum DrawKind {
         /// Texture coordinates, one per vertex. Empty means the vertex albedo.
         texcoords: Vec<[f32; 2]>,
         color: [f32; 3],
+        /// Albedo of each vertex, one per vertex. Empty means `color` on
+        /// every vertex. A textured surface ignores it.
+        colors: Vec<[f32; 3]>,
         pose: [f32; 16],
         /// Emitted light (linear). Only GI draws it.
         emission: [f32; 3],
@@ -634,6 +637,7 @@ mod tests {
                 normals: Vec::new(),
                 texcoords: Vec::new(),
                 color: [0.0, 1.0, 1.0],
+                colors: Vec::new(),
                 pose,
                 emission: [0.0; 3],
                 surface: None,

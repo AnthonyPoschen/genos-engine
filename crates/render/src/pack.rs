@@ -378,6 +378,8 @@ pub enum ShapeSource {
         positions: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
         uvs: Vec<[f32; 2]>,
+        /// Albedo of each vertex. Empty means white, tinted by the draw's colour.
+        colors: Vec<[f32; 3]>,
         /// 1 lights the face. Above 1.15 marks it two-sided in the G-buffer.
         shade: f32,
     },
@@ -404,10 +406,11 @@ pub(crate) fn build_shape(source: &ShapeSource) -> Vec<GpuVertex> {
             positions,
             normals,
             uvs,
+            colors,
             shade,
         } => {
             let pose = crate::world::identity_pose();
-            push_mesh(&mut verts, positions, normals, uvs, *shade, white, &pose);
+            push_mesh(&mut verts, positions, normals, uvs, *shade, white, colors, &pose);
         }
         ShapeSource::Baked(verts_in) => verts = verts_in.clone(),
     }
@@ -727,6 +730,7 @@ fn pack_draw(
             vertices,
             normals,
             texcoords,
+            colors,
             pose,
             emission,
             surface,
@@ -738,7 +742,9 @@ fn pack_draw(
                 .is_some_and(|s| s.two_sided)
                 .then_some(1.2)
                 .unwrap_or(1.0);
-            let key = shape_key_mesh(4, vertices, texcoords, shade);
+            let key = shape_key_mesh(4, vertices, texcoords, colors, shade);
+            // The shape's vertices carry the colours, so the draw does not tint them.
+            let color = if colors.is_empty() { color } else { [1.0; 3] };
             let (color_rect, normal_rect, cutoff, roughness, metallic, material_flags) = world
                 .surfaces
                 .get(surface.unwrap_or(usize::MAX))
@@ -768,6 +774,7 @@ fn pack_draw(
                     positions: vertices.clone(),
                     normals: normals.clone(),
                     uvs: texcoords.clone(),
+                    colors: colors.clone(),
                     shade,
                 },
             })
@@ -821,7 +828,7 @@ fn shape_key(tag: u64, values: &[f32]) -> u64 {
     hasher.finish()
 }
 
-fn shape_key_mesh(tag: u64, positions: &[[f32; 3]], uvs: &[[f32; 2]], shade: f32) -> u64 {
+fn shape_key_mesh(tag: u64, positions: &[[f32; 3]], uvs: &[[f32; 2]], colors: &[[f32; 3]], shade: f32) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -834,6 +841,11 @@ fn shape_key_mesh(tag: u64, positions: &[[f32; 3]], uvs: &[[f32; 2]], shade: f32
     }
     for uv in uvs {
         for value in uv {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    for color in colors {
+        for value in color {
             value.to_bits().hash(&mut hasher);
         }
     }
@@ -1295,6 +1307,7 @@ fn push_object(
             normals,
             texcoords,
             color,
+            colors,
             pose,
             surface,
             ..
@@ -1305,7 +1318,7 @@ fn push_object(
                 .is_some_and(|s| s.two_sided)
                 .then_some(1.2)
                 .unwrap_or(1.0);
-            push_mesh(out, vertices, normals, texcoords, shade, *color, pose);
+            push_mesh(out, vertices, normals, texcoords, shade, *color, colors, pose);
         }
         DrawKind::Particles {
             density,
@@ -1460,6 +1473,7 @@ fn push_mesh(
     uvs: &[[f32; 2]],
     shade: f32,
     color: [f32; 3],
+    colors: &[[f32; 3]],
     pose: &[f32; 16],
 ) {
     for (index, tri) in vertices.chunks(3).enumerate() {
@@ -1490,7 +1504,7 @@ fn push_mesh(
         for (pos, k) in [(a, 0), (b, 1), (c, 2)] {
             out.push(GpuVertex {
                 pos,
-                albedo: color,
+                albedo: colors.get(index * 3 + k).copied().unwrap_or(color),
                 normal: corner(k),
                 shade,
                 uv: uv(k),

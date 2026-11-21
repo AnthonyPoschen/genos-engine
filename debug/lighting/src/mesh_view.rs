@@ -192,7 +192,7 @@ pub struct Replay {
 }
 
 /// The shade modes, in the order the menu lists them.
-pub const SHADES: [&str; 3] = ["shaded", "object_ids", "wireframe"];
+pub const SHADES: [&str; 5] = ["shaded", "wireframe", "vertex_colors", "object_ids", "face_ids"];
 /// Half the width of a wireframe strip, as a share of the mesh size.
 const WIRE_WIDTH: f32 = 0.0025;
 pub const WIRE_COLOR: [f32; 3] = [0.04, 0.04, 0.05];
@@ -358,7 +358,7 @@ impl MeshView {
 
     /// For each object of the workspace, in order: whether the picture
     /// leaves it out, and its colour.
-    pub fn display(&self) -> Vec<(bool, [f32; 3])> {
+    pub fn display(&self) -> Vec<(bool, [f32; 3], Vec<[f32; 3]>)> {
         let Some(workspace) = &self.workspace else {
             return Vec::new();
         };
@@ -367,8 +367,14 @@ impl MeshView {
             .iter()
             .map(|part| {
                 let color = if self.shade == "object_ids" { id_color(part.object) } else { MESH_COLOR };
+                // One colour per vertex, or none for the object's one colour.
+                let colors = match self.shade.as_str() {
+                    "vertex_colors" => part.colors.clone(),
+                    "face_ids" => part.face_ids.iter().flat_map(|face| [id_color(*face); 3]).collect(),
+                    _ => Vec::new(),
+                };
                 // The edge strips of a hidden object are left out in `wire`.
-                (self.hidden.contains(&part.object), color)
+                (self.hidden.contains(&part.object), color, colors)
             })
             .collect()
     }
@@ -717,7 +723,7 @@ impl MeshView {
                 }
                 if let Some(shade) = args.str("shade")? {
                     if !SHADES.contains(&shade.as_str()) {
-                        return Err(format!("mesh_view shade is shaded, object_ids, or wireframe, not {shade}"));
+                        return Err(format!("mesh_view shade is {}, not {shade}", SHADES.join(", ")));
                     }
                     self.shade = shade;
                     self.display_stale = true;
@@ -1165,7 +1171,7 @@ mod tests {
         let mut view = view();
         let camera = Camera::opening();
         let none = genos_mcp::json::parse("{}").expect("json");
-        assert!(view.display().iter().all(|(hidden, color)| !hidden && *color == super::MESH_COLOR));
+        assert!(view.display().iter().all(|(hidden, color, colors)| !hidden && *color == super::MESH_COLOR && colors.is_empty()));
         let mut camera = camera;
         let solo = genos_mcp::json::parse(r#"{"solo":[2],"shade":"object_ids"}"#).expect("json");
         view.command("mesh_view", &solo, &mut camera, 1.0).expect("solo");
@@ -1174,7 +1180,14 @@ mod tests {
         assert_ne!(shown[0].1, shown[1].1, "two objects, two colours");
         let all = genos_mcp::json::parse(r#"{"show_all":true}"#).expect("json");
         view.command("mesh_view", &all, &mut camera, 1.0).expect("show all");
-        assert!(view.display().iter().all(|(hidden, _)| !hidden));
+        assert!(view.display().iter().all(|(hidden, _, _)| !hidden));
+        // Face IDs: a colour for every vertex, the same on a triangle's three.
+        let faces = genos_mcp::json::parse(r#"{"shade":"face_ids"}"#).expect("json");
+        view.command("mesh_view", &faces, &mut camera, 1.0).expect("face ids");
+        let cube = &view.display()[0].2;
+        assert_eq!(cube.len(), 36);
+        assert!(cube[0] == cube[1] && cube[1] == cube[2]);
+        assert_ne!(cube[0], cube[35], "the first and last faces differ");
         assert!(view.command("mesh_view", &none, &mut camera, 1.0).is_ok());
         // Wireframe: the cube has 12 edges and the bracket 18, two strips each.
         assert!(view.wire().0.is_empty());

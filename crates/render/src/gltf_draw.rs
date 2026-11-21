@@ -279,6 +279,7 @@ impl World {
                         normals,
                         texcoords: if has_uv { texcoords } else { Vec::new() },
                         color: draw_color,
+                        colors: Vec::new(),
                         pose,
                         emission: glow,
                         surface,

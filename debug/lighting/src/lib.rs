@@ -1201,6 +1201,7 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
                 normals: part.normals,
                 texcoords: Vec::new(),
                 color: mesh_view::MESH_COLOR,
+                colors: Vec::new(),
                 pose,
                 emission: [0.0; 3],
                 surface: None,
@@ -1366,10 +1367,11 @@ impl App {
             .objects
             .iter_mut()
             .filter(|object| matches!(object.kind, DrawKind::Mesh { .. }));
-        for (object, (hidden, shade)) in meshes.zip(display) {
+        for (object, (hidden, shade, per_vertex)) in meshes.zip(display) {
             object.hidden = hidden;
-            if let DrawKind::Mesh { color, .. } = &mut object.kind {
+            if let DrawKind::Mesh { color, colors, .. } = &mut object.kind {
                 *color = shade;
+                *colors = per_vertex;
             }
         }
         let mut pose = identity_pose();
@@ -1406,6 +1408,7 @@ impl App {
                     normals,
                     texcoords: Vec::new(),
                     color,
+                    colors: Vec::new(),
                     pose,
                     emission: [0.0; 3],
                     surface: None,
