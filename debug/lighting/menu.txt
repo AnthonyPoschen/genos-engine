@@ -19,6 +19,10 @@ Scene | - | - | open | mesh_shade
 Scene | - | - | open | mesh_solo
 Scene | - | - | open | mesh_turntable
 Scene | - | - | open | mesh_replay
+Scene | - | - | open | mesh_clip
+Scene | - | - | open | mesh_time
+Scene | - | - | open | mesh_bones
+Scene | - | - | open | mesh_surfaces
 Pipeline | - | - | open | lighting_direct
 Pipeline | - | - | open | lighting_shadows
 Pipeline | - | - | open | lighting_gi

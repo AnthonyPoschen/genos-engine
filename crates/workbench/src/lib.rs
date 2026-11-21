@@ -38,6 +38,8 @@ pub struct Part {
     /// The polygon edges, each once: the outline of every face, not the
     /// triangulation.
     pub edges: Vec<[[f32; 3]; 2]>,
+    /// The two mesh-workbench vertex IDs of each edge, in the order of `edges`.
+    pub edge_ids: Vec<[u64; 2]>,
     /// The vertex colour of each position (linear RGB). Empty when no vertex
     /// of the object is painted; an unpainted vertex of a painted object is
     /// white.
@@ -49,6 +51,21 @@ impl Part {
     pub fn triangles(&self) -> usize {
         self.face_ids.len()
     }
+}
+
+/// One bone of the rig, at rest.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bone {
+    pub name: String,
+    pub parent: Option<String>,
+    pub position: [f32; 3],
+}
+
+/// One animation clip: its name and its length in seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Clip {
+    pub name: String,
+    pub duration: f32,
 }
 
 /// A workspace's mesh, ready to draw.
@@ -64,6 +81,10 @@ pub struct Workspace {
     pub faces: usize,
     /// The vertex IDs mesh-workbench holds as its own selection.
     pub selection: Vec<u64>,
+    /// The rig's bones at rest. Empty when the mesh has no rig.
+    pub bones: Vec<Bone>,
+    /// The rig's animation clips, by name.
+    pub clips: Vec<Clip>,
     /// Lowest and highest corner of every vertex. Zero when the mesh is empty.
     pub min: [f32; 3],
     pub max: [f32; 3],
@@ -87,6 +108,8 @@ impl Workspace {
             vertices: 0,
             faces: 0,
             selection: Vec::new(),
+            bones: Vec::new(),
+            clips: Vec::new(),
             min: [0.0; 3],
             max: [0.0; 3],
         }
@@ -205,20 +228,7 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
     let painted = id_map(mesh.get("vertex_colors"), vec3)?;
     let flat: BTreeSet<u64> = mesh.get("flat_faces").map(ids).transpose()?.unwrap_or_default().into_iter().collect();
     let selection = mesh.get("selection").map(ids).transpose()?.unwrap_or_default();
-    let mut owner: BTreeMap<u64, u64> = BTreeMap::new();
-    let mut parts: BTreeMap<u64, (Part, Option<f64>)> = BTreeMap::new();
-    if let Some(Value::Object(objects)) = mesh.get("objects") {
-        for (key, object) in objects {
-            let id: u64 = key.parse().map_err(|_| format!("object id {key}"))?;
-            for vertex in object.get("vertices").map(ids).transpose()?.unwrap_or_default() {
-                owner.insert(vertex, id);
-            }
-            let origin = object.get("origin").map(vec3).transpose()?.unwrap_or([0.0; 3]);
-            let smooth = object.get("smooth_angle").and_then(Value::as_f64);
-            let name = object.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-            parts.insert(id, (empty_part(id, name, origin), smooth));
-        }
-    }
+    let (owner, mut parts) = read_objects(mesh)?;
     let mut face_normal: BTreeMap<u64, [f64; 3]> = BTreeMap::new();
     let mut faces_at: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for (&face, corners) in &faces {
@@ -244,6 +254,7 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
             let b = corners[(i + 1) % corners.len()];
             if seen_edges.insert((a.min(b), a.max(b))) {
                 part.edges.push([narrow(points[i]), narrow(points[(i + 1) % corners.len()])]);
+                part.edge_ids.push([a, b]);
             }
         }
         let flat_normal = face_normal.get(&face).copied().unwrap_or([0.0, 1.0, 0.0]);
@@ -289,9 +300,63 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
         vertices: vertices.len(),
         faces: faces.len(),
         selection,
+        bones: rig_bones(mesh),
+        clips: rig_clips(mesh),
         min: narrow(min),
         max: narrow(max),
     })
+}
+
+/// The object that owns each vertex, and an empty part with its smooth angle
+/// for each object.
+type Objects = (BTreeMap<u64, u64>, BTreeMap<u64, (Part, Option<f64>)>);
+
+fn read_objects(mesh: &Value) -> Result<Objects, String> {
+    let mut owner = BTreeMap::new();
+    let mut parts = BTreeMap::new();
+    if let Some(Value::Object(objects)) = mesh.get("objects") {
+        for (key, object) in objects {
+            let id: u64 = key.parse().map_err(|_| format!("object id {key}"))?;
+            for vertex in object.get("vertices").map(ids).transpose()?.unwrap_or_default() {
+                owner.insert(vertex, id);
+            }
+            let origin = object.get("origin").map(vec3).transpose()?.unwrap_or([0.0; 3]);
+            let smooth = object.get("smooth_angle").and_then(Value::as_f64);
+            let name = object.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            parts.insert(id, (empty_part(id, name, origin), smooth));
+        }
+    }
+    Ok((owner, parts))
+}
+
+fn rig_bones(mesh: &Value) -> Vec<Bone> {
+    let Some(bones) = mesh.get("rig").and_then(|rig| rig.get("bones")).and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    bones
+        .iter()
+        .filter_map(|bone| {
+            Some(Bone {
+                name: bone.get("name")?.as_str()?.to_string(),
+                parent: bone.get("parent").and_then(Value::as_str).map(str::to_string),
+                position: narrow(vec3(bone.get("position")?).ok()?),
+            })
+        })
+        .collect()
+}
+
+#[expect(clippy::as_conversions, clippy::cast_possible_truncation, reason = "a clip length in seconds")]
+fn rig_clips(mesh: &Value) -> Vec<Clip> {
+    let Some(Value::Object(clips)) = mesh.get("rig").and_then(|rig| rig.get("clips")) else {
+        return Vec::new();
+    };
+    clips
+        .iter()
+        .map(|(name, clip)| Clip {
+            name: name.clone(),
+            duration: clip.get("duration").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+        })
+        .collect()
 }
 
 /// Lowest and highest corner of the vertices. Zero for an empty mesh.
@@ -421,6 +486,7 @@ fn empty_part(object: u64, name: String, origin: [f64; 3]) -> Part {
         vertex_ids: Vec::new(),
         face_ids: Vec::new(),
         edges: Vec::new(),
+        edge_ids: Vec::new(),
         colors: Vec::new(),
     }
 }
@@ -536,6 +602,20 @@ mod tests {
         let dir = std::env::temp_dir().join("genos-workbench-no-such-workspace");
         let workspace = super::load_workspace(&dir).expect("empty");
         assert_eq!((workspace.parts.len(), workspace.vertices, workspace.revision), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_rig_gives_its_bones_and_clips() {
+        let rigged = PANEL.replace(
+            "\"selection\":[2]",
+            "\"selection\":[2],\"rig\":{\"bones\":[{\"name\":\"root\",\"parent\":null,\"position\":[0,0,0]},{\"name\":\"tip\",\"parent\":\"root\",\"position\":[0,1,0]}],\"clips\":{\"Lean\":{\"duration\":2.0,\"looping\":false,\"tracks\":{}}},\"weights\":{}}",
+        );
+        let workspace = parse_project(&rigged).expect("parse");
+        assert_eq!(workspace.bones.len(), 2);
+        assert_eq!(workspace.bones[1].parent.as_deref(), Some("root"));
+        assert_eq!(workspace.bones[1].position, [0.0, 1.0, 0.0]);
+        assert_eq!((workspace.clips[0].name.as_str(), workspace.clips[0].duration), ("Lean", 2.0));
+        assert!(parse_project(PANEL).expect("parse").bones.is_empty());
     }
 
     #[test]

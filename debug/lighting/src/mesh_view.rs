@@ -130,6 +130,16 @@ pub struct MeshView {
     pub shade: String,
     /// The camera turns about the mesh on its own, as on a turntable.
     pub turntable: bool,
+    /// The clip and the time, seconds, the mesh is posed at. `None` is rest.
+    pub pose: Option<(String, f32)>,
+    /// The posed position of each vertex, and of each bone's joint by name.
+    posed: Option<Posed>,
+    /// The pose has to be sampled again: the mesh was reloaded.
+    repose: bool,
+    /// Draw the bones over the mesh.
+    pub bones: bool,
+    /// Draw the mesh's surfaces. Off leaves the wireframe and the bones.
+    pub surfaces: bool,
     /// The recorded state the picture shows in place of the live mesh.
     pub replay: Option<Replay>,
     /// The picture has to be rebuilt from [`MeshView::load`].
@@ -178,6 +188,53 @@ pub fn family_of(command: &str) -> &'static str {
         "mesh_query"
     } else {
         "mesh_edit"
+    }
+}
+
+/// A sampled pose: where each vertex and each bone's joint is.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Posed {
+    vertices: std::collections::BTreeMap<u64, [f32; 3]>,
+    joints: std::collections::BTreeMap<String, [f32; 3]>,
+}
+
+/// Vertices or bones asked for in one `animation_sample` page: the most
+/// mesh-workbench gives.
+const POSE_PAGE: u64 = 256;
+/// Half the width of a bone strip, as a share of the mesh size.
+const BONE_WIDTH: f32 = 0.006;
+pub const BONE_COLOR: [f32; 3] = [0.1, 0.85, 0.35];
+
+#[expect(clippy::cast_possible_truncation, reason = "the renderer draws f32 positions")]
+fn point(value: &Value) -> Option<[f32; 3]> {
+    let items = value.as_array()?;
+    if items.len() != 3 {
+        return None;
+    }
+    Some([items[0].as_f64()? as f32, items[1].as_f64()? as f32, items[2].as_f64()? as f32])
+}
+
+/// Two crossed strips from `from` to `to`, `half` wide each side, seen from
+/// either side. Appends positions and normals, three per triangle.
+fn strip(from: [f32; 3], to: [f32; 3], half: f32, positions: &mut Vec<[f32; 3]>, normals: &mut Vec<[f32; 3]>) {
+    let along = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let helper = if along[1].abs() > along[0].abs().max(along[2].abs()) { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+    let first = normalise(cross(along, helper));
+    let second = normalise(cross(along, first));
+    for side in [first, second] {
+        let off = [side[0] * half, side[1] * half, side[2] * half];
+        let quad = [
+            [from[0] - off[0], from[1] - off[1], from[2] - off[2]],
+            [from[0] + off[0], from[1] + off[1], from[2] + off[2]],
+            [to[0] + off[0], to[1] + off[1], to[2] + off[2]],
+            [to[0] - off[0], to[1] - off[1], to[2] - off[2]],
+        ];
+        let normal = normalise(cross(along, side));
+        // Both windings: a strip is seen from either side.
+        for corner in [0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2] {
+            positions.push(quad[corner]);
+            normals.push(normal);
+        }
     }
 }
 
@@ -255,11 +312,98 @@ impl MeshView {
             hidden: BTreeSet::new(),
             shade: "shaded".into(),
             turntable: false,
+            pose: None,
+            posed: None,
+            repose: false,
+            bones: false,
+            surfaces: true,
             replay: None,
             rebuild: false,
             display_stale: true,
             bridge: None,
         }
+    }
+
+    /// Pose the mesh at `time` seconds of `clip`, or at rest with `None`.
+    /// The posed vertices and joints come from mesh-workbench's
+    /// `animation_sample`, so this opens the session, and each call is one
+    /// recorded command.
+    pub fn set_pose(&mut self, pose: Option<(String, f32)>) -> Result<(), String> {
+        self.display_stale = true;
+        self.overlay_stale = true;
+        let Some((clip, time)) = pose else {
+            self.pose = None;
+            self.posed = None;
+            return Ok(());
+        };
+        let mut posed = Posed::default();
+        for kind in ["vertices", "bones"] {
+            let mut offset = 0u64;
+            loop {
+                let request = obj(vec![
+                    ("command", text("animation_sample")),
+                    ("clip", text(clip.clone())),
+                    ("time", num(f64::from(time))),
+                    ("kind", text(kind)),
+                    ("offset", id(offset)),
+                    ("limit", id(POSE_PAGE)),
+                ]);
+                let reply = self.run(&request)?;
+                if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+                    let why = reply.get("error").and_then(Value::as_str).unwrap_or("animation_sample was refused");
+                    return Err(why.to_string());
+                }
+                let result = reply.get("result").ok_or("animation_sample gave no result")?;
+                for item in result.get("items").and_then(Value::as_array).unwrap_or(&[]) {
+                    let Some(position) = item.get("position").and_then(point) else {
+                        continue;
+                    };
+                    if let Some(vertex) = item.get("id").and_then(Value::as_u64) {
+                        posed.vertices.insert(vertex, position);
+                    } else if let Some(name) = item.get("name").and_then(Value::as_str) {
+                        posed.joints.insert(name.to_string(), position);
+                    }
+                }
+                match result.get("next_offset").and_then(Value::as_u64) {
+                    Some(next) if next > offset => offset = next,
+                    _ => break,
+                }
+            }
+        }
+        self.pose = Some((clip, time));
+        self.posed = Some(posed);
+        Ok(())
+    }
+
+    /// Bones as thin strips from each joint to its parent's, posed when a
+    /// pose is set. Empty when bones are off or the mesh has no rig.
+    pub fn bone_strips(&self) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+        let mut positions = Vec::new();
+        let mut normals = Vec::new();
+        let Some(workspace) = &self.workspace else {
+            return (positions, normals);
+        };
+        if !self.bones {
+            return (positions, normals);
+        }
+        let joint = |name: &str| {
+            self.posed
+                .as_ref()
+                .and_then(|posed| posed.joints.get(name).copied())
+                .or_else(|| workspace.bones.iter().find(|bone| bone.name == name).map(|bone| bone.position))
+        };
+        let size = (0..3).map(|a| workspace.max[a] - workspace.min[a]).fold(0.0f32, f32::max);
+        let half = (size * BONE_WIDTH).max(OVERLAY_OFFSET);
+        for bone in &workspace.bones {
+            let Some(at) = joint(&bone.name) else {
+                continue;
+            };
+            octahedron(at, half * 2.0, &mut positions, &mut normals);
+            if let Some(parent) = bone.parent.as_deref().and_then(joint) {
+                strip(parent, at, half, &mut positions, &mut normals);
+            }
+        }
+        (positions, normals)
     }
 
     /// Polygon edges as thin crossed strips, for the wireframe mode. Empty in
@@ -279,26 +423,12 @@ impl MeshView {
             if self.hidden.contains(&part.object) {
                 continue;
             }
-            for [a, b] in &part.edges {
-                let d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-                let helper = if d[1].abs() > d[0].abs().max(d[2].abs()) { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
-                let u = normalise(cross(d, helper));
-                let v = normalise(cross(d, u));
-                for side in [u, v] {
-                    let off = [side[0] * half, side[1] * half, side[2] * half];
-                    let quad = [
-                        [a[0] - off[0], a[1] - off[1], a[2] - off[2]],
-                        [a[0] + off[0], a[1] + off[1], a[2] + off[2]],
-                        [b[0] + off[0], b[1] + off[1], b[2] + off[2]],
-                        [b[0] - off[0], b[1] - off[1], b[2] - off[2]],
-                    ];
-                    let n = normalise(cross(d, side));
-                    // Both windings: a strip is seen from either side.
-                    for corner in [0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2] {
-                        positions.push(quad[corner]);
-                        normals.push(n);
-                    }
-                }
+            // An edge follows the pose of its two vertices.
+            let at = |vertex: u64, rest: [f32; 3]| {
+                self.posed.as_ref().and_then(|posed| posed.vertices.get(&vertex).copied()).unwrap_or(rest)
+            };
+            for ([a, b], [va, vb]) in part.edges.iter().zip(&part.edge_ids) {
+                strip(at(*va, *a), at(*vb, *b), half, &mut positions, &mut normals);
             }
         }
         (positions, normals)
@@ -358,6 +488,28 @@ impl MeshView {
 
     /// For each object of the workspace, in order: whether the picture
     /// leaves it out, and its colour.
+    /// The positions each object is drawn at, in order: posed when a pose is
+    /// set, else `None` for the rest positions the picture already has.
+    pub fn posed_positions(&self) -> Vec<Option<Vec<[f32; 3]>>> {
+        let Some(workspace) = &self.workspace else {
+            return Vec::new();
+        };
+        workspace
+            .parts
+            .iter()
+            .map(|part| {
+                let posed = self.posed.as_ref()?;
+                Some(
+                    part.vertex_ids
+                        .iter()
+                        .zip(&part.positions)
+                        .map(|(vertex, rest)| posed.vertices.get(vertex).copied().unwrap_or(*rest))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     pub fn display(&self) -> Vec<(bool, [f32; 3], Vec<[f32; 3]>)> {
         let Some(workspace) = &self.workspace else {
             return Vec::new();
@@ -374,7 +526,7 @@ impl MeshView {
                     _ => Vec::new(),
                 };
                 // The edge strips of a hidden object are left out in `wire`.
-                (self.hidden.contains(&part.object), color, colors)
+                (!self.surfaces || self.hidden.contains(&part.object), color, colors)
             })
             .collect()
     }
@@ -531,6 +683,21 @@ impl MeshView {
         }
         self.overlay_stale = true;
         self.display_stale = true;
+        // The mesh changed under the pose: sample it again.
+        self.posed = None;
+        self.repose = self.pose.is_some();
+    }
+
+    /// Sample the pose again after a reload. A clip the edit removed leaves
+    /// the mesh at rest.
+    pub fn repose(&mut self) {
+        if std::mem::take(&mut self.repose) {
+            let pose = self.pose.clone();
+            if self.set_pose(pose).is_err() {
+                self.pose = None;
+                self.posed = None;
+            }
+        }
     }
 
     /// Metres the mesh is lifted so its lowest point stands on the ground.
@@ -667,7 +834,26 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable"])?;
+                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces"])?;
+                if let Some(on) = args.bool("surfaces")? {
+                    self.surfaces = on;
+                    self.display_stale = true;
+                }
+                if let Some(on) = args.bool("bones")? {
+                    self.bones = on;
+                    self.overlay_stale = true;
+                }
+                match args.0.get("pose") {
+                    Some(Value::String(rest)) if rest == "rest" => self.set_pose(None)?,
+                    Some(value @ Value::Object(_)) => {
+                        let clip = value.get("clip").and_then(Value::as_str).ok_or("pose needs clip: a clip name")?.to_string();
+                        #[expect(clippy::cast_possible_truncation, reason = "a time in seconds")]
+                        let time = value.get("time").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                        self.set_pose(Some((clip, time)))?;
+                    }
+                    Some(_) => return Err("pose is \"rest\" or {clip, time}".into()),
+                    None => {}
+                }
                 if let Some(on) = args.bool("turntable")? {
                     self.turntable = on;
                 }
@@ -869,6 +1055,25 @@ impl MeshView {
             ("pick", text(self.pick_mode.clone())),
             ("shade", text(self.shade.clone())),
             ("turntable", Value::Bool(self.turntable)),
+            ("bones", Value::Bool(self.bones)),
+            ("surfaces", Value::Bool(self.surfaces)),
+            (
+                "pose",
+                self.pose.as_ref().map_or(Value::Null, |(clip, time)| {
+                    obj(vec![("clip", text(clip.clone())), ("time", num(f64::from(*time)))])
+                }),
+            ),
+            (
+                "clips",
+                list(
+                    self.workspace
+                        .iter()
+                        .flat_map(|w| &w.clips)
+                        .map(|clip| obj(vec![("name", text(clip.name.clone())), ("duration", num(f64::from(clip.duration)))]))
+                        .collect(),
+                ),
+            ),
+            ("rig_bones", num(self.workspace.as_ref().map_or(0, |w| w.bones.len()) as f64)),
             (
                 "replay",
                 self.replay.as_ref().map_or(Value::Null, |r| {

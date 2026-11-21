@@ -51,6 +51,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Editor state over MCP: `mesh_view` (the open workspace, revision, objects, display, replay) and `mesh_selection` (selection, note, camera).
 - [ ] A JSON schema per mesh command. mesh-workbench has no machine-readable command list (its help is prose), so the family tools take a free-form object. See "For Nathan".
 - [ ] Group the whole catalogue into sections (`lighting`, `scene`, `editor`, `mesh`) with the lighting commands under the lighting section. Old names stay as deprecated aliases that log a warning for one release (the public-names rule in `AGENTS.md`). Today only the mesh tools say their section, in their descriptions.
+- [x] Bones, skin weights and animation checked through `mesh_rig` and `mesh_animation`: a two-bone rig, four weighted vertices, a clip, and a sampled pose that moved those vertices 0.6 m.
 - [ ] Recent edits in the editor state, and a context packet for each request: camera pose, a screenshot, the selection, the visible objects.
 
 ### D. Viewer parity with the mesh-workbench web viewer (decision 5)
@@ -69,7 +70,9 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Replay: show the state after a command (`mesh_view replay`).
 - [x] Replay steps and scrubber: `replay: "next"`, `"previous"`, `"live"`, and the menu's "Replay" slider (0 is the session start, the last step is live).
 - [ ] Replay panel: session picker, play, command filter, the event's input and reply.
-- [ ] Animation: clip picker, play and scrub, bones, hierarchy and joint overlays, mesh toggle.
+- [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
+- [ ] Animation play button. Each pose is one recorded `animation_sample` command, so a 30 Hz player would fill the session's recordings; see "For Nathan".
+- [ ] Posed normals (the pose keeps the rest normals), and picking and the selection highlight on the posed mesh (they use the rest positions).
 - [ ] Workspace picker; connection and revision readout; statistics footer.
 
 ### E. Beyond the web viewer
@@ -88,6 +91,8 @@ Changes we would like in mesh-workbench. Add to this list as the bridge meets th
 - A user selection separate from the tool selection: faces and objects as well as vertices, not recorded as an undo step, with the viewer's camera.
 - The workflow gates (`export` refused until requirements are met) switchable off for an editor-driven session.
 - The crate, the repository and the docs under one name (`gpt-mesh`, `mesh-workbench`).
+- A read path that is not recorded as a session event (or a flag to skip recording), for queries a viewer repeats: `animation_sample` for playback, `query_rig`, `inspect`.
+- A page limit above 256 for `animation_sample` and `query_mesh`, or a whole-mesh pose in one reply.
 - A machine-readable command list: each command's name, family, parameters and types, so the engine can publish a schema per tool.
 - A reference row for each of the roughly 40 commands that are in the code and not in `docs/command-reference.md`.
 

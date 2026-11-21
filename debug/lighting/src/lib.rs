@@ -1349,14 +1349,25 @@ impl App {
         let Some(view) = &mut self.mesh else {
             return;
         };
+        view.repose();
         if !view.overlay_stale && !view.display_stale {
             return;
         }
         view.overlay_stale = false;
         view.display_stale = false;
         let display = view.display();
+        let posed = view.posed_positions();
         let lift = view.lift();
-        let extras = [(view.wire(), mesh_view::WIRE_COLOR), (view.overlay(), mesh_view::OVERLAY_COLOR)];
+        let extras = [
+            (view.wire(), mesh_view::WIRE_COLOR),
+            (view.bone_strips(), mesh_view::BONE_COLOR),
+            (view.overlay(), mesh_view::OVERLAY_COLOR),
+        ];
+        let rest: Vec<Vec<[f32; 3]>> = view
+            .workspace
+            .iter()
+            .flat_map(|w| w.parts.iter().map(|p| p.positions.clone()))
+            .collect();
         let Show::Still(world) = &mut self.show else {
             return;
         };
@@ -1367,11 +1378,17 @@ impl App {
             .objects
             .iter_mut()
             .filter(|object| matches!(object.kind, DrawKind::Mesh { .. }));
-        for (object, (hidden, shade, per_vertex)) in meshes.zip(display) {
+        for (index, (object, (hidden, shade, per_vertex))) in meshes.zip(display).enumerate() {
             object.hidden = hidden;
-            if let DrawKind::Mesh { color, colors, .. } = &mut object.kind {
+            if let DrawKind::Mesh { color, colors, vertices, .. } = &mut object.kind {
                 *color = shade;
                 *colors = per_vertex;
+                // The pose, or back to the rest positions.
+                match (posed.get(index).cloned().flatten(), rest.get(index)) {
+                    (Some(at), _) => *vertices = at,
+                    (None, Some(at)) if at.len() == vertices.len() => vertices.clone_from(at),
+                    _ => {}
+                }
             }
         }
         let mut pose = identity_pose();
@@ -1570,6 +1587,59 @@ impl Host for App {
                         text: choices[solo].clone(),
                         choices,
                     });
+                    let clips: Vec<&genos_workbench::Clip> = view.workspace.iter().flat_map(|w| &w.clips).collect();
+                    if !clips.is_empty() {
+                        let at = view
+                            .pose
+                            .as_ref()
+                            .and_then(|(name, _)| clips.iter().position(|clip| clip.name == *name))
+                            .map_or(0, |i| i + 1);
+                        let mut choices = vec!["rest".to_string()];
+                        choices.extend(clips.iter().map(|clip| clip.name.clone()));
+                        knobs.push(Knob {
+                            name: "mesh_clip".into(),
+                            label: "Clip".into(),
+                            value: at as f64,
+                            min: 0.0,
+                            max: clips.len() as f64,
+                            step: 1.0,
+                            text: choices[at].clone(),
+                            choices,
+                        });
+                        if let Some((name, time)) = &view.pose {
+                            let length = clips.iter().find(|clip| clip.name == *name).map_or(1.0, |clip| clip.duration);
+                            knobs.push(Knob {
+                                name: "mesh_time".into(),
+                                label: "Time".into(),
+                                value: f64::from(*time),
+                                min: 0.0,
+                                max: f64::from(length.max(0.01)),
+                                step: f64::from(length.max(0.01)) / 100.0,
+                                choices: Vec::new(),
+                                text: format!("{time:.2} s"),
+                            });
+                        }
+                        knobs.push(Knob {
+                            name: "mesh_surfaces".into(),
+                            label: "Mesh surfaces".into(),
+                            value: f64::from(u8::from(view.surfaces)),
+                            min: 0.0,
+                            max: 1.0,
+                            step: 1.0,
+                            choices: vec!["off".into(), "on".into()],
+                            text: if view.surfaces { "on".into() } else { "off".into() },
+                        });
+                        knobs.push(Knob {
+                            name: "mesh_bones".into(),
+                            label: "Bones".into(),
+                            value: f64::from(u8::from(view.bones)),
+                            min: 0.0,
+                            max: 1.0,
+                            step: 1.0,
+                            choices: vec!["off".into(), "on".into()],
+                            text: if view.bones { "on".into() } else { "off".into() },
+                        });
+                    }
                     knobs.push(Knob {
                         name: "mesh_turntable".into(),
                         label: "Turntable".into(),
@@ -1615,6 +1685,24 @@ impl Host for App {
     }
 
     fn set_knob(&mut self, name: &str, value: f64) -> Result<(), String> {
+        if name == "mesh_clip" || name == "mesh_time" || name == "mesh_bones" || name == "mesh_surfaces" {
+            let view = self.mesh.as_mut().ok_or("the animation knobs need a mesh scene")?;
+            if name == "mesh_surfaces" {
+                view.surfaces = value >= 0.5;
+                view.display_stale = true;
+            } else if name == "mesh_bones" {
+                view.bones = value >= 0.5;
+                view.overlay_stale = true;
+            } else if name == "mesh_clip" {
+                let clips: Vec<String> = view.workspace.iter().flat_map(|w| w.clips.iter().map(|c| c.name.clone())).collect();
+                let pick = (value.round().max(0.0) as usize).checked_sub(1).and_then(|i| clips.get(i).cloned());
+                view.set_pose(pick.map(|clip| (clip, 0.0)))?;
+            } else if let Some((clip, _)) = view.pose.clone() {
+                view.set_pose(Some((clip, value.max(0.0) as f32)))?;
+            }
+            self.refresh_mesh_overlay();
+            return Ok(());
+        }
         if name == "mesh_turntable" {
             let view = self.mesh.as_mut().ok_or("mesh_turntable needs a mesh scene")?;
             view.turntable = value >= 0.5;
