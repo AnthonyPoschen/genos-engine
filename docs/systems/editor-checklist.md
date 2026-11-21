@@ -63,12 +63,13 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Auto-rotate turntable (`mesh_view turntable`, the menu's "Turntable").
 - [x] Shaded, wireframe, object IDs.
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).
-- [ ] Textured lit (material) and the UV checker. `genos-workbench` reads the textures (RGBA from `rgba_base64`), each face's texture, and each corner's UV with V turned to the image's top row. Drawing them is blocked on the engine: built as a hand-made material scene through `World::add_gltf`, the object reaches the atlas correctly on the CPU (128 by 128 rect, the draw carries its UVs) and draws black, and Sponza draws with flat colours and no textures in this program. Find why the colour atlas is not sampled before adding the modes back.
+- [ ] Textured lit (material) and the UV checker. `genos-workbench` reads the textures (RGBA from `rgba_base64`), each face's texture, and each corner's UV with V turned to the image's top row. Drawing them is blocked on the engine: built as a hand-made material scene through `World::add_gltf`, the object reaches the atlas correctly on the CPU (128 by 128 rect, the draw carries its UVs) and draws black, and Sponza draws with flat colours and no textures in this program. What is known: `gbuffer.frag` takes the textured branch when the vertex has a UV and the surface has an atlas rect, and reads the atlas with `texelFetch` at the streamer's resident mip (`atlas_mode.color_lod`, `material_atlas.glsl`). The atlas key is a hash of its content (`MaterialAtlas::rehash`), so a world built at run time does reach `sync_materials`. `get_material_stats` reported 4 pages committed and no holes while the object drew black. Next: check which mip `atlas_lod` names for an atlas bound after start-up and whether that mip of the device image was written.
 - [ ] Unlit vertex colour.
 - [x] Face IDs (`shade: face_ids`).
 - [x] Normals, depth and base colour: the engine's `view` modes `normal`, `depth` and `albedo`. They showed nothing in the scene program until the HDR compose stored the view's colour in the scene image the display pass draws.
 - [x] Collection IDs (`shade: collection_ids`).
-- [ ] Debug views: silhouette, face orientation.
+- [x] Silhouette (`shade: silhouette`): the mesh in black.
+- [ ] Face orientation. Back faces are culled, so a face wound the wrong way is a hole, not a red face; it needs a two-sided draw.
 - [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
 - [x] Grid on the ground (`mesh_view grid`, the menu's "Grid"): a line every power of ten of metres that fits the mesh.
 - [ ] Contact shadow (the mesh casts no shadow). Bloom and auto exposure soften the picture and could be off for a mesh scene.

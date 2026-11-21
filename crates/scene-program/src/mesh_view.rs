@@ -338,7 +338,8 @@ pub struct Replay {
 }
 
 /// The shade modes, in the order the menu lists them.
-pub const SHADES: [&str; 6] = ["shaded", "wireframe", "vertex_colors", "object_ids", "face_ids", "collection_ids"];
+pub const SHADES: [&str; 7] =
+    ["shaded", "wireframe", "vertex_colors", "object_ids", "face_ids", "collection_ids", "silhouette"];
 /// Half the width of a wireframe strip, as a share of the mesh size.
 const WIRE_WIDTH: f32 = 0.0025;
 pub const WIRE_COLOR: [f32; 3] = [0.04, 0.04, 0.05];
@@ -769,6 +770,8 @@ impl MeshView {
             .map(|part| {
                 let color = match self.shade.as_str() {
                     "object_ids" => id_color(part.object),
+                    // Black whatever the light: the outline against the ground and the sky.
+                    "silhouette" => [0.0; 3],
                     // The first collection that holds the object; none is grey.
                     "collection_ids" => workspace
                         .collections
