@@ -1738,6 +1738,13 @@ impl Tools {
                     ("camera", camera_value(ctx.camera)),
                 ]))
             }
+            "mesh_view" | "mesh_selection" | "mesh_pick" | "mesh_command" => {
+                let aspect = ctx.renderer.width() as f32 / ctx.renderer.height().max(1) as f32;
+                match ctx.host.scene_command(name, args.0, ctx.camera, aspect) {
+                    Some(result) => reply(result?),
+                    None => Err(format!("{name} needs a mesh scene; load one with load_scene")),
+                }
+            }
             _ => Err(format!("unknown command {name}")),
         }
     }

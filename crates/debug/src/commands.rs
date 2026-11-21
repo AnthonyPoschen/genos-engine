@@ -284,5 +284,21 @@ fn host_specs() -> Vec<CommandSpec> {
             "jump_checkpoint",
             "Move the camera to a checkpoint by name. That pose is the one Home resets to.",
         ),
+        spec(
+            "mesh_view",
+            "The mesh-workbench workspace a mesh scene shows: workspace directory, loaded, revision, vertex and face counts, objects (id, name, origin, triangles), server_port, and lift (metres the picture raises the mesh so it stands on the ground). Needs a mesh scene.",
+        ),
+        spec(
+            "mesh_selection",
+            "What the person selected in the mesh viewer, in mesh-workbench IDs: objects, object_names, faces, vertices, point (last picked surface point, mesh coordinates), note (what they typed), revision, and the camera in mesh coordinates. This is the viewer's selection, not the mesh-workbench vertex selection its move, scale and rotate use. objects, faces and vertices (lists of ids) replace that part; note sets the note; clear: true empties it first.",
+        ),
+        spec(
+            "mesh_pick",
+            "Pick the mesh under screen [x,y] (0..1, origin top left, default the centre). mode is face (default), object, or vertex. select is set (default: replace the selection with the hit), add, or none (report only). Replies hit (object, object_name, face, face_vertices, vertex, point) or null, and the selection.",
+        ),
+        spec(
+            "mesh_command",
+            "Send command (one mesh-workbench command object such as {\"command\":\"inspect\"}, or a list of up to 1024) to mesh-server on loopback port (default GENOS_MESH_PORT, else 7879) and return its reply. Start the server with: mesh-server --workspace DIR --port 7879. The picture reloads when the workspace file changes.",
+        ),
     ]
 }

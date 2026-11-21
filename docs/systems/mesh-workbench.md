@@ -1,6 +1,6 @@
 # Mesh workbench
 
-Status: design, built in stages. Stage 1 is in the tree. The stages are listed under Plan.
+Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Not yet: selecting with the mouse, starting `mesh-server`, orbit, render modes, the objects list, replay, animation. The stages are listed under Plan.
 
 The scene program shows and edits the meshes that [mesh-workbench](https://github.com/NathanChambers/mesh-workbench) makes. A person looks at a mesh in the engine, selects part of it, and tells an agent what to change. The agent reads the selection from the engine's agent endpoint and sends the edit to mesh-workbench.
 
@@ -42,11 +42,25 @@ The viewer triangulates the n-gons itself, as the web viewer does: a fan for a c
 5. **Render modes and the objects list.** Wireframe, shaded, vertex colours, textured, and the debug modes (normals, depth, face IDs, object IDs). Show, hide, solo.
 6. **Replay and animation.** The session scrubber and the clip player.
 
+## Commands
+
+On the agent endpoint (MCP, `POST /cmd/<name>`, and Rhai), while a mesh scene is open:
+
+- `mesh_view`: the workspace directory, the revision shown, the counts, the objects (id, name, origin, triangles), the server port, and `lift`. The picture raises the mesh by `lift` metres so its lowest point stands on the ground. Every position a command reports is in mesh coordinates.
+- `mesh_pick`: the mesh under screen `[x, y]`. `mode` is `face`, `object`, or `vertex`. `select` is `set`, `add`, or `none`. The reply names the object, the face, the face's vertex IDs, the nearest vertex, and the point.
+- `mesh_selection`: the selection (objects, faces, vertices, the last picked point, the note, the revision, the camera). `objects`, `faces` and `vertices` replace that part, `note` sets the note, `clear: true` empties it first. IDs that an edit removes leave the selection at the next reload.
+- `mesh_command`: `command` is one mesh-workbench command object or a list. It goes to `POST /command` on `mesh-server` at `port` (default `GENOS_MESH_PORT`, else 7879). The reply is mesh-workbench's reply. With no server the error says how to start one.
+
+The agent's loop: read `mesh_selection`, send `mesh_command`, and the picture reloads when `project.json` changes.
+
+Checked on 22 Nov 2026 with mesh-workbench `c88a38fb`: on an empty workspace, two `object_create_box` commands through `mesh_command` made a crate and a lid, the viewer showed revision 2 with both objects, and a pick on the lid returned object 2, face 8, vertices 13 to 16. `debug/lighting/scripts/mesh_selection.rhai` checks the pick and the selection on the sample workspace without a server.
+
 ## Code
 
 - `crates/workbench`, package `genos-workbench`: `load_workspace`, `Workspace`, `Part`, `triangulate`. It depends on `genos-json` only. It does not open a window or a device.
 - `debug/scene-lib`: `Kind::Mesh { workspace }`.
-- `debug/lighting`: builds the world for a mesh scene and reloads it.
+- `debug/lighting`: `mesh_world` builds the world for a mesh scene and `follow_mesh` reloads it. `src/mesh_view.rs` holds the selection, the pick, the highlight triangles, and the loopback HTTP client.
+- `crates/debug`: `Host::scene_command` carries the `mesh_*` commands to the scene program; `commands.rs` lists them.
 
 ## Game use
 

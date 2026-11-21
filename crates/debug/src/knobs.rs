@@ -160,6 +160,19 @@ pub trait Host {
     fn jump_checkpoint(&mut self, name: &str) -> Result<CheckpointPose, String> {
         Err(format!("this host has no checkpoint {name}"))
     }
+
+    /// A command that belongs to the scene the host shows (the `mesh_*`
+    /// commands of a mesh scene). `aspect` is the picture's width over its
+    /// height. `None` means the host has no such scene open.
+    fn scene_command(
+        &mut self,
+        _name: &str,
+        _args: &genos_mcp::json::Value,
+        _camera: &genos_scene::Camera,
+        _aspect: f32,
+    ) -> Option<Result<genos_mcp::json::Value, String>> {
+        None
+    }
 }
 
 /// A bare scene: no knobs of its own.

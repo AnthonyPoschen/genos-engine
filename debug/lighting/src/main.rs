@@ -305,6 +305,7 @@ const ID_HDR_BLOOM_I: u32 = 5106;
 const ID_HDR_BLOOM: u32 = 5200;
 
 mod menu_layout;
+mod mesh_view;
 
 use menu_layout::{load_menu_layout, menu_folds, section_id, strip_id, tab_id, MenuFold, MenuLine};
 /// Ordered grades and numeric knobs. An on/off switch is not in this list.
@@ -1010,7 +1011,9 @@ struct App {
     log: std::fs::File,
     load: Option<LoadJob>,
     /// Set while a mesh scene is open: the workspace file being followed.
-    mesh: Option<MeshWatch>,
+    mesh: Option<mesh_view::MeshView>,
+    /// Index of the selection overlay in the world's objects.
+    mesh_overlay: Option<usize>,
     /// Last GI pass times, milliseconds. Numbers only.
     gi_passes: String,
     /// Last GI work counters. Numbers only.
@@ -1028,13 +1031,6 @@ struct App {
 enum Show {
     Stress(Stage),
     Still(World),
-}
-
-/// The workspace a mesh scene is showing and the `project.json` time it read.
-struct MeshWatch {
-    dir: PathBuf,
-    stamp: Option<std::time::SystemTime>,
-    looked: Instant,
 }
 
 /// Seconds between looks at a mesh workspace's `project.json`. The
@@ -1159,6 +1155,7 @@ impl App {
             log,
             load: None,
             mesh: None,
+            mesh_overlay: None,
             gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
             fog_cli: FogCli::default(),
@@ -1215,6 +1212,7 @@ impl App {
         }
         let Kind::Mesh { workspace, .. } = &self.entry().kind else {
             self.mesh = None;
+            self.mesh_overlay = None;
             return;
         };
         let dir = mesh_workspace_dir(&self.root, workspace);
@@ -1227,13 +1225,22 @@ impl App {
         let stamp = std::fs::metadata(genos_workbench::project_path(&dir))
             .and_then(|meta| meta.modified())
             .ok();
-        let changed = self
-            .mesh
-            .as_ref()
-            .is_some_and(|watch| watch.dir == dir && watch.stamp != stamp);
-        self.mesh = Some(MeshWatch { dir, stamp, looked: now });
+        let changed = match &mut self.mesh {
+            Some(watch) if watch.dir == dir => {
+                watch.looked = now;
+                watch.stamp != stamp
+            }
+            _ => {
+                self.mesh = Some(mesh_view::MeshView::new(dir, stamp));
+                false
+            }
+        };
         if !changed {
+            self.refresh_mesh_overlay();
             return;
+        }
+        if let Some(watch) = &mut self.mesh {
+            watch.reload(stamp);
         }
         let index = self.index;
         match build_entry(&self.root, &self.entries[index]) {
@@ -1250,10 +1257,73 @@ impl App {
                 scene.hdr = from.hdr;
                 self.overlay_fog();
                 self.overlay_particles();
+                self.mesh_overlay = None;
+                self.refresh_mesh_overlay();
                 self.note("mesh workspace changed; reloaded");
             }
             Err(err) => self.note(&format!("mesh workspace changed; kept the picture: {err}")),
         }
+    }
+
+    /// Draw the viewer's selection: one extra object over the mesh, replaced
+    /// when the selection or the mesh changes.
+    fn refresh_mesh_overlay(&mut self) {
+        let Some(view) = &mut self.mesh else {
+            return;
+        };
+        if !view.overlay_stale {
+            return;
+        }
+        view.overlay_stale = false;
+        let (positions, normals) = view.overlay();
+        let lift = view.lift();
+        let Show::Still(world) = &mut self.show else {
+            return;
+        };
+        if let Some(index) = self.mesh_overlay.take() {
+            if index < world.objects.len() {
+                world.objects.remove(index);
+            }
+        }
+        if positions.is_empty() {
+            return;
+        }
+        let mut low = [f32::INFINITY; 3];
+        let mut high = [f32::NEG_INFINITY; 3];
+        for p in &positions {
+            for axis in 0..3 {
+                low[axis] = low[axis].min(p[axis]);
+                high[axis] = high[axis].max(p[axis]);
+            }
+        }
+        let mut pose = identity_pose();
+        pose[13] = lift;
+        self.mesh_overlay = Some(world.objects.len());
+        world.objects.push(genos_render::Object {
+            hidden: false,
+            affects_light: false,
+            bounds: genos_render::Bounds {
+                center: [
+                    (low[0] + high[0]) * 0.5,
+                    (low[1] + high[1]) * 0.5 + lift,
+                    (low[2] + high[2]) * 0.5,
+                ],
+                half: [
+                    (high[0] - low[0]) * 0.5,
+                    (high[1] - low[1]) * 0.5,
+                    (high[2] - low[2]) * 0.5,
+                ],
+            },
+            kind: DrawKind::Mesh {
+                vertices: positions,
+                normals,
+                texcoords: Vec::new(),
+                color: mesh_view::OVERLAY_COLOR,
+                pose,
+                emission: [0.0; 3],
+                surface: None,
+            },
+        });
     }
 
     fn note(&mut self, line: &str) {
@@ -1428,6 +1498,19 @@ impl Host for App {
 
     fn poll_load(&mut self) -> Result<LoadPace, String> {
         self.take_load()
+    }
+
+    fn scene_command(
+        &mut self,
+        name: &str,
+        args: &genos_mcp::json::Value,
+        camera: &Camera,
+        aspect: f32,
+    ) -> Option<Result<genos_mcp::json::Value, String>> {
+        self.follow_mesh();
+        let result = self.mesh.as_mut()?.command(name, args, camera, aspect);
+        self.refresh_mesh_overlay();
+        Some(result)
     }
 
     fn list_checkpoints(&self) -> Vec<String> {
