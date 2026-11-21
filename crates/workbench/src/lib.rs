@@ -68,13 +68,34 @@ pub fn project_path(dir: &Path) -> PathBuf {
     dir.join("project.json")
 }
 
-/// Read and triangulate `<dir>/project.json`.
+impl Workspace {
+    /// A workspace with no mesh yet.
+    #[must_use]
+    pub fn empty(dir: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            version: NEWEST_VERSION,
+            revision: 0,
+            parts: Vec::new(),
+            vertices: 0,
+            faces: 0,
+            selection: Vec::new(),
+            min: [0.0; 3],
+            max: [0.0; 3],
+        }
+    }
+}
+
+/// Read and triangulate `<dir>/project.json`. A workspace mesh-workbench has
+/// not written to yet has no such file: that is an empty workspace.
 ///
 /// # Errors
-/// The file is missing, is not JSON, has no `mesh`, or is newer than
-/// [`NEWEST_VERSION`].
+/// The file is not JSON, has no `mesh`, or is newer than [`NEWEST_VERSION`].
 pub fn load_workspace(dir: &Path) -> Result<Workspace, String> {
     let path = project_path(dir);
+    if !path.exists() {
+        return Ok(Workspace::empty(dir));
+    }
     let text = std::fs::read_to_string(&path).map_err(|err| format!("{}: {err}", path.display()))?;
     let mut workspace = parse_project(&text).map_err(|err| format!("{}: {err}", path.display()))?;
     workspace.dir = dir.to_path_buf();
@@ -333,6 +354,13 @@ mod tests {
         assert_eq!(part.vertex_ids, vec![1, 2, 3, 1, 3, 4]);
         // Counter-clockwise seen from +Z: the normal is +Z on every corner.
         assert!(part.normals.iter().all(|n| *n == [0.0, 0.0, 1.0]), "{:?}", part.normals);
+    }
+
+    #[test]
+    fn a_directory_with_no_project_file_is_an_empty_workspace() {
+        let dir = std::env::temp_dir().join("genos-workbench-no-such-workspace");
+        let workspace = super::load_workspace(&dir).expect("empty");
+        assert_eq!((workspace.parts.len(), workspace.vertices, workspace.revision), (0, 0, 0));
     }
 
     #[test]

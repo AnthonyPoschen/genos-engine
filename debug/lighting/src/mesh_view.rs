@@ -22,6 +22,8 @@ pub const SERVER_PORT: u16 = 7879;
 const SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Largest reply taken from `mesh-server`.
 const SERVER_REPLY_MAX: u64 = 64 << 20;
+/// How long the viewer waits to learn whether a server already has the port.
+const SERVER_PROBE: Duration = Duration::from_millis(200);
 /// The selection overlay sits this far off the surface, metres, so it does
 /// not fight the face under it for depth.
 const OVERLAY_OFFSET: f32 = 0.003;
@@ -103,6 +105,38 @@ pub struct MeshView {
     /// What a click picks: `face`, `object`, or `vertex`.
     pub pick_mode: String,
     orbit: Option<Orbit>,
+    /// The `mesh-server` this viewer started on the workspace. Stopped when
+    /// the mesh scene closes.
+    server: Option<std::process::Child>,
+    /// Why no server was started, or where one answers.
+    pub server_note: String,
+}
+
+impl Drop for MeshView {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.server.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// The pick modes, in the order the menu lists them.
+pub const PICK_MODES: [&str; 3] = ["face", "object", "vertex"];
+
+/// The `mesh-server` program: `GENOS_MESH_SERVER`, else `mesh-server` on the
+/// path. `off` starts none.
+fn server_program() -> Option<PathBuf> {
+    match std::env::var_os("GENOS_MESH_SERVER") {
+        Some(value) if value == "off" => None,
+        Some(value) if !value.is_empty() => Some(PathBuf::from(value)),
+        _ => Some(PathBuf::from("mesh-server")),
+    }
+}
+
+fn server_answers(port: u16) -> bool {
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&address, SERVER_PROBE).is_ok()
 }
 
 impl MeshView {
@@ -117,6 +151,44 @@ impl MeshView {
             overlay_stale: true,
             pick_mode: "face".into(),
             orbit: None,
+            server: None,
+            server_note: "not started".into(),
+        }
+    }
+
+    /// Start `mesh-server` on this workspace so `mesh_command` has a server,
+    /// unless one already answers on the port. A missing program is not an
+    /// error: the viewer still shows the workspace.
+    pub fn start_server(&mut self) {
+        let port = server_port();
+        if server_answers(port) {
+            self.server_note = format!("a server already answers on 127.0.0.1:{port}");
+            return;
+        }
+        let Some(program) = server_program() else {
+            self.server_note = "GENOS_MESH_SERVER is off".into();
+            return;
+        };
+        let spawned = std::process::Command::new(&program)
+            .arg("--workspace")
+            .arg(&self.dir)
+            .arg("--port")
+            .arg(port.to_string())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => {
+                self.server = Some(child);
+                self.server_note = format!("started {} on 127.0.0.1:{port}", program.display());
+            }
+            Err(err) => {
+                self.server_note = format!(
+                    "{} did not start ({err}). Install mesh-workbench, or name the program with --mesh-server",
+                    program.display()
+                );
+            }
         }
     }
 
@@ -486,6 +558,7 @@ impl MeshView {
             ("faces", num(faces as f64)),
             ("objects", list(objects)),
             ("pick", text(self.pick_mode.clone())),
+            ("server", text(self.server_note.clone())),
             ("server_port", num(f64::from(server_port()))),
             ("lift", num(f64::from(self.lift()))),
         ])

@@ -109,6 +109,13 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --mesh-workspace DIR   mesh-workbench workspace a mesh scene opens, in place
                          of the one its scene file names. GENOS_MESH_WORKSPACE
                          applies only when this is omitted
+  --mesh-server PATH     the mesh-server program a mesh scene starts on its
+                         workspace (default mesh-server on the path; off
+                         starts none). GENOS_MESH_SERVER applies only when
+                         this is omitted
+  --mesh-port N          loopback port of that server and of mesh_command
+                         (default 7879). GENOS_MESH_PORT applies only when
+                         this is omitted
   --checkpoint NAME      jump here at launch
   --eye X,Y,Z            camera position, metres. --eye=X,Y,Z is the same flag.
                          Keeps the checkpoint aim unless --look is set
@@ -1254,7 +1261,11 @@ impl App {
                 watch.stamp != stamp
             }
             _ => {
-                self.mesh = Some(mesh_view::MeshView::new(dir, stamp));
+                let mut view = mesh_view::MeshView::new(dir, stamp);
+                view.start_server();
+                let note = format!("mesh-server: {}", view.server_note);
+                self.mesh = Some(view);
+                self.note(&note);
                 false
             }
         };
@@ -1463,12 +1474,34 @@ impl Host for App {
                 let mut knobs = lighting_knobs(&world.scene.lighting);
                 knobs.extend(fog_knobs(&world.scene.fog));
                 knobs.extend(particle_knobs(&world.scene.particles));
+                if let Some(view) = &self.mesh {
+                    let at = mesh_view::PICK_MODES
+                        .iter()
+                        .position(|mode| *mode == view.pick_mode)
+                        .unwrap_or(0);
+                    knobs.push(Knob {
+                        name: "mesh_pick".into(),
+                        label: "Click selects".into(),
+                        value: at as f64,
+                        min: 0.0,
+                        max: (mesh_view::PICK_MODES.len() - 1) as f64,
+                        step: 1.0,
+                        choices: mesh_view::PICK_MODES.iter().map(|mode| (*mode).to_string()).collect(),
+                        text: view.pick_mode.clone(),
+                    });
+                }
                 knobs
             }
         }
     }
 
     fn set_knob(&mut self, name: &str, value: f64) -> Result<(), String> {
+        if name == "mesh_pick" {
+            let view = self.mesh.as_mut().ok_or("mesh_pick needs a mesh scene")?;
+            let at = (value.round().max(0.0) as usize).min(mesh_view::PICK_MODES.len() - 1);
+            view.pick_mode = mesh_view::PICK_MODES[at].to_string();
+            return Ok(());
+        }
         match &mut self.show {
             Show::Stress(stage) => Host::set_knob(stage, name, value),
             Show::Still(world) => {
@@ -3101,6 +3134,14 @@ fn options() -> Result<Options, String> {
             "--eye" => eye = Some(parse_vec3("--eye", &need_arg(&mut args, "--eye")?)?),
             "--look" => look = Some(parse_vec3("--look", &need_arg(&mut args, "--look")?)?),
             "--preset" => preset = Some(need_arg(&mut args, "--preset")?),
+            "--mesh-server" => {
+                std::env::set_var("GENOS_MESH_SERVER", need_arg(&mut args, "--mesh-server")?);
+            }
+            "--mesh-port" => {
+                let port = need_arg(&mut args, "--mesh-port")?;
+                port.parse::<u16>().map_err(|_| format!("--mesh-port {port} is not a port"))?;
+                std::env::set_var("GENOS_MESH_PORT", port);
+            }
             "--mesh-workspace" => {
                 std::env::set_var("GENOS_MESH_WORKSPACE", need_arg(&mut args, "--mesh-workspace")?);
             }

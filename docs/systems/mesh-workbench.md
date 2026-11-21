@@ -1,6 +1,6 @@
 # Mesh workbench
 
-Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Also in the tree: orbit, pan and zoom, and selecting with a click. Not yet: starting `mesh-server`, the axis snaps and the orthographic view, render modes, the objects list, replay, animation. The stages are listed under Plan.
+Status: built in stages. In the tree: reading and showing a workspace, the selection and the pick over the agent endpoint, the selection highlight, and the command pass-through. Also in the tree: orbit, pan and zoom, selecting with a click, and starting `mesh-server` with the scene. Not yet: the axis snaps and the orthographic view, render modes, the objects list, replay, animation. The stages are listed under Plan.
 
 The scene program shows and edits the meshes that [mesh-workbench](https://github.com/NathanChambers/mesh-workbench) makes. A person looks at a mesh in the engine, selects part of it, and tells an agent what to change. The agent reads the selection from the engine's agent endpoint and sends the edit to mesh-workbench.
 
@@ -42,13 +42,19 @@ The viewer triangulates the n-gons itself, as the web viewer does: a fan for a c
 5. **Render modes and the objects list.** Wireframe, shaded, vertex colours, textured, and the debug modes (normals, depth, face IDs, object IDs). Show, hide, solo.
 6. **Replay and animation.** The session scrubber and the clip player.
 
+## Server
+
+When a mesh scene opens, the scene program starts `mesh-server --workspace DIR --port N` on that workspace and stops it when the scene closes or the program quits. `--mesh-server PATH` (`GENOS_MESH_SERVER`) names the program; the default is `mesh-server` on the path, and `off` starts none. `--mesh-port N` (`GENOS_MESH_PORT`) is the port, default 7879. When a server already answers on the port, none is started. When the program is missing, the viewer still shows the workspace and `mesh_view` reports why in `server`. A workspace with no `project.json` yet is an empty workspace: the server writes the file on the first edit and the viewer picks it up.
+
+Install mesh-workbench with `cargo install --path . --locked` in its checkout.
+
 ## Pointer
 
 In a mesh scene the fly camera is off and the pointer works on the mesh:
 
 - Left drag orbits about the point in front of the camera. Right drag pans. The wheel zooms. `F` frames the whole mesh.
 - A click (a press that moves under 4 pixels) selects what is under the pointer and clears the rest. Shift and a click adds it, or removes it when it was selected.
-- What a click selects is the pick mode: `face` (default), `object`, or `vertex`. `mesh_view` with `pick` sets it, and its reply reports it.
+- What a click selects is the pick mode: `face` (default), `object`, or `vertex`. `mesh_view` with `pick` sets it, and its reply reports it. The knob `mesh_pick` is the same value, and the menu's Scene tab shows it as "Click selects".
 - A press on the menu is the menu's.
 
 When a checkpoint, a script, or an agent moves the camera, the orbit continues about the point in front of that new pose.
