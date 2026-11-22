@@ -136,6 +136,8 @@ pub struct MeshView {
     /// For the `face_orientation` shade: whether each triangle of each part
     /// faces the camera. Kept so the mesh is rebuilt only when one turns over.
     facing: Vec<Vec<bool>>,
+    /// For the `depth` shade: a grey for each position of each part.
+    depths: Vec<Vec<[f32; 3]>>,
     /// The picture's overlay no longer matches `selection`.
     pub overlay_stale: bool,
     /// What a click picks: `face`, `object`, or `vertex`.
@@ -454,7 +456,7 @@ pub struct Replay {
 }
 
 /// The shade modes, in the order the menu lists them.
-pub const SHADES: [&str; 13] = [
+pub const SHADES: [&str; 15] = [
     "shaded",
     "wireframe",
     "vertex_color_shaded",
@@ -468,6 +470,8 @@ pub const SHADES: [&str; 13] = [
     "vertex_colors",
     "tessellation",
     "material",
+    "normals",
+    "depth",
 ];
 
 /// Names a shade also answers to: mesh-workbench's own name for it, or an
@@ -637,12 +641,30 @@ pub fn parse_reference(topic: &str, text: &str, out: &mut Vec<CommandDoc>) {
         let doc = rest.join(" - ");
         // A field is the name a backticked span starts with: `kind:"reference"`, `limit`, `crop:[...]`.
         let mut fields: Vec<String> = Vec::new();
+        let mut types: Vec<(String, String)> = Vec::new();
         for span in ticked(&doc) {
             let name: String = span.chars().take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_').collect();
             let after = span[name.len()..].chars().next();
             let named_command = after.is_none() && documented.contains(&name.as_str());
             let is_field = plain_name(&name) && matches!(after, None | Some(':' | '?')) && !named_command;
-            if is_field && !fields.contains(&name) {
+            if !is_field {
+                continue;
+            }
+            // The form written after the colon says the type: `value:[x,y,z]`,
+            // `kind:"reference"`, `clean:true`, `limit:8`.
+            let form = span[name.len()..].trim_start_matches(['?', ':']).trim_start();
+            let kind = match form.chars().next() {
+                Some('[') => Some("array"),
+                Some('"') => Some("string"),
+                Some('{') => Some("object"),
+                Some(c) if c.is_ascii_digit() || c == '-' => Some("number"),
+                _ if form.starts_with("true") || form.starts_with("false") => Some("boolean"),
+                _ => None,
+            };
+            if let Some(kind) = kind.filter(|_| after == Some(':') && !types.iter().any(|(named, _): &(String, String)| *named == name)) {
+                types.push((name.clone(), kind.to_string()));
+            }
+            if !fields.contains(&name) {
                 fields.push(name);
             }
         }
@@ -655,13 +677,18 @@ pub fn parse_reference(topic: &str, text: &str, out: &mut Vec<CommandDoc>) {
                             known.fields.push(field.clone());
                         }
                     }
+                    for (field, kind) in &types {
+                        if !known.types.iter().any(|(named, _)| named == field) {
+                            known.types.push((field.clone(), kind.clone()));
+                        }
+                    }
                 }
                 None => out.push(CommandDoc {
                     command: command.to_string(),
                     fields: fields.clone(),
                     doc: doc.clone(),
                     topic: topic.to_string(),
-                    types: Vec::new(),
+                    types: types.clone(),
                     example: String::new(),
                 }),
             }
@@ -1205,6 +1232,7 @@ impl MeshView {
             selection: Selection::default(),
             typing: false,
             facing: Vec::new(),
+            depths: Vec::new(),
             overlay_stale: true,
             pick_mode: "face".into(),
             orbit: None,
@@ -1899,6 +1927,7 @@ impl MeshView {
         };
         let checker = self.shade == "uv_checker";
         let textured = checker || matches!(self.shade.as_str(), "textured" | "material");
+        let normals = if self.shade == "normals" { self.posed_normals() } else { Vec::new() };
         // mesh-workbench colours an ID by its place in ID order.
         let rank = |ids: BTreeSet<u64>| ids.into_iter().enumerate().map(|(at, id)| (id, at)).collect::<std::collections::BTreeMap<u64, usize>>();
         let objects = rank(workspace.parts.iter().map(|part| part.object).filter(|object| *object != 0).collect());
@@ -1941,6 +1970,15 @@ impl MeshView {
                 let colors = match self.shade.as_str() {
                     "vertex_colors" | "vertex_color_shaded" => part.colors.clone(),
                     "face_ids" => part.face_ids.iter().flat_map(|face| [tint(&faces, *face); 3]).collect(),
+                    // mesh-workbench's encoding: RGB = (N + 1) / 2, as display values.
+                    "normals" => normals
+                        .get(at)
+                        .and_then(Option::as_ref)
+                        .unwrap_or(&part.normals)
+                        .iter()
+                        .map(|n| n.map(|c| ((c + 1.0) * 0.5).clamp(0.0, 1.0).powf(2.2)))
+                        .collect(),
+                    "depth" => self.depths.get(at).cloned().unwrap_or_default(),
                     "face_orientation" => self
                         .facing
                         .get(at)
@@ -1956,13 +1994,61 @@ impl MeshView {
             .collect()
     }
 
+    /// The `depth` shade, as mesh-workbench encodes it: each vertex's
+    /// distance along the view as a grey, 255 at the nearest and 32 at the
+    /// farthest of what is shown. Made again when the camera or the mesh moves.
+    fn watch_depth(&mut self, eye: [f32; 3]) {
+        if self.shade != "depth" {
+            self.depths.clear();
+            return;
+        }
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let eye = [eye[0], eye[1] - self.lift(), eye[2]];
+        // The view runs from the eye to the middle of the mesh.
+        let middle = [0, 1, 2].map(|axis| f32::midpoint(workspace.min[axis], workspace.max[axis]));
+        let along = normalise([middle[0] - eye[0], middle[1] - eye[1], middle[2] - eye[2]]);
+        let distance: Vec<Vec<f32>> = workspace
+            .parts
+            .iter()
+            .map(|part| {
+                (0..part.positions.len())
+                    .map(|corner| {
+                        let p = self.corner(part, corner);
+                        (0..3).map(|k| (p[k] - eye[k]) * along[k]).sum()
+                    })
+                    .collect()
+            })
+            .collect();
+        let shown = || workspace.parts.iter().zip(&distance).filter(|(part, _)| !self.hidden.contains(&part.object)).flat_map(|(_, d)| d.iter().copied());
+        let (near, far) = (shown().fold(f32::INFINITY, f32::min), shown().fold(f32::NEG_INFINITY, f32::max));
+        let span = (far - near).max(1.0e-6);
+        let depths: Vec<Vec<[f32; 3]>> = distance
+            .iter()
+            .map(|part| {
+                part.iter()
+                    .map(|d| {
+                        let code = (32.0 + 223.0 * ((far - d) / span).clamp(0.0, 1.0)) / 255.0;
+                        // The picture takes linear colour; the code is a display value.
+                        [code.powf(2.2); 3]
+                    })
+                    .collect()
+            })
+            .collect();
+        if depths != self.depths {
+            self.depths = depths;
+            self.display_stale = true;
+        }
+    }
+
     /// The shades mesh-workbench draws without light: the program shows the
     /// base colour for them.
     pub fn unlit(&self) -> bool {
         // The ID colours and the silhouette carry no light in mesh-workbench either.
         matches!(
             self.shade.as_str(),
-            "textured" | "uv_checker" | "vertex_colors" | "object_ids" | "face_ids" | "collection_ids" | "silhouette"
+            "textured" | "uv_checker" | "vertex_colors" | "object_ids" | "face_ids" | "collection_ids" | "silhouette" | "normals" | "depth"
         )
     }
 
@@ -2302,6 +2388,7 @@ impl MeshView {
     /// shade. The winding gives the front, as in mesh-workbench. Nothing is
     /// culled, so a face wound the wrong way shows red from outside.
     pub fn watch(&mut self, eye: [f32; 3]) {
+        self.watch_depth(eye);
         if self.shade != "face_orientation" {
             self.facing.clear();
             return;
@@ -4047,6 +4134,8 @@ not a row | `nothing` |\n";
         assert_eq!(names, ["uv_set", "texture_import", "texture_define"]);
         // Both of its rows: the fields of each, once, and both rows' words.
         assert_eq!(found[0].fields, ["values", "object", "faces", "limit"]);
+        // `values:[...]` is written as an array, so the table alone types it.
+        assert_eq!(found[0].types, [("values".to_string(), "array".to_string())]);
         assert!(found[0].doc.contains("Writes corners") && found[0].doc.contains("paged"));
         // A command named in the notes is not a field.
         assert_eq!(found[1].fields, ["name", "path"]);
@@ -4055,7 +4144,7 @@ not a row | `nothing` |\n";
         let prose = "Send `{\"command\":\"uv_set\",\"faces\":[2],\"values\":[{\"vertex\":5,\"uv\":[0,0]}]}` then\n\
 ```json\n{\"command\":\"rig_set\",\"bones\":[{\"name\":\"root\",\"head\":[0,0,0]}],\"replace\":true,\"note\":\"a } brace\"}\n```\n";
         super::parse_examples("rigging", prose, &mut found);
-        assert_eq!(found[0].types, [("faces".to_string(), "array".to_string()), ("values".to_string(), "array".to_string())]);
+        assert_eq!(found[0].types, [("values".to_string(), "array".to_string()), ("faces".to_string(), "array".to_string())]);
         let rig = found.iter().find(|doc| doc.command == "rig_set").expect("listed from its example");
         assert_eq!(rig.fields, ["bones", "replace", "note"]);
         assert_eq!(rig.types[1], ("replace".to_string(), "boolean".to_string()));

@@ -54,7 +54,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Editor state over MCP: `mesh_view` (the open workspace, revision, objects, display, replay) and `mesh_selection` (selection, note, camera).
 - [x] A JSON schema for each of the 13 mesh tools (`mesh_schema` in `crates/debug/src/commands.rs`). The viewer's own tools (`mesh_view`, `mesh_pick`, `mesh_selection`, `mesh_help`) name every field with its type and its choices and refuse another; a test keeps the schema and the fields the viewer reads the same. A family tool and `mesh_command` require `command`.
 - [x] `mesh_commands`: the mesh-workbench commands as its own help documents them, read from the linked version: 143 commands, the tool each goes to and its fields. `command: NAME` gives the reference text, an example and a JSON schema. A field's type comes from the JSON examples in the help (85 commands have at least one typed field), and a command with no table row (the rig and animation commands) is listed from its examples. The help is read once, on a scratch workspace, and a name is kept only if mesh-workbench accepts it.
-- [ ] A field the help gives no example of has no type in the schema; its form is in the text. A complete list waits on a machine-readable one from Nathan.
+- [x] A field's type also comes from how the reference writes it (`value:[x,y,z]`, `kind:"reference"`, `clean:true`): 118 of the 143 commands have a typed field, 314 of 518 fields.
+- [ ] A field the help names bare (`object`, `faces`) has no type in the schema; its form is in the text. A complete list waits on a machine-readable one from Nathan.
 - [x] The catalogue is in six sections: `scene`, `lighting`, `render`, `capture`, `editor`, `mesh` (`section_of` in `crates/debug/src/commands.rs`). Every description starts with its section in brackets, and `list_commands` returns the catalogue grouped, or one section. The lighting commands are the `lighting` section.
 - [x] Section prefixes in the command names: a client sees `lighting.get_settings`, `scene.load`, `mesh.view`. The old names are deprecated aliases that log a warning on first use over MCP or HTTP. Scripts keep the old names (a Rhai name has no dot). `fx.*` and `fx_*` were already published twice and still are.
 - [x] Bones, skin weights and animation checked through `mesh_rig` and `mesh_animation`: a two-bone rig, four weighted vertices, a clip, and a sampled pose that moved those vertices 0.6 m.
@@ -138,7 +139,8 @@ A workspace with three objects, an extruded face, box UVs scaled to tile, a text
 - [x] `topology` (the `wireframe` shade) labels each visible face and vertex with its ID, as mesh-workbench's does; `mesh_view labels: false` hides them. Read from a picture of the window.
 - [x] Contact shadows that would overlap are one patch: two patches at the same height flickered into rings (seen in the window).
 - [x] The sky is the lit ground's colour, so the ground has no visible edge: it fades into the background as the web viewer's does.
-- [ ] Not matched: the contact shadow shows a few steps on the dark ground, because the G-buffer keeps base colour in 8 linear bits; `normals` and `depth` are the engine's `view` modes with their own encodings.
+- [x] `normals` and `depth` are shades in mesh-workbench's encodings (RGB = (N + 1) / 2; 255 at the nearest shown vertex and 32 at the farthest), compared with its `capture` side by side. The engine's `view` modes `normal` and `depth` remain as they were.
+- [ ] Not matched: the contact shadow shows a few steps on the dark ground, because the G-buffer keeps base colour in 8 linear bits.
 - Decision: the web viewer's toolbar, axis gizmo, inspector panel and footer are the Mesh tab of the engine's menu here (a folder picker, readouts, dropdowns, check boxes, the Objects and Replay sections). The editor stays basic: a person looks, selects and types a note, and an agent edits.
 
 ## For Nathan
