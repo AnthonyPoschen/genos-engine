@@ -1,4 +1,4 @@
-.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lighting-oracle restir-ref lint-docs lint
+.PHONY: run room editor mesh stress-solo stress stress-big stress-bench lighting verify reference lighting-ref-check lighting-oracle restir-ref lint-docs lint
 
 run:
 	cargo run -p genos-camera
