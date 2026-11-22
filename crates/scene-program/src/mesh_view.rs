@@ -120,6 +120,9 @@ pub struct MeshView {
     pub selection: Selection,
     /// The person is typing the note: keys go to the note, not to hotkeys.
     pub typing: bool,
+    /// For the `face_orientation` shade: whether each triangle of each part
+    /// faces the camera. Kept so the mesh is rebuilt only when one turns over.
+    facing: Vec<Vec<bool>>,
     /// The picture's overlay no longer matches `selection`.
     pub overlay_stale: bool,
     /// What a click picks: `face`, `object`, or `vertex`.
@@ -338,7 +341,7 @@ pub struct Replay {
 }
 
 /// The shade modes, in the order the menu lists them.
-pub const SHADES: [&str; 9] = [
+pub const SHADES: [&str; 10] = [
     "shaded",
     "wireframe",
     "vertex_colors",
@@ -348,7 +351,12 @@ pub const SHADES: [&str; 9] = [
     "silhouette",
     "textured",
     "uv_checker",
+    "face_orientation",
 ];
+
+/// `face_orientation`: a face seen from its front, and one seen from behind.
+const FRONT_COLOR: [f32; 3] = [0.15, 0.3, 0.9];
+const BACK_COLOR: [f32; 3] = [0.9, 0.12, 0.08];
 
 /// Side of the UV checker image, in texels, and of one of its squares.
 const CHECKER: u32 = 128;
@@ -522,6 +530,7 @@ impl MeshView {
             workspace,
             selection: Selection::default(),
             typing: false,
+            facing: Vec::new(),
             overlay_stale: true,
             pick_mode: "face".into(),
             orbit: None,
@@ -894,7 +903,8 @@ impl MeshView {
         workspace
             .parts
             .iter()
-            .map(|part| {
+            .enumerate()
+            .map(|(at, part)| {
                 let color = match self.shade.as_str() {
                     "object_ids" => id_color(part.object),
                     // Black whatever the light: the outline against the ground and the sky.
@@ -926,6 +936,13 @@ impl MeshView {
                         .collect(),
                     "vertex_colors" => part.colors.clone(),
                     "face_ids" => part.face_ids.iter().flat_map(|face| [id_color(*face); 3]).collect(),
+                    "face_orientation" => self
+                        .facing
+                        .get(at)
+                        .into_iter()
+                        .flatten()
+                        .flat_map(|front| [if *front { FRONT_COLOR } else { BACK_COLOR }; 3])
+                        .collect(),
                     _ => Vec::new(),
                 };
                 // The edge strips of a hidden object are left out in `wire`.
@@ -966,7 +983,43 @@ impl MeshView {
 
     /// One frame of the pointer. Moves the camera, and on a click picks under
     /// the pointer with [`MeshView::pick_mode`]. `size` is the picture in pixels.
+    /// Which way each triangle faces the eye, for the `face_orientation`
+    /// shade. The winding gives the front, as in mesh-workbench. Nothing is
+    /// culled, so a face wound the wrong way shows red from outside.
+    pub fn watch(&mut self, eye: [f32; 3]) {
+        if self.shade != "face_orientation" {
+            self.facing.clear();
+            return;
+        }
+        let Some(workspace) = &self.workspace else {
+            return;
+        };
+        let eye = [eye[0], eye[1] - self.lift(), eye[2]];
+        let posed = self.posed_positions();
+        let facing: Vec<Vec<bool>> = workspace
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(at, part)| {
+                let positions = posed.get(at).and_then(Option::as_ref).unwrap_or(&part.positions);
+                positions
+                    .chunks_exact(3)
+                    .map(|t| {
+                        let (a, b) = ([0, 1, 2].map(|k| t[1][k] - t[0][k]), [0, 1, 2].map(|k| t[2][k] - t[0][k]));
+                        let normal = [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+                        (0..3).map(|k| normal[k] * (eye[k] - t[0][k])).sum::<f32>() >= 0.0
+                    })
+                    .collect()
+            })
+            .collect();
+        if facing != self.facing {
+            self.facing = facing;
+            self.display_stale = true;
+        }
+    }
+
     pub fn pointer(&mut self, camera: &mut Camera, size: [f32; 2], input: OrbitInput) {
+        self.watch([camera.position.x, camera.position.y, camera.position.z]);
         let (centre, extent) = self.extent();
         let pose = ([camera.position.x, camera.position.y, camera.position.z], camera.yaw, camera.pitch);
         // A checkpoint, a script or an agent moved the camera: orbit about the
@@ -1833,6 +1886,29 @@ mod tests {
         let (surface, uvs) = super::atlas_texcoords(part, &atlas, true);
         assert_eq!(surface, super::SURFACE_CHECKER);
         assert!(uvs.iter().all(|uv| uv[0] >= 0.0 && uv[1] >= 0.0), "the checker covers every face");
+    }
+
+    #[test]
+    fn a_face_wound_the_wrong_way_is_red_from_outside() {
+        let mut view = view();
+        view.shade = "face_orientation".to_string();
+        // Far out on +X +Y +Z: every triangle the eye can see shows its front.
+        let eye = [50.0, 50.0, 50.0];
+        view.watch(eye);
+        let before = view.display()[0].2.clone();
+        let front = before.iter().position(|c| *c == super::FRONT_COLOR).expect("a front face");
+        assert!(before.contains(&super::BACK_COLOR), "the far side of the cube is seen from behind");
+        // Turn that triangle over.
+        let part = view.workspace.as_mut().map(|w| &mut w.parts[0]).expect("cube");
+        part.positions.swap(front + 1, front + 2);
+        view.display_stale = false;
+        view.watch(eye);
+        assert!(view.display_stale, "a face that turned over redraws the mesh");
+        assert_eq!(view.display()[0].2[front], super::BACK_COLOR);
+        // The same eye again changes nothing, so nothing is rebuilt.
+        view.display_stale = false;
+        view.watch(eye);
+        assert!(!view.display_stale);
     }
 
     #[test]

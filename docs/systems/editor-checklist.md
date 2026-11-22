@@ -71,7 +71,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Normals, depth and base colour: the engine's `view` modes `normal`, `depth` and `albedo`. They showed nothing in the scene program until the HDR compose stored the view's colour in the scene image the display pass draws.
 - [x] Collection IDs (`shade: collection_ids`).
 - [x] Silhouette (`shade: silhouette`): the mesh in black.
-- [ ] Face orientation. Back faces are culled, so a face wound the wrong way is a hole, not a red face; it needs a two-sided draw.
+- [x] Face orientation (`shade: face_orientation`): a face seen from its front is blue, from behind red. The raster culls nothing, so a face wound the wrong way shows red from outside. The colours are set on the CPU and the mesh is rebuilt only when a face turns over.
 - [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
 - [x] Grid on the ground (`mesh_view grid`, the menu's "Grid"): a line every power of ten of metres that fits the mesh.
 - [ ] Contact shadow (the mesh casts no shadow). Bloom and auto exposure soften the picture and could be off for a mesh scene.
