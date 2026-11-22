@@ -892,7 +892,7 @@ fn run() -> Result<i32, String> {
                 left: gated.mouse_left,
                 right: input.mouse.down(InputCode::mouse_right),
                 wheel: gated.wheel_y,
-                over_ui: !look_capture,
+                over_ui: pointer_over_ui(gated.mouse_left, look_capture, &paints, [frame.pointer_x, frame.pointer_y]),
                 add: input.keyboard.down(InputCode::key_shift_left)
                     || input.keyboard.down(InputCode::key_shift_right),
                 frame_key: !typed && input.keyboard.pressed(InputCode::key_f),
@@ -2839,6 +2839,21 @@ const MESH_EV100: &str = "1.2";
 /// so is not drawn, outside a mesh scene.
 const MESH_TAB: &str = "Mesh";
 
+/// Whether the pointer belongs to a panel, not to the picture under it.
+///
+/// While the left button is held, the panel says so: `look_capture` is true
+/// from a press that missed every panel until its release. With no button
+/// held `look_capture` is false whatever the pointer is over, so the test is
+/// where the pointer is: on something a panel paints. The mesh viewer took
+/// `!look_capture` alone, which made the wheel and the right button "over the
+/// UI" on every frame: the wheel did not zoom and a right drag did not pan.
+fn pointer_over_ui(left_down: bool, look_capture: bool, paints: &[genos_ui::Paint], at: [f32; 2]) -> bool {
+    if left_down {
+        return !look_capture;
+    }
+    paints.iter().any(|paint| at[0] >= paint.x && at[0] < paint.x + paint.w && at[1] >= paint.y && at[1] < paint.y + paint.h)
+}
+
 /// Where the mesh viewer's own panel first stands, down from the top: under the gizmo.
 const MESH_PANEL_TOP: f32 = 176.0;
 
@@ -4644,6 +4659,14 @@ mod tests {
         }
         let narrowed = labels(&app);
         assert!(narrowed.iter().any(|label| label == "2 bracket") && !narrowed.iter().any(|label| label == cube));
+        // With no button held the pointer is over the UI only where a panel
+        // paints, so the wheel zooms and a right drag pans on the picture.
+        let panel = [genos_ui::Paint { x: 16.0, y: 16.0, w: 400.0, h: 300.0, color: [0.0; 3], alpha: 1.0 }];
+        assert!(!super::pointer_over_ui(false, false, &panel, [800.0, 400.0]), "on the picture");
+        assert!(super::pointer_over_ui(false, false, &panel, [100.0, 100.0]), "on the panel");
+        // A held left button follows the press: one that missed the panels is the picture's.
+        assert!(!super::pointer_over_ui(true, true, &panel, [100.0, 100.0]), "a drag that began on the picture");
+        assert!(super::pointer_over_ui(true, false, &panel, [800.0, 400.0]), "a drag that began on a panel");
         // The program draws the Objects and Replay lists as a panel of their
         // own: its lines hold the object rows, and the menu's do not.
         let (rest, panel) = super::split_mesh_panel(menu.clone());
