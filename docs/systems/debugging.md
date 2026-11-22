@@ -86,6 +86,8 @@ curl -s -X POST localhost:8801/cmd/capture -d '{"mode":"direct","path":"/tmp/dir
 curl -s -X POST localhost:8801/cmd/compare -d '{"width":160,"noise":0.03,"prefix":"/tmp/noon"}'
 ```
 
+`--scenes DIR` (mirror `GENOS_SCENES`, used only when the argument is omitted) adds the `.scene` files of `DIR` to the scene list of `genos-lighting` and `genos-editor`, after those of `debug/scenes`; a name already listed keeps its first file. Paths inside a scene file are under the repository.
+
 The catalogue is in six sections: `scene`, `lighting`, `render`, `capture`, `editor` and `mesh`. Every command's description starts with its section in brackets, so a flat MCP tool list reads in groups. `list_commands` returns the catalogue grouped by section, and `section` gives one section.
 
 A client sees each command under its section: `lighting.get_settings`, `scene.load`, `capture.capture`, `mesh.view` (`public_name` in `crates/debug/src/commands.rs`: the section, a dot, and the name without the section's own word; a name that already has a dot, such as `fx.spawn`, is kept). MCP `tools/list`, `GET /cmd` and `list_commands` give those names. The name without the section (`get_lighting_settings`, `mesh_view`) is a deprecated alias for one release: it still runs, and its first use over MCP or `POST /cmd/<name>` logs `genos-mcp: the command name ... is deprecated; use ...`. A Rhai script keeps the name without the section, because a Rhai name has no dot; `list_commands` gives it as `script_name`.

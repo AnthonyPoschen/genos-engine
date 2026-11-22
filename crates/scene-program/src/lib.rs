@@ -108,6 +108,10 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          (genos-editor). stress is the old name of
                          lighting-stress and still opens it. genos-lighting
                          does not list mesh scenes
+  --scenes DIR           also list the .scene files in DIR (a game's own
+                         scenes). Paths inside a scene file are under the
+                         repository. GENOS_SCENES applies only when this is
+                         omitted
   --mesh-workspace DIR   mesh-workbench workspace a mesh scene opens, in place
                          of the one its scene file names. GENOS_MESH_WORKSPACE
                          applies only when this is omitted
@@ -297,6 +301,8 @@ const ID_KNOB: u32 = 3000;
 /// The check boxes of the mesh viewer's Objects panel, then its Replay panel.
 const ID_MESH_OBJECT: u32 = 6000;
 const ID_MESH_EVENT: u32 = 6500;
+/// The "open" box of a collection's row in the Objects panel.
+const ID_MESH_FOLD: u32 = 7000;
 const ID_SWITCH: u32 = 4000;
 const ID_HDR_EXPOSURE: u32 = 5000;
 const ID_HDR_DISPLAY: u32 = 5001;
@@ -351,6 +357,7 @@ const SLIDER_KNOBS: &[&str] = &[
     "mesh_filter",
     "mesh_statistics",
     "mesh_state",
+    "mesh_command_filter",
 ];
 /// Unordered choices. A long list of scenes uses the same dropdown.
 const DROP_KNOBS: &[&str] = &[
@@ -513,6 +520,15 @@ fn run() -> Result<i32, String> {
         .map_err(|err| err.to_string())?;
     let root = genos_scene_lib::repo_root();
     let mut entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir())?;
+    // --scenes DIR (or GENOS_SCENES): a game's own scene files join the list.
+    // A name the list already has keeps its first file.
+    if let Some(dir) = std::env::var_os("GENOS_SCENES").filter(|dir| !dir.is_empty()) {
+        for entry in genos_scene_lib::load_dir(Path::new(&dir))? {
+            if !entries.iter().any(|known| known.name == entry.name) {
+                entries.push(entry);
+            }
+        }
+    }
     if !program().meshes {
         entries.retain(|entry| !matches!(entry.kind, Kind::Mesh { .. }));
     }
@@ -716,10 +732,11 @@ fn run() -> Result<i32, String> {
         // While the note is being typed in a mesh scene the keys are the note's.
         let shift = input.keyboard.down(InputCode::key_shift_left)
             || input.keyboard.down(InputCode::key_shift_right);
-        let typed = app
-            .mesh
-            .as_mut()
-            .is_some_and(|view| view.type_note(&|code| input.keyboard.pressed(code), shift));
+        let control = input.keyboard.down(InputCode::key_control_left) || input.keyboard.down(InputCode::key_control_right);
+        let typed = app.mesh.as_mut().is_some_and(|view| {
+            view.control = control;
+            view.type_note(&|code| input.keyboard.pressed(code), shift)
+        });
         if !typed {
             hotkeys(&mut app, &input, &keys, &mut camera, &mut tools, renderer)?;
         }
@@ -1900,7 +1917,7 @@ impl Host for App {
                         });
                     }
                     // Read-only: typed with Shift and T, or set by mesh_view filter.
-                    let typing = view.typing && view.typing_filter;
+                    let typing = view.typing && view.typing_filter && !view.typing_commands;
                     knobs.push(Knob {
                         name: "mesh_filter".into(),
                         label: if typing { "Filter (Enter ends)".into() } else { "Filter (Shift+T types)".into() },
@@ -1910,6 +1927,17 @@ impl Host for App {
                         step: 0.0,
                         choices: Vec::new(),
                         text: if typing { format!("{}_", view.filter) } else { view.filter.clone() },
+                    });
+                    let typing = view.typing && view.typing_commands;
+                    knobs.push(Knob {
+                        name: "mesh_command_filter".into(),
+                        label: if typing { "Commands (Enter ends)".into() } else { "Commands (Ctrl+T types)".into() },
+                        value: 0.0,
+                        min: 0.0,
+                        max: 0.0,
+                        step: 0.0,
+                        choices: Vec::new(),
+                        text: if typing { format!("{}_", view.command_filter) } else { view.command_filter.clone() },
                     });
                     let (sessions, listed) = view.session_choices();
                     if !sessions.is_empty() {
@@ -2040,7 +2068,7 @@ impl Host for App {
             view.display_stale = true;
             return Ok(());
         }
-        if name == "mesh_statistics" || name == "mesh_state" {
+        if name == "mesh_statistics" || name == "mesh_state" || name == "mesh_command_filter" {
             return Err(format!("{name} is a readout"));
         }
         if name == "mesh_workspace" {
@@ -2710,12 +2738,11 @@ fn mesh_panel_rows(app: &App, setting: &str) -> Option<Vec<PanelRow>> {
         .unwrap_or_default()
         .into_iter()
         .enumerate()
-        .map(|(at, line)| PanelRow {
-            label: line.label,
-            buttons: Vec::new(),
-            slider: None,
-            dropdown: None,
-            checks: vec![PanelCheck { id: first + at as u32, text: line.check.into(), on: line.on }],
+        .map(|(at, line)| {
+            let mut checks = vec![PanelCheck { id: first + at as u32, text: line.check.into(), on: line.on }];
+            // A collection's row folds its objects away.
+            checks.extend(line.open.map(|open| PanelCheck { id: ID_MESH_FOLD + at as u32, text: "open".into(), on: open }));
+            PanelRow { label: line.label, buttons: Vec::new(), slider: None, dropdown: None, checks }
         })
         .collect();
     Some(rows)
@@ -3623,6 +3650,14 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
             .set_key("bloom", if on { "on" } else { "off" })?;
         return Ok(());
     }
+    if (ID_MESH_FOLD..ID_MESH_FOLD + 500).contains(&id) {
+        if let Some(view) = &mut app.mesh {
+            if let Some(line) = view.object_lines().into_iter().nth((id - ID_MESH_FOLD) as usize) {
+                view.panel_fold(line.target, on);
+            }
+        }
+        return Ok(());
+    }
     if (ID_MESH_OBJECT..ID_MESH_EVENT + 500).contains(&id) {
         let Some(view) = &mut app.mesh else {
             return Ok(());
@@ -3789,6 +3824,7 @@ fn options() -> Result<Options, String> {
             "--eye" => eye = Some(parse_vec3("--eye", &need_arg(&mut args, "--eye")?)?),
             "--look" => look = Some(parse_vec3("--look", &need_arg(&mut args, "--look")?)?),
             "--preset" => preset = Some(need_arg(&mut args, "--preset")?),
+            "--scenes" => std::env::set_var("GENOS_SCENES", need_arg(&mut args, "--scenes")?),
             "--mesh-workspace" => {
                 std::env::set_var("GENOS_MESH_WORKSPACE", need_arg(&mut args, "--mesh-workspace")?);
             }

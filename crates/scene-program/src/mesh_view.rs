@@ -168,6 +168,14 @@ pub struct MeshView {
     pub filter: String,
     /// The keys go to `filter`, not to the note.
     pub typing_filter: bool,
+    /// Text that narrows the Replay panel's commands by name.
+    pub command_filter: String,
+    /// The keys go to `command_filter`.
+    pub typing_commands: bool,
+    /// Control is down this frame: with T it types the command filter.
+    pub control: bool,
+    /// Collections whose objects the Objects panel does not list.
+    pub folded: BTreeSet<u64>,
     /// The recorded sessions, oldest first, as of the last poll.
     pub recorded: Vec<genos_workbench::Session>,
     /// A box or a lasso being dragged, in pixels: the box's two corners, or
@@ -203,7 +211,8 @@ pub struct MeshView {
 /// what the family is for. `mesh_command` takes any of them.
 /// The fields each of the viewer's own tools takes. The schema a client sees
 /// (`genos_debug::commands::mesh_schema`) names the same ones; a test checks it.
-pub const VIEW_ARGS: [&str; 22] = [
+pub const VIEW_ARGS: [&str; 23] = [
+    "command_filter",
     "workspace",
     "projection",
     "filter",
@@ -275,6 +284,23 @@ struct Posed {
     vertices: std::collections::BTreeMap<u64, [f32; 3]>,
     joints: std::collections::BTreeMap<String, [f32; 3]>,
 }
+
+/// The sign Shift gives on each digit key (US layout).
+const NOTE_SIGNS: [(char, char); 10] =
+    [('1', '!'), ('2', '@'), ('3', '#'), ('4', '$'), ('5', '%'), ('6', '^'), ('7', '&'), ('8', '*'), ('9', '('), ('0', ')')];
+/// The other keys the input layer names that type a mark: plain, then with
+/// Shift. The number pad gives the point and the signs. The input layer has
+/// no code for the comma, the full stop, the hyphen or the quote keys.
+const NOTE_MARKS: [(InputCode, char, char); 8] = [
+    (InputCode::key_left_bracket, '[', '{'),
+    (InputCode::key_right_bracket, ']', '}'),
+    (InputCode::key_grave, '`', '~'),
+    (InputCode::key_numpad_decimal, '.', '.'),
+    (InputCode::key_numpad_add, '+', '+'),
+    (InputCode::key_numpad_subtract, '-', '-'),
+    (InputCode::key_numpad_multiply, '*', '*'),
+    (InputCode::key_numpad_divide, '/', '/'),
+];
 
 /// The longest note the window takes. An agent can set a longer one.
 const NOTE_MAX: usize = 200;
@@ -771,6 +797,8 @@ pub struct PanelLine {
     pub check: &'static str,
     pub on: bool,
     pub target: PanelTarget,
+    /// A collection's second box: whether its objects are listed.
+    pub open: Option<bool>,
 }
 
 /// The orthographic view: how many times the perspective distance its eye
@@ -1036,6 +1064,10 @@ impl MeshView {
             projection_stale: false,
             filter: String::new(),
             typing_filter: false,
+            command_filter: String::new(),
+            typing_commands: false,
+            control: false,
+            folded: BTreeSet::new(),
             recorded: Vec::new(),
             region: None,
             region_lasso: false,
@@ -1059,14 +1091,22 @@ impl MeshView {
         if !self.typing {
             // T types the note. Shift and T types the panels' filter (Tab
             // moves between the menu's controls).
+            // Control and T types the Replay panel's command filter.
             if pressed(InputCode::key_t) {
                 self.typing = true;
-                self.typing_filter = shift;
+                self.typing_commands = self.control;
+                self.typing_filter = shift && !self.control;
                 return true;
             }
             return false;
         }
-        let words = if self.typing_filter { &mut self.filter } else { &mut self.selection.note };
+        let words = if self.typing_commands {
+            &mut self.command_filter
+        } else if self.typing_filter {
+            &mut self.filter
+        } else {
+            &mut self.selection.note
+        };
         if pressed(InputCode::key_enter) {
             self.typing = false;
         } else if pressed(InputCode::key_escape) {
@@ -1079,7 +1119,18 @@ impl MeshView {
         } else if words.len() < NOTE_MAX {
             for (code, letter) in NOTE_KEYS {
                 if pressed(code) {
-                    words.push(if shift { letter.to_ascii_uppercase() } else { letter });
+                    // Shift gives a capital, or the sign on a digit key.
+                    let sign = NOTE_SIGNS.iter().find(|(digit, _)| *digit == letter).map(|(_, sign)| *sign);
+                    words.push(match (shift, sign) {
+                        (true, Some(sign)) => sign,
+                        (true, None) => letter.to_ascii_uppercase(),
+                        (false, _) => letter,
+                    });
+                }
+            }
+            for (code, plain, shifted) in NOTE_MARKS {
+                if pressed(code) {
+                    words.push(if shift { shifted } else { plain });
                 }
             }
         }
@@ -1127,6 +1178,10 @@ impl MeshView {
         self.filter.is_empty() || name.to_lowercase().contains(&self.filter.to_lowercase())
     }
 
+    fn passes_command(&self, name: &str) -> bool {
+        self.command_filter.is_empty() || name.to_lowercase().contains(&self.command_filter.to_lowercase())
+    }
+
     /// The Objects panel: each collection with its objects under it, then the
     /// objects in no collection. The filter keeps an object whose name holds
     /// it, and every object of a collection whose name holds it. A line's
@@ -1141,6 +1196,7 @@ impl MeshView {
             check: "show",
             on: shown(part.object),
             target: PanelTarget::Object(part.object),
+            open: None,
         };
         let mut lines = Vec::new();
         for collection in &workspace.collections {
@@ -1153,13 +1209,18 @@ impl MeshView {
             if members.is_empty() && !(whole && self.filter.is_empty()) {
                 continue;
             }
+            // A fold hides the collection's objects; a filter lists what it found.
+            let open = !self.folded.contains(&collection.id) || !self.filter.is_empty();
             lines.push(PanelLine {
                 label: format!("{} ({})", collection.name, collection.objects.len()),
                 check: "show",
                 on: collection.objects.iter().any(|object| shown(*object)),
                 target: PanelTarget::Collection(collection.id),
+                open: Some(open),
             });
-            lines.extend(members.into_iter().map(|part| line(part, "    ")));
+            if open {
+                lines.extend(members.into_iter().map(|part| line(part, "    ")));
+            }
         }
         let grouped = |object: u64| workspace.collections.iter().any(|c| c.objects.contains(&object));
         lines.extend(
@@ -1190,19 +1251,32 @@ impl MeshView {
             check: "shown",
             on: at.is_none(),
             target: PanelTarget::Live,
+            open: None,
         }];
-        lines.extend(session.events.iter().rev().filter(|event| self.passes(&event.command)).take(PANEL_EVENTS).map(|event| {
+        lines.extend(session.events.iter().rev().filter(|event| self.passes_command(&event.command)).take(PANEL_EVENTS).map(|event| {
             PanelLine {
                 label: format!("{} {}{}", event.id, event.command, if event.ok { "" } else { " (refused)" }),
                 check: "shown",
                 on: at == Some(event.id),
                 target: PanelTarget::Event(event.id),
+                open: None,
             }
         }));
         lines
     }
 
     /// A check box of a panel line was set to `on`.
+    /// A collection's "open" box was set to `open`.
+    pub fn panel_fold(&mut self, target: PanelTarget, open: bool) {
+        if let PanelTarget::Collection(id) = target {
+            if open {
+                self.folded.remove(&id);
+            } else {
+                self.folded.insert(id);
+            }
+        }
+    }
+
     pub fn panel_click(&mut self, target: PanelTarget, on: bool) -> Result<(), String> {
         let objects = match target {
             PanelTarget::Object(object) => vec![object],
@@ -2344,6 +2418,9 @@ impl MeshView {
                 if let Some(words) = args.str("filter")? {
                     self.filter = words;
                 }
+                if let Some(words) = args.str("command_filter")? {
+                    self.command_filter = words;
+                }
                 if let Some(on) = args.bool("shadow")? {
                     self.shadow = on;
                     self.overlay_stale = true;
@@ -2957,6 +3034,7 @@ impl MeshView {
             ("projection", text(if self.orthographic { "orthographic" } else { "perspective" })),
             ("preview", self.preview_value()),
             ("filter", text(self.filter.clone())),
+            ("command_filter", text(self.command_filter.clone())),
             (
                 "pose",
                 self.pose.as_ref().map_or(Value::Null, |(clip, time)| {
@@ -3395,8 +3473,17 @@ mod tests {
         let commands: Vec<&str> = lines.iter().map(|line| line.label.as_str()).collect();
         assert_eq!(commands, ["live", "3 move", "2 extrude (refused)", "1 cube"]);
         assert!(lines[0].on && lines[1..].iter().all(|line| !line.on));
-        view.filter = "ex".into();
+        view.command_filter = "ex".into();
         assert_eq!(view.replay_lines().len(), 2, "live and the one match");
+        // Folding the collection leaves its row and takes its objects off the list.
+        view.panel_fold(PanelTarget::Collection(7), false);
+        assert_eq!(labels(&view), ["Props (1)", "1 cube"]);
+        assert_eq!(view.object_lines()[0].open, Some(false));
+        view.filter = "brack".into();
+        assert_eq!(labels(&view), ["Props (1)", "    2 bracket"], "a filter lists what it found, folded or not");
+        view.filter.clear();
+        view.panel_fold(PanelTarget::Collection(7), true);
+        assert_eq!(labels(&view).len(), 3);
         assert_eq!(view.session_choices(), (vec!["new".to_string(), "old".to_string()], 0));
     }
 
@@ -3417,6 +3504,17 @@ mod tests {
         view.type_note(&|code| code == InputCode::key_t, true);
         press(&mut view, InputCode::key_escape);
         assert_eq!((view.filter.as_str(), view.selection.note.as_str()), ("", "a"));
+        // Control and T types the command filter. Shift on a digit is its sign,
+        // and the number pad gives the point.
+        view.control = true;
+        press(&mut view, InputCode::key_t);
+        view.control = false;
+        press(&mut view, InputCode::key_u);
+        view.type_note(&|code| code == InputCode::key_1, true);
+        press(&mut view, InputCode::key_numpad_decimal);
+        press(&mut view, InputCode::key_5);
+        press(&mut view, InputCode::key_enter);
+        assert_eq!((view.command_filter.as_str(), view.filter.as_str(), view.selection.note.as_str()), ("u!.5", "", "a"));
     }
 
     #[test]

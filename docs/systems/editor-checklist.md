@@ -45,7 +45,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] mesh-workbench is linked by the editor binary only. `genos-editor` gives the scene program the function that opens a session (`Program::mesh_session`); `genos-scene-program` and `genos-lighting` no longer depend on `genos-meshbench`, `gpt-mesh` or `serde_json` (`cargo tree -p genos-lighting`). A mesh command that edits says so on a program without it.
 - [ ] The viewer's own code (`mesh_view.rs`, the reader `genos-workbench`) is still in the shared library; `genos-lighting` lists no mesh scene, so it never runs there.
 - [x] Mesh workspaces found on disk are in the menu's "Workspace" picker.
-- [ ] The scene picker lists the scene files in `debug/scenes` only; a game's own scenes are not listed.
+- [x] `--scenes DIR` (mirror `GENOS_SCENES`) adds the `.scene` files of another directory to the scene picker: a game's own scenes. Paths inside a scene file are still under the repository.
 - [x] ADR 0042 records that `genos-editor` starts the editor program of ADR 0002 and ADR 0006, as a thin view over agent commands (ADR 0019).
 
 ### C. The MCP server (decision 2)
@@ -92,7 +92,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Replay play (`replay: "play"`, `"stop"`, the menu's "Play replay"): a step every 0.7 s to the live mesh.
 - [x] A session by ID (`replay: {session, event}`) and a recorded command's input and reply (`mesh_view event: N`).
 - [x] Replay panel in the window (the Mesh tab's "Replay" section): a session picker, then "live" and the session's latest 12 commands, newest first, each with a box that shows the mesh after it. The same filter narrows the commands by name.
-- [ ] The panels are menu rows, not a tree widget: no fold per collection, no scroll of its own, one filter for both, and at most 200 object lines.
+- [x] A collection's row has an "open" box that folds its objects away. The Replay panel has its own filter (`mesh_view command_filter`; Control and T types it).
+- [ ] The panels are rows of the menu, not a widget of their own: the list scrolls with the menu, and the Objects panel lists at most 200 lines.
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
 - [x] Picking and the selection highlight follow the pose.
@@ -103,7 +104,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 
 - [x] Select with a click; the selection over the agent endpoint.
 - [x] The note typed in the window: `T` starts, letters, digits and the space bar type, Backspace removes, Enter ends, Escape clears. Hotkeys are off while typing. The Mesh tab shows it as "Note".
-- [ ] Punctuation in the typed note (the window gives key codes, not text).
+- [x] The typed note takes the signs on the digit keys (Shift), the brackets, the backtick, and the number pad's point and signs.
+- [ ] The comma, the full stop, the hyphen and the quote keys have no code in the input layer (`InputCode` keeps the input-zig names), so the window cannot type them; `mesh_selection note` sets any text.
 - [x] Box and lasso selection: Control and a left drag draws a box, Alt and a left drag a lasso, and the release selects what is inside by the pick mode (Shift adds). `mesh_pick box` and `mesh_pick lasso` do the same; only what the camera sees unless `through: true`.
 - [x] Select connected and select loop: `mesh_selection grow: connected` (everything joined to the selection) and `grow: loop` (the ring of four-sided faces through two selected neighbours). They have no key in the window yet. mesh-workbench's own `select_loop`, `select_box` and `select_related` act on its vertex selection through `mesh_select`.
 - [x] Preview of a pending edit (`mesh_preview`): mesh-workbench prepares the commands as one transaction and does not commit; the picture shows the result; `commit: true` commits it as one undo step and `discard: true` drops it. The picture comes from running the same commands on a copy of the workspace under `./genos-debug/mesh-preview/`, because mesh-workbench keeps its prepared mesh private.

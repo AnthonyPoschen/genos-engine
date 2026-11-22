@@ -35,6 +35,7 @@ Mesh | - | - | open | mesh_surfaces
 Mesh | mesh_objects | Objects | open | mesh_filter
 Mesh | mesh_objects | Objects | open | mesh_objects
 Mesh | mesh_replay | Replay | closed | mesh_session
+Mesh | mesh_replay | Replay | closed | mesh_command_filter
 Mesh | mesh_replay | Replay | closed | mesh_events
 Pipeline | - | - | open | lighting_direct
 Pipeline | - | - | open | lighting_shadows
