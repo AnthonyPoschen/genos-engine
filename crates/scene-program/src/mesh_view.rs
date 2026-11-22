@@ -1976,7 +1976,7 @@ impl MeshView {
                         .and_then(Option::as_ref)
                         .unwrap_or(&part.normals)
                         .iter()
-                        .map(|n| n.map(|c| ((c + 1.0) * 0.5).clamp(0.0, 1.0).powf(2.2)))
+                        .map(|n| n.map(|c| f32::midpoint(c, 1.0).clamp(0.0, 1.0).powf(2.2)))
                         .collect(),
                     "depth" => self.depths.get(at).cloned().unwrap_or_default(),
                     "face_orientation" => self
