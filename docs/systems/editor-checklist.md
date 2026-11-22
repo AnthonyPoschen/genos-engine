@@ -43,7 +43,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] The editor opens on the mesh scene, lists every scene, and takes MCP port 8765. `genos-lighting` keeps port 8766 and does not list mesh scenes. `make mesh` runs the editor.
 - [x] The frame loop is its own crate, `crates/scene-program` (`genos-scene-program`): the loop, the menu and its layout file, and the mesh viewer. `debug/lighting` and `editor` are two small binaries on it.
 - [x] mesh-workbench is linked by the editor binary only. `genos-editor` gives the scene program the function that opens a session (`Program::mesh_session`); `genos-scene-program` and `genos-lighting` no longer depend on `genos-meshbench`, `gpt-mesh` or `serde_json` (`cargo tree -p genos-lighting`). A mesh command that edits says so on a program without it.
-- [ ] The viewer's own code (`mesh_view.rs`, the reader `genos-workbench`) is still in the shared library; `genos-lighting` lists no mesh scene, so it never runs there.
+- Decision: the viewer's own code (`mesh_view.rs`, the reader `genos-workbench`, no dependency outside the engine) stays in the shared frame-loop library. `genos-lighting` lists no mesh scene and does not link mesh-workbench; taking the viewer out too would mean a build switch at some eighty places in the loop for no change in what either program does.
 - [x] Mesh workspaces found on disk are in the menu's "Workspace" picker.
 - [x] `--scenes DIR` (mirror `GENOS_SCENES`) adds the `.scene` files of another directory to the scene picker: a game's own scenes. Paths inside a scene file are still under the repository.
 - [x] ADR 0042 records that `genos-editor` starts the editor program of ADR 0002 and ADR 0006, as a thin view over agent commands (ADR 0019).
@@ -93,7 +93,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] A session by ID (`replay: {session, event}`) and a recorded command's input and reply (`mesh_view event: N`).
 - [x] Replay panel in the window (the Mesh tab's "Replay" section): a session picker, then "live" and the session's latest 12 commands, newest first, each with a box that shows the mesh after it. The same filter narrows the commands by name.
 - [x] A collection's row has an "open" box that folds its objects away. The Replay panel has its own filter (`mesh_view command_filter`; Control and T types it).
-- [ ] The panels are rows of the menu, not a widget of their own: the list scrolls with the menu, and the Objects panel lists at most 200 lines.
+- Decision: the Objects and Replay panels stay sections of the Mesh tab, not a second floating panel; the list scrolls with the menu, and the Objects panel lists at most 200 lines (the filter narrows it).
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
 - [x] Picking and the selection highlight follow the pose.
@@ -136,7 +136,9 @@ A workspace with three objects, an extruded face, box UVs scaled to tile, a text
 - [x] The mesh scene is lit as the web viewer lights a mesh: the scene's sun from the web viewer's key direction, and two weaker directional lights from its other two directions at its strengths (`MESH_FILL_LIGHTS`).
 - [x] `topology` (the `wireframe` shade) labels each visible face and vertex with its ID, as mesh-workbench's does; `mesh_view labels: false` hides them. Read from a picture of the window.
 - [x] Contact shadows that would overlap are one patch: two patches at the same height flickered into rings (seen in the window).
-- [ ] Not matched: the ground is a lit plane with an edge, not a disc that fades into the background; the contact shadow shows a few steps on the dark ground, because the G-buffer keeps base colour in 8 linear bits; `normals` and `depth` are the engine's `view` modes with their own encodings. The web viewer's toolbar, axis gizmo and footer are the Mesh tab's rows here.
+- [x] The sky is the lit ground's colour, so the ground has no visible edge: it fades into the background as the web viewer's does.
+- [ ] Not matched: the contact shadow shows a few steps on the dark ground, because the G-buffer keeps base colour in 8 linear bits; `normals` and `depth` are the engine's `view` modes with their own encodings.
+- Decision: the web viewer's toolbar, axis gizmo, inspector panel and footer are the Mesh tab of the engine's menu here (a folder picker, readouts, dropdowns, check boxes, the Objects and Replay sections). The editor stays basic: a person looks, selects and types a note, and an agent edits.
 
 ## For Nathan
 
