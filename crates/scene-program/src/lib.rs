@@ -1419,6 +1419,11 @@ impl App {
                 let mut view = mesh_view::MeshView::new(dir, stamp);
                 view.poll_sessions();
                 self.mesh = Some(view);
+                // A mesh scene opens the menu on the mesh controls.
+                let menu = &mut self.scene().menu;
+                if menu.tab.is_empty() || menu.tab == "Scene" {
+                    menu.tab = MESH_TAB.into();
+                }
                 false
             }
         };
@@ -1881,7 +1886,7 @@ impl Host for App {
                             view.found.iter().map(|dir| dir.strip_prefix(&root).unwrap_or(dir).display().to_string()).collect();
                         knobs.push(Knob {
                             name: "mesh_workspace".into(),
-                            label: "Workspace".into(),
+                            label: "Folder".into(),
                             value: 0.0,
                             min: 0.0,
                             max: (names.len() - 1) as f64,
@@ -2590,6 +2595,16 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
         return None;
     }
     let label = menu_label(name, &knob.label);
+    // A knob with no range is a readout: its words, no slider.
+    if knob.choices.is_empty() && knob.min >= knob.max {
+        return Some(PanelRow {
+            label: if knob.text.is_empty() { label } else { format!("{label}: {}", knob.text) },
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        });
+    }
     let slider = if knob.choices.is_empty() {
         PanelSlider::range(
             ID_KNOB + index as u32,
@@ -2664,6 +2679,10 @@ fn flush_checks(section: &mut SectionAcc) {
     });
 }
 
+/// The menu tab that holds the mesh viewer's controls. It has no rows, and
+/// so is not drawn, outside a mesh scene.
+const MESH_TAB: &str = "Mesh";
+
 /// The rows of the mesh viewer's Objects (`mesh_objects`) and Replay
 /// (`mesh_events`) lists. `None` for any other setting.
 fn mesh_panel_rows(app: &App, setting: &str) -> Option<Vec<PanelRow>> {
@@ -2731,7 +2750,10 @@ fn panel_blocks(
         }
     }
     // The mesh viewer's sections have nothing in another scene: no empty fold.
-    sections.retain(|section| !(section.key.starts_with("mesh_") && section.rows.is_empty() && section.checks.is_empty()));
+    sections.retain(|section| {
+        let mesh = section.key.starts_with("mesh_") || section.tab.as_deref() == Some(MESH_TAB);
+        !(mesh && section.rows.is_empty() && section.checks.is_empty())
+    });
     if let Some(section) = sections.last_mut() {
         flush_checks(section);
     }
@@ -4396,14 +4418,16 @@ mod tests {
         let mut app = super::App::open(entries, root, log).expect("app");
         let fps = genos_scene::FpsCounterSettings::default();
         let menu = super::load_menu_layout().expect("layout");
+        // The labels on the Mesh tab; none when the tab is not drawn.
         let labels = |app: &super::App| -> Vec<String> {
             let blocks = super::panel_blocks(app, ViewMode::Full, &fps, &menu);
             let genos_ui::PanelBlock::Tabs(tabs) = &blocks[0] else {
                 panic!("the menu is one tab strip");
             };
-            let scene = tabs.tabs.iter().find(|tab| tab.title == "Scene").expect("Scene tab");
-            scene
-                .blocks
+            let Some(mesh) = tabs.tabs.iter().find(|tab| tab.title == super::MESH_TAB) else {
+                return Vec::new();
+            };
+            mesh.blocks
                 .iter()
                 .flat_map(|block| match block {
                     genos_ui::PanelBlock::Rows(rows) => rows.iter().map(|row| row.label.clone()).collect(),
@@ -4418,7 +4442,7 @@ mod tests {
         app.load_scene("mesh").expect("mesh scene");
         app.follow_mesh();
         let shown = labels(&app);
-        for want in ["Click selects", "Mesh shading", "Show object", "Note (T types)"] {
+        for want in ["Click selects", "Mesh shading", "Show object", "Note (T types)", "Folder"] {
             assert!(shown.iter().any(|label| label == want), "{want} is missing from {shown:?}");
         }
         // The on/off controls are check boxes on the tab.
@@ -4446,7 +4470,7 @@ mod tests {
         // Another scene has no Objects section.
         app.load_scene("lighting-stress").expect("lighting scene");
         app.follow_mesh();
-        assert!(!labels(&app).iter().any(|label| label == cube || label.starts_with("Filter")));
+        assert!(labels(&app).is_empty(), "no Mesh tab outside a mesh scene");
     }
 
     #[test]

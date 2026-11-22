@@ -23,7 +23,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Selection highlight: faces, objects, vertex markers.
 - [x] Agent commands: `mesh_view`, `mesh_pick`, `mesh_selection` (with the note and the camera), `mesh_command`.
 - [x] Display: hide, show, solo; `shaded`, `object_ids`, `wireframe`; axis views; replay of a recorded state.
-- [x] Menu: the Scene tab shows the mesh controls in a mesh scene. A test checks them. Until 22 Nov 2026 only the on/off ones were drawn: a slider or a dropdown needs its knob name in `SLIDER_KNOBS` or `DROP_KNOBS`.
+- [x] Menu: the Mesh tab shows the mesh controls (their own tab, drawn only in a mesh scene; the editor opens on it) in a mesh scene. A test checks them. Until 22 Nov 2026 only the on/off ones were drawn: a slider or a dropdown needs its knob name in `SLIDER_KNOBS` or `DROP_KNOBS`.
 - [x] mesh-workbench linked in (`genos-meshbench`); `mesh_command` runs on its session.
 - [x] Checks: `debug/lighting/scripts/mesh_selection.rhai`; unit tests in `genos-workbench` and `crates/scene-program/src/mesh_view.rs`; clippy clean on both.
 
@@ -84,12 +84,12 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [x] Show all, hide matching and solo matching by name (`mesh_view show_all`, `hide_match`, `solo_match`).
 - [x] Collections: listed by `mesh_view`, with `solo_collection` and `hide_collection`.
-- [x] Objects panel in the window (the Scene tab's "Objects" section): each collection with its objects under it, then the objects in no collection, each with a box that shows or hides it; a collection's box acts on all its objects. A filter narrows it: Shift and T types it, or `mesh_view filter`.
+- [x] Objects panel in the window (the Mesh tab's "Objects" section): each collection with its objects under it, then the objects in no collection, each with a box that shows or hides it; a collection's box acts on all its objects. A filter narrows it: Shift and T types it, or `mesh_view filter`.
 - [x] Replay: show the state after a command (`mesh_view replay`).
 - [x] Replay steps and scrubber: `replay: "next"`, `"previous"`, `"live"`, and the menu's "Replay" slider (0 is the session start, the last step is live).
 - [x] Replay play (`replay: "play"`, `"stop"`, the menu's "Play replay"): a step every 0.7 s to the live mesh.
 - [x] A session by ID (`replay: {session, event}`) and a recorded command's input and reply (`mesh_view event: N`).
-- [x] Replay panel in the window (the Scene tab's "Replay" section): a session picker, then "live" and the session's latest 12 commands, newest first, each with a box that shows the mesh after it. The same filter narrows the commands by name.
+- [x] Replay panel in the window (the Mesh tab's "Replay" section): a session picker, then "live" and the session's latest 12 commands, newest first, each with a box that shows the mesh after it. The same filter narrows the commands by name.
 - [ ] The panels are menu rows, not a tree widget: no fold per collection, no scroll of its own, one filter for both, and at most 200 object lines.
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
@@ -100,11 +100,16 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 ### E. Beyond the web viewer
 
 - [x] Select with a click; the selection over the agent endpoint.
-- [x] The note typed in the window: `T` starts, letters, digits and the space bar type, Backspace removes, Enter ends, Escape clears. Hotkeys are off while typing. The Scene tab shows it as "Note".
+- [x] The note typed in the window: `T` starts, letters, digits and the space bar type, Backspace removes, Enter ends, Escape clears. Hotkeys are off while typing. The Mesh tab shows it as "Note".
 - [ ] Punctuation in the typed note (the window gives key codes, not text).
 - [x] Box and lasso selection: Control and a left drag draws a box, Alt and a left drag a lasso, and the release selects what is inside by the pick mode (Shift adds). `mesh_pick box` and `mesh_pick lasso` do the same; only what the camera sees unless `through: true`.
 - [x] Select connected and select loop: `mesh_selection grow: connected` (everything joined to the selection) and `grow: loop` (the ring of four-sided faces through two selected neighbours). They have no key in the window yet. mesh-workbench's own `select_loop`, `select_box` and `select_related` act on its vertex selection through `mesh_select`.
 - [x] Preview of a pending edit (`mesh_preview`): mesh-workbench prepares the commands as one transaction and does not commit; the picture shows the result; `commit: true` commits it as one undo step and `discard: true` drops it. The picture comes from running the same commands on a copy of the workspace under `./genos-debug/mesh-preview/`, because mesh-workbench keeps its prepared mesh private.
+
+### F. Checked in the window
+
+- [x] The menu's Mesh tab was read from a picture of the editor's own window (22 Nov 2026): the folder picker, the readouts, the note, the shading and object dropdowns, the four check boxes, the replay slider, the Objects section with a show box per object, and the Replay section with the session picker and a row per command. A `capture` with `ui: true` does not include the menu; the picture came from the desktop (`grim` on the window's rectangle).
+- [x] A readout (the note, the filter, the counts, the state) draws as words. It drew as a slider with a thumb and its text ran off the panel.
 
 ## For Nathan
 
