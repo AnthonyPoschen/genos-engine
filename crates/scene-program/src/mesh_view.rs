@@ -167,6 +167,33 @@ pub struct MeshView {
 
 /// The mesh tools that each take one family of mesh-workbench commands, and
 /// what the family is for. `mesh_command` takes any of them.
+/// The fields each of the viewer's own tools takes. The schema a client sees
+/// (`genos_debug::commands::mesh_schema`) names the same ones; a test checks it.
+pub const VIEW_ARGS: [&str; 19] = [
+    "pick",
+    "hide",
+    "show",
+    "solo",
+    "show_all",
+    "shade",
+    "look",
+    "replay",
+    "turntable",
+    "pose",
+    "bones",
+    "surfaces",
+    "solo_match",
+    "hide_match",
+    "solo_collection",
+    "hide_collection",
+    "event",
+    "grid",
+    "shadow",
+];
+pub const PICK_ARGS: [&str; 3] = ["screen", "mode", "select"];
+pub const SELECTION_ARGS: [&str; 5] = ["objects", "faces", "vertices", "note", "clear"];
+pub const HELP_ARGS: [&str; 4] = ["topic", "all", "offset", "limit"];
+
 pub const FAMILIES: [(&str, &str); 8] = [
     ("mesh_object", "objects and collections: object_* and collection_* (create, rename, move, rotate, duplicate, instance, join, separate, delete, stage), and cube"),
     ("mesh_select", "mesh-workbench's own vertex selection, which its move, scale and rotate act on: select and select_*"),
@@ -1362,7 +1389,7 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces", "solo_match", "hide_match", "solo_collection", "hide_collection", "event", "grid", "shadow"])?;
+                args.only("mesh_view", &VIEW_ARGS)?;
                 for (key, solo) in [("solo_collection", true), ("hide_collection", false)] {
                     if let Some(value) = args.0.get(key) {
                         let want = value.as_u64().ok_or_else(|| format!("{key} is a collection id"))?;
@@ -1513,7 +1540,7 @@ impl MeshView {
                 Ok(self.view_value())
             }
             "mesh_selection" => {
-                args.only("mesh_selection", &["objects", "faces", "vertices", "note", "clear"])?;
+                args.only("mesh_selection", &SELECTION_ARGS)?;
                 if args.bool("clear")?.unwrap_or(false) {
                     self.selection = Selection::default();
                     self.overlay_stale = true;
@@ -1534,7 +1561,7 @@ impl MeshView {
                 Ok(self.selection_value(camera))
             }
             "mesh_pick" => {
-                args.only("mesh_pick", &["screen", "mode", "select"])?;
+                args.only("mesh_pick", &PICK_ARGS)?;
                 let at = args.floats("screen", 2)?.map_or([0.5, 0.5], |v| [v[0], v[1]]);
                 let mode = args.str("mode")?.unwrap_or_else(|| "face".into());
                 let select = args.str("select")?.unwrap_or_else(|| "set".into());
@@ -1578,7 +1605,7 @@ impl MeshView {
                 self.run(command)
             }
             "mesh_help" => {
-                args.only("mesh_help", &["topic", "all", "offset", "limit"])?;
+                args.only("mesh_help", &HELP_ARGS)?;
                 // The same fields as mesh-workbench's help, with its name added.
                 let mut request = vec![("command".to_string(), text("help"))];
                 if let Value::Object(pairs) = args.0 {
@@ -1977,6 +2004,46 @@ mod tests {
         let off = genos_mcp::json::parse(r#"{"shadow":false}"#).expect("json");
         view.command("mesh_view", &off, &mut camera, 1.0).expect("shadow off");
         assert!(view.shadow_patches(ground).0.is_empty());
+    }
+
+    #[test]
+    fn each_mesh_tool_publishes_a_schema_that_names_the_fields_it_takes() {
+        let keys = |schema: &genos_mcp::json::Value| match schema.get("properties") {
+            Some(genos_mcp::json::Value::Object(pairs)) => pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let lists: [(&str, &[&str]); 4] = [
+            ("mesh_view", &super::VIEW_ARGS),
+            ("mesh_pick", &super::PICK_ARGS),
+            ("mesh_selection", &super::SELECTION_ARGS),
+            ("mesh_help", &super::HELP_ARGS),
+        ];
+        for (tool, takes) in lists {
+            let schema = genos_debug::commands::mesh_schema(tool).expect(tool);
+            let mut named = keys(&schema);
+            let mut takes: Vec<String> = takes.iter().map(|field| (*field).to_string()).collect();
+            named.sort();
+            takes.sort();
+            assert_eq!(named, takes, "{tool}");
+        }
+        // The shades in the schema are the shades the viewer has.
+        let view = genos_debug::commands::mesh_schema("mesh_view").expect("mesh_view");
+        let shades = view.get("properties").and_then(|p| p.get("shade")).and_then(|s| s.get("enum")).expect("shade enum");
+        let shades: Vec<&str> = match shades {
+            genos_mcp::json::Value::Array(items) => items.iter().filter_map(|item| item.as_str()).collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(shades, super::SHADES);
+        // Every family tool, and mesh_command, has one; each needs `command`.
+        for (tool, _) in super::FAMILIES.iter().chain(&[("mesh_command", "")]) {
+            let schema = genos_debug::commands::mesh_schema(tool).expect(tool);
+            assert_eq!(keys(&schema), ["command"], "{tool}");
+            assert!(genos_mcp::json::encode(&schema).contains(r#""required":["command"]"#), "{tool}");
+        }
+        // And the catalogue carries them.
+        let listed = genos_debug::commands::specs();
+        let listed = listed.iter().find(|spec| spec.name == "mesh_pick").expect("mesh_pick");
+        assert_eq!(keys(&listed.schema).len(), 3);
     }
 
     #[test]

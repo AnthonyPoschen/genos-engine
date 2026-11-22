@@ -85,8 +85,30 @@ pub fn specs() -> Vec<CommandSpec> {
     ));
     for spec in &mut specs {
         spec.description = format!("[{}] {}", section_of(&spec.name), spec.description);
+        if let Some(schema) = mesh_schema(&spec.name) {
+            spec.schema = schema;
+        }
     }
     specs
+}
+
+/// The JSON schema of a mesh tool's arguments. The viewer's own tools name
+/// every field and refuse another. A family tool takes one mesh-workbench
+/// command object: its `command` name is required and its other fields are
+/// mesh-workbench's, which publishes no schema for them (`mesh_help` reads
+/// them).
+pub fn mesh_schema(name: &str) -> Option<json::Value> {
+    let text = match name {
+        "mesh_view" => r#"{"type":"object","properties":{"pick":{"type":"string","enum":["face","object","vertex"],"description":"What a click selects."},"hide":{"type":"array","items":{"type":"integer","minimum":0},"description":"Object ids to hide in the viewer."},"show":{"type":"array","items":{"type":"integer","minimum":0},"description":"Object ids to show again."},"solo":{"type":"array","items":{"type":"integer","minimum":0},"description":"Show only these object ids."},"show_all":{"type":"boolean","description":"true shows every object."},"shade":{"type":"string","enum":["shaded","wireframe","vertex_colors","object_ids","face_ids","collection_ids","silhouette","textured","uv_checker","face_orientation"]},"look":{"type":"string","enum":["+x","-x","+y","-y","+z","-z","frame"],"description":"The side the camera stands on, or frame the mesh."},"replay":{"description":"A recorded state: next, previous, live, play, stop, or {session, event}.","oneOf":[{"type":"string","enum":["next","previous","live","play","stop"]},{"type":"object","properties":{"session":{"type":"string"},"event":{"type":"integer","minimum":0}},"additionalProperties":false}]},"turntable":{"type":"boolean","description":"Turn the camera about the mesh."},"pose":{"description":"rest, stop, or {clip, time} / {clip, play: true}.","oneOf":[{"type":"string","enum":["rest","stop"]},{"type":"object","properties":{"clip":{"type":"string"},"time":{"type":"number"},"play":{"type":"boolean"}},"required":["clip"],"additionalProperties":false}]},"bones":{"type":"boolean","description":"Draw the rig's joints and bones."},"surfaces":{"type":"boolean","description":"false hides the mesh surfaces (bones only)."},"solo_match":{"type":"string","description":"Show only objects whose name contains this text."},"hide_match":{"type":"string","description":"Hide objects whose name contains this text."},"solo_collection":{"type":"integer","minimum":0,"description":"A collection id."},"hide_collection":{"type":"integer","minimum":0,"description":"A collection id."},"event":{"type":"integer","minimum":1,"description":"Return what command N of the session sent and its reply."},"grid":{"type":"boolean","description":"false hides the ground grid."},"shadow":{"type":"boolean","description":"false hides the contact shadow."}},"additionalProperties":false}"#,
+        "mesh_selection" => r#"{"type":"object","properties":{"objects":{"type":"array","items":{"type":"integer","minimum":0},"description":"Replace the selected objects."},"faces":{"type":"array","items":{"type":"integer","minimum":0},"description":"Replace the selected faces."},"vertices":{"type":"array","items":{"type":"integer","minimum":0},"description":"Replace the selected vertices."},"note":{"type":"string","description":"What the person wants done with the selection."},"clear":{"type":"boolean","description":"true empties the selection first."}},"additionalProperties":false}"#,
+        "mesh_pick" => r#"{"type":"object","properties":{"screen":{"type":"array","items":{"type":"number","minimum":0,"maximum":1},"minItems":2,"maxItems":2,"description":"[x, y], origin top left. Default the centre."},"mode":{"type":"string","enum":["face","object","vertex"]},"select":{"type":"string","enum":["set","add","none"]}},"additionalProperties":false}"#,
+        "mesh_help" => r#"{"type":"object","properties":{"topic":{"type":"string","description":"A help topic, for example command-api."},"all":{"type":"boolean","description":"true lists every topic."},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1}},"additionalProperties":false}"#,
+        "mesh_command" => r#"{"type":"object","properties":{"command":{"description":"One mesh-workbench command object, or a list of up to 1024.","oneOf":[{"type":"object","properties":{"command":{"type":"string","description":"The mesh-workbench command name."}},"required":["command"],"additionalProperties":true},{"type":"array","items":{"type":"object","properties":{"command":{"type":"string","description":"The mesh-workbench command name."}},"required":["command"],"additionalProperties":true},"minItems":1,"maxItems":1024}]}},"additionalProperties":false,"required":["command"]}"#,
+        "mesh_object" | "mesh_select" | "mesh_material" | "mesh_rig" | "mesh_animation" | "mesh_query" | "mesh_document"
+        | "mesh_edit" => r#"{"type":"object","properties":{"command":{"type":"string","description":"The mesh-workbench command name."}},"required":["command"],"additionalProperties":true}"#,
+        _ => return None,
+    };
+    json::parse(text).ok()
 }
 
 fn plain_specs() -> Vec<CommandSpec> {
