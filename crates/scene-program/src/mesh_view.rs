@@ -432,6 +432,173 @@ const PANEL_EVENTS: usize = 12;
 /// Triangles with a colour per vertex: positions, normals, colours.
 pub type Painted = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>);
 
+/// One mesh-workbench command as its own reference documents it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandDoc {
+    pub command: String,
+    /// The field names its reference row names, in the order they appear.
+    pub fields: Vec<String>,
+    /// The reference row's words: each field's form and what the command does.
+    pub doc: String,
+    /// The help topic the row is in.
+    pub topic: String,
+}
+
+/// The fields `mesh_commands` takes.
+pub const COMMANDS_ARGS: [&str; 2] = ["command", "family"];
+
+/// Lines of a help topic asked for at a time (mesh-workbench's page limit).
+const HELP_PAGE: u64 = 256;
+
+/// The catalogue, read once a process from mesh-workbench's help.
+static CATALOGUE: std::sync::OnceLock<Vec<CommandDoc>> = std::sync::OnceLock::new();
+
+/// A backticked word that is a name: lower-case letters, digits, underscores.
+fn plain_name(word: &str) -> bool {
+    word.chars().next().is_some_and(|first| first.is_ascii_lowercase())
+        && word.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The backticked spans of `text`.
+fn ticked(text: &str) -> Vec<&str> {
+    text.split('`').skip(1).step_by(2).collect()
+}
+
+/// Read the command rows out of one help topic. mesh-workbench's reference
+/// is Markdown tables whose first cell names one or more commands in
+/// backticks and whose other cells name the fields in backticks
+/// (`values:[...]`, `object`) among prose. A command in several rows gets
+/// the rows joined.
+pub fn parse_reference(topic: &str, text: &str, out: &mut Vec<CommandDoc>) {
+    let rows = || text.lines().filter(|line| line.starts_with("| `"));
+    // Every command the topic documents: one named bare in another row's
+    // words is a reference to it, not a field.
+    let documented: Vec<&str> = rows()
+        .filter_map(|line| line.trim_matches('|').split('|').next())
+        .flat_map(ticked)
+        .filter(|name| plain_name(name))
+        .collect();
+    for line in rows() {
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        let [first, rest @ ..] = cells.as_slice() else {
+            continue;
+        };
+        let commands: Vec<&str> = ticked(first).into_iter().filter(|name| plain_name(name)).collect();
+        if commands.is_empty() || rest.is_empty() {
+            continue;
+        }
+        let doc = rest.join(" - ");
+        // A field is the name a backticked span starts with: `kind:"reference"`, `limit`, `crop:[...]`.
+        let mut fields: Vec<String> = Vec::new();
+        for span in ticked(&doc) {
+            let name: String = span.chars().take_while(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '_').collect();
+            let after = span[name.len()..].chars().next();
+            let named_command = after.is_none() && documented.contains(&name.as_str());
+            let is_field = plain_name(&name) && matches!(after, None | Some(':' | '?')) && !named_command;
+            if is_field && !fields.contains(&name) {
+                fields.push(name);
+            }
+        }
+        for command in commands {
+            match out.iter_mut().find(|known| known.command == command) {
+                Some(known) => {
+                    known.doc = format!("{}\n{doc}", known.doc);
+                    for field in &fields {
+                        if !known.fields.contains(field) {
+                            known.fields.push(field.clone());
+                        }
+                    }
+                }
+                None => out.push(CommandDoc { command: command.to_string(), fields: fields.clone(), doc: doc.clone(), topic: topic.to_string() }),
+            }
+        }
+    }
+}
+
+/// Every command mesh-workbench's help documents. The help is read once,
+/// through a session on an empty scratch workspace under the output
+/// directory, so the open workspace's session record gains no help events.
+fn catalogue() -> Result<&'static [CommandDoc], String> {
+    if let Some(known) = CATALOGUE.get() {
+        return Ok(known);
+    }
+    let open = crate::program().mesh_session.ok_or("this program does not link mesh-workbench: run genos-editor")?;
+    let dir = out_dir().join("mesh-catalogue");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    let mut session = open(&dir)?;
+    let mut ask = |request: Value| -> Result<Value, String> {
+        let reply = session.execute(&request)?;
+        if !reply_ok(&reply) {
+            return Err(format!("mesh-workbench help: {}", json::encode(&reply)));
+        }
+        Ok(reply.get("result").cloned().unwrap_or(reply))
+    };
+    let topics = ask(obj(vec![("command", text("help")), ("all", Value::Bool(true))]))?;
+    let names: Vec<String> = match topics.get("topics") {
+        Some(Value::Object(pairs)) => pairs.iter().map(|(key, _)| key.clone()).collect(),
+        _ => return Err("mesh-workbench help lists no topics".into()),
+    };
+    let mut found = Vec::new();
+    for topic in names {
+        let mut offset = Some(0);
+        let mut whole = String::new();
+        while let Some(at) = offset {
+            let page = ask(obj(vec![("command", text("help")), ("topic", text(topic.clone())), ("offset", id(at)), ("limit", id(HELP_PAGE))]))?;
+            whole.push_str(page.get("text").and_then(Value::as_str).unwrap_or(""));
+            whole.push('\n');
+            offset = page.get("next_offset").and_then(Value::as_u64);
+        }
+        parse_reference(&topic, &whole, &mut found);
+    }
+    // The reference also has tables of render modes and stages. A row is a
+    // command only if mesh-workbench knows the name: sent bare on the scratch
+    // workspace, a command runs or asks for its fields, and any other name
+    // is refused as unknown.
+    found.retain(|doc| {
+        let reply = session.execute(&obj(vec![("command", text(doc.command.clone()))]));
+        let refused = match &reply {
+            Ok(reply) => reply.get("error").and_then(Value::as_str).unwrap_or("").to_string(),
+            Err(err) => err.clone(),
+        };
+        !refused.contains("unknown command")
+    });
+    drop(session);
+    let _ = std::fs::remove_dir_all(&dir);
+    found.sort_by(|a, b| a.command.cmp(&b.command));
+    Ok(CATALOGUE.get_or_init(|| found))
+}
+
+/// What `mesh_commands` says of one command: its tool, its fields, the
+/// reference's words, and a JSON schema that names the fields. The types
+/// are in the words: mesh-workbench publishes none.
+fn command_value(doc: &CommandDoc, full: bool) -> Value {
+    let mut pairs = vec![
+        ("command", text(doc.command.clone())),
+        ("tool", text(family_of(&doc.command))),
+        ("fields", list(doc.fields.iter().map(|field| text(field.clone())).collect())),
+    ];
+    if full {
+        let mut properties = vec![(
+            "command".to_string(),
+            obj(vec![("const", text(doc.command.clone()))]),
+        )];
+        properties.extend(doc.fields.iter().map(|field| (field.clone(), obj(vec![("description", text("See doc for its form."))]))));
+        pairs.push(("doc", text(doc.doc.clone())));
+        pairs.push(("topic", text(doc.topic.clone())));
+        pairs.push((
+            "schema",
+            obj(vec![
+                ("type", text("object")),
+                ("properties", Value::Object(properties)),
+                ("required", list(vec![text("command")])),
+                ("additionalProperties", Value::Bool(true)),
+            ]),
+        ));
+    }
+    obj(pairs)
+}
+
 /// The key of a reply that is not the answer yet: its value is the ticket to
 /// ask [`MeshView::poll_edit`] with.
 pub const PENDING_KEY: &str = genos_debug::knobs::SCENE_PENDING;
@@ -2381,6 +2548,32 @@ impl MeshView {
                 let command = args.0.get("command").ok_or("mesh_command needs command: one mesh-workbench command object, or a list of them")?;
                 self.edit(command)
             }
+            "mesh_commands" => {
+                args.only("mesh_commands", &COMMANDS_ARGS)?;
+                let known = catalogue()?;
+                if let Some(name) = args.str("command")? {
+                    let doc = known.iter().find(|doc| doc.command == name).ok_or_else(|| {
+                        format!("mesh-workbench's help has no row for {name}; mesh_help topic command-api describes the rest")
+                    })?;
+                    return Ok(command_value(doc, true));
+                }
+                let family = args.str("family")?;
+                if let Some(family) = &family {
+                    if !FAMILIES.iter().any(|(tool, _)| tool == family) {
+                        return Err(format!("mesh_commands family is one of {}", FAMILIES.map(|(tool, _)| tool).join(", ")));
+                    }
+                }
+                let listed: Vec<Value> = known
+                    .iter()
+                    .filter(|doc| family.as_deref().is_none_or(|want| family_of(&doc.command) == want))
+                    .map(|doc| command_value(doc, false))
+                    .collect();
+                Ok(obj(vec![
+                    ("count", num(listed.len() as f64)),
+                    ("commands", list(listed)),
+                    ("source", text("Parsed from the tables of mesh-workbench's own help. command: NAME gives one command's words and schema.")),
+                ]))
+            }
             "mesh_preview" => {
                 args.only("mesh_preview", &PREVIEW_ARGS)?;
                 self.preview_command(&args)
@@ -3129,12 +3322,13 @@ mod tests {
             Some(genos_mcp::json::Value::Object(pairs)) => pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        let lists: [(&str, &[&str]); 6] = [
+        let lists: [(&str, &[&str]); 7] = [
             ("mesh_view", &super::VIEW_ARGS),
             ("mesh_pick", &super::PICK_ARGS),
             ("mesh_selection", &super::SELECTION_ARGS),
             ("mesh_help", &super::HELP_ARGS),
             ("mesh_preview", &super::PREVIEW_ARGS),
+            ("mesh_commands", &super::COMMANDS_ARGS),
             ("mesh_context", &super::CONTEXT_ARGS),
         ];
         for (tool, takes) in lists {
@@ -3417,6 +3611,27 @@ mod tests {
         // A ticket the view does not hold is a closed workspace, not a wait for ever.
         let mut view = view();
         assert!(view.poll_edit(7).is_some_and(|reply| reply.is_err()));
+    }
+
+    #[test]
+    fn a_reference_table_row_gives_each_command_its_fields() {
+        let text = "## UV editing\n\n| Command | Fields | Notes |\n|---|---|---|\n\
+| `uv_set` | `values:[{vertex,uv:[u,v],face?},...]` (1-4096 entries), optional `object`, `faces`. Writes corners. |\n\
+| `texture_import`, `texture_define` | `name`, `path` to a PNG | Named images; see `uv_set` |\n\
+| `uv_set` | `limit` 1..64 | paged |\n\
+not a row | `nothing` |\n";
+        let mut found = Vec::new();
+        super::parse_reference("uv-editing", text, &mut found);
+        let names: Vec<&str> = found.iter().map(|doc| doc.command.as_str()).collect();
+        assert_eq!(names, ["uv_set", "texture_import", "texture_define"]);
+        // Both of its rows: the fields of each, once, and both rows' words.
+        assert_eq!(found[0].fields, ["values", "object", "faces", "limit"]);
+        assert!(found[0].doc.contains("Writes corners") && found[0].doc.contains("paged"));
+        // A command named in the notes is not a field.
+        assert_eq!(found[1].fields, ["name", "path"]);
+        let value = genos_mcp::json::encode(&super::command_value(&found[0], true));
+        assert!(value.contains(r#""tool":"mesh_material""#) && value.contains(r#""command":{"const":"uv_set"}"#), "{value}");
+        assert!(value.contains(r#""required":["command"]"#) && value.contains(r#""faces":{"#), "{value}");
     }
 
     #[test]
