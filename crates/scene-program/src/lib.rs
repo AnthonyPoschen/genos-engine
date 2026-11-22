@@ -1249,17 +1249,20 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
     for lamp in lamps {
         scene.lights.push(point_light(lamp));
     }
+    // A mesh is looked at for its shape and colour: no glow around bright faces.
+    let _ = scene.hdr.set_key("bloom", "off");
     let mut world = World::from_scene(scene);
     // Surface 0: the mesh's textures and the UV checker in one atlas. A part
     // draws with it only in the `textured` and `uv_checker` shades.
     let atlas = mesh_view::atlas(&workspace.textures);
     // In `mesh_view`'s order: SURFACE_CHECKER, then SURFACE_TEXTURES.
     world.surfaces.clear();
-    for color in [atlas.checker].iter().chain(&atlas.rects) {
+    let cutoffs = std::iter::once(0.0).chain(atlas.cutoffs.iter().copied());
+    for (color, cutoff) in [atlas.checker].iter().chain(&atlas.rects).zip(cutoffs) {
         world.surfaces.push(genos_render::Surface {
             color: *color,
             normal: [0; 4],
-            cutoff: 0.0,
+            cutoff,
             two_sided: false,
             roughness: 1.0,
             metallic: 0.0,

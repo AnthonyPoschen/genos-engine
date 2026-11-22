@@ -46,7 +46,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [ ] The viewer's own code (`mesh_view.rs`, the reader `genos-workbench`) is still in the shared library; `genos-lighting` lists no mesh scene, so it never runs there.
 - [x] Mesh workspaces found on disk are in the menu's "Workspace" picker.
 - [ ] The scene picker lists the scene files in `debug/scenes` only; a game's own scenes are not listed.
-- [ ] ADR note: this starts the editor program of ADR 0002 and ADR 0006, as a thin view over agent commands ([agent-driven editing](agent-driven-editing.md), ADR 0019).
+- [x] ADR 0042 records that `genos-editor` starts the editor program of ADR 0002 and ADR 0006, as a thin view over agent commands (ADR 0019).
 
 ### C. The MCP server (decision 2)
 
@@ -69,7 +69,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).
 - [x] Textured (`shade: textured`) and the UV checker (`shade: uv_checker`). A mesh scene's colour atlas holds the checker and every texture of the workspace. A part with one texture, and the checker, repeat as in mesh-workbench. The vertex paint tints the texture; a face with no texture is grey.
 - [x] Textured as mesh-workbench draws it: `textured`, `uv_checker` and `vertex_colors_unlit` switch the view to the base colour (unlit) and back; a face with incomplete UVs is magenta and a face with no texture grey; a part with several textures is drawn as one piece a texture, so each repeats.
-- [ ] `alpha_cutoff` on a texture is not read. Texels are fetched at the resident mip, nearest, as mesh-workbench samples.
+- [x] Texture alpha as mesh-workbench shows it: a texture with `alpha_cutoff` drops the texels under it; one without stands over mid grey by its alpha.
 - [x] The engine drew every texture at its coarsest mip in the scene program (fixed 22 Nov 2026, `Streamer::load`'s starvation floor and the draw call's own time as the streamer's frame time). Sponza draws textured after about 20 seconds.
 - [x] Unlit vertex colour (`shade: vertex_colors_unlit`).
 - [x] Face IDs (`shade: face_ids`).
@@ -80,7 +80,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
 - [x] Grid on the ground (`mesh_view grid`, the menu's "Grid"): a line every power of ten of metres that fits the mesh.
 - [x] Contact shadow (`mesh_view shadow`, the menu's "Contact shadow"): a soft dark patch on the ground under each shown object, fainter for an object off the ground. It is drawn, not traced, so it does not follow the light.
-- [ ] Bloom and auto exposure soften the picture and could be off for a mesh scene.
+- [x] Bloom is off in a mesh scene.
+- [ ] Auto exposure still sets the picture's brightness in a mesh scene; `--exposure-mode fixed` holds it.
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [x] Show all, hide matching and solo matching by name (`mesh_view show_all`, `hide_match`, `solo_match`).
 - [x] Collections: listed by `mesh_view`, with `solo_collection` and `hide_collection`.

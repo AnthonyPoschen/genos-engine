@@ -568,6 +568,8 @@ pub struct Atlas {
     /// RGBA8 sRGB, top row first.
     pub rgba: Vec<u8>,
     pub rects: Vec<[u32; 4]>,
+    /// Each texture's alpha cutoff; 0 draws every texel.
+    pub cutoffs: Vec<f32>,
     pub checker: [u32; 4],
 }
 
@@ -604,11 +606,26 @@ pub fn atlas(textures: &[genos_workbench::TextureImage]) -> Atlas {
         for y in 0..texture.height as usize {
             let at = y * row + (left as usize) * 4;
             rgba[at..at + line].copy_from_slice(&texture.pixels[y * line..(y + 1) * line]);
+            // With no cutoff the image stands over mid grey by its alpha, as
+            // mesh-workbench previews it. With one, the surface's cutoff
+            // drops the texels under it and the colour is left as it is.
+            if texture.alpha_cutoff.is_none() {
+                for texel in rgba[at..at + line].chunks_exact_mut(4) {
+                    let alpha = u32::from(texel[3]);
+                    for channel in &mut texel[..3] {
+                        #[expect(clippy::cast_possible_truncation, reason = "a blend of two bytes is a byte")]
+                        let blended = ((u32::from(*channel) * alpha + 128 * (255 - alpha)) / 255) as u8;
+                        *channel = blended;
+                    }
+                    texel[3] = 255;
+                }
+            }
         }
         rects.push([left, 0, texture.width, texture.height]);
         left += texture.width;
     }
-    Atlas { width, height, rgba, rects, checker: [0, 0, CHECKER, CHECKER] }
+    let cutoffs = textures.iter().map(|texture| texture.alpha_cutoff.unwrap_or(0.0)).collect();
+    Atlas { width, height, rgba, rects, cutoffs, checker: [0, 0, CHECKER, CHECKER] }
 }
 
 /// Surfaces of a mesh scene, in the order `mesh_world` adds them: the
@@ -2914,21 +2931,26 @@ mod tests {
     fn a_textured_shade_gives_each_face_a_place_in_its_image() {
         use genos_workbench::TextureImage;
         // The checker comes first, then each texture to its right.
-        let red = TextureImage { name: "red".into(), width: 4, height: 2, pixels: [255, 0, 0, 255].repeat(8) };
-        let blue = TextureImage { name: "blue".into(), width: 2, height: 2, pixels: [0, 0, 255, 255].repeat(4) };
+        let red = TextureImage { name: "red".into(), width: 4, height: 2, pixels: [255, 0, 0, 255].repeat(8), alpha_cutoff: None };
+        let blue = TextureImage { name: "blue".into(), width: 2, height: 2, pixels: [0, 0, 255, 64].repeat(4), alpha_cutoff: Some(0.5) };
         let atlas = super::atlas(&[red, blue]);
         assert_eq!((atlas.width, atlas.height), (128 + 6, 128));
         assert_eq!(atlas.rects, vec![[128, 0, 4, 2], [132, 0, 2, 2]]);
         let texel = |x: usize, y: usize| atlas.rgba[(y * 134 + x) * 4..][..4].to_vec();
         assert_eq!(texel(128, 1), [255, 0, 0, 255]);
-        assert_eq!(texel(133, 0), [0, 0, 255, 255]);
+        // The blue image has a cutoff: its texels and their alpha are kept for the surface to cut.
+        assert_eq!(texel(133, 0), [0, 0, 255, 64]);
+        assert_eq!(atlas.cutoffs, [0.0, 0.5]);
+        // No cutoff: a half-clear texel stands over mid grey.
+        let clear = TextureImage { name: "clear".into(), width: 1, height: 1, pixels: vec![255, 0, 0, 0], alpha_cutoff: None };
+        assert_eq!(super::atlas(&[clear]).rgba[128 * 4..][..4], [128, 128, 128, 255]);
         assert_eq!(texel(0, 0), [230, 230, 230, 255]);
 
         let mut view = view();
         view.shade = "textured".to_string();
         let textures = vec![
-            TextureImage { name: "red".into(), width: 4, height: 2, pixels: [255, 0, 0, 255].repeat(8) },
-            TextureImage { name: "blue".into(), width: 2, height: 2, pixels: [0, 0, 255, 255].repeat(4) },
+            TextureImage { name: "red".into(), width: 4, height: 2, pixels: [255, 0, 0, 255].repeat(8), alpha_cutoff: None },
+            TextureImage { name: "blue".into(), width: 2, height: 2, pixels: [0, 0, 255, 64].repeat(4), alpha_cutoff: Some(0.5) },
         ];
         let workspace = view.workspace.as_mut().expect("workspace");
         workspace.textures = textures;

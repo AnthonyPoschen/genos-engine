@@ -78,6 +78,9 @@ pub struct TextureImage {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    /// A texel with less alpha than this is not drawn. `None`: the image is
+    /// shown over mid grey by its alpha, as mesh-workbench previews it.
+    pub alpha_cutoff: Option<f32>,
 }
 
 /// A named group of objects.
@@ -425,7 +428,9 @@ fn read_textures(mesh: &Value) -> Vec<TextureImage> {
             let height = u32::try_from(texture.get("height")?.as_u64()?).ok()?;
             let pixels = decode_base64(texture.get("rgba_base64")?.as_str()?)?;
             let want = usize::try_from(u64::from(width) * u64::from(height) * 4).ok()?;
-            (pixels.len() == want).then(|| TextureImage { name: name.clone(), width, height, pixels })
+            #[expect(clippy::as_conversions, clippy::cast_possible_truncation, reason = "an alpha threshold in 0..1")]
+            let alpha_cutoff = texture.get("alpha_cutoff").and_then(Value::as_f64).map(|cutoff| cutoff as f32);
+            (pixels.len() == want).then(|| TextureImage { name: name.clone(), width, height, pixels, alpha_cutoff })
         })
         .collect()
 }

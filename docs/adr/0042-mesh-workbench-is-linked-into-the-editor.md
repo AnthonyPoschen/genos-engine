@@ -19,6 +19,7 @@ ADR 0007 says a third-party crate does not own the window, the input, the render
 
 ## Consequences
 
+- `genos-editor` is the start of the editor program of ADR 0002 and ADR 0006: a Linux binary in this workspace that depends on the runtime crates. It is a thin view over agent commands (ADR 0019, [agent-driven editing](../systems/agent-driven-editing.md)): a person looks, selects and says what they want; every edit is a command an agent sends.
 - An edit is a function call on the frame thread. A long command stalls the frame until it returns. Moving the session to a worker is later work.
 - The session writes `project.json` and its recordings in the workspace, as the server did. The viewer still follows that file, so a workspace another process edits is still shown.
 - The engine's build now fetches a git repository and compiles `ufbx` (C, through its crate).
