@@ -39,6 +39,11 @@ struct Queue {
     waiting: Vec<Pending>,
     done: Vec<(u64, Result<Value, String>)>,
     specs: Vec<CommandSpec>,
+    /// (public name, registered name) for a command that is published under
+    /// another name. The registered name stays as a deprecated alias.
+    public: Vec<(String, String)>,
+    /// Deprecated names already warned about.
+    warned: Vec<String>,
     /// A frame thread has taken the queue at least once.
     served: bool,
 }
@@ -48,6 +53,8 @@ static QUEUE: Mutex<Queue> = Mutex::new(Queue {
     waiting: Vec::new(),
     done: Vec::new(),
     specs: Vec::new(),
+    public: Vec::new(),
+    warned: Vec::new(),
     served: false,
 });
 static WAKE: Condvar = Condvar::new();
@@ -66,9 +73,56 @@ pub fn specs() -> Vec<CommandSpec> {
     lock().specs.clone()
 }
 
-/// True when `name` is a registered command.
+/// Publish registered commands under other names: `(public, registered)`.
+/// A client lists and calls the public name. The registered name still runs
+/// the command; a client that sends it gets one warning ([`resolve`]). Code
+/// in this process, and scripts (a Rhai name has no dot), keep the
+/// registered names.
+pub fn publish(names: Vec<(String, String)>) {
+    lock().public = names;
+}
+
+/// The registered commands under the names a client sees.
+pub fn published() -> Vec<CommandSpec> {
+    let queue = lock();
+    queue
+        .specs
+        .iter()
+        .cloned()
+        .map(|mut spec| {
+            if let Some((public, _)) = queue.public.iter().find(|(_, registered)| *registered == spec.name) {
+                spec.name.clone_from(public);
+            }
+            spec
+        })
+        .collect()
+}
+
+/// The registered name for a name a client sent, public or registered.
+/// A registered name that has a public one is deprecated: the first use of
+/// each logs a warning that gives the public name.
+pub fn resolve(name: &str) -> Option<String> {
+    let mut queue = lock();
+    if let Some((_, registered)) = queue.public.iter().find(|(public, _)| public == name) {
+        return Some(registered.clone());
+    }
+    if !queue.specs.iter().any(|spec| spec.name == name) {
+        return None;
+    }
+    let public = queue.public.iter().find(|(_, registered)| registered == name).map(|(public, _)| public.clone());
+    if let Some(public) = public {
+        if !queue.warned.iter().any(|seen| seen == name) {
+            queue.warned.push(name.to_string());
+            eprintln!("genos-mcp: the command name {name} is deprecated; use {public}");
+        }
+    }
+    Some(name.to_string())
+}
+
+/// True when `name` is a command, by its public or its registered name.
 pub fn known(name: &str) -> bool {
-    lock().specs.iter().any(|spec| spec.name == name)
+    let queue = lock();
+    queue.specs.iter().any(|spec| spec.name == name) || queue.public.iter().any(|(public, _)| public == name)
 }
 
 /// Queue a command and wait for its reply. A command that waits on frames needs a

@@ -52,7 +52,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Editor state over MCP: `mesh_view` (the open workspace, revision, objects, display, replay) and `mesh_selection` (selection, note, camera).
 - [ ] A JSON schema per mesh command. mesh-workbench has no machine-readable command list (its help is prose), so the family tools take a free-form object. See "For Nathan".
 - [x] The catalogue is in six sections: `scene`, `lighting`, `render`, `capture`, `editor`, `mesh` (`section_of` in `crates/debug/src/commands.rs`). Every description starts with its section in brackets, and `list_commands` returns the catalogue grouped, or one section. The lighting commands are the `lighting` section.
-- [ ] Section prefixes in the command names themselves (`lighting.get_settings`), with the old names as deprecated aliases that log a warning for one release (the public-names rule in `AGENTS.md`). The names are unchanged today: every script and test uses them.
+- [x] Section prefixes in the command names: a client sees `lighting.get_settings`, `scene.load`, `mesh.view`. The old names are deprecated aliases that log a warning on first use over MCP or HTTP. Scripts keep the old names (a Rhai name has no dot). `fx.*` and `fx_*` were already published twice and still are.
 - [x] Bones, skin weights and animation checked through `mesh_rig` and `mesh_animation`: a two-bone rig, four weighted vertices, a clip, and a sampled pose that moved those vertices 0.6 m.
 - [ ] Recent edits in the editor state, and a context packet for each request: camera pose, a screenshot, the selection, the visible objects.
 

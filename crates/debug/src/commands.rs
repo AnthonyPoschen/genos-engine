@@ -44,6 +44,36 @@ pub fn section_of(name: &str) -> &'static str {
     }
 }
 
+/// The name a client sees: the section, a dot, and the command's name without
+/// the section's own word (`lighting.get_settings` for `get_lighting_settings`,
+/// `mesh.view` for `mesh_view`). A name that already has a dot is kept
+/// (`fx.spawn`). The registered name stays as a deprecated alias, and is the
+/// name a script uses: a Rhai name has no dot.
+pub fn public_name(name: &str) -> String {
+    if name.contains('.') {
+        return name.to_string();
+    }
+    let section = section_of(name);
+    let rest = name
+        .strip_prefix(&format!("{section}_"))
+        .map(str::to_string)
+        .or_else(|| {
+            // The section as a whole word inside the name: `load_scene`, not `list_scenes`.
+            let word = format!("_{section}");
+            let at = name.find(&word)?;
+            let after = &name[at + word.len()..];
+            (after.is_empty() || after.starts_with('_')).then(|| format!("{}{after}", &name[..at]))
+        })
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or_else(|| name.to_string());
+    format!("{section}.{rest}")
+}
+
+/// (public name, registered name) for every command: [`genos_mcp::command::publish`].
+pub fn public_names() -> Vec<(String, String)> {
+    specs().into_iter().map(|spec| (public_name(&spec.name), spec.name)).collect()
+}
+
 /// Every command [`crate::Tools`] runs. Shared by MCP, `POST /cmd/<name>` and
 /// scripts. Each description starts with its section in brackets, so a flat
 /// tool list still reads in groups.
@@ -380,7 +410,7 @@ fn host_specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests {
-    use super::{section_of, specs, SECTIONS};
+    use super::{public_name, section_of, specs, SECTIONS};
 
     #[test]
     fn every_command_is_in_one_known_section_and_says_so() {
@@ -389,6 +419,25 @@ mod tests {
             let section = section_of(&spec.name);
             assert!(SECTIONS.contains(&section), "{} has section {section}", spec.name);
             assert!(spec.description.starts_with(&format!("[{section}] ")), "{}", spec.name);
+        }
+        // Every public name is its section, a dot and a name, and no two agree.
+        let names: Vec<String> = specs.iter().map(|spec| public_name(&spec.name)).collect();
+        for (at, name) in names.iter().enumerate() {
+            assert!(!names[..at].contains(name), "two commands are published as {name}");
+            assert!(name.contains('.'), "{name}");
+        }
+        for (name, public) in [
+            ("get_lighting_settings", "lighting.get_settings"),
+            ("lighting_cascade_gaps", "lighting.cascade_gaps"),
+            ("lights", "lighting.lights"),
+            ("mesh_view", "mesh.view"),
+            ("set_fog_settings", "render.set_fog_settings"),
+            ("fx.spawn", "fx.spawn"),
+            ("capture", "capture.capture"),
+            ("load_scene", "scene.load"),
+            ("list_scenes", "scene.list_scenes"),
+        ] {
+            assert_eq!(public_name(name), public);
         }
         for (name, section) in [
             ("set_lighting_settings", "lighting"),

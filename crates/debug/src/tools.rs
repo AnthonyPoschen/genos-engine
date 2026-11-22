@@ -414,6 +414,7 @@ impl Tools {
     /// Register the commands on the MCP port and start with the picture as it is.
     pub fn new() -> Self {
         genos_mcp::command::register(crate::commands::specs());
+        genos_mcp::command::publish(crate::commands::public_names());
         Self {
             frame: 0,
             paused: false,
@@ -1771,7 +1772,9 @@ impl Tools {
                             .filter(|spec| crate::commands::section_of(&spec.name) == *section)
                             .map(|spec| {
                                 obj(vec![
-                                    ("name", text(spec.name.clone())),
+                                    ("name", text(crate::commands::public_name(&spec.name))),
+                                    // The name a script uses, and the deprecated alias.
+                                    ("script_name", text(spec.name.clone())),
                                     ("description", text(spec.description.clone())),
                                 ])
                             })
