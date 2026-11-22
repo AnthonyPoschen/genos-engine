@@ -317,7 +317,8 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
                 part.positions.push(narrow(points[corner]));
                 part.normals.push(narrow(normal));
                 part.vertex_ids.push(vertex);
-                part.colors.push(painted.get(&vertex).map_or([1.0; 3], |c| narrow(*c)));
+                // mesh-workbench keeps paint as display values; the picture takes linear.
+                part.colors.push(painted.get(&vertex).map_or([1.0; 3], |c| narrow(*c).map(|channel| channel.max(0.0).powf(2.2))));
                 let uv = face_uvs.get(&face).and_then(|corners| corners.get(&vertex));
                 part.uvs.push(corner_uv(uv));
                 part.uv_mapped.push(uv.is_some());

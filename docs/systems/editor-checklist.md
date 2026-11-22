@@ -115,6 +115,19 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] The menu's Mesh tab was read from a picture of the editor's own window (22 Nov 2026): the folder picker, the readouts, the note, the shading and object dropdowns, the four check boxes, the replay slider, the Objects section with a show box per object, and the Replay section with the session picker and a row per command. A `capture` with `ui: true` does not include the menu; the picture came from the desktop (`grim` on the window's rectangle).
 - [x] A readout (the note, the filter, the counts, the state) draws as words. It drew as a slider with a thumb and its text ran off the panel.
 
+### G. Compared with mesh-workbench's own renderer
+
+A workspace with three objects, an extruded face, box UVs scaled to tile, a texture on one object and painted vertices on another was drawn in each mode by mesh-workbench's `capture` and by the editor, side by side (23 Nov 2026; `genos-debug/cmp/sheet.png` on the machine that ran it).
+
+- [x] `object_ids`, `face_ids`, `collection_ids`: the same colours. The editor used its own palette by ID; it now uses mesh-workbench's (`categorical_color`: the colour of the Nth ID in order). An object's red reads 241, 53, 54 in the editor and 242, 53, 53 in mesh-workbench.
+- [x] `uv_checker`: the same checker (eight squares a UV unit, 224 and 48). The editor's was tinted.
+- [x] `textured`: the same image and tiling; a face with no UVs is magenta whether or not it has a texture, as in mesh-workbench.
+- [x] `vertex_colors`: an unpainted object is white, and paint is read as display values.
+- [x] `silhouette`, `orientation` (grey, red from behind), `tessellation` (every triangle edge) and `material` (the texture, lit) match in what they show.
+- [x] The unlit modes show exact colours: a debug view is no longer exposed and tone-mapped under the HDR display path (white read 184).
+- [x] The shade names are mesh-workbench's: `vertex_colors` is unlit and `vertex_color_shaded` lit; `orientation` and `topology` are accepted for `face_orientation` and `wireframe`.
+- [ ] Not matched: the background (the editor draws its ground, grid and sky; mesh-workbench a flat colour), the lights of `shaded` (the scene's sun against three fixed lights), the vertex and face ID labels of `topology`, and `normals` and `depth`, which are the engine's `view` modes with their own encodings.
+
 ## For Nathan
 
 Changes we would like in mesh-workbench. Add to this list as the bridge meets them.

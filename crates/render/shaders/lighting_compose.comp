@@ -137,7 +137,12 @@ void main() {
 #ifdef GENOS_HDR_COMPOSE
         // The display pass draws the scene image. Without this store it drew
         // the lit picture left there, so these three views showed nothing.
-        scene_store(index, vec4(shown, length(pos - scene.eye.xyz)));
+        // These views are data, not light: the colour is stored as the code
+        // to show (the base colour gamma-encoded), and a negative depth
+        // tells the display pass to show it as it is, with no exposure, no
+        // bloom and no tone curve.
+        vec3 ready = mode == 3u ? pow(max(albedo, vec3(0.0)), vec3(1.0 / 2.2)) : shown;
+        scene_store(index, vec4(ready, -max(length(pos - scene.eye.xyz), 1.0e-3)));
 #endif
         return;
     }

@@ -28,22 +28,30 @@ pub const OVERLAY_COLOR: [f32; 3] = [1.0, 0.52, 0.08];
 /// Albedo of a mesh-workbench object with no texture.
 pub const MESH_COLOR: [f32; 3] = [0.72, 0.72, 0.75];
 
-/// A steady colour for an object ID: the golden-ratio turn of the hue, so
-/// neighbouring IDs are far apart.
-#[expect(clippy::cast_precision_loss, reason = "an object ID is a small counter")]
-pub fn id_color(object: u64) -> [f32; 3] {
-    let hue = (object as f32 * 0.618_034).fract() * 6.0;
-    let x = 1.0 - (hue % 2.0 - 1.0).abs();
-    let (r, g, b) = match hue as u32 {
-        0 => (1.0, x, 0.0),
-        1 => (x, 1.0, 0.0),
-        2 => (0.0, 1.0, x),
-        3 => (0.0, x, 1.0),
-        4 => (x, 0.0, 1.0),
-        _ => (1.0, 0.0, x),
+/// The colour of the `index`-th object, face or collection in ID order: the
+/// palette mesh-workbench's viewer, inspector and captures share.
+#[expect(clippy::cast_precision_loss, reason = "a small count")]
+pub fn id_color(index: usize) -> [f32; 3] {
+    // mesh-workbench's `categorical_color`: the hue steps by the golden
+    // ratio, at 0.95 value and 0.78 saturation, as display bytes.
+    let hue = (index as f64 * 0.618_033_988_749_895).fract() * 6.0;
+    let fraction = hue - hue.floor();
+    let value = 0.95;
+    let p = value * (1.0 - 0.78);
+    let q = value * (1.0 - 0.78 * fraction);
+    let t = value * (1.0 - 0.78 * (1.0 - fraction));
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..6")]
+    let rgb = match hue.floor() as u32 {
+        0 => [value, t, p],
+        1 => [q, value, p],
+        2 => [p, value, t],
+        3 => [p, q, value],
+        4 => [t, p, value],
+        _ => [value, p, q],
     };
-    // Keep some grey in it so the shading still reads.
-    [0.25 + 0.6 * r, 0.25 + 0.6 * g, 0.25 + 0.6 * b]
+    // The picture takes linear colour.
+    #[expect(clippy::cast_possible_truncation, reason = "a colour channel")]
+    rgb.map(|channel| ((channel * 255.0).round() / 255.0).powf(2.2) as f32)
 }
 
 /// Radians of orbit per pixel of drag.
@@ -433,10 +441,10 @@ pub struct Replay {
 }
 
 /// The shade modes, in the order the menu lists them.
-pub const SHADES: [&str; 11] = [
+pub const SHADES: [&str; 13] = [
     "shaded",
     "wireframe",
-    "vertex_colors",
+    "vertex_color_shaded",
     "object_ids",
     "face_ids",
     "collection_ids",
@@ -444,8 +452,18 @@ pub const SHADES: [&str; 11] = [
     "textured",
     "uv_checker",
     "face_orientation",
-    "vertex_colors_unlit",
+    "vertex_colors",
+    "tessellation",
+    "material",
 ];
+
+/// Names a shade also answers to: mesh-workbench's own name for it, or an
+/// earlier name of this viewer (deprecated: it logs a warning).
+const SHADE_ALIASES: [(&str, &str, bool); 3] =
+    [("orientation", "face_orientation", false), ("topology", "wireframe", false), ("vertex_colors_unlit", "vertex_colors", true)];
+
+/// An object in no collection, in the `collection_ids` shade (mesh-workbench's 128 grey).
+const UNASSIGNED_COLOR: [f32; 3] = [0.216, 0.216, 0.216];
 
 /// A face whose UVs are incomplete, in the textured and checker shades.
 const UNMAPPED_COLOR: [f32; 3] = [1.0, 0.0, 1.0];
@@ -813,8 +831,9 @@ const SHADOW_REACH: f32 = 1.15;
 const SHADOW_SIDES: usize = 40;
 const SHADOW_RINGS: [(f32, f32); 5] = [(0.0, 1.0), (0.45, 0.9), (0.7, 0.55), (0.88, 0.2), (1.0, 0.0)];
 
-/// `face_orientation`: a face seen from its front, and one seen from behind.
-const FRONT_COLOR: [f32; 3] = [0.15, 0.3, 0.9];
+/// `face_orientation`: a face seen from its front is the plain grey, and one
+/// seen from behind is red, as in mesh-workbench.
+const FRONT_COLOR: [f32; 3] = MESH_COLOR;
 const BACK_COLOR: [f32; 3] = [0.9, 0.12, 0.08];
 
 /// Side of the UV checker image, in texels, and of one of its squares.
@@ -845,13 +864,11 @@ pub fn atlas(textures: &[genos_workbench::TextureImage]) -> Atlas {
     let row = (width as usize) * 4;
     for y in 0..CHECKER {
         for x in 0..CHECKER {
-            let light = (x / CHECKER_CELL + y / CHECKER_CELL).is_multiple_of(2);
-            // U runs to red and V to green, so a flipped or turned UV shows.
-            let texel = if light {
-                [230, 230, 230, 255]
-            } else {
-                [(60 + x * 150 / CHECKER) as u8, (60 + y * 150 / CHECKER) as u8, 70, 255]
-            };
+            // mesh-workbench's checker: eight squares a UV unit, 224 where
+            // the squares' sum is even counted from the UV origin. The image's
+            // top row is V = 1, so here that is an odd sum.
+            let light = !(x / CHECKER_CELL + y / CHECKER_CELL).is_multiple_of(2);
+            let texel = if light { [224, 224, 224, 255] } else { [48, 48, 48, 255] };
             let at = (y as usize) * row + (x as usize) * 4;
             rgba[at..at + 4].copy_from_slice(&texel);
         }
@@ -925,14 +942,15 @@ fn textured_corners(part: &Part, textures: &[genos_workbench::TextureImage], che
     let mut drawn = vec![None; part.triangles()];
     for (triangle, slot) in drawn.iter_mut().enumerate() {
         let texture = part.face_textures.get(triangle).copied().flatten().filter(|at| textures.get(*at).is_some_and(usable));
-        if !checker && texture.is_none() {
-            continue;
-        }
         let at = triangle * 3;
+        // No UVs is magenta whether or not the face has a texture.
         let Some(mapped) = triangle_uvs(part, triangle) else {
             colors[at..at + 3].fill(UNMAPPED_COLOR);
             continue;
         };
+        if !checker && texture.is_none() {
+            continue;
+        }
         uvs[at..at + 3].copy_from_slice(&mapped);
         for (corner, color) in colors[at..at + 3].iter_mut().enumerate() {
             *color = if checker { [1.0; 3] } else { part.colors.get(at + corner).copied().unwrap_or([1.0; 3]) };
@@ -1589,7 +1607,8 @@ impl MeshView {
         let Some(workspace) = &self.workspace else {
             return (positions, normals);
         };
-        if self.shade != "wireframe" {
+        let triangles = self.shade == "tessellation";
+        if self.shade != "wireframe" && !triangles {
             return (positions, normals);
         }
         let size = (0..3).map(|a| workspace.max[a] - workspace.min[a]).fold(0.0f32, f32::max);
@@ -1602,6 +1621,19 @@ impl MeshView {
             let at = |vertex: u64, rest: [f32; 3]| {
                 self.posed.as_ref().and_then(|posed| posed.vertices.get(&vertex).copied()).unwrap_or(rest)
             };
+            if triangles {
+                // Every edge of every triangle the picture draws, the
+                // diagonals inside a polygon included, each once.
+                let mut drawn = BTreeSet::new();
+                for corner in 0..part.positions.len() {
+                    let next = corner - corner % 3 + (corner + 1) % 3;
+                    let (va, vb) = (part.vertex_ids[corner], part.vertex_ids[next]);
+                    if drawn.insert((va.min(vb), va.max(vb))) {
+                        strip(at(va, part.positions[corner]), at(vb, part.positions[next]), half, &mut positions, &mut normals);
+                    }
+                }
+                continue;
+            }
             for ([a, b], [va, vb]) in part.edges.iter().zip(&part.edge_ids) {
                 strip(at(*va, *a), at(*vb, *b), half, &mut positions, &mut normals);
             }
@@ -1690,14 +1722,22 @@ impl MeshView {
             return Vec::new();
         };
         let checker = self.shade == "uv_checker";
-        let textured = checker || self.shade == "textured";
+        let textured = checker || matches!(self.shade.as_str(), "textured" | "material");
+        // mesh-workbench colours an ID by its place in ID order.
+        let rank = |ids: BTreeSet<u64>| ids.into_iter().enumerate().map(|(at, id)| (id, at)).collect::<std::collections::BTreeMap<u64, usize>>();
+        let objects = rank(workspace.parts.iter().map(|part| part.object).filter(|object| *object != 0).collect());
+        let faces = rank(workspace.parts.iter().flat_map(|part| part.face_ids.iter().copied()).collect());
+        let collections = rank(workspace.collections.iter().map(|collection| collection.id).collect());
+        let tint = |ranks: &std::collections::BTreeMap<u64, usize>, id: u64| ranks.get(&id).map_or(MESH_COLOR, |place| id_color(*place));
         workspace
             .parts
             .iter()
             .enumerate()
             .map(|(at, part)| {
                 let color = match self.shade.as_str() {
-                    "object_ids" => id_color(part.object),
+                    "object_ids" => tint(&objects, part.object),
+                    // An unpainted object is white, as in mesh-workbench.
+                    "vertex_colors" | "vertex_color_shaded" if part.colors.is_empty() => [1.0; 3],
                     // Black whatever the light: the outline against the ground and the sky.
                     "silhouette" => [0.0; 3],
                     // The first collection that holds the object; none is grey.
@@ -1705,7 +1745,7 @@ impl MeshView {
                         .collections
                         .iter()
                         .find(|collection| collection.objects.contains(&part.object))
-                        .map_or(MESH_COLOR, |collection| id_color(collection.id)),
+                        .map_or(UNASSIGNED_COLOR, |collection| tint(&collections, collection.id)),
                     _ => MESH_COLOR,
                 };
                 let hidden = !self.surfaces || self.hidden.contains(&part.object);
@@ -1723,8 +1763,8 @@ impl MeshView {
                 }
                 // One colour per vertex, or none for the object's one colour.
                 let colors = match self.shade.as_str() {
-                    "vertex_colors" | "vertex_colors_unlit" => part.colors.clone(),
-                    "face_ids" => part.face_ids.iter().flat_map(|face| [id_color(*face); 3]).collect(),
+                    "vertex_colors" | "vertex_color_shaded" => part.colors.clone(),
+                    "face_ids" => part.face_ids.iter().flat_map(|face| [tint(&faces, *face); 3]).collect(),
                     "face_orientation" => self
                         .facing
                         .get(at)
@@ -1743,13 +1783,17 @@ impl MeshView {
     /// The shades mesh-workbench draws without light: the program shows the
     /// base colour for them.
     pub fn unlit(&self) -> bool {
-        matches!(self.shade.as_str(), "textured" | "uv_checker" | "vertex_colors_unlit")
+        // The ID colours and the silhouette carry no light in mesh-workbench either.
+        matches!(
+            self.shade.as_str(),
+            "textured" | "uv_checker" | "vertex_colors" | "object_ids" | "face_ids" | "collection_ids" | "silhouette"
+        )
     }
 
-    /// In the `textured` shade, each part that uses several textures, as one
+    /// In the `textured` and `material` shades, each part that uses several textures, as one
     /// piece a texture and one for its faces with none. Positions are posed.
     pub fn textured_pieces(&self) -> Vec<Piece> {
-        let Some(workspace) = self.workspace.as_ref().filter(|_| self.shade == "textured" && self.surfaces) else {
+        let Some(workspace) = self.workspace.as_ref().filter(|_| matches!(self.shade.as_str(), "textured" | "material") && self.surfaces) else {
             return Vec::new();
         };
         let posed = self.posed_normals();
@@ -2517,6 +2561,15 @@ impl MeshView {
                     self.display_stale = true;
                 }
                 if let Some(shade) = args.str("shade")? {
+                    let shade = match SHADE_ALIASES.iter().find(|(other, _, _)| *other == shade) {
+                        Some((other, name, deprecated)) => {
+                            if *deprecated {
+                                eprintln!("mesh_view: the shade name {other} is deprecated; use {name}");
+                            }
+                            (*name).to_string()
+                        }
+                        None => shade,
+                    };
                     if !SHADES.contains(&shade.as_str()) {
                         return Err(format!("mesh_view shade is {}, not {shade}", SHADES.join(", ")));
                     }
@@ -3322,7 +3375,7 @@ mod tests {
         // No cutoff: a half-clear texel stands over mid grey.
         let clear = TextureImage { name: "clear".into(), width: 1, height: 1, pixels: vec![255, 0, 0, 0], alpha_cutoff: None };
         assert_eq!(super::atlas(&[clear]).rgba[128 * 4..][..4], [128, 128, 128, 255]);
-        assert_eq!(texel(0, 0), [230, 230, 230, 255]);
+        assert_eq!((texel(0, 0), texel(16, 0)), (vec![48, 48, 48, 255], vec![224, 224, 224, 255]));
 
         let mut view = view();
         view.shade = "textured".to_string();
@@ -3334,11 +3387,13 @@ mod tests {
         workspace.textures = textures;
         let part = &mut workspace.parts[0];
         // The first triangle tiles past one repeat and starts below zero. The
-        // second has a texture and no UVs. The rest have no texture.
+        // second has a texture and no UVs. The rest have no UVs either.
         part.uvs = vec![[0.0; 2]; part.positions.len()];
         part.uv_mapped = vec![false; part.positions.len()];
         part.uvs[..3].copy_from_slice(&[[-0.5, 0.25], [1.5, 0.25], [0.0, 0.75]]);
         part.uv_mapped[..3].fill(true);
+        // The third triangle has UVs and no texture.
+        part.uv_mapped[6..9].fill(true);
         part.face_textures = vec![None; part.triangles()];
         part.face_textures[0] = Some(0);
         part.face_textures[1] = Some(0);
@@ -3349,7 +3404,8 @@ mod tests {
         assert!(uvs[3..].iter().all(|uv| uv[0] < 0.0), "no UV or no texture: no coordinate");
         assert_eq!(shown[0].2[0], [1.0; 3], "white under the texture");
         assert_eq!(shown[0].2[3], super::UNMAPPED_COLOR, "a textured face with no UVs is magenta");
-        assert_eq!(shown[0].2[6], super::MESH_COLOR, "a face with no texture is grey");
+        assert_eq!(shown[0].2[6], super::MESH_COLOR, "a face with UVs and no texture is grey");
+        assert_eq!(shown[0].2[9], super::UNMAPPED_COLOR, "no UVs is magenta, texture or not");
         assert!(view.textured_pieces().is_empty() && view.unlit());
         // A second texture: the part is drawn as a piece a texture, each repeating.
         let part = view.workspace.as_mut().map(|w| &mut w.parts[0]).expect("cube");
@@ -3849,6 +3905,13 @@ not a row | `nothing` |\n";
         let off = genos_mcp::json::parse(r#"{"grid":false}"#).expect("json");
         view.command("mesh_view", &off, &mut camera, 1.0).expect("grid off");
         assert!(view.grid_strips().0.is_empty());
+        // Tessellation: every triangle edge once, the diagonal of each quad
+        // included. The cube: 12 edges and 6 diagonals.
+        let hide = genos_mcp::json::parse(r#"{"shade":"tessellation","hide":[2]}"#).expect("json");
+        view.command("mesh_view", &hide, &mut camera, 1.0).expect("tessellation");
+        assert_eq!(view.wire().0.len(), (12 + 6) * 2 * 12);
+        let show = genos_mcp::json::parse(r#"{"show_all":true,"shade":"shaded"}"#).expect("json");
+        view.command("mesh_view", &show, &mut camera, 1.0).expect("show");
         // Wireframe: the cube has 12 edges and the bracket 18, two strips each.
         assert!(view.wire().0.is_empty());
         let wire = genos_mcp::json::parse(r#"{"shade":"wireframe"}"#).expect("json");
