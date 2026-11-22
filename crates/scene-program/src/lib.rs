@@ -848,6 +848,8 @@ fn run() -> Result<i32, String> {
                     || input.keyboard.down(InputCode::key_shift_right),
                 frame_key: !typed && input.keyboard.pressed(InputCode::key_f),
                 dt,
+                box_key: input.keyboard.down(InputCode::key_control_left) || input.keyboard.down(InputCode::key_control_right),
+                lasso_key: input.keyboard.down(InputCode::key_alt_left) || input.keyboard.down(InputCode::key_alt_right),
             };
             if let Some(view) = &mut app.mesh {
                 view.pointer(&mut camera, [size.0 as f32, size.1 as f32], orbit);
@@ -919,6 +921,19 @@ fn run() -> Result<i32, String> {
         drawn += 1;
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let want_read = tools_read || last;
+        // The box or the lasso being dragged in a mesh scene.
+        let outline = app.mesh.as_ref().map(mesh_view::MeshView::region_outline).unwrap_or_default();
+        let dragged: Vec<genos_render::ScreenLine> = (0..outline.len())
+            .map(|at| genos_render::ScreenLine {
+                a: outline[at],
+                b: outline[(at + 1) % outline.len()],
+                width: 1.5,
+                color: mesh_view::OVERLAY_COLOR,
+            })
+            .collect();
+        if app.mesh.is_some() {
+            renderer.set_overlay_lines(&dragged);
+        }
         if want_read && !tools.show_capture_overlay(capture_ui) {
             overlay.clear();
             renderer.set_overlay_lines(&[]);

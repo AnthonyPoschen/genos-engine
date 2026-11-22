@@ -78,6 +78,10 @@ pub struct OrbitInput {
     pub frame_key: bool,
     /// Seconds since the last frame, for the turntable.
     pub dt: f32,
+    /// Control is down: a left drag draws a box and selects what is in it.
+    pub box_key: bool,
+    /// Alt is down: a left drag draws a lasso and selects what is in it.
+    pub lasso_key: bool,
 }
 
 /// Orbit about a point: left drag turns, right drag pans, the wheel zooms.
@@ -166,6 +170,11 @@ pub struct MeshView {
     pub typing_filter: bool,
     /// The recorded sessions, oldest first, as of the last poll.
     pub recorded: Vec<genos_workbench::Session>,
+    /// A box or a lasso being dragged, in pixels: the box's two corners, or
+    /// the lasso's path.
+    pub region: Option<Vec<[f32; 2]>>,
+    /// The drag is a lasso, not a box.
+    region_lasso: bool,
     /// The workspaces found on disk at the last poll. The open one is first.
     pub found: Vec<PathBuf>,
     /// Put the whole mesh in view on the next pointer step (a new workspace).
@@ -214,8 +223,8 @@ pub const VIEW_ARGS: [&str; 22] = [
     "grid",
     "shadow",
 ];
-pub const PICK_ARGS: [&str; 3] = ["screen", "mode", "select"];
-pub const SELECTION_ARGS: [&str; 5] = ["objects", "faces", "vertices", "note", "clear"];
+pub const PICK_ARGS: [&str; 6] = ["screen", "mode", "select", "box", "lasso", "through"];
+pub const SELECTION_ARGS: [&str; 6] = ["objects", "faces", "vertices", "note", "clear", "grow"];
 pub const HELP_ARGS: [&str; 4] = ["topic", "all", "offset", "limit"];
 
 pub const FAMILIES: [(&str, &str); 8] = [
@@ -778,6 +787,8 @@ impl MeshView {
             filter: String::new(),
             typing_filter: false,
             recorded: Vec::new(),
+            region: None,
+            region_lasso: false,
             found: Vec::new(),
             frame_next: false,
             replay: None,
@@ -1483,6 +1494,203 @@ impl MeshView {
 
     /// One frame of the pointer. Moves the camera, and on a click picks under
     /// the pointer with [`MeshView::pick_mode`]. `size` is the picture in pixels.
+    /// A left drag with Control (a box) or Alt (a lasso). Returns whether the
+    /// drag has the left button this frame. The release selects what is
+    /// inside, by [`Self::pick_mode`]; Shift adds to the selection.
+    fn drag_region(&mut self, camera: &Camera, size: [f32; 2], input: &OrbitInput) -> bool {
+        let at = [input.x, input.y];
+        match (&mut self.region, input.left) {
+            (None, true) if !input.over_ui && (input.box_key || input.lasso_key) && self.orbit.is_none_or(|o| o.dragged.is_none()) => {
+                self.region_lasso = input.lasso_key && !input.box_key;
+                self.region = Some(vec![at, at]);
+                true
+            }
+            (Some(points), true) => {
+                if self.region_lasso {
+                    // A point every few pixels is the path.
+                    let last = points[points.len() - 1];
+                    if (last[0] - at[0]).abs() + (last[1] - at[1]).abs() >= LASSO_STEP {
+                        points.push(at);
+                    }
+                } else {
+                    points[1] = at;
+                }
+                true
+            }
+            (Some(_), false) => {
+                let outline: Vec<[f32; 2]> = self
+                    .region_outline()
+                    .into_iter()
+                    .map(|p| [p[0] / size[0].max(1.0), p[1] / size[1].max(1.0)])
+                    .collect();
+                self.region = None;
+                let mode = self.pick_mode.clone();
+                self.select_inside(camera, size[0] / size[1].max(1.0), &outline, &mode, input.add, false);
+                true
+            }
+            (None, _) => false,
+        }
+    }
+
+    /// The outline being dragged, in pixels: a box's four corners or the
+    /// lasso's path. Empty when nothing is dragged. The program draws it.
+    pub fn region_outline(&self) -> Vec<[f32; 2]> {
+        match &self.region {
+            Some(points) if !self.region_lasso => {
+                let (a, b) = (points[0], points[1]);
+                vec![a, [b[0], a[1]], b, [a[0], b[1]]]
+            }
+            Some(points) => points.clone(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Select what lies inside `outline` (a closed polygon in screen
+    /// coordinates, 0..1, origin top left): faces by their centre, vertices by
+    /// their place, objects that have a face inside. Unless `through`, only
+    /// what the camera sees: a face or a vertex behind another surface is
+    /// left out. Returns how many were added.
+    pub fn select_inside(&mut self, camera: &Camera, aspect: f32, outline: &[[f32; 2]], mode: &str, add: bool, through: bool) -> usize {
+        let lift = self.lift();
+        let mut faces = BTreeSet::new();
+        let mut vertices = BTreeSet::new();
+        let mut objects = BTreeSet::new();
+        if let Some(workspace) = &self.workspace {
+            let on_screen = |p: [f32; 3]| genos_scene::viewport_uv(camera, aspect, [p[0], p[1] + lift, p[2]]).filter(|uv| inside(outline, *uv));
+            for part in workspace.parts.iter().filter(|part| !self.hidden.contains(&part.object)) {
+                if mode == "vertex" {
+                    let mut seen = BTreeSet::new();
+                    for (corner, vertex) in part.vertex_ids.iter().enumerate() {
+                        if !seen.insert(*vertex) {
+                            continue;
+                        }
+                        let Some(uv) = on_screen(self.corner(part, corner)) else {
+                            continue;
+                        };
+                        // In sight: the surface under it is one of its own faces.
+                        if through || self.pick(camera, aspect, uv).is_none_or(|hit| self.face_vertices(hit.face).contains(vertex)) {
+                            vertices.insert(*vertex);
+                        }
+                    }
+                    continue;
+                }
+                let mut sums: std::collections::BTreeMap<u64, ([f32; 3], f32)> = std::collections::BTreeMap::new();
+                for (corner, face) in part.face_ids.iter().flat_map(|face| [face; 3]).enumerate() {
+                    let p = self.corner(part, corner);
+                    let sum = sums.entry(*face).or_insert(([0.0; 3], 0.0));
+                    for (total, place) in sum.0.iter_mut().zip(p) {
+                        *total += place;
+                    }
+                    sum.1 += 1.0;
+                }
+                for (face, (sum, count)) in sums {
+                    let Some(uv) = on_screen(sum.map(|c| c / count)) else {
+                        continue;
+                    };
+                    if through || self.pick(camera, aspect, uv).is_some_and(|hit| hit.face == face) {
+                        faces.insert(face);
+                        objects.insert(part.object);
+                    }
+                }
+            }
+        }
+        if !add {
+            let note = std::mem::take(&mut self.selection.note);
+            self.selection = Selection { note, ..Selection::default() };
+        }
+        let (into, found) = match mode {
+            "vertex" => (&mut self.selection.vertices, vertices),
+            "object" => (&mut self.selection.objects, objects),
+            _ => (&mut self.selection.faces, faces),
+        };
+        let before = into.len();
+        into.extend(found);
+        self.overlay_stale = true;
+        into.len() - before
+    }
+
+    /// Grow the selection. `connected`: every face (or vertex) joined to a
+    /// selected one through shared vertices (or edges). `loop`: from two
+    /// selected faces that share an edge, the ring of four-sided faces that
+    /// runs on through the opposite edges.
+    fn grow(&mut self, how: &str) -> Result<usize, String> {
+        let Some(workspace) = &self.workspace else {
+            return Ok(0);
+        };
+        // Each face's vertices, by part.
+        let mut faces: std::collections::BTreeMap<u64, BTreeSet<u64>> = std::collections::BTreeMap::new();
+        for part in &workspace.parts {
+            for (triangle, face) in part.face_ids.iter().enumerate() {
+                faces.entry(*face).or_default().extend(part.vertex_ids[triangle * 3..triangle * 3 + 3].iter().copied());
+            }
+        }
+        let before = self.selection.faces.len() + self.selection.vertices.len();
+        match how {
+            "connected" => {
+                // Vertices reached: from the selected faces' and the selected vertices' own.
+                let mut reached: BTreeSet<u64> = self.selection.vertices.clone();
+                reached.extend(self.selection.faces.iter().filter_map(|face| faces.get(face)).flatten().copied());
+                loop {
+                    let size = reached.len();
+                    for corners in faces.values() {
+                        if corners.iter().any(|vertex| reached.contains(vertex)) {
+                            reached.extend(corners.iter().copied());
+                        }
+                    }
+                    if reached.len() == size {
+                        break;
+                    }
+                }
+                if !self.selection.vertices.is_empty() {
+                    self.selection.vertices = reached.clone();
+                }
+                if !self.selection.faces.is_empty() {
+                    self.selection.faces =
+                        faces.iter().filter(|(_, corners)| corners.iter().all(|v| reached.contains(v))).map(|(face, _)| *face).collect();
+                }
+            }
+            "loop" => {
+                let picked: Vec<u64> = self.selection.faces.iter().copied().collect();
+                let shared = |a: u64, b: u64| -> Vec<u64> {
+                    match (faces.get(&a), faces.get(&b)) {
+                        (Some(x), Some(y)) => x.intersection(y).copied().collect(),
+                        _ => Vec::new(),
+                    }
+                };
+                let pair = picked
+                    .iter()
+                    .flat_map(|a| picked.iter().map(move |b| (*a, *b)))
+                    .find(|(a, b)| a < b && shared(*a, *b).len() == 2)
+                    .ok_or("a loop needs two selected faces that share an edge")?;
+                // Walk away from each of the two, through the edge opposite the one just crossed.
+                for (mut from, mut at) in [pair, (pair.1, pair.0)] {
+                    for _ in 0..faces.len() {
+                        let Some(corners) = faces.get(&at).filter(|corners| corners.len() == 4) else {
+                            break;
+                        };
+                        let crossed = shared(from, at);
+                        let opposite: Vec<u64> = corners.iter().copied().filter(|v| !crossed.contains(v)).collect();
+                        let next = faces
+                            .iter()
+                            .find(|(face, other)| **face != at && opposite.iter().all(|v| other.contains(v)))
+                            .map(|(face, _)| *face);
+                        let Some(next) = next else {
+                            break;
+                        };
+                        if !self.selection.faces.insert(next) {
+                            break;
+                        }
+                        from = at;
+                        at = next;
+                    }
+                }
+            }
+            other => return Err(format!("mesh_selection grow is connected or loop, not {other}")),
+        }
+        self.overlay_stale = true;
+        Ok((self.selection.faces.len() + self.selection.vertices.len()).saturating_sub(before))
+    }
+
     /// Which way each triangle faces the eye, for the `face_orientation`
     /// shade. The winding gives the front, as in mesh-workbench. Nothing is
     /// culled, so a face wound the wrong way shows red from outside.
@@ -1555,6 +1763,7 @@ impl MeshView {
         if input.frame_key {
             self.frame(camera);
         }
+        let dragging = self.drag_region(camera, size, &input);
         // A press takes the camera back from the turntable for that frame.
         let turning = self.turntable && !input.left && !input.right;
         let Some(orbit) = &mut self.orbit else {
@@ -1564,7 +1773,12 @@ impl MeshView {
         orbit.last = [input.x, input.y];
         let mut changed = false;
         let mut click = false;
-        match (input.left, orbit.dragged) {
+        // A box or lasso drag has the left button: it does not turn the camera.
+        let left = input.left && !dragging;
+        if dragging {
+            orbit.dragged = None;
+        }
+        match (left, orbit.dragged) {
             (true, None) if !input.over_ui => orbit.dragged = Some(0.0),
             (true, Some(travel)) => {
                 let travel = travel + delta[0].abs() + delta[1].abs();
@@ -2003,6 +2217,9 @@ impl MeshView {
                 if let Some(note) = args.str("note")? {
                     self.selection.note = note;
                 }
+                if let Some(how) = args.str("grow")? {
+                    self.grow(&how)?;
+                }
                 Ok(self.selection_value(camera))
             }
             "mesh_pick" => {
@@ -2015,6 +2232,32 @@ impl MeshView {
                 }
                 if !matches!(select.as_str(), "set" | "add" | "none") {
                     return Err(format!("mesh_pick select is set, add, or none, not {select}"));
+                }
+                // A box or a lasso selects everything inside it.
+                let outline: Option<Vec<[f32; 2]>> = match (args.floats("box", 4)?, args.0.get("lasso")) {
+                    (Some(b), _) => Some(vec![[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]]),
+                    (None, Some(Value::Array(points))) => Some(
+                        points
+                            .iter()
+                            .map(|point| match point.as_array() {
+                                #[expect(clippy::cast_possible_truncation, reason = "a screen coordinate")]
+                                Some([x, y]) => x.as_f64().zip(y.as_f64()).map(|(x, y)| [x as f32, y as f32]),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>()
+                            .filter(|path| path.len() >= 3)
+                            .ok_or("mesh_pick lasso is three or more [x, y] points")?,
+                    ),
+                    (None, Some(_)) => return Err("mesh_pick lasso is three or more [x, y] points".into()),
+                    (None, None) => None,
+                };
+                if let Some(outline) = outline {
+                    if select == "none" {
+                        return Err("mesh_pick with box or lasso selects: select is set or add".into());
+                    }
+                    let through = args.bool("through")?.unwrap_or(false);
+                    let added = self.select_inside(camera, aspect, &outline, &mode, select == "add", through);
+                    return Ok(obj(vec![("added", num(added as f64)), ("selection", self.selection_value(camera))]));
                 }
                 let hit = self.pick(camera, aspect, at);
                 if select != "none" {
@@ -2497,6 +2740,21 @@ impl Orbit {
 
 /// A plain click selects `id` alone (the caller cleared the set). A shift
 /// click adds it, or removes it when it was already selected.
+/// Pixels of travel between two points of a lasso.
+const LASSO_STEP: f32 = 6.0;
+
+/// Whether `at` is inside the closed polygon `outline` (even-odd rule).
+fn inside(outline: &[[f32; 2]], at: [f32; 2]) -> bool {
+    let mut within = false;
+    for (index, a) in outline.iter().enumerate() {
+        let b = outline[(index + 1) % outline.len()];
+        if (a[1] > at[1]) != (b[1] > at[1]) && at[0] < a[0] + (at[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]) {
+            within = !within;
+        }
+    }
+    within
+}
+
 fn toggle(set: &mut BTreeSet<u64>, id: u64, add: bool) {
     if add && set.contains(&id) {
         set.remove(&id);
@@ -2775,7 +3033,7 @@ mod tests {
         // And the catalogue carries them.
         let listed = genos_debug::commands::specs();
         let listed = listed.iter().find(|spec| spec.name == "mesh_pick").expect("mesh_pick");
-        assert_eq!(keys(&listed.schema).len(), 3);
+        assert_eq!(keys(&listed.schema).len(), super::PICK_ARGS.len());
     }
 
     #[test]
@@ -2926,6 +3184,83 @@ mod tests {
         assert_eq!(view.found.iter().filter(|dir| **dir == sample).count(), 1);
         assert_eq!(view.statistics(), "rev 1 - 2 objects, 14 faces, 32 tris, 20 verts");
         assert_eq!(view.state(), "live, viewing");
+    }
+
+    #[test]
+    fn a_box_and_a_lasso_select_what_is_inside_and_in_sight() {
+        let mut view = view();
+        let mut camera = Camera::new(0.0, 4.0, 0.0);
+        let front = genos_mcp::json::parse(r#"{"look":"+z"}"#).expect("json");
+        view.command("mesh_view", &front, &mut camera, 1.0).expect("look");
+        let pick = |view: &mut MeshView, camera: &mut Camera, args: &str| {
+            let args = genos_mcp::json::parse(args).expect("json");
+            view.command("mesh_pick", &args, camera, 1.0).expect("pick")
+        };
+        // The whole picture, faces in sight: the fronts, not the backs.
+        pick(&mut view, &mut camera, r#"{"box":[0,0,1,1]}"#);
+        let seen = view.selection.faces.clone();
+        assert!(seen.contains(&2), "the cube's +Z face: {seen:?}");
+        // Through the mesh: every face whose centre is on screen.
+        pick(&mut view, &mut camera, r#"{"box":[0,0,1,1],"through":true}"#);
+        assert!(view.selection.faces.len() > seen.len() && view.selection.faces.is_superset(&seen));
+        assert_eq!(view.selection.faces.len(), 14, "all the faces of both objects");
+        // Objects by a box, vertices by a lasso; an empty corner selects nothing.
+        pick(&mut view, &mut camera, r#"{"box":[0,0,1,1],"mode":"object"}"#);
+        assert_eq!(view.selection.objects.iter().copied().collect::<Vec<_>>(), [1, 2]);
+        pick(&mut view, &mut camera, r#"{"lasso":[[0,0],[1,0],[1,1],[0,1]],"mode":"vertex","through":true}"#);
+        assert_eq!(view.selection.vertices.len(), 20);
+        pick(&mut view, &mut camera, r#"{"box":[0,0,0.02,0.02]}"#);
+        assert!(view.selection.is_empty());
+        // In the window: Control and a drag is the box; the camera does not turn.
+        let size = [1280.0, 720.0];
+        let yaw = camera.yaw;
+        let at = super::OrbitInput { x: 10.0, y: 10.0, ..super::OrbitInput::default() };
+        view.pointer(&mut camera, size, at);
+        view.pointer(&mut camera, size, super::OrbitInput { left: true, box_key: true, ..at });
+        view.pointer(&mut camera, size, super::OrbitInput { left: true, box_key: true, x: 1270.0, y: 710.0, ..at });
+        assert_eq!(view.region_outline().len(), 4, "the box is drawn while it is dragged");
+        view.pointer(&mut camera, size, super::OrbitInput { x: 1270.0, y: 710.0, ..at });
+        assert!(view.region_outline().is_empty() && (camera.yaw - yaw).abs() < 1.0e-6);
+        assert_eq!(view.selection.faces, seen, "the drag selected what the box command did");
+        assert!(!super::inside(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], [0.1, 0.9]));
+    }
+
+    #[test]
+    fn grow_selects_what_is_connected_and_the_ring_through_two_faces() {
+        let mut view = view();
+        let mut camera = Camera::new(0.0, 4.0, 0.0);
+        let run = |view: &mut MeshView, camera: &mut Camera, args: &str| {
+            let args = genos_mcp::json::parse(args).expect("json");
+            view.command("mesh_selection", &args, camera, 1.0)
+        };
+        // One face of the cube grows to the cube's six, not to the bracket.
+        run(&mut view, &mut camera, r#"{"faces":[2],"grow":"connected"}"#).expect("connected");
+        assert_eq!(view.selection.faces.len(), 6);
+        // A loop needs two neighbours.
+        assert!(run(&mut view, &mut camera, r#"{"faces":[2],"grow":"loop"}"#).is_err());
+        // Two side faces that share an edge: the ring of four sides, not the two ends.
+        let sides: Vec<u64> = {
+            let part = &view.workspace.as_ref().expect("workspace").parts[0];
+            let upright = |face: u64| {
+                let at = part.face_ids.iter().position(|id| *id == face).expect("face") * 3;
+                part.normals[at][1].abs() < 0.5
+            };
+            let mut faces: Vec<u64> = part.face_ids.clone();
+            faces.dedup();
+            faces.into_iter().filter(|face| upright(*face)).collect()
+        };
+        assert_eq!(sides.len(), 4);
+        let pair = sides
+            .iter()
+            .flat_map(|a| sides.iter().map(move |b| (*a, *b)))
+            .find(|(a, b)| a < b && view.face_vertices(*a).iter().filter(|v| view.face_vertices(*b).contains(v)).count() == 2)
+            .expect("two sides that share an edge");
+        run(&mut view, &mut camera, &format!(r#"{{"faces":[{},{}],"grow":"loop"}}"#, pair.0, pair.1)).expect("loop");
+        assert_eq!(view.selection.faces.iter().copied().collect::<Vec<_>>(), {
+            let mut all = sides.clone();
+            all.sort_unstable();
+            all
+        });
     }
 
     #[test]
