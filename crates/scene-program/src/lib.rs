@@ -1207,7 +1207,7 @@ enum Show {
 /// Seconds between looks at a mesh workspace's `project.json`. The
 /// mesh-workbench web viewer polls at 0.4 s.
 const MESH_POLL_SECONDS: f32 = 0.4;
-const MESH_GROUND_COLOR: [f32; 3] = [0.30, 0.31, 0.33];
+const MESH_GROUND_COLOR: [f32; 3] = [0.015, 0.018, 0.025];
 /// The ground reaches this many mesh sizes out, and at least this far.
 const MESH_GROUND_SCALE: f32 = 4.0;
 const MESH_GROUND_MIN: f32 = 6.0;
@@ -1506,12 +1506,17 @@ impl App {
             colors: Vec::new(),
             texcoords: Vec::new(),
             surface: None,
+            emission: [0.0; 3],
         }
         .tinted(color);
+        // The grid lines stand on edge, where the sun does not reach them:
+        // they carry a little light of their own, as the web viewer's do.
+        let mut grid = plain(view.grid_strips(), mesh_view::GRID_COLOR);
+        grid.0.emission = mesh_view::GRID_GLOW;
         let mut extras = vec![
-            mesh_view::Piece { positions: shadow_at, normals: shadow_up, colors: shadow_colors, texcoords: Vec::new(), surface: None }
+            mesh_view::Piece { positions: shadow_at, normals: shadow_up, colors: shadow_colors, texcoords: Vec::new(), surface: None, emission: [0.0; 3] }
                 .tinted([1.0; 3]),
-            plain(view.grid_strips(), mesh_view::GRID_COLOR),
+            grid,
             plain(view.wire(), mesh_view::WIRE_COLOR),
             plain(view.bone_strips(), mesh_view::BONE_COLOR),
             plain(view.overlay(), mesh_view::OVERLAY_COLOR),
@@ -1562,7 +1567,7 @@ impl App {
         let mut pose = identity_pose();
         pose[13] = lift;
         for (piece, color) in extras {
-            let mesh_view::Piece { positions, normals, colors, texcoords, surface } = piece;
+            let mesh_view::Piece { positions, normals, colors, texcoords, surface, emission } = piece;
             if positions.is_empty() {
                 continue;
             }
@@ -1596,7 +1601,7 @@ impl App {
                     color,
                     colors,
                     pose,
-                    emission: [0.0; 3],
+                    emission,
                     surface,
                 },
             });

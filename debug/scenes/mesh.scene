@@ -4,6 +4,6 @@ workspace debug/scenes/mesh/sample
 review A mesh-workbench workspace on a ground plane. The sample holds a cube and an L-shaped bracket. --mesh-workspace DIR opens another workspace. The picture follows project.json as it changes.
 checkpoint front 1.0 1.4 4.0 look 1.0 0.4 0
 checkpoint top 1.0 5.0 0.6 look 1.0 0 0
-check front mean 8
+check front mean 4
 sun -0.45 -1 -0.6 5.0 4.8 4.5
-sky 0.10 0.12 0.16
+sky 0.012 0.015 0.021

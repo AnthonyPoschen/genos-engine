@@ -398,7 +398,9 @@ const GRID_REACH: f32 = 2.0;
 const GRID_LINES_MAX: f32 = 40.0;
 /// Half the width of a grid line, as a share of the grid step.
 const GRID_WIDTH: f32 = 0.004;
-pub const GRID_COLOR: [f32; 3] = [0.16, 0.17, 0.19];
+pub const GRID_COLOR: [f32; 3] = [0.05, 0.056, 0.068];
+/// The light a grid line gives off, so it reads lighter than the dark ground.
+pub const GRID_GLOW: [f32; 3] = [0.03, 0.034, 0.042];
 /// Half the width of a bone strip, as a share of the mesh size.
 const BONE_WIDTH: f32 = 0.006;
 pub const BONE_COLOR: [f32; 3] = [0.1, 0.85, 0.35];
@@ -1083,6 +1085,8 @@ pub struct Piece {
     pub colors: Vec<[f32; 3]>,
     pub texcoords: Vec<[f32; 2]>,
     pub surface: Option<usize>,
+    /// Light the piece gives off.
+    pub emission: [f32; 3],
 }
 
 impl Piece {
@@ -1931,6 +1935,7 @@ impl MeshView {
                     colors: corners.iter().map(|at| colors[*at]).collect(),
                     texcoords: corners.iter().map(|at| uvs[*at]).collect(),
                     surface: texture.map(|at| SURFACE_TEXTURES + at),
+                    emission: [0.0; 3],
                 });
             }
         }
