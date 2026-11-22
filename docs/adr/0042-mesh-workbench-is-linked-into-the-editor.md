@@ -12,7 +12,7 @@ ADR 0007 says a third-party crate does not own the window, the input, the render
 
 1. `gpt-mesh` is a git dependency pinned to a revision. One crate, `genos-meshbench`, depends on it. No other engine crate names `gpt-mesh`, `serde`, or `serde_json`.
 2. `genos-meshbench` speaks `genos_json::Value`. It converts to and from `serde_json` through JSON text.
-3. Only authoring programs link `genos-meshbench`: the scene program today, the editor when it exists. The runtime that ships a game does not. A finished mesh still enters a game as a GLB through import, cook and load (ADR 0020).
+3. Only the editor binary (`editor/`, `genos-editor`) links `genos-meshbench`. It hands the scene program a function that opens a session (`Program::mesh_session`), so the shared frame loop (`genos-scene-program`) and `genos-lighting` do not link mesh-workbench or `serde_json`. The runtime that ships a game does not. A finished mesh still enters a game as a GLB through import, cook and load (ADR 0020).
 4. `deny.toml` allows that one git source. The five bans of ADR 0007 are unchanged.
 5. The pinned revision moves on purpose, in its own commit, after the bridge tests pass against it. mesh-workbench says its command API and workspace format may change.
 6. If the crate cannot be linked as it stands, it is forked under Anthony's GitHub and this ADR names the fork.

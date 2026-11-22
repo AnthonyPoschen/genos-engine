@@ -14,7 +14,6 @@ genos-debug = { path = "../debug" }
 genos-input = { path = "../input" }
 genos-load = { path = "../load" }
 genos-mcp = { path = "../mcp" }
-genos-meshbench = { path = "../meshbench" }
 genos-render = { path = "../render" }
 genos-scene = { path = "../scene" }
 genos-scene-lib = { path = "../../debug/scene-lib" }

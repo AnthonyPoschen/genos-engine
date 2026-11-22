@@ -3,7 +3,8 @@
 //! A mesh scene shows a mesh-workbench workspace. This module keeps what the
 //! person selected in that picture (objects, faces, vertices, a point, a typed
 //! note), answers a pick at a screen point, and runs a mesh-workbench command
-//! on the linked library (`genos-meshbench`, ADR 0042). The record is `docs/systems/mesh-workbench.md`.
+//! on the session the binary supplies (`Program::mesh_session`; `genos-editor`
+//! links `genos-meshbench`, ADR 0042). The record is `docs/systems/mesh-workbench.md`.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -173,7 +174,7 @@ pub struct MeshView {
     pub display_stale: bool,
     /// The mesh-workbench session on this workspace. Opened by the first
     /// `mesh_command`, so looking at a workspace writes nothing to it.
-    bridge: Option<genos_meshbench::Bridge>,
+    bridge: Option<Box<dyn crate::MeshSession>>,
 }
 
 /// The mesh tools that each take one family of mesh-workbench commands, and
@@ -1843,7 +1844,10 @@ impl MeshView {
     /// first call opens the session on the workspace.
     fn run(&mut self, command: &Value) -> Result<Value, String> {
         if self.bridge.is_none() {
-            self.bridge = Some(genos_meshbench::Bridge::open(&self.dir)?);
+            let open = crate::program()
+                .mesh_session
+                .ok_or("this program does not link mesh-workbench: run genos-editor to edit a mesh")?;
+            self.bridge = Some(open(&self.dir)?);
         }
         let bridge = self.bridge.as_mut().ok_or("the mesh session did not open")?;
         let reply = bridge.execute(command)?;

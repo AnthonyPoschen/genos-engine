@@ -427,7 +427,24 @@ pub struct Program {
     pub default_scene: &'static str,
     /// Whether the program lists mesh scenes (mesh-workbench workspaces).
     pub meshes: bool,
+    /// Opens the mesh-workbench session on a workspace directory, for the
+    /// mesh commands that edit. The binary supplies it, so this library does
+    /// not link mesh-workbench: `genos-editor` does, `genos-lighting` does not.
+    pub mesh_session: Option<OpenMeshSession>,
 }
+
+/// A mesh-workbench session on one workspace: it runs a command, or a list
+/// of commands, and gives mesh-workbench's reply.
+pub trait MeshSession {
+    /// # Errors
+    ///
+    /// The session could not run the request at all. A command mesh-workbench
+    /// refuses is a reply with `ok: false`, not an error.
+    fn execute(&mut self, request: &genos_mcp::json::Value) -> Result<genos_mcp::json::Value, String>;
+}
+
+/// Opens a [`MeshSession`] on a workspace directory.
+pub type OpenMeshSession = fn(&Path) -> Result<Box<dyn MeshSession>, String>;
 
 impl Program {
     /// The lighting debug binary: every lighting scene, no mesh scenes.
@@ -437,15 +454,18 @@ impl Program {
         mcp_port: MCP_PORT,
         default_scene: genos_scene_lib::DEFAULT_SCENE,
         meshes: false,
+        mesh_session: None,
     };
     /// The editor: opens on the mesh scene and lists every scene. It takes
     /// the engine's first MCP port, as `genos-camera` and `genos-stress` do.
+    /// The binary adds [`Program::mesh_session`].
     pub const EDITOR: Self = Self {
         name: "genos-editor",
         title: "Genos editor",
         mcp_port: genos_mcp::PORT,
         default_scene: "mesh",
         meshes: true,
+        mesh_session: None,
     };
 }
 

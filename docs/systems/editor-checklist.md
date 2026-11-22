@@ -42,7 +42,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] `editor/` (package `genos-editor`, `make editor`). It runs the same frame loop as `genos-lighting`: the library `genos_scene_program`, where a `Program` value gives each binary its name, title, MCP port, opening scene and scene list.
 - [x] The editor opens on the mesh scene, lists every scene, and takes MCP port 8765. `genos-lighting` keeps port 8766 and does not list mesh scenes. `make mesh` runs the editor.
 - [x] The frame loop is its own crate, `crates/scene-program` (`genos-scene-program`): the loop, the menu and its layout file, and the mesh viewer. `debug/lighting` and `editor` are two small binaries on it.
-- [ ] Compile the mesh viewer into the editor only. Today both binaries link it and only the editor lists mesh scenes.
+- [x] mesh-workbench is linked by the editor binary only. `genos-editor` gives the scene program the function that opens a session (`Program::mesh_session`); `genos-scene-program` and `genos-lighting` no longer depend on `genos-meshbench`, `gpt-mesh` or `serde_json` (`cargo tree -p genos-lighting`). A mesh command that edits says so on a program without it.
+- [ ] The viewer's own code (`mesh_view.rs`, the reader `genos-workbench`) is still in the shared library; `genos-lighting` lists no mesh scene, so it never runs there.
 - [ ] The scene picker lists game scenes and mesh workspaces found on disk, not only the files in `debug/scenes`.
 - [ ] ADR note: this starts the editor program of ADR 0002 and ADR 0006, as a thin view over agent commands ([agent-driven editing](agent-driven-editing.md), ADR 0019).
 

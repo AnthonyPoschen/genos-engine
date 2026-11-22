@@ -12,4 +12,7 @@ name = "genos-editor"
 path = "src/main.rs"
 
 [dependencies]
+genos-json = { path = "../crates/json" }
+# mesh-workbench is linked here and nowhere else (ADR 0042).
+genos-meshbench = { path = "../crates/meshbench" }
 genos-scene-program = { path = "../crates/scene-program" }
