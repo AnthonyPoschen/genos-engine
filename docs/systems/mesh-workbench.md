@@ -68,7 +68,7 @@ A mesh scene writes the web viewer's corners on the picture: the workspace's nam
 
 ## Working from Claude Code
 
-`.mcp.json` at the repository root gives a Claude Code session in this repository the editor's tools (server `genos-editor`, `http://127.0.0.1:8765/mcp`) while `make editor` runs. A person selects in the window and types a note (`T`); the session reads `mesh_context` (the note, the selection, each selected face's vertices, centre and normal, a screenshot), looks a command up with `mesh_commands`, shows the edit with `mesh_preview`, and commits it. `debug/lighting/scripts/mesh_edit_from_selection.rhai` runs the same loop as a check.
+`.mcp.json` at the repository root gives a Claude Code session in this repository the editor's tools (server `genos-editor`, `http://127.0.0.1:8765/mcp`) while `make editor` runs. A person selects in the window and types a note (`T`); the session reads `mesh_context` (the note, the selection, each selected face's vertices, centre and normal, a screenshot), looks a command up with `mesh_commands`, shows the edit with `mesh_preview`, and commits it. `debug/lighting/scripts/mesh_edit_from_selection.rhai` runs the same loop as a check. `cargo test -p genos-editor` runs it with no window: the test drives the mesh viewer and the linked mesh-workbench directly.
 
 ## Commands
 

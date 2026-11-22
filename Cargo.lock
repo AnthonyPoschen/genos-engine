@@ -267,6 +267,7 @@ version = "0.1.0"
 dependencies = [
  "genos-json",
  "genos-meshbench",
+ "genos-scene",
  "genos-scene-program",
 ]
 

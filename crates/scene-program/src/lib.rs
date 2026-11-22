@@ -318,7 +318,7 @@ const ID_HDR_BLOOM: u32 = 5200;
 
 mod menu_layout;
 mod mesh_view;
-pub use mesh_view::{read_catalogue, CommandDoc};
+pub use mesh_view::{read_catalogue, set_out_dir as set_mesh_out_dir, CommandDoc, MeshView};
 
 use menu_layout::{load_menu_layout, menu_folds, section_id, strip_id, tab_id, MenuFold, MenuLine};
 /// Ordered grades and numeric knobs. An on/off switch is not in this list.
@@ -486,6 +486,13 @@ static PROGRAM: std::sync::OnceLock<Program> = std::sync::OnceLock::new();
 /// [`run_program`] gets the editor, which lists every scene.
 fn program() -> Program {
     *PROGRAM.get_or_init(|| Program::EDITOR)
+}
+
+/// Name the program without running its window: the mesh viewer then has
+/// the program's way to open a mesh-workbench session. For a test that
+/// drives [`MeshView`] with no window. The first call in a process wins.
+pub fn use_program(program: Program) {
+    let _ = PROGRAM.set(program);
 }
 
 /// Run `program` until it quits, then exit the process with its code.
