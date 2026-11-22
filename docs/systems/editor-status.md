@@ -22,7 +22,7 @@ Where the editor stands on 23 Nov 2026 (branch `lighting-v3`), and what is missi
 
 **Selecting.** A click selects a face, an object or a vertex; Shift adds. Control and a drag draws a box, Alt and a drag a lasso. `T` types the note.
 
-**Editing through MCP.** 92 tools in six sections; 18 are mesh tools.
+**Editing through MCP.** The tools are in six sections (scene, lighting, render, capture, editor, mesh); 16 are mesh tools. A Claude Code session sees 90 tools in all.
 
 - `mesh_context` gives one packet: the note, the selection, each selected face's vertices, centre and normal, the camera, the objects in view, the latest edits, and a screenshot.
 - `mesh_commands` lists mesh-workbench's 143 commands with their fields, read from the linked version's help.
