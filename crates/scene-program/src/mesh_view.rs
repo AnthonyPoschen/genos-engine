@@ -190,6 +190,8 @@ pub struct MeshView {
     pub recorded: Vec<genos_workbench::Session>,
     /// The topology shade (`wireframe`) labels vertices and faces with their IDs.
     pub labels: bool,
+    /// The Objects and Replay panel is on the picture.
+    pub panel_open: bool,
     /// The labels of the last look, and the look they were made for.
     label_cache: Option<(LabelKey, Vec<Label>)>,
     /// A box or a lasso being dragged, in pixels: the box's two corners, or
@@ -225,7 +227,8 @@ pub struct MeshView {
 /// what the family is for. `mesh_command` takes any of them.
 /// The fields each of the viewer's own tools takes. The schema a client sees
 /// (`genos_debug::commands::mesh_schema`) names the same ones; a test checks it.
-pub const VIEW_ARGS: [&str; 24] = [
+pub const VIEW_ARGS: [&str; 25] = [
+    "panel",
     "labels",
     "command_filter",
     "workspace",
@@ -957,6 +960,8 @@ pub struct GizmoEnd {
     pub color: [f32; 3],
     /// The side a click looks from (`mesh_view look`); `None` is the projection toggle.
     pub look: Option<&'static str>,
+    /// A click opens or closes the Objects panel, not the projection.
+    pub panel: bool,
     /// The gizmo's centre, for the ends that have a line to it.
     pub line_from: Option<[f32; 2]>,
     depth: f32,
@@ -1290,6 +1295,7 @@ impl MeshView {
             folded: BTreeSet::new(),
             recorded: Vec::new(),
             labels: true,
+            panel_open: true,
             label_cache: None,
             region: None,
             region_lasso: false,
@@ -2183,6 +2189,7 @@ impl MeshView {
                     // The far ends are dimmer, as in the web viewer.
                     color: if sign > 0.0 { color } else { color.map(|c| c * 0.45) },
                     look: Some(look),
+                    panel: false,
                     line_from: (sign > 0.0).then_some(centre),
                     depth: toward * sign,
                 });
@@ -2199,8 +2206,21 @@ impl MeshView {
             label: name.to_string(),
             color: [0.8, 0.84, 0.9],
             look: None,
+            panel: false,
             line_from: None,
             depth: 2.0,
+        });
+        // Under it, the button that opens and closes the Objects panel, as
+        // the web viewer's toolbar has.
+        ends.push(GizmoEnd {
+            at: [centre[0], centre[1] + GIZMO_ARM + 44.0],
+            half: [27.0, 8.0],
+            label: "OBJECTS".to_string(),
+            color: if self.panel_open { [1.0, 0.82, 0.35] } else { [0.8, 0.84, 0.9] },
+            look: None,
+            panel: true,
+            line_from: None,
+            depth: 3.0,
         });
         ends
     }
@@ -2624,7 +2644,9 @@ impl MeshView {
         // A click on the axis gizmo turns the view; it is not a pick.
         if click {
             if let Some(press) = self.gizmo(camera, size).into_iter().find(|end| end.holds([input.x, input.y])) {
-                if let Some(from) = press.look {
+                if press.panel {
+                    self.panel_open = !self.panel_open;
+                } else if let Some(from) = press.look {
                     let _ = self.look(camera, from);
                 } else {
                     self.orthographic = !self.orthographic;
@@ -2899,6 +2921,9 @@ impl MeshView {
                 }
                 if let Some(on) = args.bool("labels")? {
                     self.labels = on;
+                }
+                if let Some(on) = args.bool("panel")? {
+                    self.panel_open = on;
                 }
                 if let Some(words) = args.str("command_filter")? {
                     self.command_filter = words;
@@ -3528,6 +3553,7 @@ impl MeshView {
             ("preview", self.preview_value()),
             ("filter", text(self.filter.clone())),
             ("labels", Value::Bool(self.labels)),
+            ("panel", Value::Bool(self.panel_open)),
             ("command_filter", text(self.command_filter.clone())),
             (
                 "pose",
@@ -4280,8 +4306,8 @@ not a row | `nothing` |\n";
         };
         // Six ends and the projection's name, in the top right corner.
         let ends = view.gizmo(&camera, size);
-        assert_eq!(ends.len(), 7);
-        assert!(ends.iter().all(|end| end.at[0] > 1100.0 && end.at[1] < 160.0), "{ends:?}");
+        assert_eq!(ends.len(), 8);
+        assert!(ends.iter().all(|end| end.at[0] > 1100.0 && end.at[1] < 170.0), "{ends:?}");
         // The +X end: the camera goes to the +X side, and nothing is picked.
         let x = ends.iter().find(|end| end.label == "X").expect("X").at;
         click(&mut view, &mut camera, x);
@@ -4292,11 +4318,18 @@ not a row | `nothing` |\n";
         let x = ends.iter().find(|end| end.label == "X").expect("X");
         assert!((x.at[0] - (size[0] - super::GIZMO_INSET)).abs() < 1.0 && (x.at[1] - super::GIZMO_INSET).abs() < 1.0);
         // The name under it toggles the projection.
-        let name = ends.iter().find(|end| end.look.is_none()).expect("projection").clone();
+        let name = ends.iter().find(|end| end.look.is_none() && !end.panel).expect("projection").clone();
         assert_eq!(name.label, "PERSPECTIVE");
         click(&mut view, &mut camera, name.at);
         assert!(view.orthographic && camera.parallel_half > 0.0);
-        assert_eq!(view.gizmo(&camera, size).last().map(|end| end.label.clone()), Some("ORTHOGRAPHIC".to_string()));
+        assert!(view.gizmo(&camera, size).iter().any(|end| end.label == "ORTHOGRAPHIC"));
+        // The button under it closes and opens the Objects panel.
+        let button = view.gizmo(&camera, size).into_iter().find(|end| end.panel).expect("panel button");
+        assert!(view.panel_open);
+        click(&mut view, &mut camera, button.at);
+        assert!(!view.panel_open);
+        click(&mut view, &mut camera, button.at);
+        assert!(view.panel_open);
         // The words on the picture.
         let hud = view.hud();
         assert_eq!(hud[0], "SAMPLE   LIVE   REV 1");

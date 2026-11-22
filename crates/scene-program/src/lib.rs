@@ -652,7 +652,10 @@ fn run() -> Result<i32, String> {
     }
     let mut size = (renderer.width(), renderer.height());
     let mut focus = FocusGate::default();
-    let menu = load_menu_layout()?;
+    // The mesh viewer's Objects and Replay lists are a panel of their own.
+    let (menu, mesh_panel) = split_mesh_panel(load_menu_layout()?);
+    let mut mesh_ui = State::default();
+    let mut mesh_ui_placed = false;
     let folds = menu_folds(&menu);
     let mut ui = State::default();
     let mut tracked_collapsed = app.scene().menu.collapsed.clone();
@@ -764,7 +767,7 @@ fn run() -> Result<i32, String> {
         };
         let mut drew_panel = false;
         let mut menu_blur = false;
-        let (paints, look_capture) = if opts.headless {
+        let (mut paints, mut look_capture) = if opts.headless {
             (Vec::new(), true)
         } else if !menu_open {
             let ui_frame = show_menu_tab(&mut ui, [size.0 as f32, size.1 as f32], pointer);
@@ -810,6 +813,35 @@ fn run() -> Result<i32, String> {
             menu_blur = ui_frame.consumed.blur;
             (ui_frame.paints, ui_frame.look_capture)
         };
+        // The Objects and Replay panel of a mesh scene: a second panel, on the
+        // right under the gizmo, with its own place and folds. Its HIDE
+        // button and the OBJECTS button under the gizmo close it.
+        if !opts.headless && !app.loading() && app.mesh.as_ref().is_some_and(|view| view.panel_open) {
+            let viewport = [size.0 as f32, size.1 as f32];
+            if !mesh_ui_placed {
+                mesh_ui_placed = true;
+                mesh_ui.panel_offset = [(viewport[0] * (2.0 / 3.0) - 16.0).max(16.0), MESH_PANEL_TOP];
+            }
+            let fps_menu = app.scene().fps_counter.effective();
+            let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &mesh_panel);
+            let frame = button_panel_blocks(&mut mesh_ui, "Objects", &blocks, viewport, &camera, pointer);
+            for action in &frame.actions {
+                match *action {
+                    Action::Slide { id, value } => slide(&mut app, id, value)?,
+                    Action::Select { id, value } => select(&mut app, &mut camera, &mut tools, renderer, id, value)?,
+                    Action::Toggle { id, on } => toggle(&mut app, id, on)?,
+                    Action::Press(id) if id == MENU_HIDE => {
+                        if let Some(view) = &mut app.mesh {
+                            view.panel_open = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            paints.extend(frame.paints);
+            look_capture = look_capture && frame.look_capture;
+            menu_blur = menu_blur || frame.consumed.blur;
+        }
         if keys.pressed(&input, "menu") && !menu_blur {
             menu_open = !menu_open;
         }
@@ -2794,6 +2826,19 @@ const MESH_EV100: &str = "1.2";
 /// so is not drawn, outside a mesh scene.
 const MESH_TAB: &str = "Mesh";
 
+/// Where the mesh viewer's own panel first stands, down from the top: under the gizmo.
+const MESH_PANEL_TOP: f32 = 176.0;
+
+/// Take the mesh viewer's Objects and Replay sections out of the menu
+/// layout: the program draws them as a second panel. Returns the menu
+/// without them, and their lines with no tab.
+fn split_mesh_panel(menu: Vec<MenuLine>) -> (Vec<MenuLine>, Vec<MenuLine>) {
+    let (panel, menu): (Vec<MenuLine>, Vec<MenuLine>) =
+        menu.into_iter().partition(|line| matches!(line.section.as_str(), "mesh_objects" | "mesh_replay"));
+    let panel = panel.into_iter().map(|line| MenuLine { tab: None, ..line }).collect();
+    (menu, panel)
+}
+
 /// The rows of the mesh viewer's Objects (`mesh_objects`) and Replay
 /// (`mesh_events`) lists. `None` for any other setting.
 fn mesh_panel_rows(app: &App, setting: &str) -> Option<Vec<PanelRow>> {
@@ -4586,6 +4631,13 @@ mod tests {
         }
         let narrowed = labels(&app);
         assert!(narrowed.iter().any(|label| label == "2 bracket") && !narrowed.iter().any(|label| label == cube));
+        // The program draws the Objects and Replay lists as a panel of their
+        // own: its lines hold the object rows, and the menu's do not.
+        let (rest, panel) = super::split_mesh_panel(menu.clone());
+        let in_panel: Vec<String> = super::flatten_blocks(&super::panel_blocks(&app, ViewMode::Full, &fps, &panel)).iter().map(|row| row.label.clone()).collect();
+        let in_menu: Vec<String> = super::flatten_blocks(&super::panel_blocks(&app, ViewMode::Full, &fps, &rest)).iter().map(|row| row.label.clone()).collect();
+        assert!(in_panel.iter().any(|label| label == "2 bracket") && !in_menu.iter().any(|label| label == "2 bracket"), "{in_panel:?}");
+        assert!(in_menu.iter().any(|label| label == "Click selects") && !in_panel.iter().any(|label| label == "Click selects"));
         // Another scene has no Objects section.
         app.load_scene("lighting-stress").expect("lighting scene");
         app.follow_mesh();

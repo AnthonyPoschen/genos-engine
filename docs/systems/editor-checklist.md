@@ -94,7 +94,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] A session by ID (`replay: {session, event}`) and a recorded command's input and reply (`mesh_view event: N`).
 - [x] Replay panel in the window (the Mesh tab's "Replay" section): a session picker, then "live" and the session's latest 12 commands, newest first, each with a box that shows the mesh after it. The same filter narrows the commands by name.
 - [x] A collection's row has an "open" box that folds its objects away. The Replay panel has its own filter (`mesh_view command_filter`; Control and T types it).
-- Decision: the Objects and Replay panels stay sections of the Mesh tab, not a second floating panel; the list scrolls with the menu, and the Objects panel lists at most 200 lines (the filter narrows it).
+- [x] The Objects and Replay lists are a panel of their own: a second panel on the right under the gizmo, with its own place (it drags) and folds. Its HIDE button and the OBJECTS button under the gizmo close it, the button opens it again, and `mesh_view panel` does both. The Objects list holds at most 200 lines (the filter narrows it). Read from a picture of the window.
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
 - [x] Picking and the selection highlight follow the pose.
@@ -144,7 +144,7 @@ A workspace with three objects, an extruded face, box UVs scaled to tile, a text
 - [x] `normals` and `depth` are shades in mesh-workbench's encodings (RGB = (N + 1) / 2; 255 at the nearest shown vertex and 32 at the farthest), compared with its `capture` side by side. The engine's `view` modes `normal` and `depth` remain as they were.
 - [x] The contact shadow is a smooth gradient. It showed steps on the dark ground because the G-buffer keeps base colour in 8 linear bits; `gbuffer.frag` now adds an ordered dither of under half a step, fixed to the pixel, so a dark gradient anywhere in the engine has no steps. A colour that is exactly a byte is unchanged, and the render suite fails the same tests with and without it.
 - [x] The web viewer's corners are on the picture: the workspace with what is shown and its revision (top), the counts (bottom left), the pointer hints (bottom right), and the axis gizmo (top right). A click on a gizmo end looks from that side, and a click on the projection's name under it changes the projection. Read from a picture of the window.
-- Decision: the web viewer's toolbar and inspector panel are the Mesh tab of the engine's menu here (a folder picker, dropdowns, check boxes, the Objects and Replay sections). The editor stays basic: a person looks, selects and types a note, and an agent edits.
+- Decision: the web viewer's toolbar is the Mesh tab of the engine's menu here (a folder picker, dropdowns, check boxes). The editor stays basic: a person looks, selects and types a note, and an agent edits.
 
 ## For Nathan
 
