@@ -97,7 +97,7 @@ None. This is authoring. A finished mesh leaves mesh-workbench as a GLB and ente
 
 - The picture is the engine's raster and direct light. The mesh has no baked distance field, so it does not occlude bounce light.
 - The orthographic view stands the camera up to 120 m back (the far plane is 200 m); a mesh too large for that gets a wider lens. Reflections and the reference tracer assume the 60 degree lens.
-- The `textured` and `uv_checker` shades are lit, where mesh-workbench draws them unlit. A corner with no UV draws at the image's corner, not magenta. A part with several textures holds a tiling UV at the image's edge. `alpha_cutoff` is not read. A pose keeps the rest normals. Picking and the selection highlight follow the pose.
+- `textured`, `uv_checker` and `vertex_colors_unlit` are drawn unlit: choosing one switches the engine's view to `albedo`, and leaving it switches back to `full`. A face with incomplete UVs is magenta. A part with several textures is drawn as one object a texture. A texture's `alpha_cutoff` is not read. The normals follow a pose. Picking and the selection highlight follow the pose.
 - The workspace format may change upstream. `load_workspace` reads versions 1 to 8 and refuses a newer one.
 - Nothing is pushed: the viewer polls the file's modification time.
 

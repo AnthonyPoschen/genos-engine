@@ -883,6 +883,14 @@ fn run() -> Result<i32, String> {
             app.scene().debug.ui = true;
         }
         let capture_ui = app.scene().debug.ui;
+        // A mesh shade that mesh-workbench draws unlit shows the base colour.
+        // Only the change of shade switches the view, so a person can still
+        // pick another view after it.
+        let unlit = app.mesh.as_ref().is_some_and(mesh_view::MeshView::unlit);
+        if unlit != app.mesh_unlit {
+            app.mesh_unlit = unlit;
+            tools.set_view(if unlit { ViewMode::Albedo } else { ViewMode::Full });
+        }
         let tools_read = tools.before_draw(&mut genos_debug::Ctx {
             renderer,
             camera: &mut camera,
@@ -1138,6 +1146,9 @@ struct App {
     /// How many of the world's objects are the scene itself. The viewer's
     /// extra objects (wireframe, selection) come after them.
     mesh_overlay: Option<usize>,
+    /// The mesh shade is one mesh-workbench draws unlit, and the view was
+    /// switched to the base colour for it.
+    mesh_unlit: bool,
     /// Last GI pass times, milliseconds. Numbers only.
     gi_passes: String,
     /// Last GI work counters. Numbers only.
@@ -1220,10 +1231,9 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
     // Surface 0: the mesh's textures and the UV checker in one atlas. A part
     // draws with it only in the `textured` and `uv_checker` shades.
     let atlas = mesh_view::atlas(&workspace.textures);
-    // In `mesh_view`'s order: SURFACE_ATLAS, SURFACE_CHECKER, SURFACE_TEXTURES.
+    // In `mesh_view`'s order: SURFACE_CHECKER, then SURFACE_TEXTURES.
     world.surfaces.clear();
-    let rects = [[0, 0, atlas.width, atlas.height], atlas.checker];
-    for color in rects.iter().chain(&atlas.rects) {
+    for color in [atlas.checker].iter().chain(&atlas.rects) {
         world.surfaces.push(genos_render::Surface {
             color: *color,
             normal: [0; 4],
@@ -1297,6 +1307,7 @@ impl App {
             load: None,
             mesh: None,
             mesh_overlay: None,
+            mesh_unlit: false,
             gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
             fog_cli: FogCli::default(),
@@ -1425,14 +1436,27 @@ impl App {
         let posed = view.posed_positions();
         let lift = view.lift();
         let (shadow_at, shadow_up, shadow_colors) = view.shadow_patches(MESH_GROUND_COLOR);
-        let plain = |(positions, normals): (Vec<[f32; 3]>, Vec<[f32; 3]>), color| (positions, normals, color, Vec::new());
-        let extras = [
-            (shadow_at, shadow_up, [1.0; 3], shadow_colors),
+        let plain = |(positions, normals): (Vec<[f32; 3]>, Vec<[f32; 3]>), color| mesh_view::Piece {
+            positions,
+            normals,
+            colors: Vec::new(),
+            texcoords: Vec::new(),
+            surface: None,
+        }
+        .tinted(color);
+        let mut extras = vec![
+            mesh_view::Piece { positions: shadow_at, normals: shadow_up, colors: shadow_colors, texcoords: Vec::new(), surface: None }
+                .tinted([1.0; 3]),
             plain(view.grid_strips(), mesh_view::GRID_COLOR),
             plain(view.wire(), mesh_view::WIRE_COLOR),
             plain(view.bone_strips(), mesh_view::BONE_COLOR),
             plain(view.overlay(), mesh_view::OVERLAY_COLOR),
         ];
+        // A part with several textures, one piece a texture.
+        extras.extend(view.textured_pieces().into_iter().map(|piece| piece.tinted(mesh_view::MESH_COLOR)));
+        let posed_normals = view.posed_normals();
+        let rest_normals: Vec<Vec<[f32; 3]>> =
+            view.workspace.iter().flat_map(|w| w.parts.iter().map(|p| p.normals.clone())).collect();
         let rest: Vec<Vec<[f32; 3]>> = view
             .workspace
             .iter()
@@ -1450,7 +1474,13 @@ impl App {
             .filter(|object| matches!(object.kind, DrawKind::Mesh { .. }));
         for (index, (object, (hidden, shade, per_vertex, uvs))) in meshes.zip(display).enumerate() {
             object.hidden = hidden;
-            if let DrawKind::Mesh { color, colors, vertices, texcoords, surface, .. } = &mut object.kind {
+            if let DrawKind::Mesh { color, colors, vertices, normals, texcoords, surface, .. } = &mut object.kind {
+                // The normals follow the pose, and go back with it.
+                match (posed_normals.get(index).cloned().flatten(), rest_normals.get(index)) {
+                    (Some(at), _) => *normals = at,
+                    (None, Some(at)) if at.len() == normals.len() => normals.clone_from(at),
+                    _ => {}
+                }
                 *color = shade;
                 *colors = per_vertex;
                 // The surfaces are the ones `mesh_world` made.
@@ -1467,7 +1497,8 @@ impl App {
         }
         let mut pose = identity_pose();
         pose[13] = lift;
-        for (positions, normals, color, colors) in extras {
+        for (piece, color) in extras {
+            let mesh_view::Piece { positions, normals, colors, texcoords, surface } = piece;
             if positions.is_empty() {
                 continue;
             }
@@ -1497,12 +1528,12 @@ impl App {
                 kind: DrawKind::Mesh {
                     vertices: positions,
                     normals,
-                    texcoords: Vec::new(),
+                    texcoords,
                     color,
                     colors,
                     pose,
                     emission: [0.0; 3],
-                    surface: None,
+                    surface,
                 },
             });
         }

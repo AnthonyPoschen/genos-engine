@@ -44,6 +44,9 @@ pub struct Part {
     /// top row of the image (mesh-workbench keeps 0 at the bottom). A corner
     /// with no UV is at the origin.
     pub uvs: Vec<[f32; 2]>,
+    /// Whether each position has a UV of its own. `uvs` holds the origin for
+    /// one that has none.
+    pub uv_mapped: Vec<bool>,
     /// The texture of each triangle's face: an index into
     /// [`Workspace::textures`], or `None`.
     pub face_textures: Vec<Option<usize>>,
@@ -312,7 +315,9 @@ pub fn parse_project(text: &str) -> Result<Workspace, String> {
                 part.normals.push(narrow(normal));
                 part.vertex_ids.push(vertex);
                 part.colors.push(painted.get(&vertex).map_or([1.0; 3], |c| narrow(*c)));
-                part.uvs.push(corner_uv(face_uvs.get(&face).and_then(|corners| corners.get(&vertex))));
+                let uv = face_uvs.get(&face).and_then(|corners| corners.get(&vertex));
+                part.uvs.push(corner_uv(uv));
+                part.uv_mapped.push(uv.is_some());
             }
             part.face_ids.push(face);
             part.face_textures.push(face_texture.get(&face).copied());
@@ -642,6 +647,7 @@ fn empty_part(object: u64, name: String, origin: [f64; 3]) -> Part {
         edges: Vec::new(),
         edge_ids: Vec::new(),
         uvs: Vec::new(),
+        uv_mapped: Vec::new(),
         face_textures: Vec::new(),
         colors: Vec::new(),
     }
@@ -774,6 +780,7 @@ mod tests {
         assert_eq!(part.face_textures, vec![Some(0), Some(0)]);
         // Vertex 1 has UV (0, 0): the bottom left, so V is 1 from the top.
         assert_eq!(part.uvs[0], [0.0, 1.0]);
+        assert!(part.uv_mapped.iter().all(|mapped| *mapped));
         assert_eq!(part.uvs[2], [1.0, 0.0]);
         assert_eq!(super::decode_base64("aGk="), Some(b"hi".to_vec()));
         assert_eq!(super::decode_base64("a?"), None);

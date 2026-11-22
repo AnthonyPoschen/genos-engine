@@ -67,9 +67,10 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Shaded, wireframe, object IDs.
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).
 - [x] Textured (`shade: textured`) and the UV checker (`shade: uv_checker`). A mesh scene's colour atlas holds the checker and every texture of the workspace. A part with one texture, and the checker, repeat as in mesh-workbench. The vertex paint tints the texture; a face with no texture is grey.
-- [ ] Textured, the rest: both shades are lit (mesh-workbench draws them unlit); a missing UV draws at the image's corner, not magenta (the reader does not say which corners are unmapped); a part with several textures holds a tiling UV at the image's edge; `alpha_cutoff` is not read.
+- [x] Textured as mesh-workbench draws it: `textured`, `uv_checker` and `vertex_colors_unlit` switch the view to the base colour (unlit) and back; a face with incomplete UVs is magenta and a face with no texture grey; a part with several textures is drawn as one piece a texture, so each repeats.
+- [ ] `alpha_cutoff` on a texture is not read. Texels are fetched at the resident mip, nearest, as mesh-workbench samples.
 - [x] The engine drew every texture at its coarsest mip in the scene program (fixed 22 Nov 2026, `Streamer::load`'s starvation floor and the draw call's own time as the streamer's frame time). Sponza draws textured after about 20 seconds.
-- [ ] Unlit vertex colour.
+- [x] Unlit vertex colour (`shade: vertex_colors_unlit`).
 - [x] Face IDs (`shade: face_ids`).
 - [x] Normals, depth and base colour: the engine's `view` modes `normal`, `depth` and `albedo`. They showed nothing in the scene program until the HDR compose stored the view's colour in the scene image the display pass draws.
 - [x] Collection IDs (`shade: collection_ids`).
@@ -92,7 +93,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
 - [x] Picking and the selection highlight follow the pose.
-- [ ] Posed normals (the pose keeps the rest normals).
+- [x] Posed normals: the normals follow the pose, smooth where the rest normals are.
 - [ ] Workspace picker; connection and revision readout; statistics footer.
 
 ### E. Beyond the web viewer

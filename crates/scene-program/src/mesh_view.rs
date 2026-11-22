@@ -389,7 +389,7 @@ pub struct Replay {
 }
 
 /// The shade modes, in the order the menu lists them.
-pub const SHADES: [&str; 10] = [
+pub const SHADES: [&str; 11] = [
     "shaded",
     "wireframe",
     "vertex_colors",
@@ -400,7 +400,11 @@ pub const SHADES: [&str; 10] = [
     "textured",
     "uv_checker",
     "face_orientation",
+    "vertex_colors_unlit",
 ];
+
+/// A face whose UVs are incomplete, in the textured and checker shades.
+const UNMAPPED_COLOR: [f32; 3] = [1.0, 0.0, 1.0];
 
 /// The most lines the window's Objects panel lists, and the most commands
 /// its Replay panel lists.
@@ -552,61 +556,99 @@ pub fn atlas(textures: &[genos_workbench::TextureImage]) -> Atlas {
     Atlas { width, height, rgba, rects, checker: [0, 0, CHECKER, CHECKER] }
 }
 
-/// Surfaces of a mesh scene, in the order `mesh_world` adds them: the whole
-/// atlas, the checker, then one per texture.
-pub const SURFACE_ATLAS: usize = 0;
-pub const SURFACE_CHECKER: usize = 1;
-pub const SURFACE_TEXTURES: usize = 2;
+/// Surfaces of a mesh scene, in the order `mesh_world` adds them: the
+/// checker, then one per texture.
+pub const SURFACE_CHECKER: usize = 0;
+pub const SURFACE_TEXTURES: usize = 1;
 
-/// A surface for the part and a texture coordinate for each of its positions.
-/// A corner of a face with no texture is negative: it keeps its own colour.
-///
-/// The checker, and a part whose faces use one texture, draw with that image's
-/// own surface, so the UVs repeat as they do in mesh-workbench. A part with
-/// several textures draws with the whole atlas: each triangle's UVs are placed
-/// in its texture's rect and held to it, so a UV that tiles is held at the edge.
-#[expect(clippy::cast_precision_loss, reason = "an image side is far below 2^24")]
-fn atlas_texcoords(part: &Part, atlas: &Atlas, checker: bool) -> (usize, Vec<[f32; 2]>) {
-    let texture_of = |triangle: usize| {
-        part.face_textures
-            .get(triangle)
-            .copied()
-            .flatten()
-            .filter(|at| atlas.rects.get(*at).is_some_and(|rect| rect[2] > 0))
-    };
-    let used: BTreeSet<usize> = (0..part.triangles()).filter_map(texture_of).collect();
-    let surface = match (checker, used.len()) {
-        (true, _) => SURFACE_CHECKER,
-        (false, 1) => SURFACE_TEXTURES + used.first().copied().unwrap_or(0),
-        _ => SURFACE_ATLAS,
-    };
-    let mut out = vec![[-1.0f32; 2]; part.positions.len()];
-    for (triangle, corners) in out.chunks_exact_mut(3).enumerate() {
-        let texture = texture_of(triangle);
+/// A triangle's UVs, moved so the triangle starts in the first repeat (a
+/// negative coordinate means "no texture" to the shader). `None` when a
+/// corner has no UV.
+fn triangle_uvs(part: &Part, triangle: usize) -> Option<[[f32; 2]; 3]> {
+    let at = triangle * 3;
+    if !(0..3).all(|corner| part.uv_mapped.get(at + corner).copied().unwrap_or(false)) {
+        return None;
+    }
+    let uv = [0, 1, 2].map(|corner| part.uvs.get(at + corner).copied().unwrap_or([0.0; 2]));
+    let shift = [0, 1].map(|axis| uv.iter().map(|p| p[axis]).fold(f32::INFINITY, f32::min).floor());
+    Some(uv.map(|p| [p[0] - shift[0], p[1] - shift[1]]))
+}
+
+fn usable(texture: &genos_workbench::TextureImage) -> bool {
+    texture.width > 0 && texture.height > 0 && texture.pixels.len() == (texture.width as usize) * (texture.height as usize) * 4
+}
+
+/// A texture coordinate and a colour for each position, and the texture of
+/// each triangle.
+type TexturedCorners = (Vec<[f32; 2]>, Vec<[f32; 3]>, Vec<Option<usize>>);
+
+/// How a part draws in the `textured` or `uv_checker` shade: a texture
+/// coordinate and a colour for each position, and the texture each triangle
+/// draws with. As in mesh-workbench: a face with no texture is grey, a face
+/// whose UVs are incomplete is magenta, and the vertex paint tints a texture.
+fn textured_corners(part: &Part, textures: &[genos_workbench::TextureImage], checker: bool) -> TexturedCorners {
+    let mut uvs = vec![[-1.0f32; 2]; part.positions.len()];
+    let mut colors = vec![MESH_COLOR; part.positions.len()];
+    let mut drawn = vec![None; part.triangles()];
+    for (triangle, slot) in drawn.iter_mut().enumerate() {
+        let texture = part.face_textures.get(triangle).copied().flatten().filter(|at| textures.get(*at).is_some_and(usable));
         if !checker && texture.is_none() {
             continue;
         }
-        let uv = |corner: usize| part.uvs.get(triangle * 3 + corner).copied().unwrap_or([0.0; 2]);
-        // A negative coordinate means "no texture" to the shader: start every
-        // triangle in the first repeat.
-        let shift = [0, 1].map(|axis| (0..3).map(|c| uv(c)[axis]).fold(f32::INFINITY, f32::min).floor());
-        let rect = texture.and_then(|at| atlas.rects.get(at)).filter(|_| surface == SURFACE_ATLAS);
-        for (corner, place) in corners.iter_mut().enumerate() {
-            for axis in 0..2 {
-                let local = uv(corner)[axis] - shift[axis];
-                place[axis] = match rect {
-                    Some(rect) => {
-                        let side = rect[2 + axis] as f32;
-                        let inset = 0.5 / side;
-                        let whole = if axis == 0 { atlas.width } else { atlas.height } as f32;
-                        (rect[axis] as f32 + local.clamp(inset, 1.0 - inset) * side) / whole
-                    }
-                    None => local,
-                };
+        let at = triangle * 3;
+        let Some(mapped) = triangle_uvs(part, triangle) else {
+            colors[at..at + 3].fill(UNMAPPED_COLOR);
+            continue;
+        };
+        uvs[at..at + 3].copy_from_slice(&mapped);
+        for (corner, color) in colors[at..at + 3].iter_mut().enumerate() {
+            *color = if checker { [1.0; 3] } else { part.colors.get(at + corner).copied().unwrap_or([1.0; 3]) };
+        }
+        *slot = texture;
+    }
+    (uvs, colors, drawn)
+}
+
+/// A part's faces that draw with one surface, as an object of its own: a
+/// part with several textures is drawn as one piece a texture, so each
+/// repeats as it does in mesh-workbench.
+pub struct Piece {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub colors: Vec<[f32; 3]>,
+    pub texcoords: Vec<[f32; 2]>,
+    pub surface: Option<usize>,
+}
+
+impl Piece {
+    /// The piece with the one colour it draws in when it has none per vertex.
+    #[must_use]
+    pub fn tinted(self, color: [f32; 3]) -> (Self, [f32; 3]) {
+        (self, color)
+    }
+}
+
+/// Normals for the posed positions `at`, smooth where the rest normals are:
+/// corners that share a vertex and a rest normal share the posed one.
+fn posed_normals_of(part: &Part, at: &[[f32; 3]]) -> Vec<[f32; 3]> {
+    #[expect(clippy::cast_possible_truncation, reason = "a unit vector's component times 1000")]
+    let key = |corner: usize| {
+        let rest = part.normals.get(corner).copied().unwrap_or([0.0; 3]);
+        (part.vertex_ids.get(corner).copied().unwrap_or(0), rest.map(|c| (c * 1000.0).round() as i32))
+    };
+    let mut sums: std::collections::BTreeMap<(u64, [i32; 3]), [f32; 3]> = std::collections::BTreeMap::new();
+    for triangle in at.chunks_exact(3).enumerate() {
+        let (index, t) = triangle;
+        // Not normalised: a larger face counts for more.
+        let face = cross([0, 1, 2].map(|k| t[1][k] - t[0][k]), [0, 1, 2].map(|k| t[2][k] - t[0][k]));
+        for corner in index * 3..index * 3 + 3 {
+            let sum = sums.entry(key(corner)).or_insert([0.0; 3]);
+            for axis in 0..3 {
+                sum[axis] += face[axis];
             }
         }
     }
-    (surface, out)
+    (0..at.len()).map(|corner| normalise(sums.get(&key(corner)).copied().unwrap_or([0.0, 1.0, 0.0]))).collect()
 }
 
 /// What one object draws as: hidden, its colour, a colour per vertex (or
@@ -1240,8 +1282,8 @@ impl MeshView {
         let Some(workspace) = &self.workspace else {
             return Vec::new();
         };
-        let textured = matches!(self.shade.as_str(), "textured" | "uv_checker");
-        let atlas = textured.then(|| atlas(&workspace.textures));
+        let checker = self.shade == "uv_checker";
+        let textured = checker || self.shade == "textured";
         workspace
             .parts
             .iter()
@@ -1257,26 +1299,24 @@ impl MeshView {
                         .iter()
                         .find(|collection| collection.objects.contains(&part.object))
                         .map_or(MESH_COLOR, |collection| id_color(collection.id)),
-                    // The texture is the colour.
-                    "uv_checker" => [1.0; 3],
                     _ => MESH_COLOR,
                 };
-                let texcoords =
-                    atlas.as_ref().map(|atlas| atlas_texcoords(part, atlas, self.shade == "uv_checker"));
+                let hidden = !self.surfaces || self.hidden.contains(&part.object);
+                if textured {
+                    let (uvs, colors, drawn) = textured_corners(part, &workspace.textures, checker);
+                    let used: BTreeSet<usize> = drawn.iter().flatten().copied().collect();
+                    let surface = match (checker, used.len()) {
+                        (true, _) => SURFACE_CHECKER,
+                        (false, 1) => SURFACE_TEXTURES + used.first().copied().unwrap_or(0),
+                        // No texture: the colours alone. Several: `textured_pieces` draws it.
+                        (false, 0) => return (hidden, color, colors, None),
+                        (false, _) => return (true, color, Vec::new(), None),
+                    };
+                    return (hidden, color, colors, Some((surface, uvs)));
+                }
                 // One colour per vertex, or none for the object's one colour.
                 let colors = match self.shade.as_str() {
-                    // White under a texture; a face with none keeps the grey.
-                    // The paint tints the texture. A face with no texture is grey.
-                    "textured" => texcoords
-                        .iter()
-                        .flat_map(|(_, uvs)| uvs.iter().enumerate())
-                        .map(|(at, uv)| match part.colors.get(at) {
-                            _ if uv[0] < 0.0 => MESH_COLOR,
-                            Some(paint) => *paint,
-                            None => [1.0; 3],
-                        })
-                        .collect(),
-                    "vertex_colors" => part.colors.clone(),
+                    "vertex_colors" | "vertex_colors_unlit" => part.colors.clone(),
                     "face_ids" => part.face_ids.iter().flat_map(|face| [id_color(*face); 3]).collect(),
                     "face_orientation" => self
                         .facing
@@ -1288,9 +1328,56 @@ impl MeshView {
                     _ => Vec::new(),
                 };
                 // The edge strips of a hidden object are left out in `wire`.
-                (!self.surfaces || self.hidden.contains(&part.object), color, colors, texcoords)
+                (hidden, color, colors, None)
             })
             .collect()
+    }
+
+    /// The shades mesh-workbench draws without light: the program shows the
+    /// base colour for them.
+    pub fn unlit(&self) -> bool {
+        matches!(self.shade.as_str(), "textured" | "uv_checker" | "vertex_colors_unlit")
+    }
+
+    /// In the `textured` shade, each part that uses several textures, as one
+    /// piece a texture and one for its faces with none. Positions are posed.
+    pub fn textured_pieces(&self) -> Vec<Piece> {
+        let Some(workspace) = self.workspace.as_ref().filter(|_| self.shade == "textured" && self.surfaces) else {
+            return Vec::new();
+        };
+        let posed = self.posed_normals();
+        let mut pieces = Vec::new();
+        for (index, part) in workspace.parts.iter().enumerate() {
+            if self.hidden.contains(&part.object) {
+                continue;
+            }
+            let (uvs, colors, drawn) = textured_corners(part, &workspace.textures, false);
+            let used: BTreeSet<Option<usize>> = drawn.iter().copied().collect();
+            if used.iter().flatten().count() < 2 {
+                continue;
+            }
+            let normals = posed.get(index).and_then(Option::as_ref).unwrap_or(&part.normals);
+            for texture in used {
+                let corners: Vec<usize> =
+                    (0..part.triangles()).filter(|t| drawn[*t] == texture).flat_map(|t| t * 3..t * 3 + 3).collect();
+                pieces.push(Piece {
+                    positions: corners.iter().map(|at| self.corner(part, *at)).collect(),
+                    normals: corners.iter().map(|at| normals.get(*at).copied().unwrap_or([0.0, 1.0, 0.0])).collect(),
+                    colors: corners.iter().map(|at| colors[*at]).collect(),
+                    texcoords: corners.iter().map(|at| uvs[*at]).collect(),
+                    surface: texture.map(|at| SURFACE_TEXTURES + at),
+                });
+            }
+        }
+        pieces
+    }
+
+    /// Normals for each object's posed positions, or `None` at rest.
+    pub fn posed_normals(&self) -> Vec<Option<Vec<[f32; 3]>>> {
+        let Some(workspace) = &self.workspace else {
+            return Vec::new();
+        };
+        workspace.parts.iter().zip(self.posed_positions()).map(|(part, at)| Some(posed_normals_of(part, &at?))).collect()
     }
 
     /// Centre and size of the mesh in the picture (lifted onto the ground).
@@ -2496,26 +2583,47 @@ mod tests {
         assert_eq!(texel(0, 0), [230, 230, 230, 255]);
 
         let mut view = view();
-        let part = view.workspace.as_mut().map(|w| &mut w.parts[0]).expect("cube");
-        // The first face runs past one repeat and starts below zero; the
-        // second face has the blue texture; the rest have none.
+        view.shade = "textured".to_string();
+        let textures = vec![
+            TextureImage { name: "red".into(), width: 4, height: 2, pixels: [255, 0, 0, 255].repeat(8) },
+            TextureImage { name: "blue".into(), width: 2, height: 2, pixels: [0, 0, 255, 255].repeat(4) },
+        ];
+        let workspace = view.workspace.as_mut().expect("workspace");
+        workspace.textures = textures;
+        let part = &mut workspace.parts[0];
+        // The first triangle tiles past one repeat and starts below zero. The
+        // second has a texture and no UVs. The rest have no texture.
         part.uvs = vec![[0.0; 2]; part.positions.len()];
+        part.uv_mapped = vec![false; part.positions.len()];
         part.uvs[..3].copy_from_slice(&[[-0.5, 0.25], [1.5, 0.25], [0.0, 0.75]]);
+        part.uv_mapped[..3].fill(true);
         part.face_textures = vec![None; part.triangles()];
         part.face_textures[0] = Some(0);
-        let (surface, uvs) = super::atlas_texcoords(part, &atlas, false);
+        part.face_textures[1] = Some(0);
+        let shown = view.display();
+        let (surface, uvs) = shown[0].3.clone().expect("the cube draws with a surface");
         assert_eq!(surface, super::SURFACE_TEXTURES, "one texture: its own surface, so it repeats");
         assert_eq!(uvs[..3], [[0.5, 0.25], [2.5, 0.25], [1.0, 0.75]]);
-        assert!(uvs[3..].iter().all(|uv| uv[0] < 0.0), "no texture, no coordinate");
-        part.face_textures[1] = Some(1);
-        let (surface, uvs) = super::atlas_texcoords(part, &atlas, false);
-        assert_eq!(surface, super::SURFACE_ATLAS, "two textures: the whole atlas");
-        // Held inside the red rect, half a texel in from its edges.
-        assert!(uvs[..3].iter().all(|uv| uv[0] * 134.0 >= 128.5 && uv[0] * 134.0 <= 131.5 && uv[1] * 128.0 <= 1.5));
-        assert!(uvs[3..6].iter().all(|uv| uv[0] * 134.0 >= 132.5 && uv[0] * 134.0 <= 133.5));
-        let (surface, uvs) = super::atlas_texcoords(part, &atlas, true);
-        assert_eq!(surface, super::SURFACE_CHECKER);
-        assert!(uvs.iter().all(|uv| uv[0] >= 0.0 && uv[1] >= 0.0), "the checker covers every face");
+        assert!(uvs[3..].iter().all(|uv| uv[0] < 0.0), "no UV or no texture: no coordinate");
+        assert_eq!(shown[0].2[0], [1.0; 3], "white under the texture");
+        assert_eq!(shown[0].2[3], super::UNMAPPED_COLOR, "a textured face with no UVs is magenta");
+        assert_eq!(shown[0].2[6], super::MESH_COLOR, "a face with no texture is grey");
+        assert!(view.textured_pieces().is_empty() && view.unlit());
+        // A second texture: the part is drawn as a piece a texture, each repeating.
+        let part = view.workspace.as_mut().map(|w| &mut w.parts[0]).expect("cube");
+        part.uv_mapped[6..9].fill(true);
+        part.face_textures[2] = Some(1);
+        assert!(view.display()[0].0, "the whole part is left to the pieces");
+        let pieces = view.textured_pieces();
+        let surfaces: Vec<Option<usize>> = pieces.iter().map(|piece| piece.surface).collect();
+        assert_eq!(surfaces, [None, Some(super::SURFACE_TEXTURES), Some(super::SURFACE_TEXTURES + 1)]);
+        assert_eq!(pieces[1].texcoords, [[0.5, 0.25], [2.5, 0.25], [1.0, 0.75]], "still repeating");
+        assert_eq!(pieces.iter().map(|piece| piece.positions.len()).sum::<usize>(), 36);
+        // The checker covers every mapped face and marks the rest.
+        view.shade = "uv_checker".to_string();
+        let shown = view.display();
+        assert_eq!(shown[0].3.as_ref().map(|(surface, _)| *surface), Some(super::SURFACE_CHECKER));
+        assert_eq!((shown[0].2[0], shown[0].2[3]), ([1.0; 3], super::UNMAPPED_COLOR));
     }
 
     #[test]
@@ -2706,6 +2814,23 @@ mod tests {
         }
         // A preview with nothing to show is refused before any session is opened.
         assert!(view.command("mesh_preview", &none, &mut camera, 1.0).is_err());
+    }
+
+    #[test]
+    fn the_normals_turn_with_the_pose() {
+        let view = view();
+        let part = &view.workspace.as_ref().expect("workspace").parts[0];
+        // The cube turned a quarter about Y: x goes to z, z goes to -x.
+        let turned: Vec<[f32; 3]> = part.positions.iter().map(|p| [-p[2], p[1], p[0]]).collect();
+        let normals = super::posed_normals_of(part, &turned);
+        for (rest, now) in part.normals.iter().zip(&normals) {
+            let want = [-rest[2], rest[1], rest[0]];
+            assert!((0..3).all(|k| (want[k] - now[k]).abs() < 1.0e-4), "{rest:?} became {now:?}");
+        }
+        // At rest the rule gives the rest normals back.
+        let same = super::posed_normals_of(part, &part.positions);
+        assert!(part.normals.iter().zip(&same).all(|(a, b)| (0..3).all(|k| (a[k] - b[k]).abs() < 1.0e-4)));
+        assert!(view.posed_normals().iter().all(Option::is_none), "no pose, no posed normals");
     }
 
     #[test]
