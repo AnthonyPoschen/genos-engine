@@ -299,9 +299,12 @@ const ID_MENU_WHEEL: u32 = 2820;
 const ID_MENU_KEYS: u32 = 2821;
 const ID_KNOB: u32 = 3000;
 /// The check boxes of the mesh viewer's Objects panel, then its Replay panel.
+#[cfg(feature = "mesh")]
 const ID_MESH_OBJECT: u32 = 6000;
+#[cfg(feature = "mesh")]
 const ID_MESH_EVENT: u32 = 6500;
 /// The "open" box of a collection's row in the Objects panel.
+#[cfg(feature = "mesh")]
 const ID_MESH_FOLD: u32 = 7000;
 const ID_SWITCH: u32 = 4000;
 const ID_HDR_EXPOSURE: u32 = 5000;
@@ -317,7 +320,9 @@ const ID_HDR_BLOOM_I: u32 = 5106;
 const ID_HDR_BLOOM: u32 = 5200;
 
 mod menu_layout;
+#[cfg(feature = "mesh")]
 mod mesh_view;
+#[cfg(feature = "mesh")]
 pub use mesh_view::{read_catalogue, set_out_dir as set_mesh_out_dir, CommandDoc, MeshView};
 
 use menu_layout::{load_menu_layout, menu_folds, section_id, strip_id, tab_id, MenuFold, MenuLine};
@@ -515,6 +520,7 @@ fn run() -> Result<i32, String> {
     let opts = options()?;
     apply_intent(&opts)?;
     std::fs::create_dir_all(opts.out.join("shots")).map_err(|err| err.to_string())?;
+    #[cfg(feature = "mesh")]
     mesh_view::set_out_dir(opts.out.clone());
     std::fs::create_dir_all(opts.out.join("logs")).map_err(|err| err.to_string())?;
     std::fs::create_dir_all(opts.out.join("dumps")).map_err(|err| err.to_string())?;
@@ -662,7 +668,11 @@ fn run() -> Result<i32, String> {
     let mut focus = FocusGate::default();
     // The mesh viewer's Objects and Replay lists are a panel of their own.
     let (menu, mesh_panel) = split_mesh_panel(load_menu_layout()?);
+    #[cfg(not(feature = "mesh"))]
+    drop(mesh_panel);
+    #[cfg(feature = "mesh")]
     let mut mesh_ui = State::default();
+    #[cfg(feature = "mesh")]
     let mut mesh_ui_placed = false;
     let folds = menu_folds(&menu);
     let mut ui = State::default();
@@ -744,10 +754,17 @@ fn run() -> Result<i32, String> {
         let shift = input.keyboard.down(InputCode::key_shift_left)
             || input.keyboard.down(InputCode::key_shift_right);
         let control = input.keyboard.down(InputCode::key_control_left) || input.keyboard.down(InputCode::key_control_right);
+        #[cfg(feature = "mesh")]
         let typed = app.mesh.as_mut().is_some_and(|view| {
             view.control = control;
             view.type_note(&|code| input.keyboard.pressed(code), shift)
         });
+        // Only the mesh viewer takes typed text.
+        #[cfg(not(feature = "mesh"))]
+        let typed = {
+            let _ = (control, shift);
+            false
+        };
         if !typed {
             hotkeys(&mut app, &input, &keys, &mut camera, &mut tools, renderer)?;
         }
@@ -775,6 +792,7 @@ fn run() -> Result<i32, String> {
         };
         let mut drew_panel = false;
         let mut menu_blur = false;
+        #[cfg_attr(not(feature = "mesh"), expect(unused_mut, reason = "the mesh viewer's panel adds to these"))]
         let (mut paints, mut look_capture) = if opts.headless {
             (Vec::new(), true)
         } else if !menu_open {
@@ -824,6 +842,7 @@ fn run() -> Result<i32, String> {
         // The Objects and Replay panel of a mesh scene: a second panel, on the
         // right under the gizmo, with its own place and folds. Its HIDE
         // button and the OBJECTS button under the gizmo close it.
+        #[cfg(feature = "mesh")]
         if !opts.headless && !app.loading() && app.mesh.as_ref().is_some_and(|view| view.panel_open) {
             let viewport = [size.0 as f32, size.1 as f32];
             if !mesh_ui_placed {
@@ -889,7 +908,11 @@ fn run() -> Result<i32, String> {
         }
         // A mesh scene is looked at, not walked through: the pointer orbits
         // and picks, and the fly camera stays out of it.
+        #[cfg(feature = "mesh")]
         let mesh_scene = !loading && app.mesh.is_some();
+        #[cfg(not(feature = "mesh"))]
+        let mesh_scene = false;
+        #[cfg(feature = "mesh")]
         if mesh_scene {
             if camera.captured {
                 camera.captured = false;
@@ -949,7 +972,9 @@ fn run() -> Result<i32, String> {
         // A mesh shade that mesh-workbench draws unlit shows the base colour.
         // Only the change of shade switches the view, so a person can still
         // pick another view after it.
+        #[cfg(feature = "mesh")]
         let unlit = app.mesh.as_ref().is_some_and(mesh_view::MeshView::unlit);
+        #[cfg(feature = "mesh")]
         if unlit != app.mesh_unlit {
             app.mesh_unlit = unlit;
             tools.set_view(if unlit { ViewMode::Albedo } else { ViewMode::Full });
@@ -961,7 +986,9 @@ fn run() -> Result<i32, String> {
         });
         overlay.extend_from_slice(tools.overlay());
         // The topology shade's ID labels, each on a dark plate.
+        #[cfg(feature = "mesh")]
         let mut gizmo_lines: Vec<genos_render::ScreenLine> = Vec::new();
+        #[cfg(feature = "mesh")]
         if let Some(view) = &mut app.mesh {
             let (width, height) = (size.0 as f32, size.1 as f32);
             // The web viewer's corners: the workspace line, the counts, the
@@ -1012,7 +1039,9 @@ fn run() -> Result<i32, String> {
         let last = opts.frames.is_some_and(|limit| drawn >= limit);
         let want_read = tools_read || last;
         // The box or the lasso being dragged in a mesh scene.
+        #[cfg(feature = "mesh")]
         let outline = app.mesh.as_ref().map(mesh_view::MeshView::region_outline).unwrap_or_default();
+        #[cfg(feature = "mesh")]
         let dragged: Vec<genos_render::ScreenLine> = (0..outline.len())
             .map(|at| genos_render::ScreenLine {
                 a: outline[at],
@@ -1021,6 +1050,7 @@ fn run() -> Result<i32, String> {
                 color: mesh_view::OVERLAY_COLOR,
             })
             .collect();
+        #[cfg(feature = "mesh")]
         if app.mesh.is_some() {
             let mut lines = gizmo_lines;
             lines.extend(dragged);
@@ -1252,14 +1282,18 @@ struct App {
     log: std::fs::File,
     load: Option<LoadJob>,
     /// Set while a mesh scene is open: the workspace file being followed.
+    #[cfg(feature = "mesh")]
     mesh: Option<mesh_view::MeshView>,
     /// How many of the world's objects are the scene itself. The viewer's
     /// extra objects (wireframe, selection) come after them.
+    #[cfg(feature = "mesh")]
     mesh_overlay: Option<usize>,
     /// The mesh shade is one mesh-workbench draws unlit, and the view was
     /// switched to the base colour for it.
+    #[cfg(feature = "mesh")]
     mesh_unlit: bool,
     /// The mesh scene's own sky colour, while a shade shows another backdrop.
+    #[cfg(feature = "mesh")]
     mesh_sky: Option<[f32; 3]>,
     /// Last GI pass times, milliseconds. Numbers only.
     gi_passes: String,
@@ -1282,14 +1316,19 @@ enum Show {
 
 /// Seconds between looks at a mesh workspace's `project.json`. The
 /// mesh-workbench web viewer polls at 0.4 s.
+#[cfg(feature = "mesh")]
 const MESH_POLL_SECONDS: f32 = 0.4;
+#[cfg(feature = "mesh")]
 const MESH_GROUND_COLOR: [f32; 3] = [0.028, 0.032, 0.04];
 /// The ground reaches this many mesh sizes out, and at least this far.
+#[cfg(feature = "mesh")]
 const MESH_GROUND_SCALE: f32 = 4.0;
+#[cfg(feature = "mesh")]
 const MESH_GROUND_MIN: f32 = 6.0;
 
 /// The workspace a mesh scene opens: `--mesh-workspace`, then
 /// `GENOS_MESH_WORKSPACE`, then the scene file's path under the repository.
+#[cfg(feature = "mesh")]
 fn mesh_workspace_dir(root: &Path, named: &str) -> PathBuf {
     // The picker's choice comes first: it was made after the program started.
     if let Some(chosen) = mesh_view::chosen_workspace() {
@@ -1304,6 +1343,18 @@ fn mesh_workspace_dir(root: &Path, named: &str) -> PathBuf {
 /// A mesh-workbench workspace as a world: every object a raster mesh, standing
 /// on a ground plane. The mesh is lifted so its lowest point is on the ground.
 /// It has no baked distance field, so it does not block or bounce light.
+/// A mesh scene's show. Without the `mesh` feature there is no mesh viewer.
+#[cfg(feature = "mesh")]
+fn mesh_show(root: &Path, workspace: &str, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lamp]) -> Result<Show, String> {
+    Ok(Show::Still(mesh_world(&mesh_workspace_dir(root, workspace), sun, sky, lamps)?))
+}
+
+#[cfg(not(feature = "mesh"))]
+fn mesh_show(_root: &Path, workspace: &str, _sun: Option<&Sun>, _sky: Option<[f32; 3]>, _lamps: &[Lamp]) -> Result<Show, String> {
+    Err(format!("{workspace} is a mesh scene: this program is built without the mesh viewer; run genos-editor"))
+}
+
+#[cfg(feature = "mesh")]
 fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lamp]) -> Result<World, String> {
     let workspace = mesh_view::load_shown(dir)?;
     let size = (0..3)
@@ -1428,9 +1479,13 @@ impl App {
             root,
             log,
             load: None,
+            #[cfg(feature = "mesh")]
             mesh: None,
+            #[cfg(feature = "mesh")]
             mesh_overlay: None,
+            #[cfg(feature = "mesh")]
             mesh_unlit: false,
+            #[cfg(feature = "mesh")]
             mesh_sky: None,
             gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
@@ -1482,6 +1537,12 @@ impl App {
     /// pushes nothing, so this looks at the modification time
     /// `MESH_POLL_SECONDS` apart. A file that does not parse (caught half
     /// written) keeps the picture and is tried again.
+    /// Without the mesh viewer there is no workspace to follow.
+    #[cfg(not(feature = "mesh"))]
+    #[expect(clippy::unused_self, clippy::needless_pass_by_ref_mut, reason = "the same call as with the mesh viewer")]
+    fn follow_mesh(&mut self) {}
+
+    #[cfg(feature = "mesh")]
     fn follow_mesh(&mut self) {
         if self.load.is_some() {
             return;
@@ -1570,6 +1631,7 @@ impl App {
     /// Bring the picture's mesh objects up to the viewer's state: hidden
     /// objects and the colour mode on the workspace's objects, then the extra
     /// objects after them (the wireframe strips, the selection).
+    #[cfg(feature = "mesh")]
     fn refresh_mesh_overlay(&mut self) {
         let Some(view) = &mut self.mesh else {
             return;
@@ -1815,6 +1877,7 @@ impl Host for App {
                 let mut knobs = lighting_knobs(&world.scene.lighting);
                 knobs.extend(fog_knobs(&world.scene.fog));
                 knobs.extend(particle_knobs(&world.scene.particles));
+                #[cfg(feature = "mesh")]
                 if let Some(view) = &self.mesh {
                     let at = mesh_view::PICK_MODES
                         .iter()
@@ -2087,9 +2150,11 @@ impl Host for App {
     }
 
     fn set_knob(&mut self, name: &str, value: f64) -> Result<(), String> {
+        #[cfg(feature = "mesh")]
         if name == "mesh_note" {
             return Err("mesh_note is read-only: type it with T in the window, or set it with mesh_selection".into());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_replay_play" {
             let view = self.mesh.as_mut().ok_or("mesh_replay_play needs a mesh scene")?;
             if value >= 0.5 {
@@ -2104,6 +2169,7 @@ impl Host for App {
             self.refresh_mesh_overlay();
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_play" {
             let view = self.mesh.as_mut().ok_or("mesh_play needs a mesh scene")?;
             let clip = view
@@ -2115,6 +2181,7 @@ impl Host for App {
             self.refresh_mesh_overlay();
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_clip" || name == "mesh_time" || name == "mesh_bones" || name == "mesh_surfaces" {
             let view = self.mesh.as_mut().ok_or("the animation knobs need a mesh scene")?;
             if name == "mesh_surfaces" {
@@ -2133,6 +2200,7 @@ impl Host for App {
             self.refresh_mesh_overlay();
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_orthographic" {
             let view = self.mesh.as_mut().ok_or("mesh_orthographic needs a mesh scene")?;
             // The camera is not here: the pointer step applies it next frame.
@@ -2140,23 +2208,27 @@ impl Host for App {
             view.projection_stale = true;
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_shadow" {
             let view = self.mesh.as_mut().ok_or("mesh_shadow needs a mesh scene")?;
             view.shadow = value >= 0.5;
             view.overlay_stale = true;
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_grid" {
             let view = self.mesh.as_mut().ok_or("mesh_grid needs a mesh scene")?;
             view.grid = value >= 0.5;
             view.overlay_stale = true;
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_turntable" {
             let view = self.mesh.as_mut().ok_or("mesh_turntable needs a mesh scene")?;
             view.turntable = value >= 0.5;
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_replay" {
             let view = self.mesh.as_mut().ok_or("mesh_replay needs a mesh scene")?;
             view.scrub(value.round().max(0.0) as u64)?;
@@ -2164,6 +2236,7 @@ impl Host for App {
             self.refresh_mesh_overlay();
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_shade" {
             let view = self.mesh.as_mut().ok_or("mesh_shade needs a mesh scene")?;
             let at = (value.round().max(0.0) as usize).min(mesh_view::SHADES.len() - 1);
@@ -2171,9 +2244,11 @@ impl Host for App {
             view.display_stale = true;
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_statistics" || name == "mesh_state" || name == "mesh_command_filter" {
             return Err(format!("{name} is a readout"));
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_workspace" {
             let view = self.mesh.as_mut().ok_or("mesh_workspace needs a mesh scene")?;
             let dir = view.found.get(value.round().max(0.0) as usize).ok_or("no such workspace")?.clone();
@@ -2182,13 +2257,16 @@ impl Host for App {
             view.rebuild = true;
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_filter" {
             return Err("mesh_filter is read-only: type it with Shift and T in the window, or set it with mesh_view filter".into());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_session" {
             let view = self.mesh.as_mut().ok_or("mesh_session needs a mesh scene")?;
             return view.pick_session(value.round().max(0.0) as usize);
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_solo" {
             let view = self.mesh.as_mut().ok_or("mesh_solo needs a mesh scene")?;
             let objects: Vec<u64> = view.workspace.iter().flat_map(|w| w.parts.iter().map(|p| p.object)).collect();
@@ -2200,6 +2278,7 @@ impl Host for App {
             view.display_stale = true;
             return Ok(());
         }
+        #[cfg(feature = "mesh")]
         if name == "mesh_pick" {
             let view = self.mesh.as_mut().ok_or("mesh_pick needs a mesh scene")?;
             let at = (value.round().max(0.0) as usize).min(mesh_view::PICK_MODES.len() - 1);
@@ -2260,6 +2339,7 @@ impl Host for App {
         self.take_load()
     }
 
+    #[cfg(feature = "mesh")]
     fn scene_command(
         &mut self,
         name: &str,
@@ -2283,6 +2363,7 @@ impl Host for App {
         Some(result)
     }
 
+    #[cfg(feature = "mesh")]
     fn scene_command_poll(&mut self, ticket: u64) -> Option<Result<genos_mcp::json::Value, String>> {
         let Some(view) = &mut self.mesh else {
             return Some(Err("the mesh scene was closed before the command finished".into()));
@@ -2402,12 +2483,7 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
             sun,
             sky,
             lamps,
-        } => Ok(Show::Still(mesh_world(
-            &mesh_workspace_dir(root, workspace),
-            sun.as_ref(),
-            *sky,
-            lamps,
-        )?)),
+        } => mesh_show(root, workspace, sun.as_ref(), *sky, lamps),
         Kind::Gltf {
             path,
             sun,
@@ -2828,19 +2904,25 @@ fn flush_checks(section: &mut SectionAcc) {
 /// The mesh scene's two fill lights: the way each shines, and its strength
 /// as a share of the sun's. mesh-workbench's web viewer has lights towards
 /// (-3, 5, 4), (4, 2, 1) and (1, 3, -4) at 0.8, 0.27 and 0.38.
+#[cfg(feature = "mesh")]
 const MESH_FILL_LIGHTS: [([f32; 3], f32); 2] = [([-4.0, -2.0, -1.0], 0.27 / 0.8), ([-1.0, -3.0, 4.0], 0.38 / 0.8)];
 
 /// The words on a mesh scene's picture: the workspace line and the counts,
 /// and the hints.
+#[cfg(feature = "mesh")]
 const HUD_BRIGHT: [f32; 3] = [0.82, 0.85, 0.9];
+#[cfg(feature = "mesh")]
 const HUD_DIM: [f32; 3] = [0.5, 0.53, 0.58];
 
 /// The height of a label's small text in pixels, and the plate behind it.
+#[cfg(feature = "mesh")]
 const LABEL_HEIGHT: f32 = 8.0;
+#[cfg(feature = "mesh")]
 const LABEL_PLATE: [f32; 3] = [0.05, 0.06, 0.08];
 
 /// The exposure a mesh scene holds: what the auto exposure settles at on the
 /// sample seen from the front. (From above it settles at 1.9.)
+#[cfg(feature = "mesh")]
 const MESH_EV100: &str = "1.2";
 
 /// The menu tab that holds the mesh viewer's controls. It has no rows, and
@@ -2855,6 +2937,7 @@ const MESH_TAB: &str = "Mesh";
 /// where the pointer is: on something a panel paints. The mesh viewer took
 /// `!look_capture` alone, which made the wheel and the right button "over the
 /// UI" on every frame: the wheel did not zoom and a right drag did not pan.
+#[cfg(feature = "mesh")]
 fn pointer_over_ui(left_down: bool, look_capture: bool, paints: &[genos_ui::Paint], at: [f32; 2]) -> bool {
     if left_down {
         return !look_capture;
@@ -2863,6 +2946,7 @@ fn pointer_over_ui(left_down: bool, look_capture: bool, paints: &[genos_ui::Pain
 }
 
 /// Where the mesh viewer's own panel first stands, down from the top: under the gizmo.
+#[cfg(feature = "mesh")]
 const MESH_PANEL_TOP: f32 = 176.0;
 
 /// Take the mesh viewer's Objects and Replay sections out of the menu
@@ -2877,6 +2961,12 @@ fn split_mesh_panel(menu: Vec<MenuLine>) -> (Vec<MenuLine>, Vec<MenuLine>) {
 
 /// The rows of the mesh viewer's Objects (`mesh_objects`) and Replay
 /// (`mesh_events`) lists. `None` for any other setting.
+#[cfg(not(feature = "mesh"))]
+fn mesh_panel_rows(_app: &App, _setting: &str) -> Option<Vec<PanelRow>> {
+    None
+}
+
+#[cfg(feature = "mesh")]
 fn mesh_panel_rows(app: &App, setting: &str) -> Option<Vec<PanelRow>> {
     let (first, lines) = match setting {
         "mesh_objects" => (ID_MESH_OBJECT, app.mesh.as_ref().map(mesh_view::MeshView::object_lines)),
@@ -3799,7 +3889,9 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
             .set_key("bloom", if on { "on" } else { "off" })?;
         return Ok(());
     }
+    #[cfg(feature = "mesh")]
     if (ID_MESH_FOLD..ID_MESH_FOLD + 500).contains(&id) {
+        #[cfg(feature = "mesh")]
         if let Some(view) = &mut app.mesh {
             if let Some(line) = view.object_lines().into_iter().nth((id - ID_MESH_FOLD) as usize) {
                 view.panel_fold(line.target, on);
@@ -3807,6 +3899,7 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
         }
         return Ok(());
     }
+    #[cfg(feature = "mesh")]
     if (ID_MESH_OBJECT..ID_MESH_EVENT + 500).contains(&id) {
         let Some(view) = &mut app.mesh else {
             return Ok(());
@@ -4608,6 +4701,7 @@ mod tests {
         (width, height, rgb)
     }
 
+    #[cfg(feature = "mesh")]
     #[test]
     fn a_mesh_scene_puts_its_controls_on_the_scene_tab_and_other_scenes_do_not() {
         use genos_debug::Host as _;
@@ -4662,6 +4756,7 @@ mod tests {
         super::toggle(&mut app, row.checks[0].id, false).expect("hide the cube");
         assert!(app.mesh.as_ref().is_some_and(|view| view.hidden.contains(&1)));
         // The filter narrows the list.
+        #[cfg(feature = "mesh")]
         if let Some(view) = &mut app.mesh {
             view.filter = "brack".into();
         }

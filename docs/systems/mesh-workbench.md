@@ -95,6 +95,7 @@ Checked on 22 Nov 2026 with mesh-workbench `c88a38fb`: on an empty workspace, tw
 - `crates/workbench`, package `genos-workbench`: `load_workspace`, `Workspace`, `Part`, `triangulate`. It depends on `genos-json` only. It does not open a window or a device.
 - `debug/scene-lib`: `Kind::Mesh { workspace }`.
 - `crates/scene-program` (`genos-scene-program`), the frame loop `genos-editor` and `genos-lighting` run: `mesh_world` builds the world for a mesh scene and `follow_mesh` reloads it. `src/mesh_view.rs` holds the selection, the pick, the pointer, the highlight and wireframe triangles, replay, and the bridge.
+- The viewer is the `mesh` feature of `crates/scene-program`: `editor/` turns it on, and `genos-lighting` built alone does not have it. `cargo test -p genos-scene-program --features mesh` runs the viewer's tests.
 - `crates/meshbench`, package `genos-meshbench`: the bridge to the linked mesh-workbench session. The viewer runs the session on a worker thread; a tool call is answered when its command finishes and the picture keeps drawing meanwhile. Only `editor/` (`genos-editor`) depends on it; it passes the scene program the session opener (`Program::mesh_session`, the `MeshSession` trait in `crates/scene-program`).
 - `crates/debug`: `Host::scene_command` carries the `mesh_*` commands to the scene program; `commands.rs` lists them.
 

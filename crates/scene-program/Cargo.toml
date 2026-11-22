@@ -20,4 +20,12 @@ genos-scene-lib = { path = "../../debug/scene-lib" }
 genos-stress = { path = "../../examples/stress" }
 genos-ui = { path = "../ui" }
 genos-window = { path = "../window" }
-genos-workbench = { path = "../workbench" }
+genos-workbench = { path = "../workbench", optional = true }
+
+[features]
+# The mesh viewer (mesh-workbench workspaces): the mesh scene, its tools and
+# its menu. `genos-editor` turns it on. `genos-lighting` does not, so a build
+# of that program alone (`cargo build -p genos-lighting`, `make stress`) has
+# no mesh viewer in it. A build of the whole workspace has it in both: Cargo
+# gives one set of features to a crate that two programs share.
+mesh = ["dep:genos-workbench"]

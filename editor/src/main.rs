@@ -64,12 +64,12 @@ mod tests {
                     if let Some(done) = view.poll_edit(ticket) {
                         break done.unwrap_or_else(|err| panic!("{tool}: {err}"));
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    std::thread::yield_now();
                 },
                 None => reply,
             }
         };
-        let number = |value: &Value, path: &[&str]| path.iter().fold(Some(value), |at, key| at.and_then(|v| v.get(key))).and_then(Value::as_f64);
+        let number = |value: &Value, path: &[&str]| path.iter().try_fold(value, |at, key| at.get(key)).and_then(Value::as_f64);
         let third = |value: &Value| value.as_array().and_then(|v| v.get(2)).and_then(Value::as_f64);
 
         // The person: the cube's +Z face, and what they want done with it.

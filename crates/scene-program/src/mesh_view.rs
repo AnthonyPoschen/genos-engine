@@ -1,3 +1,8 @@
+#![expect(
+    clippy::must_use_candidate,
+    clippy::missing_errors_doc,
+    reason = "the view is public only for the editor crate's windowless test; each error is the refusal the caller reports"
+)]
 //! The mesh viewer's state and its agent commands.
 //!
 //! A mesh scene shows a mesh-workbench workspace. This module keeps what the
@@ -458,23 +463,24 @@ pub struct Replay {
     pub command: String,
 }
 
-/// The shade modes, in the order the menu lists them.
+/// The shade modes, in the order the menu lists them. The menu's list shows
+/// six at a time and scrolls, so the ones used most come first.
 pub const SHADES: [&str; 15] = [
     "shaded",
+    "textured",
+    "material",
     "wireframe",
+    "uv_checker",
+    "vertex_colors",
     "vertex_color_shaded",
     "object_ids",
     "face_ids",
     "collection_ids",
-    "silhouette",
-    "textured",
-    "uv_checker",
     "face_orientation",
-    "vertex_colors",
     "tessellation",
-    "material",
     "normals",
     "depth",
+    "silhouette",
 ];
 
 /// Names a shade also answers to: mesh-workbench's own name for it, or an
