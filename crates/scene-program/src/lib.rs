@@ -318,6 +318,7 @@ const ID_HDR_BLOOM: u32 = 5200;
 
 mod menu_layout;
 mod mesh_view;
+pub use mesh_view::{read_catalogue, CommandDoc};
 
 use menu_layout::{load_menu_layout, menu_folds, section_id, strip_id, tab_id, MenuFold, MenuLine};
 /// Ordered grades and numeric knobs. An on/off switch is not in this list.

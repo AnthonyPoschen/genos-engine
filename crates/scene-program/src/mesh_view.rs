@@ -744,6 +744,19 @@ fn catalogue() -> Result<&'static [CommandDoc], String> {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     let mut session = open(&dir)?;
+    let found = read_catalogue(session.as_mut());
+    drop(session);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(CATALOGUE.get_or_init(|| found.unwrap_or_default()))
+}
+
+/// Read the catalogue through `session`: its help, parsed, with the names
+/// mesh-workbench does not accept as commands left out. The session's
+/// workspace is written to (a bare command may run), so give it a scratch one.
+///
+/// # Errors
+/// mesh-workbench's help could not be read.
+pub fn read_catalogue(session: &mut dyn crate::MeshSession) -> Result<Vec<CommandDoc>, String> {
     let mut ask = |request: Value| -> Result<Value, String> {
         let reply = session.execute(&request)?;
         if !reply_ok(&reply) {
@@ -781,11 +794,50 @@ fn catalogue() -> Result<&'static [CommandDoc], String> {
         };
         !refused.contains("unknown command")
     });
-    drop(session);
-    let _ = std::fs::remove_dir_all(&dir);
     infer_types(&mut found);
+    // What is still untyped is asked of mesh-workbench itself: a field sent
+    // as a value no field takes is refused by name when the command reaches
+    // it ("cap_start must be boolean", "offset must be an unsigned integer").
+    for doc in &mut found {
+        for field in doc.fields.clone() {
+            if doc.types.iter().any(|(named, _)| *named == field) {
+                continue;
+            }
+            let probe = Value::Object(vec![
+                ("command".to_string(), text(doc.command.clone())),
+                (field.clone(), obj(vec![("genos_probe", Value::Bool(true))])),
+            ]);
+            let refused = match session.execute(&probe) {
+                Ok(reply) => reply.get("error").and_then(Value::as_str).unwrap_or("").to_string(),
+                Err(err) => err,
+            };
+            if let Some(kind) = type_from_refusal(&field, &refused) {
+                doc.types.push((field, kind.to_string()));
+            }
+        }
+    }
     found.sort_by(|a, b| a.command.cmp(&b.command));
-    Ok(CATALOGUE.get_or_init(|| found))
+    Ok(found)
+}
+
+/// The JSON type mesh-workbench's refusal names for `field`, when the
+/// refusal is about that field: "`field` must be ...".
+pub fn type_from_refusal(field: &str, refusal: &str) -> Option<&'static str> {
+    let wanted = refusal.strip_prefix(field)?.strip_prefix(" must be ")?;
+    let has = |words: &[&str]| words.iter().any(|word| wanted.contains(word));
+    if has(&["boolean", "true or false"]) {
+        Some("boolean")
+    } else if wanted.starts_with('[') || has(&["array", "a list", "numbers"]) {
+        Some("array")
+    } else if has(&["integer", "finite", "degrees", "a number", "positive", "non-negative"]) {
+        Some("number")
+    } else if has(&["a name", "a string", "text", "bytes"]) {
+        Some("string")
+    } else if has(&["an object"]) {
+        Some("object")
+    } else {
+        None
+    }
 }
 
 /// What `mesh_commands` says of one command: its tool, its fields, the
@@ -4357,6 +4409,13 @@ not a row | `nothing` |\n";
         let import = found.iter().find(|doc| doc.command == "texture_import").expect("texture_import");
         assert_eq!(import.types, [("path".to_string(), "string".to_string())]);
         assert_eq!(import.inferred, ["path"]);
+        // mesh-workbench's refusal types a field when it is about that field.
+        assert_eq!(super::type_from_refusal("cap_start", "cap_start must be boolean"), Some("boolean"));
+        assert_eq!(super::type_from_refusal("offset", "offset must be an unsigned integer"), Some("number"));
+        assert_eq!(super::type_from_refusal("depth_range", "depth_range must be [far_z, near_z]"), Some("array"));
+        assert_eq!(super::type_from_refusal("region", "region must be a name"), Some("string"));
+        assert_eq!(super::type_from_refusal("up", "profile must contain [u,v] points"), None, "about another field");
+        assert_eq!(super::type_from_refusal("view_id", "view_id must be an ID"), None, "an ID's type is not said");
         let value = genos_mcp::json::encode(&super::command_value(&found[0], true));
         assert!(value.contains(r#""faces":{"type":"array"}"#), "{value}");
         assert!(value.contains(r#""tool":"mesh_material""#) && value.contains(r#""command":{"const":"uv_set"}"#), "{value}");
