@@ -186,6 +186,10 @@ pub struct MeshView {
     pub folded: BTreeSet<u64>,
     /// The recorded sessions, oldest first, as of the last poll.
     pub recorded: Vec<genos_workbench::Session>,
+    /// The topology shade (`wireframe`) labels vertices and faces with their IDs.
+    pub labels: bool,
+    /// The labels of the last look, and the look they were made for.
+    label_cache: Option<(LabelKey, Vec<Label>)>,
     /// A box or a lasso being dragged, in pixels: the box's two corners, or
     /// the lasso's path.
     pub region: Option<Vec<[f32; 2]>>,
@@ -219,7 +223,8 @@ pub struct MeshView {
 /// what the family is for. `mesh_command` takes any of them.
 /// The fields each of the viewer's own tools takes. The schema a client sees
 /// (`genos_debug::commands::mesh_schema`) names the same ones; a test checks it.
-pub const VIEW_ARGS: [&str; 23] = [
+pub const VIEW_ARGS: [&str; 24] = [
+    "labels",
     "command_filter",
     "workspace",
     "projection",
@@ -914,6 +919,25 @@ fn reply_ok(reply: &Value) -> bool {
     reply.get("ok").and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// An ID drawn on the picture: the number, where (screen, 0..1, origin top
+/// left), and whether it names a face (else a vertex).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Label {
+    pub text: String,
+    pub at: [f32; 2],
+    pub face: bool,
+}
+
+/// What a set of labels was made for: the camera, the mesh's revision, how
+/// many objects are hidden, and whether a pose is on.
+type LabelKey = ([f32; 7], u64, usize, bool);
+
+/// The most face labels, and the most vertex labels, on the picture.
+const LABELS_MOST: usize = 160;
+/// A face's label and a vertex's label, as mesh-workbench colours them apart.
+pub const FACE_LABEL_COLOR: [f32; 3] = [1.0, 0.82, 0.35];
+pub const VERTEX_LABEL_COLOR: [f32; 3] = [0.55, 0.85, 1.0];
+
 /// What a panel line's check box acts on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelTarget {
@@ -1205,6 +1229,8 @@ impl MeshView {
             control: false,
             folded: BTreeSet::new(),
             recorded: Vec::new(),
+            labels: true,
+            label_cache: None,
             region: None,
             region_lasso: false,
             found: Vec::new(),
@@ -1679,7 +1705,11 @@ impl MeshView {
             return (positions, Vec::new(), colors);
         };
         let size = (0..3).map(|a| workspace.max[a] - workspace.min[a]).fold(0.0f32, f32::max).max(0.1);
-        for (at, part) in workspace.parts.iter().enumerate() {
+        // Each shown object's box. Two patches that overlapped would lie at
+        // the same height and flicker, so objects whose patches would touch
+        // share one patch over them all.
+        let mut boxes: Vec<([f32; 3], [f32; 3])> = Vec::new();
+        for part in &workspace.parts {
             if self.hidden.contains(&part.object) || part.positions.is_empty() {
                 continue;
             }
@@ -1691,13 +1721,41 @@ impl MeshView {
                     high[axis] = high[axis].max(p[axis]);
                 }
             }
+            boxes.push((low, high));
+        }
+        // A patch reaches this far past its box's middle, on X and on Z.
+        let reach_of = |low: &[f32; 3], high: &[f32; 3]| [0, 2].map(|axis| (high[axis] - low[axis]) * 0.5 * std::f32::consts::SQRT_2 * SHADOW_REACH);
+        let touch = |a: &([f32; 3], [f32; 3]), b: &([f32; 3], [f32; 3])| {
+            let (ra, rb) = (reach_of(&a.0, &a.1), reach_of(&b.0, &b.1));
+            [0usize, 2].iter().zip(0..2).all(|(axis, k)| {
+                let (ca, cb) = (f32::midpoint(a.0[*axis], a.1[*axis]), f32::midpoint(b.0[*axis], b.1[*axis]));
+                (ca - cb).abs() <= ra[k] + rb[k]
+            })
+        };
+        'merge: loop {
+            for first in 0..boxes.len() {
+                for second in first + 1..boxes.len() {
+                    if touch(&boxes[first], &boxes[second]) {
+                        let other = boxes.swap_remove(second);
+                        let joined = &mut boxes[first];
+                        for axis in 0..3 {
+                            joined.0[axis] = joined.0[axis].min(other.0[axis]);
+                            joined.1[axis] = joined.1[axis].max(other.1[axis]);
+                        }
+                        continue 'merge;
+                    }
+                }
+            }
+            break;
+        }
+        for (low, high) in boxes {
             let height = low[1] - workspace.min[1];
             let strength = SHADOW_DARK * (1.0 - height / size).clamp(0.0, 1.0);
             let centre = [f32::midpoint(low[0], high[0]), f32::midpoint(low[2], high[2])];
             // The ellipse through the footprint's corners, and a soft margin.
-            let reach = [0, 2].map(|axis| (high[axis] - low[axis]) * 0.5 * std::f32::consts::SQRT_2 * SHADOW_REACH);
-            // Below the grid lines; each patch a little above the last, so two that overlap do not flicker.
-            let y = workspace.min[1] + OVERLAY_OFFSET * (0.2 + 0.5 * at as f32 / workspace.parts.len() as f32);
+            let reach = reach_of(&low, &high);
+            // Below the grid lines.
+            let y = workspace.min[1] + OVERLAY_OFFSET * 0.4;
             let ring = |radius: f32, k: usize| {
                 let turn = k as f32 / SHADOW_SIDES as f32 * std::f32::consts::TAU;
                 [centre[0] + turn.cos() * reach[0] * radius, y, centre[1] + turn.sin() * reach[1] * radius]
@@ -1982,6 +2040,67 @@ impl MeshView {
 
     /// One frame of the pointer. Moves the camera, and on a click picks under
     /// the pointer with [`MeshView::pick_mode`]. `size` is the picture in pixels.
+    /// The ID labels of the topology shade (`wireframe`), as mesh-workbench's
+    /// `topology` mode shows them: each face's ID at its centre and each
+    /// vertex's ID at the vertex, for what the camera sees. Made again only
+    /// when the camera, the mesh or what is hidden changes.
+    pub fn id_labels(&mut self, camera: &Camera, aspect: f32) -> &[Label] {
+        if self.shade != "wireframe" || !self.labels {
+            self.label_cache = None;
+            return &[];
+        }
+        let key: LabelKey = (
+            [camera.position.x, camera.position.y, camera.position.z, camera.yaw, camera.pitch, camera.parallel_half, aspect],
+            self.workspace.as_ref().map_or(0, |w| w.revision),
+            self.hidden.len(),
+            self.posed.is_some(),
+        );
+        if self.label_cache.as_ref().is_none_or(|(made_for, _)| *made_for != key) {
+            let labels = self.make_labels(camera, aspect);
+            self.label_cache = Some((key, labels));
+        }
+        self.label_cache.as_ref().map_or(&[], |(_, labels)| labels)
+    }
+
+    fn make_labels(&self, camera: &Camera, aspect: f32) -> Vec<Label> {
+        let lift = self.lift();
+        let on_screen = |p: [f32; 3]| genos_scene::viewport_uv(camera, aspect, [p[0], p[1] + lift, p[2]]).filter(|uv| (0.0..=1.0).contains(&uv[0]) && (0.0..=1.0).contains(&uv[1]));
+        let (mut faces, mut vertices) = (Vec::new(), Vec::new());
+        for part in self.workspace.iter().flat_map(|w| &w.parts).filter(|part| !self.hidden.contains(&part.object)) {
+            let mut centres: std::collections::BTreeMap<u64, ([f32; 3], f32)> = std::collections::BTreeMap::new();
+            let mut seen = BTreeSet::new();
+            for (corner, face) in part.face_ids.iter().flat_map(|face| [face; 3]).enumerate() {
+                let p = self.corner(part, corner);
+                let sum = centres.entry(*face).or_insert(([0.0; 3], 0.0));
+                for (total, place) in sum.0.iter_mut().zip(p) {
+                    *total += place;
+                }
+                sum.1 += 1.0;
+                let vertex = part.vertex_ids[corner];
+                if vertices.len() < LABELS_MOST && seen.insert(vertex) {
+                    if let Some(at) = on_screen(p) {
+                        // In sight: the surface under it is one of its own faces.
+                        if self.pick(camera, aspect, at).is_none_or(|hit| self.face_vertices(hit.face).contains(&vertex)) {
+                            vertices.push(Label { text: vertex.to_string(), at, face: false });
+                        }
+                    }
+                }
+            }
+            for (face, (sum, count)) in centres {
+                if faces.len() == LABELS_MOST {
+                    break;
+                }
+                if let Some(at) = on_screen(sum.map(|c| c / count)) {
+                    if self.pick(camera, aspect, at).is_some_and(|hit| hit.face == face) {
+                        faces.push(Label { text: face.to_string(), at, face: true });
+                    }
+                }
+            }
+        }
+        faces.extend(vertices);
+        faces
+    }
+
     /// A left drag with Control (a box) or Alt (a lasso). Returns whether the
     /// drag has the left button this frame. The release selects what is
     /// inside, by [`Self::pick_mode`]; Shift adds to the selection.
@@ -2580,6 +2699,9 @@ impl MeshView {
                 }
                 if let Some(words) = args.str("filter")? {
                     self.filter = words;
+                }
+                if let Some(on) = args.bool("labels")? {
+                    self.labels = on;
                 }
                 if let Some(words) = args.str("command_filter")? {
                     self.command_filter = words;
@@ -3206,6 +3328,7 @@ impl MeshView {
             ("projection", text(if self.orthographic { "orthographic" } else { "perspective" })),
             ("preview", self.preview_value()),
             ("filter", text(self.filter.clone())),
+            ("labels", Value::Bool(self.labels)),
             ("command_filter", text(self.command_filter.clone())),
             (
                 "pose",
@@ -3549,7 +3672,7 @@ mod tests {
         let ground = [0.3, 0.31, 0.33];
         let (positions, normals, colors) = view.shadow_patches(ground);
         let per_object = (super::SHADOW_RINGS.len() - 1) * super::SHADOW_SIDES * 6;
-        assert_eq!(positions.len(), per_object * 2, "the cube and the bracket");
+        assert_eq!(positions.len(), per_object * 2, "the cube and the bracket stand apart: a patch each");
         assert!(normals.iter().all(|n| *n == [0.0, 1.0, 0.0]));
         // Dark at the centre, the ground's own colour at the rim, never brighter.
         let darkest = colors.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min);
@@ -3559,6 +3682,15 @@ mod tests {
         let cube = &positions[..per_object];
         let reach = cube.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
         assert!(reach > 0.5 && reach < 1.0, "{reach}");
+        // Objects whose patches would overlap share one, so no two lie on each other.
+        let mut close = self::view();
+        if let Some(workspace) = &mut close.workspace {
+            let shift = workspace.parts[1].positions.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min) - 0.6;
+            for p in &mut workspace.parts[1].positions {
+                p[0] -= shift;
+            }
+        }
+        assert_eq!(close.shadow_patches(ground).0.len(), per_object, "the bracket moved against the cube");
         // A hidden object has none; neither does a view with the shadow off.
         let mut camera = Camera::new(0.0, 0.0, 0.0);
         let hide = genos_mcp::json::parse(r#"{"hide":[1]}"#).expect("json");
@@ -4056,6 +4188,21 @@ not a row | `nothing` |\n";
         assert_eq!(view.wire().0.len(), (12 + 6) * 2 * 12);
         let show = genos_mcp::json::parse(r#"{"show_all":true,"shade":"shaded"}"#).expect("json");
         view.command("mesh_view", &show, &mut camera, 1.0).expect("show");
+        // The topology shade names what the camera sees: from +Z, the cube's
+        // front face (2) and its four front vertices are among the labels,
+        // and the back face (1) is not.
+        let front = genos_mcp::json::parse(r#"{"shade":"topology","look":"+z"}"#).expect("json");
+        view.command("mesh_view", &front, &mut camera, 1.0).expect("topology");
+        let labels = view.id_labels(&camera, 1.0).to_vec();
+        let named = |face: bool, id: &str| labels.iter().any(|label| label.face == face && label.text == id);
+        assert!(named(true, "2") && !named(true, "1"), "{labels:?}");
+        assert!(["5", "6", "7", "8"].iter().all(|vertex| named(false, vertex)), "{labels:?}");
+        let off = genos_mcp::json::parse(r#"{"labels":false}"#).expect("json");
+        view.command("mesh_view", &off, &mut camera, 1.0).expect("labels off");
+        assert!(view.id_labels(&camera, 1.0).is_empty());
+        let on = genos_mcp::json::parse(r#"{"labels":true,"shade":"shaded","look":"frame"}"#).expect("json");
+        view.command("mesh_view", &on, &mut camera, 1.0).expect("labels on");
+        assert!(view.id_labels(&camera, 1.0).is_empty(), "only the topology shade has labels");
         // Wireframe: the cube has 12 edges and the bracket 18, two strips each.
         assert!(view.wire().0.is_empty());
         let wire = genos_mcp::json::parse(r#"{"shade":"wireframe"}"#).expect("json");

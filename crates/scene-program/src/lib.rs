@@ -920,6 +920,17 @@ fn run() -> Result<i32, String> {
             host: &mut app,
         });
         overlay.extend_from_slice(tools.overlay());
+        // The topology shade's ID labels, each on a dark plate.
+        if let Some(view) = &mut app.mesh {
+            let (width, height) = (size.0 as f32, size.1 as f32);
+            for label in view.id_labels(&camera, width / height.max(1.0)) {
+                let color = if label.face { mesh_view::FACE_LABEL_COLOR } else { mesh_view::VERTEX_LABEL_COLOR };
+                let (paints, wide) = genos_ui::small_text(&label.text, 0.0, 0.0, color);
+                let (x, y) = ((label.at[0] * width - wide * 0.5).round(), (label.at[1] * height - LABEL_HEIGHT * 0.5).round());
+                overlay.push(ScreenRect { x: x - 2.0, y: y - 2.0, w: wide + 3.0, h: LABEL_HEIGHT + 4.0, color: LABEL_PLATE });
+                overlay.extend(paints.iter().map(|p| ScreenRect { x: x + p.x, y: y + p.y, w: p.w, h: p.h, color: p.color }));
+            }
+        }
         let fps_now = app.scene().fps_counter.effective();
         fps_overlay.note(
             fps_now.enabled,
@@ -1207,7 +1218,7 @@ enum Show {
 /// Seconds between looks at a mesh workspace's `project.json`. The
 /// mesh-workbench web viewer polls at 0.4 s.
 const MESH_POLL_SECONDS: f32 = 0.4;
-const MESH_GROUND_COLOR: [f32; 3] = [0.015, 0.018, 0.025];
+const MESH_GROUND_COLOR: [f32; 3] = [0.028, 0.032, 0.04];
 /// The ground reaches this many mesh sizes out, and at least this far.
 const MESH_GROUND_SCALE: f32 = 4.0;
 const MESH_GROUND_MIN: f32 = 6.0;
@@ -2742,6 +2753,10 @@ fn flush_checks(section: &mut SectionAcc) {
 /// as a share of the sun's. mesh-workbench's web viewer has lights towards
 /// (-3, 5, 4), (4, 2, 1) and (1, 3, -4) at 0.8, 0.27 and 0.38.
 const MESH_FILL_LIGHTS: [([f32; 3], f32); 2] = [([-4.0, -2.0, -1.0], 0.27 / 0.8), ([-1.0, -3.0, 4.0], 0.38 / 0.8)];
+
+/// The height of a label's small text in pixels, and the plate behind it.
+const LABEL_HEIGHT: f32 = 8.0;
+const LABEL_PLATE: [f32; 3] = [0.05, 0.06, 0.08];
 
 /// The exposure a mesh scene holds: what the auto exposure settles at on the
 /// sample seen from the front. (From above it settles at 1.9.)

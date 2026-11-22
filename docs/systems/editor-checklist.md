@@ -134,7 +134,9 @@ A workspace with three objects, an extruded face, box UVs scaled to tile, a text
 - [x] The shade names are mesh-workbench's: `vertex_colors` is unlit and `vertex_color_shaded` lit; `orientation` and `topology` are accepted for `face_orientation` and `wireframe`.
 - [x] Compared with the browser viewer itself: mesh-workbench's `mesh-server` was built from the pinned revision and its page drawn in headless Chromium on the same workspace (`genos-debug/cmp/web-default.png`). Its look is a dark background (23, 26, 32), a dark ground with a faint grid and a soft shadow under the model, and a neutral grey mesh. The mesh scene now has that look: a dark sky and ground, grid lines a little lighter than the ground, the contact shadow, and the same grey (the front of the cube reads about 150 in both).
 - [x] The mesh scene is lit as the web viewer lights a mesh: the scene's sun from the web viewer's key direction, and two weaker directional lights from its other two directions at its strengths (`MESH_FILL_LIGHTS`).
-- [ ] Not matched: the ground is a lit plane with an edge, not a disc that fades into the background; `topology` has no vertex and face ID labels; `normals` and `depth` are the engine's `view` modes with their own encodings. The web viewer's toolbar, axis gizmo and footer are the Mesh tab's rows here.
+- [x] `topology` (the `wireframe` shade) labels each visible face and vertex with its ID, as mesh-workbench's does; `mesh_view labels: false` hides them. Read from a picture of the window.
+- [x] Contact shadows that would overlap are one patch: two patches at the same height flickered into rings (seen in the window).
+- [ ] Not matched: the ground is a lit plane with an edge, not a disc that fades into the background; the contact shadow shows a few steps on the dark ground, because the G-buffer keeps base colour in 8 linear bits; `normals` and `depth` are the engine's `view` modes with their own encodings. The web viewer's toolbar, axis gizmo and footer are the Mesh tab's rows here.
 
 ## For Nathan
 
