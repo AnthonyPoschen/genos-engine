@@ -1267,8 +1267,6 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
     for lamp in lamps {
         scene.lights.push(point_light(lamp));
     }
-    // A mesh is looked at for its shape and colour: no glow around bright faces.
-    let _ = scene.hdr.set_key("bloom", "off");
     let mut world = World::from_scene(scene);
     // Surface 0: the mesh's textures and the UV checker in one atlas. A part
     // draws with it only in the `textured` and `uv_checker` shades.
@@ -1445,6 +1443,13 @@ impl App {
                 if menu.tab.is_empty() || menu.tab == "Scene" {
                     menu.tab = MESH_TAB.into();
                 }
+                // A mesh is looked at for its shape and colour: no glow
+                // around bright faces, and one brightness from every side.
+                // The Output tab still changes either.
+                let hdr = &mut self.scene().hdr;
+                let _ = hdr.set_key("bloom", "off");
+                let _ = hdr.set_key("exposure_mode", "fixed");
+                let _ = hdr.set_key("ev100", MESH_EV100);
                 false
             }
         };
@@ -2721,6 +2726,10 @@ fn flush_checks(section: &mut SectionAcc) {
         checks: std::mem::take(&mut section.checks),
     });
 }
+
+/// The exposure a mesh scene holds: what the auto exposure settles at on the
+/// sample seen from the front. (From above it settles at 1.9.)
+const MESH_EV100: &str = "1.2";
 
 /// The menu tab that holds the mesh viewer's controls. It has no rows, and
 /// so is not drawn, outside a mesh scene.

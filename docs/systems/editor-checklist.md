@@ -82,7 +82,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Grid on the ground (`mesh_view grid`, the menu's "Grid"): a line every power of ten of metres that fits the mesh.
 - [x] Contact shadow (`mesh_view shadow`, the menu's "Contact shadow"): a soft dark patch on the ground under each shown object, fainter for an object off the ground. It is drawn, not traced, so it does not follow the light.
 - [x] Bloom is off in a mesh scene.
-- [ ] Auto exposure still sets the picture's brightness in a mesh scene; `--exposure-mode fixed` holds it.
+- [x] A mesh scene holds a fixed exposure (EV 1.2) with bloom off, so the picture is as bright from every side. The Output tab still changes both, and another scene gets its own settings back. (The first attempt set bloom in the world builder, where the preset then replaced it; it is set when the mesh view opens.)
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [x] Show all, hide matching and solo matching by name (`mesh_view show_all`, `hide_match`, `solo_match`).
 - [x] Collections: listed by `mesh_view`, with `solo_collection` and `hide_collection`.
@@ -105,7 +105,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Select with a click; the selection over the agent endpoint.
 - [x] The note typed in the window: `T` starts, letters, digits and the space bar type, Backspace removes, Enter ends, Escape clears. Hotkeys are off while typing. The Mesh tab shows it as "Note".
 - [x] The typed note takes the signs on the digit keys (Shift), the brackets, the backtick, and the number pad's point and signs.
-- [ ] The comma, the full stop, the hyphen and the quote keys have no code in the input layer (`InputCode` keeps the input-zig names), so the window cannot type them; `mesh_selection note` sets any text.
+- [x] The window types the punctuation row: `InputCode` gained `key_comma`, `key_period`, `key_minus`, `key_equal`, `key_semicolon`, `key_quote`, `key_slash` and `key_backslash` (the Windows OEM virtual keys, as `key_grave` and the brackets are), with their evdev codes. Shift gives the upper mark on a US layout; another layout's marks are not read.
 - [x] Box and lasso selection: Control and a left drag draws a box, Alt and a left drag a lasso, and the release selects what is inside by the pick mode (Shift adds). `mesh_pick box` and `mesh_pick lasso` do the same; only what the camera sees unless `through: true`.
 - [x] Select connected and select loop: `mesh_selection grow: connected` (everything joined to the selection) and `grow: loop` (the ring of four-sided faces through two selected neighbours). They have no key in the window yet. mesh-workbench's own `select_loop`, `select_box` and `select_related` act on its vertex selection through `mesh_select`.
 - [x] Preview of a pending edit (`mesh_preview`): mesh-workbench prepares the commands as one transaction and does not commit; the picture shows the result; `commit: true` commits it as one undo step and `discard: true` drops it. The picture comes from running the same commands on a copy of the workspace under `./genos-debug/mesh-preview/`, because mesh-workbench keeps its prepared mesh private.

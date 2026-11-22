@@ -296,10 +296,16 @@ struct Posed {
 /// The sign Shift gives on each digit key (US layout).
 const NOTE_SIGNS: [(char, char); 10] =
     [('1', '!'), ('2', '@'), ('3', '#'), ('4', '$'), ('5', '%'), ('6', '^'), ('7', '&'), ('8', '*'), ('9', '('), ('0', ')')];
-/// The other keys the input layer names that type a mark: plain, then with
-/// Shift. The number pad gives the point and the signs. The input layer has
-/// no code for the comma, the full stop, the hyphen or the quote keys.
-const NOTE_MARKS: [(InputCode, char, char); 8] = [
+/// The other keys that type a mark: plain, then with Shift (US layout).
+const NOTE_MARKS: [(InputCode, char, char); 16] = [
+    (InputCode::key_semicolon, ';', ':'),
+    (InputCode::key_equal, '=', '+'),
+    (InputCode::key_comma, ',', '<'),
+    (InputCode::key_minus, '-', '_'),
+    (InputCode::key_period, '.', '>'),
+    (InputCode::key_slash, '/', '?'),
+    (InputCode::key_backslash, '\\', '|'),
+    (InputCode::key_quote, '\'', '"'),
     (InputCode::key_left_bracket, '[', '{'),
     (InputCode::key_right_bracket, ']', '}'),
     (InputCode::key_grave, '`', '~'),
@@ -3679,6 +3685,20 @@ mod tests {
         press(&mut view, InputCode::key_5);
         press(&mut view, InputCode::key_enter);
         assert_eq!((view.command_filter.as_str(), view.filter.as_str(), view.selection.note.as_str()), ("u!.5", "", "a"));
+        // A sentence: comma, hyphen, full stop, and Shift for the question mark and the quote.
+        press(&mut view, InputCode::key_t);
+        for (key, shift) in [
+            (InputCode::key_comma, false),
+            (InputCode::key_space, false),
+            (InputCode::key_minus, false),
+            (InputCode::key_period, false),
+            (InputCode::key_slash, true),
+            (InputCode::key_quote, true),
+        ] {
+            view.type_note(&|code| code == key, shift);
+        }
+        press(&mut view, InputCode::key_enter);
+        assert_eq!(view.selection.note, "a, -.?\"");
     }
 
     #[test]
