@@ -1,6 +1,6 @@
 # Editor and mesh workbench checklist
 
-The running list for the editor work. A session reads this first, does the next open item, and updates it in the same change. The design is in [mesh workbench](mesh-workbench.md).
+The running list for the editor work. For where it stands and what is missing, read [editor status](editor-status.md) first. A session reads this first, does the next open item, and updates it in the same change. The design is in [mesh workbench](mesh-workbench.md).
 
 ## Decisions from Anthony (22 Nov 2026)
 
