@@ -1394,11 +1394,14 @@ impl App {
         let display = view.display();
         let posed = view.posed_positions();
         let lift = view.lift();
+        let (shadow_at, shadow_up, shadow_colors) = view.shadow_patches(MESH_GROUND_COLOR);
+        let plain = |(positions, normals): (Vec<[f32; 3]>, Vec<[f32; 3]>), color| (positions, normals, color, Vec::new());
         let extras = [
-            (view.grid_strips(), mesh_view::GRID_COLOR),
-            (view.wire(), mesh_view::WIRE_COLOR),
-            (view.bone_strips(), mesh_view::BONE_COLOR),
-            (view.overlay(), mesh_view::OVERLAY_COLOR),
+            (shadow_at, shadow_up, [1.0; 3], shadow_colors),
+            plain(view.grid_strips(), mesh_view::GRID_COLOR),
+            plain(view.wire(), mesh_view::WIRE_COLOR),
+            plain(view.bone_strips(), mesh_view::BONE_COLOR),
+            plain(view.overlay(), mesh_view::OVERLAY_COLOR),
         ];
         let rest: Vec<Vec<[f32; 3]>> = view
             .workspace
@@ -1434,7 +1437,7 @@ impl App {
         }
         let mut pose = identity_pose();
         pose[13] = lift;
-        for ((positions, normals), color) in extras {
+        for (positions, normals, color, colors) in extras {
             if positions.is_empty() {
                 continue;
             }
@@ -1466,7 +1469,7 @@ impl App {
                     normals,
                     texcoords: Vec::new(),
                     color,
-                    colors: Vec::new(),
+                    colors,
                     pose,
                     emission: [0.0; 3],
                     surface: None,
@@ -1692,6 +1695,16 @@ impl Host for App {
                         });
                     }
                     knobs.push(Knob {
+                        name: "mesh_shadow".into(),
+                        label: "Contact shadow".into(),
+                        value: f64::from(u8::from(view.shadow)),
+                        min: 0.0,
+                        max: 1.0,
+                        step: 1.0,
+                        choices: vec!["off".into(), "on".into()],
+                        text: if view.shadow { "on".into() } else { "off".into() },
+                    });
+                    knobs.push(Knob {
                         name: "mesh_grid".into(),
                         label: "Grid".into(),
                         value: f64::from(u8::from(view.grid)),
@@ -1818,6 +1831,12 @@ impl Host for App {
                 view.set_pose(Some((clip, value.max(0.0) as f32)))?;
             }
             self.refresh_mesh_overlay();
+            return Ok(());
+        }
+        if name == "mesh_shadow" {
+            let view = self.mesh.as_mut().ok_or("mesh_shadow needs a mesh scene")?;
+            view.shadow = value >= 0.5;
+            view.overlay_stale = true;
             return Ok(());
         }
         if name == "mesh_grid" {

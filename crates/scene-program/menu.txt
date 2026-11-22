@@ -20,6 +20,7 @@ Scene | - | - | open | mesh_shade
 Scene | - | - | open | mesh_solo
 Scene | - | - | open | mesh_turntable
 Scene | - | - | open | mesh_grid
+Scene | - | - | open | mesh_shadow
 Scene | - | - | open | mesh_replay
 Scene | - | - | open | mesh_replay_play
 Scene | - | - | open | mesh_clip

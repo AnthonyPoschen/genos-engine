@@ -152,6 +152,8 @@ pub struct MeshView {
     pub surfaces: bool,
     /// Draw a grid on the ground.
     pub grid: bool,
+    /// A soft dark patch on the ground under each object.
+    pub shadow: bool,
     /// The recorded state the picture shows in place of the live mesh.
     pub replay: Option<Replay>,
     /// The picture has to be rebuilt from [`MeshView::load`].
@@ -354,6 +356,13 @@ pub const SHADES: [&str; 10] = [
     "face_orientation",
 ];
 
+/// The contact shadow: how dark its centre is, how far past the footprint it
+/// reaches, its sides, and (radius, darkness) from the centre to the rim.
+const SHADOW_DARK: f32 = 0.6;
+const SHADOW_REACH: f32 = 1.15;
+const SHADOW_SIDES: usize = 40;
+const SHADOW_RINGS: [(f32, f32); 5] = [(0.0, 1.0), (0.45, 0.9), (0.7, 0.55), (0.88, 0.2), (1.0, 0.0)];
+
 /// `face_orientation`: a face seen from its front, and one seen from behind.
 const FRONT_COLOR: [f32; 3] = [0.15, 0.3, 0.9];
 const BACK_COLOR: [f32; 3] = [0.9, 0.12, 0.08];
@@ -384,7 +393,7 @@ pub fn atlas(textures: &[genos_workbench::TextureImage]) -> Atlas {
     let row = (width as usize) * 4;
     for y in 0..CHECKER {
         for x in 0..CHECKER {
-            let light = (x / CHECKER_CELL + y / CHECKER_CELL) % 2 == 0;
+            let light = (x / CHECKER_CELL + y / CHECKER_CELL).is_multiple_of(2);
             // U runs to red and V to green, so a flipped or turned UV shows.
             let texel = if light {
                 [230, 230, 230, 255]
@@ -545,6 +554,7 @@ impl MeshView {
             bones: false,
             surfaces: true,
             grid: true,
+            shadow: true,
             replay: None,
             rebuild: false,
             display_stale: true,
@@ -788,6 +798,56 @@ impl MeshView {
             strip([centre[0] - span, y, centre[1] + offset], [centre[0] + span, y, centre[1] + offset], half, &mut positions, &mut normals);
         }
         (positions, normals)
+    }
+
+    /// The contact shadow: under each shown object, a patch on the ground
+    /// that is `ground` at its rim and darker inside. It is drawn, not traced
+    /// (the mesh has no distance field), so it does not follow the light. An
+    /// object off the ground has a fainter patch. Positions, normals and a
+    /// colour per vertex, three per triangle.
+    #[expect(clippy::cast_precision_loss, reason = "small counts")]
+    pub fn shadow_patches(&self, ground: [f32; 3]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>) {
+        let (mut positions, mut colors) = (Vec::new(), Vec::new());
+        let Some(workspace) = self.workspace.as_ref().filter(|_| self.shadow && self.surfaces) else {
+            return (positions, Vec::new(), colors);
+        };
+        let size = (0..3).map(|a| workspace.max[a] - workspace.min[a]).fold(0.0f32, f32::max).max(0.1);
+        for (at, part) in workspace.parts.iter().enumerate() {
+            if self.hidden.contains(&part.object) || part.positions.is_empty() {
+                continue;
+            }
+            let mut low = [f32::INFINITY; 3];
+            let mut high = [f32::NEG_INFINITY; 3];
+            for p in &part.positions {
+                for axis in 0..3 {
+                    low[axis] = low[axis].min(p[axis]);
+                    high[axis] = high[axis].max(p[axis]);
+                }
+            }
+            let height = low[1] - workspace.min[1];
+            let strength = SHADOW_DARK * (1.0 - height / size).clamp(0.0, 1.0);
+            let centre = [f32::midpoint(low[0], high[0]), f32::midpoint(low[2], high[2])];
+            // The ellipse through the footprint's corners, and a soft margin.
+            let reach = [0, 2].map(|axis| (high[axis] - low[axis]) * 0.5 * std::f32::consts::SQRT_2 * SHADOW_REACH);
+            // Below the grid lines; each patch a little above the last, so two that overlap do not flicker.
+            let y = workspace.min[1] + OVERLAY_OFFSET * (0.2 + 0.5 * at as f32 / workspace.parts.len() as f32);
+            let ring = |radius: f32, k: usize| {
+                let turn = k as f32 / SHADOW_SIDES as f32 * std::f32::consts::TAU;
+                [centre[0] + turn.cos() * reach[0] * radius, y, centre[1] + turn.sin() * reach[1] * radius]
+            };
+            let shade = |dark: f32| ground.map(|c| c * (1.0 - strength * dark));
+            // (radius, darkness) from the centre out. The rim is the ground's colour.
+            for pair in SHADOW_RINGS.windows(2) {
+                let ((r0, d0), (r1, d1)) = (pair[0], pair[1]);
+                for k in 0..SHADOW_SIDES {
+                    // Wound to face up.
+                    positions.extend([ring(r0, k), ring(r1, k + 1), ring(r1, k), ring(r0, k), ring(r0, k + 1), ring(r1, k + 1)]);
+                    colors.extend([shade(d0), shade(d1), shade(d1), shade(d0), shade(d0), shade(d1)]);
+                }
+            }
+        }
+        let normals = vec![[0.0, 1.0, 0.0]; positions.len()];
+        (positions, normals, colors)
     }
 
     /// Polygon edges as thin crossed strips, for the wireframe mode. Empty in
@@ -1302,7 +1362,7 @@ impl MeshView {
         let args = Args(args);
         match name {
             "mesh_view" => {
-                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces", "solo_match", "hide_match", "solo_collection", "hide_collection", "event", "grid"])?;
+                args.only("mesh_view", &["pick", "hide", "show", "solo", "show_all", "shade", "look", "replay", "turntable", "pose", "bones", "surfaces", "solo_match", "hide_match", "solo_collection", "hide_collection", "event", "grid", "shadow"])?;
                 for (key, solo) in [("solo_collection", true), ("hide_collection", false)] {
                     if let Some(value) = args.0.get(key) {
                         let want = value.as_u64().ok_or_else(|| format!("{key} is a collection id"))?;
@@ -1340,6 +1400,10 @@ impl MeshView {
                 }
                 if let Some(on) = args.bool("grid")? {
                     self.grid = on;
+                    self.overlay_stale = true;
+                }
+                if let Some(on) = args.bool("shadow")? {
+                    self.shadow = on;
                     self.overlay_stale = true;
                 }
                 if let Some(on) = args.bool("surfaces")? {
@@ -1602,6 +1666,7 @@ impl MeshView {
             ("bones", Value::Bool(self.bones)),
             ("surfaces", Value::Bool(self.surfaces)),
             ("grid", Value::Bool(self.grid)),
+            ("shadow", Value::Bool(self.shadow)),
             (
                 "pose",
                 self.pose.as_ref().map_or(Value::Null, |(clip, time)| {
@@ -1886,6 +1951,32 @@ mod tests {
         let (surface, uvs) = super::atlas_texcoords(part, &atlas, true);
         assert_eq!(surface, super::SURFACE_CHECKER);
         assert!(uvs.iter().all(|uv| uv[0] >= 0.0 && uv[1] >= 0.0), "the checker covers every face");
+    }
+
+    #[test]
+    fn each_shown_object_has_a_contact_shadow_that_ends_at_the_ground_colour() {
+        let mut view = view();
+        let ground = [0.3, 0.31, 0.33];
+        let (positions, normals, colors) = view.shadow_patches(ground);
+        let per_object = (super::SHADOW_RINGS.len() - 1) * super::SHADOW_SIDES * 6;
+        assert_eq!(positions.len(), per_object * 2, "the cube and the bracket");
+        assert!(normals.iter().all(|n| *n == [0.0, 1.0, 0.0]));
+        // Dark at the centre, the ground's own colour at the rim, never brighter.
+        let darkest = colors.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min);
+        assert!((darkest - 0.3 * (1.0 - super::SHADOW_DARK)).abs() < 1.0e-5, "{darkest}");
+        assert!(colors.contains(&ground) && colors.iter().all(|c| c[0] <= ground[0]));
+        // It reaches past the cube (1 m across, centred on the origin) and stays on the ground.
+        let cube = &positions[..per_object];
+        let reach = cube.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(reach > 0.5 && reach < 1.0, "{reach}");
+        // A hidden object has none; neither does a view with the shadow off.
+        let mut camera = Camera::new(0.0, 0.0, 0.0);
+        let hide = genos_mcp::json::parse(r#"{"hide":[1]}"#).expect("json");
+        view.command("mesh_view", &hide, &mut camera, 1.0).expect("hide");
+        assert_eq!(view.shadow_patches(ground).0.len(), per_object);
+        let off = genos_mcp::json::parse(r#"{"shadow":false}"#).expect("json");
+        view.command("mesh_view", &off, &mut camera, 1.0).expect("shadow off");
+        assert!(view.shadow_patches(ground).0.is_empty());
     }
 
     #[test]

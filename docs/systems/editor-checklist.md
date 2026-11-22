@@ -74,7 +74,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Face orientation (`shade: face_orientation`): a face seen from its front is blue, from behind red. The raster culls nothing, so a face wound the wrong way shows red from outside. The colours are set on the CPU and the mesh is rebuilt only when a face turns over.
 - [x] Lighting with contrast: the mesh scene's sun is 5 and its sky 0.1 to 0.16, so faces read apart.
 - [x] Grid on the ground (`mesh_view grid`, the menu's "Grid"): a line every power of ten of metres that fits the mesh.
-- [ ] Contact shadow (the mesh casts no shadow). Bloom and auto exposure soften the picture and could be off for a mesh scene.
+- [x] Contact shadow (`mesh_view shadow`, the menu's "Contact shadow"): a soft dark patch on the ground under each shown object, fainter for an object off the ground. It is drawn, not traced, so it does not follow the light.
+- [ ] Bloom and auto exposure soften the picture and could be off for a mesh scene.
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [x] Show all, hide matching and solo matching by name (`mesh_view show_all`, `hide_match`, `solo_match`).
 - [x] Collections: listed by `mesh_view`, with `solo_collection` and `hide_collection`.
