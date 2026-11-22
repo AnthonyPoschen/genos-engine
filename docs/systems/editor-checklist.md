@@ -62,8 +62,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 ### D. Viewer parity with the mesh-workbench web viewer (decision 5)
 
 - [x] Orbit, pan, zoom, frame, axis views.
-- [x] Orthographic view (`mesh_view projection`, the menu's "Orthographic"): a 3 degree lens from far back with the same framing, so a part 1 m nearer draws under 2% larger. `Camera::view_tan` is the camera's field of view (the tangent of half of it; the default is the 60 degree lens). The picture, the lighting's position rebuild, the frame fog and picking follow it.
-- [ ] A true parallel projection. The lighting passes rebuild a position from a ray through the eye, so it needs a second ray rule in each. Reflections and the reference tracer still assume 60 degrees; a mesh scene uses neither.
+- [x] Orthographic view (`mesh_view projection`, the menu's "Orthographic"): a parallel projection with the same framing. `Camera::parallel_half` (half the picture's height in metres; 0 is perspective) gives the view-projection its parallel form; the scene block carries it (`view_up.w`), the G-buffer stores depth along the view, and the lighting rebuilds and projects positions with it. `Camera::view_tan` is the perspective field of view. Orbit, zoom, pan, picking, box selection and the face-orientation shade work in it.
+- [ ] In the parallel view the fog, reflections, particles and the reference tracer still assume a perspective eye; a mesh scene uses none of them. The lighting sizes its cells by the distance to the eye, which stands up to 120 m back.
 - [x] Auto-rotate turntable (`mesh_view turntable`, the menu's "Turntable").
 - [x] Shaded, wireframe, object IDs.
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).

@@ -212,6 +212,8 @@ pub struct Pack {
     pub(crate) view_up: [f32; 3],
     pub(crate) view_forward: [f32; 3],
     pub(crate) view_tan: f32,
+    /// Half the picture's height in metres in a parallel view; 0 otherwise.
+    pub(crate) view_parallel: f32,
     pub(crate) view_aspect: f32,
     /// Debug word the shader reads from `grid_at.w` (gpu debug_view); 0 is the picture.
     pub(crate) debug_view: u32,
@@ -561,6 +563,7 @@ pub fn pack_frame(
         view_up: [0.0, 1.0, 0.0],
         view_forward: [0.0, 0.0, -1.0],
         view_tan: (30.0_f32.to_radians()).tan(),
+        view_parallel: 0.0,
         view_aspect: 1.0,
         debug_view: 0,
         draws,
@@ -1001,7 +1004,7 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.view_up[0]);
     push_f32(&mut bytes, pack.view_up[1]);
     push_f32(&mut bytes, pack.view_up[2]);
-    push_f32(&mut bytes, 0.0);
+    push_f32(&mut bytes, pack.view_parallel);
     push_f32(&mut bytes, pack.view_forward[0]);
     push_f32(&mut bytes, pack.view_forward[1]);
     push_f32(&mut bytes, pack.view_forward[2]);
@@ -1082,6 +1085,7 @@ pub(crate) fn apply_view(pack: &mut Pack, camera: &genos_scene::Camera, aspect: 
     pack.view_up = [up.x, up.y, up.z];
     pack.view_forward = [forward.x, forward.y, forward.z];
     pack.view_tan = camera.view_tan;
+    pack.view_parallel = camera.parallel_half.max(0.0);
     pack.view_aspect = aspect.max(0.01);
 }
 

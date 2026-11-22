@@ -202,7 +202,23 @@ vec3 lighting_ray_light(vec4 v) {
 const vec4 LIGHTING_MISS = vec4(-1.0, 0.0, 0.0, 0.0);
 
 // The eye ray through pixel p (picture y down, clip space Y flipped).
+// scene.view_up.w is 0 for a perspective view. Above 0 the view is parallel
+// and it is half the picture's height in metres: every ray runs along the
+// view, and starts at the pixel's place on the plane through the eye.
+vec3 lighting_eye_origin(uvec2 p) {
+    float half_height = scene.view_up.w;
+    if (!(half_height > 0.0)) {
+        return scene.eye.xyz;
+    }
+    vec2 ndc = vec2((float(p.x) + 0.5) / float(pc.dims.x) * 2.0 - 1.0,
+                    1.0 - (float(p.y) + 0.5) / float(pc.dims.y) * 2.0);
+    return scene.eye.xyz + ndc.x * half_height * scene.view_forward.w * scene.view_right.xyz
+           + ndc.y * half_height * scene.view_up.xyz;
+}
 vec3 lighting_eye_dir(uvec2 p) {
+    if (scene.view_up.w > 0.0) {
+        return scene.view_forward.xyz;
+    }
     vec2 ndc = vec2((float(p.x) + 0.5) / float(pc.dims.x) * 2.0 - 1.0,
                     1.0 - (float(p.y) + 0.5) / float(pc.dims.y) * 2.0);
     float t = scene.view_right.w;
@@ -223,7 +239,7 @@ bool lighting_surface(uvec2 p, out vec3 pos, out vec3 n, out vec3 albedo, out bo
     if (!(dist > 0.0)) {
         return false;
     }
-    pos = scene.eye.xyz + lighting_eye_dir(p) * dist;
+    pos = lighting_eye_origin(p) + lighting_eye_dir(p) * dist;
     n = lighting_unpack_normal(g.y);
     vec4 a = unpackUnorm4x8(g.z);
     albedo = a.rgb;

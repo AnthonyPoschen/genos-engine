@@ -774,7 +774,9 @@ void lighting_cascade_seat(uint word) {
     float aspect = scene.view_forward.w;
     bool same = false;
     if (z > CASCADE_SEAT_NEAR && t > 0.0) {
-        vec2 ndc = vec2(dot(rel, scene.view_right.xyz) / (z * t * aspect), dot(rel, scene.view_up.xyz) / (z * t));
+        // Half the picture's height at that depth; a parallel view has one height.
+        float span = scene.view_up.w > 0.0 ? scene.view_up.w : z * t;
+        vec2 ndc = vec2(dot(rel, scene.view_right.xyz) / (span * aspect), dot(rel, scene.view_up.xyz) / span);
         vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
         if (px.x >= 0.0 && px.y >= 0.0 && px.x < float(pc.dims.x) && px.y < float(pc.dims.y)) {
             vec3 spos;

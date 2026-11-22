@@ -103,7 +103,11 @@ void main() {
     // minimum over those fragments instead (records are all ones when empty, and
     // positive floats order as uints), the same answer every frame.
     uint i = p.y * gbuf.header.x + p.x;
-    float dist = max(length(v_pos - scene.eye.xyz), 1.0e-6);
+    // Along the pixel's ray: from the eye, or in a parallel view
+    // (scene.view_up.w > 0) from the plane through the eye.
+    float dist = scene.view_up.w > 0.0
+        ? max(dot(v_pos - scene.eye.xyz, scene.view_forward.xyz), 1.0e-6)
+        : max(length(v_pos - scene.eye.xyz), 1.0e-6);
     uint dist_bits = floatBitsToUint(dist);
     // Elect the nearest fragment (positive floats order as uints). Object 0 and the
     // shading fields take atomicMin; object id must follow the same winner so a

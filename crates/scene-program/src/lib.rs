@@ -856,6 +856,7 @@ fn run() -> Result<i32, String> {
             } else {
                 // The orthographic lens belongs to the mesh viewer.
                 camera.view_tan = genos_scene::DEFAULT_VIEW_TAN;
+                camera.parallel_half = 0.0;
             }
             app.refresh_mesh_overlay();
         }

@@ -370,7 +370,7 @@ bool lighting_view_held() {
     vec4 up = work.v[lighting_change_at() + 3u];
     vec4 fwd = work.v[lighting_change_at() + 4u];
     return all(equal(right.xyz, scene.view_right.xyz)) && right.w == scene.view_right.w
-        && all(equal(up.xyz, scene.view_up.xyz))
+        && all(equal(up.xyz, scene.view_up.xyz)) && up.w == scene.view_up.w
         && all(equal(fwd.xyz, scene.view_forward.xyz)) && fwd.w == scene.view_forward.w;
 }
 // A held camera rebuilds the wavelet, the pushed field, and the compose list
@@ -1066,8 +1066,10 @@ bool lighting_in_picture(vec3 p) {
     if (z <= 1.0e-4 || tan_half < 1.0e-6 || aspect < 1.0e-6) {
         return false;
     }
-    float ndc_x = dot(rel, scene.view_right.xyz) / (z * tan_half * aspect);
-    float ndc_y = dot(rel, scene.view_up.xyz) / (z * tan_half);
+    // Half the picture's height at that depth; a parallel view has one height.
+    float span = scene.view_up.w > 0.0 ? scene.view_up.w : z * tan_half;
+    float ndc_x = dot(rel, scene.view_right.xyz) / (span * aspect);
+    float ndc_y = dot(rel, scene.view_up.xyz) / span;
     return abs(ndc_x) <= 1.0 && abs(ndc_y) <= 1.0;
 }
 float lighting_fine_word(uint at);
@@ -5772,8 +5774,9 @@ bool lighting_reach_project(vec3 world, out uvec2 px) {
     }
     float t = max(scene.view_right.w, REACH_TAN_FLOOR);
     float aspect = max(scene.view_forward.w, REACH_TAN_FLOOR);
-    float ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
-    float ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
+    float span = scene.view_up.w > 0.0 ? scene.view_up.w : z * t;
+    float ndc_x = dot(rel, scene.view_right.xyz) / (span * aspect);
+    float ndc_y = dot(rel, scene.view_up.xyz) / span;
     float sx = (ndc_x + 1.0) * REACH_HALF * float(pc.dims.x);
     float sy = (1.0 - ndc_y) * REACH_HALF * float(pc.dims.y);
     if (sx < 0.0 || sy < 0.0 || sx >= float(pc.dims.x) || sy >= float(pc.dims.y)) {
@@ -5908,14 +5911,17 @@ void lighting_reach_note_bounds(vec3 centre, float rad) {
     float zc = max(z, REACH_NEAR_Z);
     float ndc_x = 0.0;
     float ndc_y = 0.0;
+    bool parallel = scene.view_up.w > 0.0;
     if (z > REACH_NDC_Z) {
-        ndc_x = dot(rel, scene.view_right.xyz) / (z * t * aspect);
-        ndc_y = dot(rel, scene.view_up.xyz) / (z * t);
+        float span = parallel ? scene.view_up.w : z * t;
+        ndc_x = dot(rel, scene.view_right.xyz) / (span * aspect);
+        ndc_y = dot(rel, scene.view_up.xyz) / span;
     }
     float px = (ndc_x + 1.0) * REACH_HALF * float(pc.dims.x);
     float py = (1.0 - ndc_y) * REACH_HALF * float(pc.dims.y);
-    float pry = (rad / zc) / t * (REACH_HALF * float(pc.dims.y));
-    float prx = (rad / zc) / (t * aspect) * (REACH_HALF * float(pc.dims.x));
+    float span_c = parallel ? scene.view_up.w : zc * t;
+    float pry = rad / span_c * (REACH_HALF * float(pc.dims.y));
+    float prx = rad / (span_c * aspect) * (REACH_HALF * float(pc.dims.x));
     float pr = max(prx, pry);
     int x0 = int(floor((px - pr) / REACH_TILE));
     int y0 = int(floor((py - pr) / REACH_TILE));

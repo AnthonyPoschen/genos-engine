@@ -539,10 +539,9 @@ pub struct PanelLine {
     pub target: PanelTarget,
 }
 
-/// The orthographic view: the tangent of half its field of view (1.5
-/// degrees: a part 1 m nearer draws under 1% larger at 3 m of mesh), and the
-/// furthest the camera stands for it.
-const ORTHO_TAN: f32 = 0.026_19;
+/// The orthographic view: how many times the perspective distance its eye
+/// stands back, and the furthest (the far plane is 200 m).
+const ORTHO_BACK: f32 = 8.0;
 const ORTHO_REACH: f32 = 120.0;
 
 /// The contact shadow: how dark its centre is, how far past the footprint it
@@ -1750,7 +1749,10 @@ impl MeshView {
         if std::mem::take(&mut self.projection_stale) {
             self.set_projection(camera);
         }
-        self.watch([camera.position.x, camera.position.y, camera.position.z]);
+        // In the parallel view every face is seen along the view: an eye very far back.
+        let back = if camera.parallel_half > 0.0 { 1.0e5 } else { 0.0 };
+        let along = genos_scene::look_direction(camera.yaw, camera.pitch);
+        self.watch([camera.position.x - along.x * back, camera.position.y - along.y * back, camera.position.z - along.z * back]);
         let (centre, extent) = self.extent();
         let pose = ([camera.position.x, camera.position.y, camera.position.z], camera.yaw, camera.pitch);
         // A checkpoint, a script or an agent moved the camera: orbit about the
@@ -1763,13 +1765,15 @@ impl MeshView {
         if moved {
             let to = [centre[0] - pose.0[0], centre[1] - pose.0[1], centre[2] - pose.0[2]];
             let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
-            // The orbit's distance is the 60 degree lens's; a narrow lens stands further back.
-            let lens = camera.view_tan / genos_scene::DEFAULT_VIEW_TAN;
-            let along = (to[0] * forward.x + to[1] * forward.y + to[2] * forward.z).max(extent * 0.25 / lens);
+            let along = (to[0] * forward.x + to[1] * forward.y + to[2] * forward.z).max(extent * 0.25);
+            // The orbit's distance is the perspective view's. A parallel view
+            // gives it by the height it shows, wherever its eye stands.
+            let framing =
+                if camera.parallel_half > 0.0 { camera.parallel_half / genos_scene::DEFAULT_VIEW_TAN } else { along };
             let previous = self.orbit;
             self.orbit = Some(Orbit {
                 target: [pose.0[0] + forward.x * along, pose.0[1] + forward.y * along, pose.0[2] + forward.z * along],
-                distance: along * lens,
+                distance: framing,
                 last: previous.map_or([input.x, input.y], |o| o.last),
                 dragged: previous.and_then(|o| o.dragged),
                 panning: previous.is_some_and(|o| o.panning),
@@ -2731,20 +2735,15 @@ impl MeshView {
     }
 }
 
-/// The orthographic view's lens: [`ORTHO_TAN`], or wider when that would
-/// stand the camera past [`ORTHO_REACH`] metres (the far plane is 200 m).
-fn ortho_tan(distance: f32) -> f32 {
-    ORTHO_TAN.max(genos_scene::DEFAULT_VIEW_TAN * distance / ORTHO_REACH).min(genos_scene::DEFAULT_VIEW_TAN)
-}
-
 impl Orbit {
     /// Stand back from the target along the camera's direction. `distance`
-    /// is how far the 60 degree lens stands. The orthographic view keeps the
-    /// same framing with a narrow lens from further back, so near and far
-    /// parts of the mesh draw at almost the same size.
+    /// is how far the perspective view stands. The orthographic view is a
+    /// parallel projection that shows the same height at the target; its eye
+    /// stands further back, so the whole mesh is in front of it.
     fn write(&mut self, camera: &mut Camera, orthographic: bool) {
-        camera.view_tan = if orthographic { ortho_tan(self.distance) } else { genos_scene::DEFAULT_VIEW_TAN };
-        let back = self.distance * genos_scene::DEFAULT_VIEW_TAN / camera.view_tan;
+        camera.view_tan = genos_scene::DEFAULT_VIEW_TAN;
+        camera.parallel_half = if orthographic { self.distance * genos_scene::DEFAULT_VIEW_TAN } else { 0.0 };
+        let back = if orthographic { (self.distance * ORTHO_BACK).clamp(self.distance.min(ORTHO_REACH), ORTHO_REACH) } else { self.distance };
         let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
         camera.position = genos_scene::Vec3::new(
             self.target[0] - forward.x * back,
@@ -3137,17 +3136,17 @@ mod tests {
 
         let ortho = genos_mcp::json::parse(r#"{"projection":"orthographic"}"#).expect("json");
         view.command("mesh_view", &ortho, &mut camera, 1.0).expect("orthographic");
-        assert!(camera.view_tan < 0.03 && camera.position.x > stood * 10.0, "a narrow lens from far back");
+        assert!(camera.parallel_half > 0.0 && camera.position.x > stood * 4.0, "a parallel view, the eye further back");
         assert!(camera.position.x < genos_scene::CAMERA_FAR, "inside the far plane");
         let (plane_o, near_o) = (across(&camera, 0.0), across(&camera, 1.0));
         assert!((plane_o - plane).abs() < 1.0e-4, "the framing is kept: {plane_o} {plane}");
-        assert!(near_o < plane_o * 1.02, "near and far draw the same size: {near_o} {plane_o}");
+        assert!((near_o - plane_o).abs() < 1.0e-5, "near and far draw the same size: {near_o} {plane_o}");
         // A pick still finds the mesh.
         assert!(view.pick(&camera, 1.0, [0.5, 0.5]).is_some());
 
         let back = genos_mcp::json::parse(r#"{"projection":"perspective"}"#).expect("json");
         view.command("mesh_view", &back, &mut camera, 1.0).expect("perspective");
-        assert!((camera.view_tan - genos_scene::DEFAULT_VIEW_TAN).abs() < 1.0e-6 && (camera.position.x - stood).abs() < 1.0e-3);
+        assert!(camera.parallel_half == 0.0 && (camera.position.x - stood).abs() < 1.0e-3);
     }
 
     #[test]
