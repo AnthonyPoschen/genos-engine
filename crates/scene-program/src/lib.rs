@@ -294,6 +294,9 @@ const ID_REFL_TRACER: u32 = 2908;
 const ID_MENU_WHEEL: u32 = 2820;
 const ID_MENU_KEYS: u32 = 2821;
 const ID_KNOB: u32 = 3000;
+/// The check boxes of the mesh viewer's Objects panel, then its Replay panel.
+const ID_MESH_OBJECT: u32 = 6000;
+const ID_MESH_EVENT: u32 = 6500;
 const ID_SWITCH: u32 = 4000;
 const ID_HDR_EXPOSURE: u32 = 5000;
 const ID_HDR_DISPLAY: u32 = 5001;
@@ -345,6 +348,7 @@ const SLIDER_KNOBS: &[&str] = &[
     "mesh_replay",
     "mesh_time",
     "mesh_note",
+    "mesh_filter",
 ];
 /// Unordered choices. A long list of scenes uses the same dropdown.
 const DROP_KNOBS: &[&str] = &[
@@ -358,6 +362,7 @@ const DROP_KNOBS: &[&str] = &[
     "mesh_shade",
     "mesh_solo",
     "mesh_clip",
+    "mesh_session",
 ];
 const VIEWS: [&str; 10] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance", "path",
@@ -1340,6 +1345,7 @@ impl App {
         let changed = match &mut self.mesh {
             Some(watch) if watch.dir == dir => {
                 watch.looked = now;
+                watch.poll_sessions();
                 // A replayed state does not follow the live file.
                 watch.rebuild || (watch.replay.is_none() && watch.stamp != stamp)
             }
@@ -1755,16 +1761,41 @@ impl Host for App {
                                 .map_or_else(|| "live".to_string(), |r| format!("{} {}", r.event, r.command)),
                         });
                     }
-                    // Read-only: the note is typed with T, or set by mesh_selection.
+                    // Read-only: typed with Shift and T, or set by mesh_view filter.
+                    let typing = view.typing && view.typing_filter;
                     knobs.push(Knob {
-                        name: "mesh_note".into(),
-                        label: if view.typing { "Note (Enter ends)".into() } else { "Note (T types)".into() },
+                        name: "mesh_filter".into(),
+                        label: if typing { "Filter (Enter ends)".into() } else { "Filter (Shift+T types)".into() },
                         value: 0.0,
                         min: 0.0,
                         max: 0.0,
                         step: 0.0,
                         choices: Vec::new(),
-                        text: if view.typing {
+                        text: if typing { format!("{}_", view.filter) } else { view.filter.clone() },
+                    });
+                    let (sessions, listed) = view.session_choices();
+                    if !sessions.is_empty() {
+                        knobs.push(Knob {
+                            name: "mesh_session".into(),
+                            label: "Session".into(),
+                            value: listed as f64,
+                            min: 0.0,
+                            max: (sessions.len() - 1) as f64,
+                            step: 1.0,
+                            text: sessions[listed].clone(),
+                            choices: sessions,
+                        });
+                    }
+                    // Read-only: the note is typed with T, or set by mesh_selection.
+                    knobs.push(Knob {
+                        name: "mesh_note".into(),
+                        label: if view.typing && !view.typing_filter { "Note (Enter ends)".into() } else { "Note (T types)".into() },
+                        value: 0.0,
+                        min: 0.0,
+                        max: 0.0,
+                        step: 0.0,
+                        choices: Vec::new(),
+                        text: if view.typing && !view.typing_filter {
                             format!("{}_", view.selection.note)
                         } else {
                             view.selection.note.clone()
@@ -1863,6 +1894,13 @@ impl Host for App {
             view.shade = mesh_view::SHADES[at].to_string();
             view.display_stale = true;
             return Ok(());
+        }
+        if name == "mesh_filter" {
+            return Err("mesh_filter is read-only: type it with Shift and T in the window, or set it with mesh_view filter".into());
+        }
+        if name == "mesh_session" {
+            let view = self.mesh.as_mut().ok_or("mesh_session needs a mesh scene")?;
+            return view.pick_session(value.round().max(0.0) as usize);
         }
         if name == "mesh_solo" {
             let view = self.mesh.as_mut().ok_or("mesh_solo needs a mesh scene")?;
@@ -2477,6 +2515,29 @@ fn flush_checks(section: &mut SectionAcc) {
     });
 }
 
+/// The rows of the mesh viewer's Objects (`mesh_objects`) and Replay
+/// (`mesh_events`) lists. `None` for any other setting.
+fn mesh_panel_rows(app: &App, setting: &str) -> Option<Vec<PanelRow>> {
+    let (first, lines) = match setting {
+        "mesh_objects" => (ID_MESH_OBJECT, app.mesh.as_ref().map(mesh_view::MeshView::object_lines)),
+        "mesh_events" => (ID_MESH_EVENT, app.mesh.as_ref().map(mesh_view::MeshView::replay_lines)),
+        _ => return None,
+    };
+    let rows = lines
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(at, line)| PanelRow {
+            label: line.label,
+            buttons: Vec::new(),
+            slider: None,
+            dropdown: None,
+            checks: vec![PanelCheck { id: first + at as u32, text: line.check.into(), on: line.on }],
+        })
+        .collect();
+    Some(rows)
+}
+
 fn panel_blocks(
     app: &App,
     view: ViewMode,
@@ -2501,20 +2562,27 @@ fn panel_blocks(
                 checks: Vec::new(),
             });
         }
-        let Some(piece) = setting_piece(app, view, fps, &line.setting) else {
-            continue;
+        // One line of the layout is one setting, except the mesh viewer's
+        // lists: a row for each object, a row for each recorded command.
+        let pieces: Vec<Piece> = match mesh_panel_rows(app, &line.setting) {
+            Some(rows) => rows.into_iter().map(Piece::Row).collect(),
+            None => setting_piece(app, view, fps, &line.setting).into_iter().collect(),
         };
         let Some(section) = sections.last_mut() else {
             continue;
         };
-        match piece {
-            Piece::Row(row) => {
-                flush_checks(section);
-                section.rows.push(row);
+        for piece in pieces {
+            match piece {
+                Piece::Row(row) => {
+                    flush_checks(section);
+                    section.rows.push(row);
+                }
+                Piece::Check(check) => section.checks.push(check),
             }
-            Piece::Check(check) => section.checks.push(check),
         }
     }
+    // The mesh viewer's sections have nothing in another scene: no empty fold.
+    sections.retain(|section| !(section.key.starts_with("mesh_") && section.rows.is_empty() && section.checks.is_empty()));
     if let Some(section) = sections.last_mut() {
         flush_checks(section);
     }
@@ -3369,6 +3437,20 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
             .set_key("bloom", if on { "on" } else { "off" })?;
         return Ok(());
     }
+    if (ID_MESH_OBJECT..ID_MESH_EVENT + 500).contains(&id) {
+        let Some(view) = &mut app.mesh else {
+            return Ok(());
+        };
+        let line = if id < ID_MESH_EVENT {
+            view.object_lines().into_iter().nth((id - ID_MESH_OBJECT) as usize)
+        } else {
+            view.replay_lines().into_iter().nth((id - ID_MESH_EVENT) as usize)
+        };
+        if let Some(line) = line {
+            view.panel_click(line.target, on)?;
+        }
+        return Ok(());
+    }
     let index = id.wrapping_sub(ID_SWITCH) as usize;
     if let Some(name) = switch_knobs(app).get(index).map(|knob| knob.name.clone()) {
         app.set_knob(&name, if on { 1.0 } else { 0.0 })?;
@@ -4197,6 +4279,25 @@ mod tests {
             .flat_map(|row| row.checks.iter().map(|check| check.text.clone()))
             .collect();
         assert!(checks.iter().any(|text| text == "Turntable"), "{checks:?}");
+        // The Objects panel: a row for each object, with a box that hides it.
+        let cube = "1 cube";
+        assert!(shown.iter().any(|label| label == cube) && shown.iter().any(|label| label == "2 bracket"), "{shown:?}");
+        assert!(shown.iter().any(|label| label == "Filter (Shift+T types)"), "{shown:?}");
+        let rows = super::flatten_blocks(&blocks);
+        let row = rows.iter().find(|row| row.label == cube).expect("the cube's row");
+        assert!(row.checks[0].on, "shown at first");
+        super::toggle(&mut app, row.checks[0].id, false).expect("hide the cube");
+        assert!(app.mesh.as_ref().is_some_and(|view| view.hidden.contains(&1)));
+        // The filter narrows the list.
+        if let Some(view) = &mut app.mesh {
+            view.filter = "brack".into();
+        }
+        let narrowed = labels(&app);
+        assert!(narrowed.iter().any(|label| label == "2 bracket") && !narrowed.iter().any(|label| label == cube));
+        // Another scene has no Objects section.
+        app.load_scene("lighting-stress").expect("lighting scene");
+        app.follow_mesh();
+        assert!(!labels(&app).iter().any(|label| label == cube || label.starts_with("Filter")));
     }
 
     #[test]

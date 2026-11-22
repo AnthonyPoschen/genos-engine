@@ -28,6 +28,10 @@ Scene | - | - | open | mesh_time
 Scene | - | - | open | mesh_play
 Scene | - | - | open | mesh_bones
 Scene | - | - | open | mesh_surfaces
+Scene | mesh_objects | Objects | open | mesh_filter
+Scene | mesh_objects | Objects | open | mesh_objects
+Scene | mesh_replay | Replay | closed | mesh_session
+Scene | mesh_replay | Replay | closed | mesh_events
 Pipeline | - | - | open | lighting_direct
 Pipeline | - | - | open | lighting_shadows
 Pipeline | - | - | open | lighting_gi

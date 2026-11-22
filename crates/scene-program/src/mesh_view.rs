@@ -154,6 +154,13 @@ pub struct MeshView {
     pub grid: bool,
     /// A soft dark patch on the ground under each object.
     pub shadow: bool,
+    /// Text that narrows the window's Objects and Replay panels: an object or
+    /// a collection whose name holds it, a command whose name holds it.
+    pub filter: String,
+    /// The keys go to `filter`, not to the note.
+    pub typing_filter: bool,
+    /// The recorded sessions, oldest first, as of the last poll.
+    pub recorded: Vec<genos_workbench::Session>,
     /// The recorded state the picture shows in place of the live mesh.
     pub replay: Option<Replay>,
     /// The picture has to be rebuilt from [`MeshView::load`].
@@ -169,7 +176,8 @@ pub struct MeshView {
 /// what the family is for. `mesh_command` takes any of them.
 /// The fields each of the viewer's own tools takes. The schema a client sees
 /// (`genos_debug::commands::mesh_schema`) names the same ones; a test checks it.
-pub const VIEW_ARGS: [&str; 19] = [
+pub const VIEW_ARGS: [&str; 20] = [
+    "filter",
     "pick",
     "hide",
     "show",
@@ -383,6 +391,33 @@ pub const SHADES: [&str; 10] = [
     "face_orientation",
 ];
 
+/// The most lines the window's Objects panel lists, and the most commands
+/// its Replay panel lists.
+const PANEL_OBJECTS: usize = 200;
+const PANEL_EVENTS: usize = 12;
+
+/// Triangles with a colour per vertex: positions, normals, colours.
+pub type Painted = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>);
+
+/// What a panel line's check box acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelTarget {
+    Collection(u64),
+    Object(u64),
+    Event(u64),
+    Live,
+}
+
+/// One line of the window's Objects or Replay panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelLine {
+    pub label: String,
+    /// The check box's word.
+    pub check: &'static str,
+    pub on: bool,
+    pub target: PanelTarget,
+}
+
 /// The contact shadow: how dark its centre is, how far past the footprint it
 /// reaches, its sides, and (radius, darkness) from the centre to the rim.
 const SHADOW_DARK: f32 = 0.6;
@@ -582,6 +617,9 @@ impl MeshView {
             surfaces: true,
             grid: true,
             shadow: true,
+            filter: String::new(),
+            typing_filter: false,
+            recorded: Vec::new(),
             replay: None,
             rebuild: false,
             display_stale: true,
@@ -595,29 +633,166 @@ impl MeshView {
     /// Returns whether the keys were the note's this frame.
     pub fn type_note(&mut self, pressed: &dyn Fn(InputCode) -> bool, shift: bool) -> bool {
         if !self.typing {
+            // T types the note. Shift and T types the panels' filter (Tab
+            // moves between the menu's controls).
             if pressed(InputCode::key_t) {
                 self.typing = true;
+                self.typing_filter = shift;
                 return true;
             }
             return false;
         }
+        let words = if self.typing_filter { &mut self.filter } else { &mut self.selection.note };
         if pressed(InputCode::key_enter) {
             self.typing = false;
         } else if pressed(InputCode::key_escape) {
             self.typing = false;
-            self.selection.note.clear();
+            words.clear();
         } else if pressed(InputCode::key_backspace) {
-            self.selection.note.pop();
+            words.pop();
         } else if pressed(InputCode::key_space) {
-            self.selection.note.push(' ');
-        } else if self.selection.note.len() < NOTE_MAX {
+            words.push(' ');
+        } else if words.len() < NOTE_MAX {
             for (code, letter) in NOTE_KEYS {
                 if pressed(code) {
-                    self.selection.note.push(if shift { letter.to_ascii_uppercase() } else { letter });
+                    words.push(if shift { letter.to_ascii_uppercase() } else { letter });
                 }
             }
         }
         true
+    }
+
+    /// Read the recorded sessions again, for the Replay panel. Called at the
+    /// workspace poll, not every frame: it reads the session index files.
+    pub fn poll_sessions(&mut self) {
+        self.recorded = genos_workbench::sessions(&self.dir);
+    }
+
+    fn passes(&self, name: &str) -> bool {
+        self.filter.is_empty() || name.to_lowercase().contains(&self.filter.to_lowercase())
+    }
+
+    /// The Objects panel: each collection with its objects under it, then the
+    /// objects in no collection. The filter keeps an object whose name holds
+    /// it, and every object of a collection whose name holds it. A line's
+    /// check box shows or hides the object, or every object of the collection.
+    pub fn object_lines(&self) -> Vec<PanelLine> {
+        let Some(workspace) = &self.workspace else {
+            return Vec::new();
+        };
+        let shown = |object: u64| !self.hidden.contains(&object);
+        let line = |part: &Part, indent: &str| PanelLine {
+            label: format!("{indent}{} {}", part.object, part.name),
+            check: "show",
+            on: shown(part.object),
+            target: PanelTarget::Object(part.object),
+        };
+        let mut lines = Vec::new();
+        for collection in &workspace.collections {
+            let whole = self.passes(&collection.name);
+            let members: Vec<&Part> = workspace
+                .parts
+                .iter()
+                .filter(|part| collection.objects.contains(&part.object) && (whole || self.passes(&part.name)))
+                .collect();
+            if members.is_empty() && !(whole && self.filter.is_empty()) {
+                continue;
+            }
+            lines.push(PanelLine {
+                label: format!("{} ({})", collection.name, collection.objects.len()),
+                check: "show",
+                on: collection.objects.iter().any(|object| shown(*object)),
+                target: PanelTarget::Collection(collection.id),
+            });
+            lines.extend(members.into_iter().map(|part| line(part, "    ")));
+        }
+        let grouped = |object: u64| workspace.collections.iter().any(|c| c.objects.contains(&object));
+        lines.extend(
+            workspace.parts.iter().filter(|part| !grouped(part.object) && self.passes(&part.name)).map(|part| line(part, "")),
+        );
+        lines.truncate(PANEL_OBJECTS);
+        lines
+    }
+
+    /// The session the Replay panel lists: the replayed one, else the latest.
+    fn panel_session(&self) -> Option<&genos_workbench::Session> {
+        match &self.replay {
+            Some(replay) => self.recorded.iter().find(|session| session.id == replay.session),
+            None => self.recorded.last(),
+        }
+    }
+
+    /// The Replay panel: "live", then the latest commands of the session whose
+    /// names hold the filter, newest first. A line's check box shows the mesh
+    /// as it stood after that command.
+    pub fn replay_lines(&self) -> Vec<PanelLine> {
+        let Some(session) = self.panel_session() else {
+            return Vec::new();
+        };
+        let at = self.replay.as_ref().map(|replay| replay.event);
+        let mut lines = vec![PanelLine {
+            label: "live".into(),
+            check: "shown",
+            on: at.is_none(),
+            target: PanelTarget::Live,
+        }];
+        lines.extend(session.events.iter().rev().filter(|event| self.passes(&event.command)).take(PANEL_EVENTS).map(|event| {
+            PanelLine {
+                label: format!("{} {}{}", event.id, event.command, if event.ok { "" } else { " (refused)" }),
+                check: "shown",
+                on: at == Some(event.id),
+                target: PanelTarget::Event(event.id),
+            }
+        }));
+        lines
+    }
+
+    /// A check box of a panel line was set to `on`.
+    pub fn panel_click(&mut self, target: PanelTarget, on: bool) -> Result<(), String> {
+        let objects = match target {
+            PanelTarget::Object(object) => vec![object],
+            PanelTarget::Collection(id) => self
+                .workspace
+                .iter()
+                .flat_map(|w| &w.collections)
+                .find(|collection| collection.id == id)
+                .map(|collection| collection.objects.clone())
+                .unwrap_or_default(),
+            PanelTarget::Event(event) if on => {
+                let session = self.panel_session().map(|session| session.id.clone()).ok_or("no session is recorded")?;
+                return self.replay_at(&session, event);
+            }
+            // Unchecking the shown command, or checking "live": the live mesh.
+            PanelTarget::Event(_) | PanelTarget::Live => {
+                self.rebuild = self.replay.take().is_some();
+                return Ok(());
+            }
+        };
+        for object in objects {
+            if on {
+                self.hidden.remove(&object);
+            } else {
+                self.hidden.insert(object);
+            }
+        }
+        self.display_stale = true;
+        self.overlay_stale = true;
+        Ok(())
+    }
+
+    /// The Replay panel's session picker: the ids, newest first, and which is listed.
+    pub fn session_choices(&self) -> (Vec<String>, usize) {
+        let ids: Vec<String> = self.recorded.iter().rev().map(|session| session.id.clone()).collect();
+        let at = self.panel_session().and_then(|shown| ids.iter().position(|id| *id == shown.id)).unwrap_or(0);
+        (ids, at)
+    }
+
+    /// Show the end of the session at `index` of [`Self::session_choices`].
+    pub fn pick_session(&mut self, index: usize) -> Result<(), String> {
+        let (ids, _) = self.session_choices();
+        let id = ids.get(index).ok_or("no such session")?;
+        let last = self.recorded.iter().find(|session| session.id == *id).and_then(|s| s.events.last()).map_or(0, |e| e.id);
+        self.replay_at(&id.clone(), last)
     }
 
     /// Whether the clip is playing.
@@ -833,7 +1008,7 @@ impl MeshView {
     /// object off the ground has a fainter patch. Positions, normals and a
     /// colour per vertex, three per triangle.
     #[expect(clippy::cast_precision_loss, reason = "small counts")]
-    pub fn shadow_patches(&self, ground: [f32; 3]) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    pub fn shadow_patches(&self, ground: [f32; 3]) -> Painted {
         let (mut positions, mut colors) = (Vec::new(), Vec::new());
         let Some(workspace) = self.workspace.as_ref().filter(|_| self.shadow && self.surfaces) else {
             return (positions, Vec::new(), colors);
@@ -1429,6 +1604,9 @@ impl MeshView {
                     self.grid = on;
                     self.overlay_stale = true;
                 }
+                if let Some(words) = args.str("filter")? {
+                    self.filter = words;
+                }
                 if let Some(on) = args.bool("shadow")? {
                     self.shadow = on;
                     self.overlay_stale = true;
@@ -1694,6 +1872,7 @@ impl MeshView {
             ("surfaces", Value::Bool(self.surfaces)),
             ("grid", Value::Bool(self.grid)),
             ("shadow", Value::Bool(self.shadow)),
+            ("filter", text(self.filter.clone())),
             (
                 "pose",
                 self.pose.as_ref().map_or(Value::Null, |(clip, time)| {
@@ -2044,6 +2223,66 @@ mod tests {
         let listed = genos_debug::commands::specs();
         let listed = listed.iter().find(|spec| spec.name == "mesh_pick").expect("mesh_pick");
         assert_eq!(keys(&listed.schema).len(), 3);
+    }
+
+    #[test]
+    fn the_panels_list_collections_objects_and_commands_and_act_on_a_click() {
+        use super::PanelTarget;
+        use genos_workbench::{Collection, Event, Session};
+        let mut view = view();
+        let labels = |view: &MeshView| view.object_lines().into_iter().map(|line| line.label).collect::<Vec<_>>();
+        assert_eq!(labels(&view), ["1 cube", "2 bracket"]);
+        // A collection lists its objects under it; the rest come after.
+        if let Some(workspace) = &mut view.workspace {
+            workspace.collections = vec![Collection { id: 7, name: "Props".into(), objects: vec![2] }];
+        }
+        assert_eq!(labels(&view), ["Props (1)", "    2 bracket", "1 cube"]);
+        // The filter keeps a matching object, or all of a matching collection.
+        view.filter = "CUBE".into();
+        assert_eq!(labels(&view), ["1 cube"]);
+        view.filter = "prop".into();
+        assert_eq!(labels(&view), ["Props (1)", "    2 bracket"]);
+        view.filter.clear();
+        // The collection's box hides its objects; the object's box shows it again.
+        view.panel_click(PanelTarget::Collection(7), false).expect("hide Props");
+        assert!(view.hidden.contains(&2) && !view.hidden.contains(&1));
+        assert!(!view.object_lines()[0].on && view.object_lines()[2].on);
+        view.panel_click(PanelTarget::Object(2), true).expect("show the bracket");
+        assert!(view.hidden.is_empty());
+
+        // The Replay panel: nothing without a session, then live and the commands, newest first.
+        assert!(view.replay_lines().is_empty());
+        let event = |id, command: &str, ok| Event { id, command: command.into(), ok, snapshot: None };
+        view.recorded = vec![
+            Session { id: "old".into(), initial_snapshot: 0, events: vec![event(1, "inspect", true)] },
+            Session { id: "new".into(), initial_snapshot: 0, events: vec![event(1, "cube", true), event(2, "extrude", false), event(3, "move", true)] },
+        ];
+        let lines = view.replay_lines();
+        let commands: Vec<&str> = lines.iter().map(|line| line.label.as_str()).collect();
+        assert_eq!(commands, ["live", "3 move", "2 extrude (refused)", "1 cube"]);
+        assert!(lines[0].on && lines[1..].iter().all(|line| !line.on));
+        view.filter = "ex".into();
+        assert_eq!(view.replay_lines().len(), 2, "live and the one match");
+        assert_eq!(view.session_choices(), (vec!["new".to_string(), "old".to_string()], 0));
+    }
+
+    #[test]
+    fn shift_and_t_types_the_filter_and_leaves_the_note_alone() {
+        use genos_input::InputCode;
+        let mut view = view();
+        let press = |view: &mut MeshView, key: InputCode| view.type_note(&|code| code == key, false);
+        assert!(view.type_note(&|code| code == InputCode::key_t, true) && view.typing && view.typing_filter);
+        press(&mut view, InputCode::key_c);
+        press(&mut view, InputCode::key_u);
+        press(&mut view, InputCode::key_enter);
+        assert_eq!((view.filter.as_str(), view.selection.note.as_str(), view.typing), ("cu", "", false));
+        // T types the note again, and Escape while filtering clears the filter only.
+        press(&mut view, InputCode::key_t);
+        press(&mut view, InputCode::key_a);
+        press(&mut view, InputCode::key_enter);
+        view.type_note(&|code| code == InputCode::key_t, true);
+        press(&mut view, InputCode::key_escape);
+        assert_eq!((view.filter.as_str(), view.selection.note.as_str()), ("", "a"));
     }
 
     #[test]

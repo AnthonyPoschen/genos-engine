@@ -80,12 +80,13 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Hide, show, solo, frame an object (commands and one menu dropdown).
 - [x] Show all, hide matching and solo matching by name (`mesh_view show_all`, `hide_match`, `solo_match`).
 - [x] Collections: listed by `mesh_view`, with `solo_collection` and `hide_collection`.
-- [ ] Objects panel in the window: collections and objects as a tree with a search box. The menu has one "Show object" dropdown; the rest is commands.
+- [x] Objects panel in the window (the Scene tab's "Objects" section): each collection with its objects under it, then the objects in no collection, each with a box that shows or hides it; a collection's box acts on all its objects. A filter narrows it: Shift and T types it, or `mesh_view filter`.
 - [x] Replay: show the state after a command (`mesh_view replay`).
 - [x] Replay steps and scrubber: `replay: "next"`, `"previous"`, `"live"`, and the menu's "Replay" slider (0 is the session start, the last step is live).
 - [x] Replay play (`replay: "play"`, `"stop"`, the menu's "Play replay"): a step every 0.7 s to the live mesh.
 - [x] A session by ID (`replay: {session, event}`) and a recorded command's input and reply (`mesh_view event: N`).
-- [ ] Replay panel in the window: a session picker and a command filter.
+- [x] Replay panel in the window (the Scene tab's "Replay" section): a session picker, then "live" and the session's latest 12 commands, newest first, each with a box that shows the mesh after it. The same filter narrows the commands by name.
+- [ ] The panels are menu rows, not a tree widget: no fold per collection, no scroll of its own, one filter for both, and at most 200 object lines.
 - [x] Animation: clip picker and time scrub (`mesh_view pose`, the menu's "Clip" and "Time"), bones with their joints and the line to each parent (`bones`), and the mesh toggle (`surfaces`). The wireframe follows the pose.
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
 - [x] Picking and the selection highlight follow the pose.
