@@ -133,7 +133,8 @@ A workspace with three objects, an extruded face, box UVs scaled to tile, a text
 - [x] The unlit modes show exact colours: a debug view is no longer exposed and tone-mapped under the HDR display path (white read 184).
 - [x] The shade names are mesh-workbench's: `vertex_colors` is unlit and `vertex_color_shaded` lit; `orientation` and `topology` are accepted for `face_orientation` and `wireframe`.
 - [x] Compared with the browser viewer itself: mesh-workbench's `mesh-server` was built from the pinned revision and its page drawn in headless Chromium on the same workspace (`genos-debug/cmp/web-default.png`). Its look is a dark background (23, 26, 32), a dark ground with a faint grid and a soft shadow under the model, and a neutral grey mesh. The mesh scene now has that look: a dark sky and ground, grid lines a little lighter than the ground, the contact shadow, and the same grey (the front of the cube reads about 150 in both).
-- [ ] Not matched: the lights of `shaded` are the scene's sun, not the web viewer's three fixed lights, so the faces' relative brightness differs a little; the ground is a lit plane with an edge, not a disc that fades into the background; `topology` has no vertex and face ID labels; `normals` and `depth` are the engine's `view` modes with their own encodings. The web viewer's toolbar, axis gizmo and footer are the Mesh tab's rows here.
+- [x] The mesh scene is lit as the web viewer lights a mesh: the scene's sun from the web viewer's key direction, and two weaker directional lights from its other two directions at its strengths (`MESH_FILL_LIGHTS`).
+- [ ] Not matched: the ground is a lit plane with an edge, not a disc that fades into the background; `topology` has no vertex and face ID labels; `normals` and `depth` are the engine's `view` modes with their own encodings. The web viewer's toolbar, axis gizmo and footer are the Mesh tab's rows here.
 
 ## For Nathan
 

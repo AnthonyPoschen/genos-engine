@@ -5,5 +5,5 @@ review A mesh-workbench workspace on a ground plane. The sample holds a cube and
 checkpoint front 1.0 1.4 4.0 look 1.0 0.4 0
 checkpoint top 1.0 5.0 0.6 look 1.0 0 0
 check front mean 4
-sun -0.45 -1 -0.6 5.0 4.8 4.5
+sun 0.42 -0.71 -0.57 5.0 4.9 4.8
 sky 0.012 0.015 0.021

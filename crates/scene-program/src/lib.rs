@@ -1263,6 +1263,12 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
     };
     if let Some(sun) = sun {
         scene.lights.push(sun_light(sun));
+        // The web viewer lights a mesh with a key light and two weaker ones
+        // from the other sides, so no face is black. The scene's sun is the
+        // key; these are the other two, at the web viewer's strengths.
+        for (direction, share) in MESH_FILL_LIGHTS {
+            scene.lights.push(sun_light(&Sun { direction, color: sun.color.map(|channel| channel * share) }));
+        }
     }
     for lamp in lamps {
         scene.lights.push(point_light(lamp));
@@ -2731,6 +2737,11 @@ fn flush_checks(section: &mut SectionAcc) {
         checks: std::mem::take(&mut section.checks),
     });
 }
+
+/// The mesh scene's two fill lights: the way each shines, and its strength
+/// as a share of the sun's. mesh-workbench's web viewer has lights towards
+/// (-3, 5, 4), (4, 2, 1) and (1, 3, -4) at 0.8, 0.27 and 0.38.
+const MESH_FILL_LIGHTS: [([f32; 3], f32); 2] = [([-4.0, -2.0, -1.0], 0.27 / 0.8), ([-1.0, -3.0, 4.0], 0.38 / 0.8)];
 
 /// The exposure a mesh scene holds: what the auto exposure settles at on the
 /// sample seen from the front. (From above it settles at 1.9.)
