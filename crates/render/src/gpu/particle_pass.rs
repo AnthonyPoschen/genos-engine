@@ -208,7 +208,8 @@ impl Gpu {
         camera: &Camera,
         aspect: f32,
     ) {
-        if !settings.dispatches() {
+        // The cards face a perspective eye. A parallel view draws no particles.
+        if !settings.dispatches() || camera.parallel_half > 0.0 {
             self.particle_job = None;
             return;
         }

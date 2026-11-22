@@ -485,6 +485,12 @@ const SHADE_ALIASES: [(&str, &str, bool); 3] =
 /// An object in no collection, in the `collection_ids` shade (mesh-workbench's 128 grey).
 const UNASSIGNED_COLOR: [f32; 3] = [0.216, 0.216, 0.216];
 
+/// The web viewer's background (23, 26, 32), as linear colour.
+const WEB_BACKGROUND: [f32; 3] = [0.005, 0.0066, 0.0104];
+/// The light an unmapped face gives off in the lit `material` shade, so it
+/// is the same flat magenta from every side.
+const UNMAPPED_GLOW: [f32; 3] = [1.0, 0.0, 1.0];
+
 /// A face whose UVs are incomplete, in the textured and checker shades.
 const UNMAPPED_COLOR: [f32; 3] = [1.0, 0.0, 1.0];
 
@@ -512,6 +518,8 @@ pub struct CommandDoc {
     pub types: Vec<(String, String)>,
     /// One example of the command from the help, as it is written there.
     pub example: String,
+    /// Fields whose type is taken from other commands that have the field.
+    pub inferred: Vec<String>,
 }
 
 /// The JSON type name of a value, for a schema.
@@ -580,6 +588,7 @@ pub fn parse_examples(topic: &str, text: &str, out: &mut Vec<CommandDoc>) {
                 topic: topic.to_string(),
                 types: Vec::new(),
                 example: String::new(),
+                inferred: Vec::new(),
             });
             out.len() - 1
         });
@@ -693,7 +702,31 @@ pub fn parse_reference(topic: &str, text: &str, out: &mut Vec<CommandDoc>) {
                     topic: topic.to_string(),
                     types: types.clone(),
                     example: String::new(),
+                inferred: Vec::new(),
                 }),
+            }
+        }
+    }
+}
+
+/// Give a field with no type the type it has in other commands, when every
+/// command that types that field agrees (`object` is a number wherever an
+/// example or a table writes it). Such a field is in `inferred`.
+pub fn infer_types(found: &mut [CommandDoc]) {
+    let mut seen: std::collections::BTreeMap<String, BTreeSet<String>> = std::collections::BTreeMap::new();
+    for doc in found.iter() {
+        for (field, kind) in &doc.types {
+            seen.entry(field.clone()).or_default().insert(kind.clone());
+        }
+    }
+    for doc in found.iter_mut() {
+        for field in doc.fields.clone() {
+            if doc.types.iter().any(|(named, _)| *named == field) {
+                continue;
+            }
+            if let Some(kind) = seen.get(&field).filter(|kinds| kinds.len() == 1).and_then(|kinds| kinds.first()) {
+                doc.types.push((field.clone(), kind.clone()));
+                doc.inferred.push(field);
             }
         }
     }
@@ -750,6 +783,7 @@ fn catalogue() -> Result<&'static [CommandDoc], String> {
     });
     drop(session);
     let _ = std::fs::remove_dir_all(&dir);
+    infer_types(&mut found);
     found.sort_by(|a, b| a.command.cmp(&b.command));
     Ok(CATALOGUE.get_or_init(|| found))
 }
@@ -771,6 +805,10 @@ fn command_value(doc: &CommandDoc, full: bool) -> Value {
         properties.extend(doc.fields.iter().map(|field| {
             // A type the help's examples show; the words say the rest.
             let property = match doc.types.iter().find(|(named, _)| named == field) {
+                Some((_, kind)) if doc.inferred.contains(field) => obj(vec![
+                    ("type", text(kind.clone())),
+                    ("description", text("Type as this field has in mesh-workbench's other commands; see doc for its form.")),
+                ]),
                 Some((_, kind)) => obj(vec![("type", text(kind.clone()))]),
                 None => obj(vec![("description", text("See doc for its form."))]),
             };
@@ -1162,6 +1200,13 @@ fn textured_corners(part: &Part, textures: &[genos_workbench::TextureImage], che
         *slot = texture;
     }
     (uvs, colors, drawn)
+}
+
+/// Whether a part is drawn as pieces (`MeshView::textured_pieces`): it uses
+/// several textures, or in the lit `material` shade it has faces with no UVs.
+fn in_pieces(shade: &str, colors: &[[f32; 3]], drawn: &[Option<usize>]) -> bool {
+    let textures: BTreeSet<usize> = drawn.iter().flatten().copied().collect();
+    textures.len() >= 2 || (shade == "material" && colors.contains(&UNMAPPED_COLOR))
 }
 
 /// A part's faces that draw with one surface, as an object of its own: a
@@ -1998,7 +2043,10 @@ impl MeshView {
                     let surface = match (checker, used.len()) {
                         (true, _) => SURFACE_CHECKER,
                         (false, 1) => SURFACE_TEXTURES + used.first().copied().unwrap_or(0),
-                        // No texture: the colours alone. Several: `textured_pieces` draws it.
+                        // `textured_pieces` draws it: several textures, or
+                        // unmapped faces in the lit shade.
+                        _ if in_pieces(&self.shade, &colors, &drawn) => return (true, color, Vec::new(), None),
+                        // No texture: the colours alone.
                         (false, 0) => return (hidden, color, colors, None),
                         (false, _) => return (true, color, Vec::new(), None),
                     };
@@ -2080,6 +2128,19 @@ impl MeshView {
         }
     }
 
+    /// The ground's and the sky's colour for the shade, and whether the grid
+    /// and the contact shadow are drawn, as the web viewer clears: white for
+    /// `silhouette`, black for `depth`, its dark background for the other
+    /// unlit shades. `None` is the scene's own lit ground and sky.
+    pub fn backdrop(&self) -> Option<([f32; 3], bool)> {
+        match self.shade.as_str() {
+            "silhouette" => Some(([1.0; 3], false)),
+            "depth" => Some(([0.0; 3], false)),
+            _ if self.unlit() => Some((WEB_BACKGROUND, true)),
+            _ => None,
+        }
+    }
+
     /// The shades mesh-workbench draws without light: the program shows the
     /// base colour for them.
     pub fn unlit(&self) -> bool {
@@ -2103,21 +2164,26 @@ impl MeshView {
                 continue;
             }
             let (uvs, colors, drawn) = textured_corners(part, &workspace.textures, false);
-            let used: BTreeSet<Option<usize>> = drawn.iter().copied().collect();
-            if used.iter().flatten().count() < 2 {
+            if !in_pieces(&self.shade, &colors, &drawn) {
                 continue;
             }
+            // A group is a texture (or none), and whether its faces lack UVs.
+            let group = |triangle: usize| (drawn[triangle], colors[triangle * 3] == UNMAPPED_COLOR);
+            let groups: BTreeSet<(Option<usize>, bool)> = (0..part.triangles()).map(group).collect();
             let normals = posed.get(index).and_then(Option::as_ref).unwrap_or(&part.normals);
-            for texture in used {
+            for (texture, unmapped) in groups {
                 let corners: Vec<usize> =
-                    (0..part.triangles()).filter(|t| drawn[*t] == texture).flat_map(|t| t * 3..t * 3 + 3).collect();
+                    (0..part.triangles()).filter(|t| group(*t) == (texture, unmapped)).flat_map(|t| t * 3..t * 3 + 3).collect();
+                // In the lit shade an unmapped face is black and gives off
+                // magenta, so no light changes it.
+                let glows = unmapped && self.shade == "material";
                 pieces.push(Piece {
                     positions: corners.iter().map(|at| self.corner(part, *at)).collect(),
                     normals: corners.iter().map(|at| normals.get(*at).copied().unwrap_or([0.0, 1.0, 0.0])).collect(),
-                    colors: corners.iter().map(|at| colors[*at]).collect(),
+                    colors: corners.iter().map(|at| if glows { [0.0; 3] } else { colors[*at] }).collect(),
                     texcoords: corners.iter().map(|at| uvs[*at]).collect(),
                     surface: texture.map(|at| SURFACE_TEXTURES + at),
-                    emission: [0.0; 3],
+                    emission: if glows { UNMAPPED_GLOW } else { [0.0; 3] },
                 });
             }
         }
@@ -4285,6 +4351,12 @@ not a row | `nothing` |\n";
         assert_eq!(rig.fields, ["bones", "replace", "note"]);
         assert_eq!(rig.types[1], ("replace".to_string(), "boolean".to_string()));
         assert!(rig.example.ends_with("brace\"}"), "{}", rig.example);
+        // `texture_import` names `path` bare; another command types it, so it takes that type.
+        super::parse_examples("io", r#"{"command":"import_glb","path":"a.glb"}"#, &mut found);
+        super::infer_types(&mut found);
+        let import = found.iter().find(|doc| doc.command == "texture_import").expect("texture_import");
+        assert_eq!(import.types, [("path".to_string(), "string".to_string())]);
+        assert_eq!(import.inferred, ["path"]);
         let value = genos_mcp::json::encode(&super::command_value(&found[0], true));
         assert!(value.contains(r#""faces":{"type":"array"}"#), "{value}");
         assert!(value.contains(r#""tool":"mesh_material""#) && value.contains(r#""command":{"const":"uv_set"}"#), "{value}");

@@ -619,6 +619,10 @@ impl Tools {
         let ui_default = ctx
             .as_deref_mut()
             .is_some_and(|ctx| ctx.host.scene().debug.ui);
+        // The reference tracer shoots rays from a perspective eye.
+        if matches!(name, "reference" | "compare") && ctx.as_deref().is_some_and(|ctx| ctx.camera.parallel_half > 0.0) {
+            return Err(format!("{name} needs a perspective view: the camera is in a parallel (orthographic) projection"));
+        }
         if let Some(step) = self.frame_job(name, args, ui_default)? {
             return Ok(step);
         }

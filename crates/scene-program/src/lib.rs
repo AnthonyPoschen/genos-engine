@@ -1251,6 +1251,8 @@ struct App {
     /// The mesh shade is one mesh-workbench draws unlit, and the view was
     /// switched to the base colour for it.
     mesh_unlit: bool,
+    /// The mesh scene's own sky colour, while a shade shows another backdrop.
+    mesh_sky: Option<[f32; 3]>,
     /// Last GI pass times, milliseconds. Numbers only.
     gi_passes: String,
     /// Last GI work counters. Numbers only.
@@ -1421,6 +1423,7 @@ impl App {
             mesh: None,
             mesh_overlay: None,
             mesh_unlit: false,
+            mesh_sky: None,
             gi_passes: "direct 0.00 atrous 0.00 compose 0.00 trace 0.00 filter 0.00 gather 0.00 resolve 0.00".into(),
             gi_work: "rays 0 refreshed 0 lamps 0".into(),
             fog_cli: FogCli::default(),
@@ -1478,6 +1481,7 @@ impl App {
         let Kind::Mesh { workspace, .. } = &self.entry().kind else {
             self.mesh = None;
             self.mesh_overlay = None;
+            self.mesh_sky = None;
             return;
         };
         let dir = mesh_workspace_dir(&self.root, workspace);
@@ -1571,7 +1575,12 @@ impl App {
         let display = view.display();
         let posed = view.posed_positions();
         let lift = view.lift();
-        let (shadow_at, shadow_up, shadow_colors) = view.shadow_patches(MESH_GROUND_COLOR);
+        // The ground and the sky the shade is seen against.
+        let backdrop = view.backdrop();
+        let ground = backdrop.map_or(MESH_GROUND_COLOR, |(color, _)| color);
+        let furniture = backdrop.is_none_or(|(_, drawn)| drawn);
+        let (shadow_at, shadow_up, shadow_colors) =
+            if furniture { view.shadow_patches(ground) } else { (Vec::new(), Vec::new(), Vec::new()) };
         let plain = |(positions, normals): (Vec<[f32; 3]>, Vec<[f32; 3]>), color| mesh_view::Piece {
             positions,
             normals,
@@ -1583,7 +1592,7 @@ impl App {
         .tinted(color);
         // The grid lines stand on edge, where the sun does not reach them:
         // they carry a little light of their own, as the web viewer's do.
-        let mut grid = plain(view.grid_strips(), mesh_view::GRID_COLOR);
+        let mut grid = plain(if furniture { view.grid_strips() } else { (Vec::new(), Vec::new()) }, mesh_view::GRID_COLOR);
         grid.0.emission = mesh_view::GRID_GLOW;
         let mut extras = vec![
             mesh_view::Piece { positions: shadow_at, normals: shadow_up, colors: shadow_colors, texcoords: Vec::new(), surface: None, emission: [0.0; 3] }
@@ -1606,6 +1615,10 @@ impl App {
         let Show::Still(world) = &mut self.show else {
             return;
         };
+        // The scene's own sky is kept the first time, to go back to.
+        let own_sky = *self.mesh_sky.get_or_insert(world.scene.sky.as_ref().map_or([0.0; 3], |sky| sky.color));
+        world.scene.sky = Some(genos_scene::Sky { color: backdrop.map_or(own_sky, |(color, _)| color) });
+        world.scene.floor.color = ground;
         // The extras sit after the workspace's objects. Drop the old ones.
         let base = *self.mesh_overlay.get_or_insert(world.objects.len());
         world.objects.truncate(base);

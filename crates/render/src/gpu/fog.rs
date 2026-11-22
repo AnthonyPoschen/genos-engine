@@ -62,7 +62,8 @@ pub(super) struct Targets {
 
 impl Gpu {
     pub(super) fn set_froxel_frame(&mut self, scene: &Scene, camera: &Camera, aspect: f32) {
-        if !scene.fog.dispatches() {
+        // The froxels are a perspective frustum. A parallel view draws no fog.
+        if !scene.fog.dispatches() || camera.parallel_half > 0.0 {
             self.froxel_frame = None;
             self.froxel_vram = 0;
             return;

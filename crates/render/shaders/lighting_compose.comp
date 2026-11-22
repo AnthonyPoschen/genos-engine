@@ -90,7 +90,13 @@ void main() {
 #ifdef GENOS_HDR_COMPOSE
         // The clear already wrote the toned sky. Keep those bytes. The grade
         // reads this linear sky and does not invert the shoulder.
-        scene_store(index, vec4(scene.sky.rgb, 1000.0));
+        // In the base-colour view the sky is data too: its own colour as the
+        // code to show, marked by a negative depth (see the debug views below).
+        if ((scene.grid_at.w & 255u) == 3u) {
+            scene_store(index, vec4(pow(max(scene.sky.rgb, vec3(0.0)), vec3(1.0 / 2.2)), -1000.0));
+        } else {
+            scene_store(index, vec4(scene.sky.rgb, 1000.0));
+        }
 #endif
         return;
     }

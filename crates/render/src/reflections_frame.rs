@@ -214,7 +214,12 @@ impl Gpu {
         quad_first: u32,
         _quad_count: u32,
     ) {
-        let settings = world.scene.reflections;
+        let mut settings = world.scene.reflections;
+        // The mirror views are built for a perspective eye. A parallel view
+        // draws no reflections.
+        if camera.parallel_half > 0.0 {
+            settings.enabled = false;
+        }
         let mut planes = [Reflector::default(); PLANES];
         let mut count = 0u32;
         for reflector in world.reflectors.iter().take(PLANES) {
