@@ -20,7 +20,7 @@ mod types;
 
 pub use camera::{
     listener_state, look_direction, transform_point, update, view_proj, viewport_uv, Actions,
-    Camera, CAMERA_FAR, CAMERA_HEIGHT, CAMERA_NEAR, PITCH_LIMIT,
+    Camera, CAMERA_FAR, CAMERA_HEIGHT, CAMERA_NEAR, DEFAULT_VIEW_TAN, PITCH_LIMIT,
 };
 pub use codimation::{Codimation, Easing};
 pub use debug_settings::DebugSettings;

@@ -827,6 +827,9 @@ fn run() -> Result<i32, String> {
             };
             if let Some(view) = &mut app.mesh {
                 view.pointer(&mut camera, [size.0 as f32, size.1 as f32], orbit);
+            } else {
+                // The orthographic lens belongs to the mesh viewer.
+                camera.view_tan = genos_scene::DEFAULT_VIEW_TAN;
             }
             app.refresh_mesh_overlay();
         }
@@ -1701,6 +1704,16 @@ impl Host for App {
                         });
                     }
                     knobs.push(Knob {
+                        name: "mesh_orthographic".into(),
+                        label: "Orthographic".into(),
+                        value: f64::from(u8::from(view.orthographic)),
+                        min: 0.0,
+                        max: 1.0,
+                        step: 1.0,
+                        choices: vec!["off".into(), "on".into()],
+                        text: if view.orthographic { "on".into() } else { "off".into() },
+                    });
+                    knobs.push(Knob {
                         name: "mesh_shadow".into(),
                         label: "Contact shadow".into(),
                         value: f64::from(u8::from(view.shadow)),
@@ -1862,6 +1875,13 @@ impl Host for App {
                 view.set_pose(Some((clip, value.max(0.0) as f32)))?;
             }
             self.refresh_mesh_overlay();
+            return Ok(());
+        }
+        if name == "mesh_orthographic" {
+            let view = self.mesh.as_mut().ok_or("mesh_orthographic needs a mesh scene")?;
+            // The camera is not here: the pointer step applies it next frame.
+            view.orthographic = value >= 0.5;
+            view.projection_stale = true;
             return Ok(());
         }
         if name == "mesh_shadow" {

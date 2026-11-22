@@ -60,7 +60,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 ### D. Viewer parity with the mesh-workbench web viewer (decision 5)
 
 - [x] Orbit, pan, zoom, frame, axis views.
-- [ ] Orthographic view. Blocked on the engine: the field of view is a fixed 60 degrees in `genos_scene::view_proj`, in the scene block the lighting passes rebuild positions from (`view_right.w`), in the fog passes, and in the references. It needs a field of view (or a projection kind) on `Camera` carried through those, in its own change with the lighting gates run.
+- [x] Orthographic view (`mesh_view projection`, the menu's "Orthographic"): a 3 degree lens from far back with the same framing, so a part 1 m nearer draws under 2% larger. `Camera::view_tan` is the camera's field of view (the tangent of half of it; the default is the 60 degree lens). The picture, the lighting's position rebuild, the frame fog and picking follow it.
+- [ ] A true parallel projection. The lighting passes rebuild a position from a ray through the eye, so it needs a second ray rule in each. Reflections and the reference tracer still assume 60 degrees; a mesh scene uses neither.
 - [x] Auto-rotate turntable (`mesh_view turntable`, the menu's "Turntable").
 - [x] Shaded, wireframe, object IDs.
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).

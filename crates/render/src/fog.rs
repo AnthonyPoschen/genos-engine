@@ -142,10 +142,11 @@ impl FogView {
     }
 }
 
-/// Frustum the frame froxel uses. Half the vertical field is 30 degrees.
+/// Frustum the frame froxel uses. `view_tan` is the tangent of half the
+/// vertical field (`Camera::view_tan`).
 #[must_use]
-pub fn frame_fog_view(origin: [f32; 3], yaw: f32, pitch: f32, aspect: f32) -> FogView {
-    FogView::look(origin, yaw, pitch, 30.0_f32.to_radians().tan(), aspect)
+pub fn frame_fog_view(origin: [f32; 3], yaw: f32, pitch: f32, view_tan: f32, aspect: f32) -> FogView {
+    FogView::look(origin, yaw, pitch, view_tan, aspect)
 }
 
 /// Sun used when the scene has no directional light.

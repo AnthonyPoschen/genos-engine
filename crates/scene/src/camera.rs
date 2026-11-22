@@ -67,6 +67,12 @@ pub struct Actions {
 
 #[derive(Clone, Debug)]
 pub struct Camera {
+    /// Tangent of half the vertical field of view. [`DEFAULT_VIEW_TAN`] is the
+    /// 60 degree lens every scene uses. A smaller value is a longer lens: the
+    /// mesh viewer's orthographic view stands far back with a narrow one.
+    /// The picture, the lighting's position rebuild and the frame fog follow
+    /// it; reflections and the reference tracer assume the default.
+    pub view_tan: f32,
     pub position: Vec3,
     pub yaw: f32,
     pub pitch: f32,
@@ -103,6 +109,7 @@ impl Camera {
         let mut physics = World::new(GRAVITY);
         physics.insert(view_capsule(position));
         Self {
+            view_tan: DEFAULT_VIEW_TAN,
             position,
             yaw,
             pitch: 0.0,
@@ -445,7 +452,7 @@ pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32
 pub fn view_proj(camera: &Camera, aspect: f32) -> [f32; 16] {
     let view = view_matrix(camera);
     let proj = perspective(
-        60.0_f32.to_radians(),
+        camera.view_tan.max(1.0e-4),
         aspect.max(0.01),
         CAMERA_NEAR,
         CAMERA_FAR,
@@ -484,8 +491,11 @@ fn view_matrix(camera: &Camera) -> Mat4 {
 pub const CAMERA_NEAR: f32 = 0.05;
 pub const CAMERA_FAR: f32 = 200.0;
 
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-    let h = 1.0 / (fovy * 0.5).tan();
+/// Tangent of half of 60 degrees: the field of view of [`Camera::new`].
+pub const DEFAULT_VIEW_TAN: f32 = 0.577_350_26;
+
+fn perspective(view_tan: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    let h = 1.0 / view_tan;
     let w = h / aspect;
     let mut cols = [0.0; 16];
     cols[0] = w;

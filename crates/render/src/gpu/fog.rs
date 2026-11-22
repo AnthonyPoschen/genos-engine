@@ -74,7 +74,7 @@ impl Gpu {
             return;
         }
         let origin = [camera.position.x, camera.position.y, camera.position.z];
-        let view = frame_fog_view(origin, camera.yaw, camera.pitch, aspect);
+        let view = frame_fog_view(origin, camera.yaw, camera.pitch, camera.view_tan, aspect);
         let (sun, lamps) = sun_and_lamps(&scene.lights);
         self.froxel_frame = Some(FrameJob {
             params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0, 0.0),

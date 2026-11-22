@@ -1081,7 +1081,7 @@ pub(crate) fn apply_view(pack: &mut Pack, camera: &genos_scene::Camera, aspect: 
     pack.view_right = [right.x, right.y, right.z];
     pack.view_up = [up.x, up.y, up.z];
     pack.view_forward = [forward.x, forward.y, forward.z];
-    pack.view_tan = (30.0_f32.to_radians()).tan();
+    pack.view_tan = camera.view_tan;
     pack.view_aspect = aspect.max(0.01);
 }
 

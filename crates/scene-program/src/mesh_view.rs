@@ -154,6 +154,10 @@ pub struct MeshView {
     pub grid: bool,
     /// A soft dark patch on the ground under each object.
     pub shadow: bool,
+    /// The orthographic view: a narrow lens from far back.
+    pub orthographic: bool,
+    /// The menu changed `orthographic`; the next pointer step moves the camera.
+    pub projection_stale: bool,
     /// Text that narrows the window's Objects and Replay panels: an object or
     /// a collection whose name holds it, a command whose name holds it.
     pub filter: String,
@@ -176,7 +180,8 @@ pub struct MeshView {
 /// what the family is for. `mesh_command` takes any of them.
 /// The fields each of the viewer's own tools takes. The schema a client sees
 /// (`genos_debug::commands::mesh_schema`) names the same ones; a test checks it.
-pub const VIEW_ARGS: [&str; 20] = [
+pub const VIEW_ARGS: [&str; 21] = [
+    "projection",
     "filter",
     "pick",
     "hide",
@@ -418,6 +423,12 @@ pub struct PanelLine {
     pub target: PanelTarget,
 }
 
+/// The orthographic view: the tangent of half its field of view (1.5
+/// degrees: a part 1 m nearer draws under 1% larger at 3 m of mesh), and the
+/// furthest the camera stands for it.
+const ORTHO_TAN: f32 = 0.026_19;
+const ORTHO_REACH: f32 = 120.0;
+
 /// The contact shadow: how dark its centre is, how far past the footprint it
 /// reaches, its sides, and (radius, darkness) from the centre to the rim.
 const SHADOW_DARK: f32 = 0.6;
@@ -617,6 +628,8 @@ impl MeshView {
             surfaces: true,
             grid: true,
             shadow: true,
+            orthographic: false,
+            projection_stale: false,
             filter: String::new(),
             typing_filter: false,
             recorded: Vec::new(),
@@ -660,6 +673,14 @@ impl MeshView {
             }
         }
         true
+    }
+
+    /// Apply [`Self::orthographic`] to the camera, keeping what is framed.
+    pub fn set_projection(&mut self, camera: &mut Camera) {
+        match &mut self.orbit {
+            Some(orbit) => orbit.write(camera, self.orthographic),
+            None => self.frame(camera),
+        }
     }
 
     /// Read the recorded sessions again, for the Replay panel. Called at the
@@ -1239,7 +1260,7 @@ impl MeshView {
             panning: false,
             wrote: ([0.0; 3], 0.0, 0.0),
         };
-        orbit.write(camera);
+        orbit.write(camera, self.orthographic);
         self.orbit = Some(orbit);
     }
 
@@ -1281,6 +1302,9 @@ impl MeshView {
     }
 
     pub fn pointer(&mut self, camera: &mut Camera, size: [f32; 2], input: OrbitInput) {
+        if std::mem::take(&mut self.projection_stale) {
+            self.set_projection(camera);
+        }
         self.watch([camera.position.x, camera.position.y, camera.position.z]);
         let (centre, extent) = self.extent();
         let pose = ([camera.position.x, camera.position.y, camera.position.z], camera.yaw, camera.pitch);
@@ -1294,11 +1318,13 @@ impl MeshView {
         if moved {
             let to = [centre[0] - pose.0[0], centre[1] - pose.0[1], centre[2] - pose.0[2]];
             let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
-            let along = (to[0] * forward.x + to[1] * forward.y + to[2] * forward.z).max(extent * 0.25);
+            // The orbit's distance is the 60 degree lens's; a narrow lens stands further back.
+            let lens = camera.view_tan / genos_scene::DEFAULT_VIEW_TAN;
+            let along = (to[0] * forward.x + to[1] * forward.y + to[2] * forward.z).max(extent * 0.25 / lens);
             let previous = self.orbit;
             self.orbit = Some(Orbit {
                 target: [pose.0[0] + forward.x * along, pose.0[1] + forward.y * along, pose.0[2] + forward.z * along],
-                distance: along,
+                distance: along * lens,
                 last: previous.map_or([input.x, input.y], |o| o.last),
                 dragged: previous.and_then(|o| o.dragged),
                 panning: previous.is_some_and(|o| o.panning),
@@ -1362,7 +1388,7 @@ impl MeshView {
             changed = true;
         }
         if changed {
-            orbit.write(camera);
+            orbit.write(camera, self.orthographic);
         }
         if click {
             let at = [input.x / size[0].max(1.0), input.y / size[1].max(1.0)];
@@ -1603,6 +1629,14 @@ impl MeshView {
                 if let Some(on) = args.bool("grid")? {
                     self.grid = on;
                     self.overlay_stale = true;
+                }
+                if let Some(kind) = args.str("projection")? {
+                    self.orthographic = match kind.as_str() {
+                        "orthographic" => true,
+                        "perspective" => false,
+                        _ => return Err(format!("mesh_view projection is perspective or orthographic, not {kind}")),
+                    };
+                    self.set_projection(camera);
                 }
                 if let Some(words) = args.str("filter")? {
                     self.filter = words;
@@ -1872,6 +1906,7 @@ impl MeshView {
             ("surfaces", Value::Bool(self.surfaces)),
             ("grid", Value::Bool(self.grid)),
             ("shadow", Value::Bool(self.shadow)),
+            ("projection", text(if self.orthographic { "orthographic" } else { "perspective" })),
             ("filter", text(self.filter.clone())),
             (
                 "pose",
@@ -1952,14 +1987,25 @@ impl MeshView {
     }
 }
 
+/// The orthographic view's lens: [`ORTHO_TAN`], or wider when that would
+/// stand the camera past [`ORTHO_REACH`] metres (the far plane is 200 m).
+fn ortho_tan(distance: f32) -> f32 {
+    ORTHO_TAN.max(genos_scene::DEFAULT_VIEW_TAN * distance / ORTHO_REACH).min(genos_scene::DEFAULT_VIEW_TAN)
+}
+
 impl Orbit {
-    /// Stand `distance` back from the target along the camera's direction.
-    fn write(&mut self, camera: &mut Camera) {
+    /// Stand back from the target along the camera's direction. `distance`
+    /// is how far the 60 degree lens stands. The orthographic view keeps the
+    /// same framing with a narrow lens from further back, so near and far
+    /// parts of the mesh draw at almost the same size.
+    fn write(&mut self, camera: &mut Camera, orthographic: bool) {
+        camera.view_tan = if orthographic { ortho_tan(self.distance) } else { genos_scene::DEFAULT_VIEW_TAN };
+        let back = self.distance * genos_scene::DEFAULT_VIEW_TAN / camera.view_tan;
         let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
         camera.position = genos_scene::Vec3::new(
-            self.target[0] - forward.x * self.distance,
-            self.target[1] - forward.y * self.distance,
-            self.target[2] - forward.z * self.distance,
+            self.target[0] - forward.x * back,
+            self.target[1] - forward.y * back,
+            self.target[2] - forward.z * back,
         );
         self.wrote = ([camera.position.x, camera.position.y, camera.position.z], camera.yaw, camera.pitch);
     }
@@ -2283,6 +2329,38 @@ mod tests {
         view.type_note(&|code| code == InputCode::key_t, true);
         press(&mut view, InputCode::key_escape);
         assert_eq!((view.filter.as_str(), view.selection.note.as_str()), ("", "a"));
+    }
+
+    #[test]
+    fn the_orthographic_view_keeps_the_framing_and_draws_near_and_far_the_same_size() {
+        let mut view = view();
+        let mut camera = Camera::new(0.0, 4.0, 0.0);
+        let side = genos_mcp::json::parse(r#"{"look":"+x"}"#).expect("json");
+        view.command("mesh_view", &side, &mut camera, 1.0).expect("look");
+        // Two points level with the camera's aim, 0.4 m to the side: one in
+        // the plane the camera turns about, one a metre nearer the camera.
+        let aim = view.orbit.map(|orbit| orbit.target).expect("orbit");
+        let across = |camera: &Camera, nearer: f32| {
+            let uv = genos_scene::viewport_uv(camera, 1.0, [aim[0] + nearer, aim[1], aim[2] + 0.4]).expect("in view");
+            (uv[0] - 0.5).abs()
+        };
+        let (plane, near) = (across(&camera, 0.0), across(&camera, 1.0));
+        assert!(near > plane * 1.15, "perspective draws the nearer point further out: {near} {plane}");
+        let stood = camera.position.x;
+
+        let ortho = genos_mcp::json::parse(r#"{"projection":"orthographic"}"#).expect("json");
+        view.command("mesh_view", &ortho, &mut camera, 1.0).expect("orthographic");
+        assert!(camera.view_tan < 0.03 && camera.position.x > stood * 10.0, "a narrow lens from far back");
+        assert!(camera.position.x < genos_scene::CAMERA_FAR, "inside the far plane");
+        let (plane_o, near_o) = (across(&camera, 0.0), across(&camera, 1.0));
+        assert!((plane_o - plane).abs() < 1.0e-4, "the framing is kept: {plane_o} {plane}");
+        assert!(near_o < plane_o * 1.02, "near and far draw the same size: {near_o} {plane_o}");
+        // A pick still finds the mesh.
+        assert!(view.pick(&camera, 1.0, [0.5, 0.5]).is_some());
+
+        let back = genos_mcp::json::parse(r#"{"projection":"perspective"}"#).expect("json");
+        view.command("mesh_view", &back, &mut camera, 1.0).expect("perspective");
+        assert!((camera.view_tan - genos_scene::DEFAULT_VIEW_TAN).abs() < 1.0e-6 && (camera.position.x - stood).abs() < 1.0e-3);
     }
 
     #[test]
