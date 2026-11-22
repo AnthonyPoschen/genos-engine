@@ -486,6 +486,96 @@ pub struct CommandDoc {
     pub doc: String,
     /// The help topic the row is in.
     pub topic: String,
+    /// A field's JSON type, from the examples mesh-workbench's help gives
+    /// (`{"command":"uv_set","values":[...]}`): field, then `array`,
+    /// `string`, `number`, `boolean` or `object`.
+    pub types: Vec<(String, String)>,
+    /// One example of the command from the help, as it is written there.
+    pub example: String,
+}
+
+/// The JSON type name of a value, for a schema.
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Array(_) => "array",
+        Value::String(_) => "string",
+        Value::Bool(_) => "boolean",
+        Value::Object(_) => "object",
+        Value::Null => "null",
+        Value::Number(_) => "number",
+    }
+}
+
+/// Read the example commands out of a help topic: every JSON object in the
+/// text that has a `command` name. Each gives its command's fields their
+/// types, and the first is kept as the command's example. A command with no
+/// table row (the rig and animation commands) is listed from its examples.
+pub fn parse_examples(topic: &str, text: &str, out: &mut Vec<CommandDoc>) {
+    let mut from = 0;
+    while let Some(start) = text[from..].find("{\"command\"").map(|at| from + at) {
+        // The matching brace, outside strings.
+        let (mut depth, mut quoted, mut escaped, mut end) = (0usize, false, false, None);
+        for (at, c) in text[start..].char_indices() {
+            if quoted {
+                match (escaped, c) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => quoted = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => quoted = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(start + at + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else {
+            break;
+        };
+        from = end;
+        let written = &text[start..end];
+        let Ok(Value::Object(pairs)) = json::parse(written) else {
+            continue;
+        };
+        let Some(command) = pairs.iter().find(|(key, _)| key == "command").and_then(|(_, name)| name.as_str()) else {
+            continue;
+        };
+        if !plain_name(command) {
+            continue;
+        }
+        let at = out.iter().position(|known| known.command == command).unwrap_or_else(|| {
+            out.push(CommandDoc {
+                command: command.to_string(),
+                fields: Vec::new(),
+                doc: String::new(),
+                topic: topic.to_string(),
+                types: Vec::new(),
+                example: String::new(),
+            });
+            out.len() - 1
+        });
+        let known = &mut out[at];
+        if known.example.is_empty() {
+            known.example = written.to_string();
+        }
+        for (field, value) in pairs.iter().filter(|(key, _)| key != "command") {
+            if !known.fields.contains(field) {
+                known.fields.push(field.clone());
+            }
+            if !known.types.iter().any(|(named, _)| named == field) && !matches!(value, Value::Null) {
+                known.types.push((field.clone(), type_name(value).to_string()));
+            }
+        }
+    }
 }
 
 /// The fields `mesh_commands` takes.
@@ -546,14 +636,21 @@ pub fn parse_reference(topic: &str, text: &str, out: &mut Vec<CommandDoc>) {
         for command in commands {
             match out.iter_mut().find(|known| known.command == command) {
                 Some(known) => {
-                    known.doc = format!("{}\n{doc}", known.doc);
+                    known.doc = if known.doc.is_empty() { doc.clone() } else { format!("{}\n{doc}", known.doc) };
                     for field in &fields {
                         if !known.fields.contains(field) {
                             known.fields.push(field.clone());
                         }
                     }
                 }
-                None => out.push(CommandDoc { command: command.to_string(), fields: fields.clone(), doc: doc.clone(), topic: topic.to_string() }),
+                None => out.push(CommandDoc {
+                    command: command.to_string(),
+                    fields: fields.clone(),
+                    doc: doc.clone(),
+                    topic: topic.to_string(),
+                    types: Vec::new(),
+                    example: String::new(),
+                }),
             }
         }
     }
@@ -594,6 +691,7 @@ fn catalogue() -> Result<&'static [CommandDoc], String> {
             offset = page.get("next_offset").and_then(Value::as_u64);
         }
         parse_reference(&topic, &whole, &mut found);
+        parse_examples(&topic, &whole, &mut found);
     }
     // The reference also has tables of render modes and stages. A row is a
     // command only if mesh-workbench knows the name: sent bare on the scratch
@@ -627,8 +725,18 @@ fn command_value(doc: &CommandDoc, full: bool) -> Value {
             "command".to_string(),
             obj(vec![("const", text(doc.command.clone()))]),
         )];
-        properties.extend(doc.fields.iter().map(|field| (field.clone(), obj(vec![("description", text("See doc for its form."))]))));
+        properties.extend(doc.fields.iter().map(|field| {
+            // A type the help's examples show; the words say the rest.
+            let property = match doc.types.iter().find(|(named, _)| named == field) {
+                Some((_, kind)) => obj(vec![("type", text(kind.clone()))]),
+                None => obj(vec![("description", text("See doc for its form."))]),
+            };
+            (field.clone(), property)
+        }));
         pairs.push(("doc", text(doc.doc.clone())));
+        if !doc.example.is_empty() {
+            pairs.push(("example", text(doc.example.clone())));
+        }
         pairs.push(("topic", text(doc.topic.clone())));
         pairs.push((
             "schema",
@@ -3783,9 +3891,20 @@ not a row | `nothing` |\n";
         assert!(found[0].doc.contains("Writes corners") && found[0].doc.contains("paged"));
         // A command named in the notes is not a field.
         assert_eq!(found[1].fields, ["name", "path"]);
+        // An example in the prose types the fields it shows, and lists a
+        // command that has no table row.
+        let prose = "Send `{\"command\":\"uv_set\",\"faces\":[2],\"values\":[{\"vertex\":5,\"uv\":[0,0]}]}` then\n\
+```json\n{\"command\":\"rig_set\",\"bones\":[{\"name\":\"root\",\"head\":[0,0,0]}],\"replace\":true,\"note\":\"a } brace\"}\n```\n";
+        super::parse_examples("rigging", prose, &mut found);
+        assert_eq!(found[0].types, [("faces".to_string(), "array".to_string()), ("values".to_string(), "array".to_string())]);
+        let rig = found.iter().find(|doc| doc.command == "rig_set").expect("listed from its example");
+        assert_eq!(rig.fields, ["bones", "replace", "note"]);
+        assert_eq!(rig.types[1], ("replace".to_string(), "boolean".to_string()));
+        assert!(rig.example.ends_with("brace\"}"), "{}", rig.example);
         let value = genos_mcp::json::encode(&super::command_value(&found[0], true));
+        assert!(value.contains(r#""faces":{"type":"array"}"#), "{value}");
         assert!(value.contains(r#""tool":"mesh_material""#) && value.contains(r#""command":{"const":"uv_set"}"#), "{value}");
-        assert!(value.contains(r#""required":["command"]"#) && value.contains(r#""faces":{"#), "{value}");
+        assert!(value.contains(r#""required":["command"]"#) && value.contains(r#""object":{"description""#), "{value}");
     }
 
     #[test]
