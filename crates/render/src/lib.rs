@@ -121,7 +121,7 @@ pub use trace::{
     solid_contains, trace as trace_ray, Hit as TraceHit, Surfaces, SUN_DISC,
 };
 pub use unfilled::{check_unfilled_arg, unfilled_flag_needs_value};
-pub use world::{
+pub use world::{MAT_BASE,
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,
     MaterialAtlas, Object, ParticleFrame, ParticleImage, Reflector, ReflectorKind, ShadePlane,
     ShaderSpace, StreamedTexture, Surface, World,

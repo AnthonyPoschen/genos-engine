@@ -1188,6 +1188,24 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
         scene.lights.push(point_light(lamp));
     }
     let mut world = World::from_scene(scene);
+    // Surface 0: the mesh's textures and the UV checker in one atlas. A part
+    // draws with it only in the `textured` and `uv_checker` shades.
+    let atlas = mesh_view::atlas(&workspace.textures);
+    // In `mesh_view`'s order: SURFACE_ATLAS, SURFACE_CHECKER, SURFACE_TEXTURES.
+    world.surfaces.clear();
+    let rects = [[0, 0, atlas.width, atlas.height], atlas.checker];
+    for color in rects.iter().chain(&atlas.rects) {
+        world.surfaces.push(genos_render::Surface {
+            color: *color,
+            normal: [0; 4],
+            cutoff: 0.0,
+            two_sided: false,
+            roughness: 1.0,
+            metallic: 0.0,
+            material_flags: genos_render::MAT_BASE,
+        });
+    }
+    world.color_atlas = genos_render::MaterialAtlas::from_rgba(atlas.width, atlas.height, atlas.rgba);
     let mut pose = identity_pose();
     pose[13] = lift;
     for part in workspace.parts {
@@ -1397,11 +1415,15 @@ impl App {
             .objects
             .iter_mut()
             .filter(|object| matches!(object.kind, DrawKind::Mesh { .. }));
-        for (index, (object, (hidden, shade, per_vertex))) in meshes.zip(display).enumerate() {
+        for (index, (object, (hidden, shade, per_vertex, uvs))) in meshes.zip(display).enumerate() {
             object.hidden = hidden;
-            if let DrawKind::Mesh { color, colors, vertices, .. } = &mut object.kind {
+            if let DrawKind::Mesh { color, colors, vertices, texcoords, surface, .. } = &mut object.kind {
                 *color = shade;
                 *colors = per_vertex;
+                // The surfaces are the ones `mesh_world` made.
+                let (drawn_with, uvs) = uvs.map_or((None, Vec::new()), |(at, uvs)| (Some(at), uvs));
+                *surface = drawn_with;
+                *texcoords = uvs;
                 // The pose, or back to the rest positions.
                 match (posed.get(index).cloned().flatten(), rest.get(index)) {
                     (Some(at), _) => *vertices = at,

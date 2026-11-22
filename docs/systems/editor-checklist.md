@@ -63,7 +63,9 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Auto-rotate turntable (`mesh_view turntable`, the menu's "Turntable").
 - [x] Shaded, wireframe, object IDs.
 - [x] Shaded vertex colours (`shade: vertex_colors`). The mesh draw carries a colour per vertex (`DrawKind::Mesh::colors`).
-- [ ] Textured lit (material) and the UV checker: being added back now that textures stream. The cause of the black draw was the engine's texture streamer, fixed on 22 Nov 2026: it admitted new mips only from the time left under a 16 ms frame budget, measured as the gap between frames. A 60 Hz display paces frames 16.7 ms apart, so nothing was ever admitted and every texture stayed at its coarsest mip (Sponza at mip 12; a mostly empty atlas reads near black there). The renderer now gives the streamer the draw call's own time, and the streamer lets one mip through after 30 frames with none admitted. Sponza reaches full detail in about 20 seconds.
+- [x] Textured (`shade: textured`) and the UV checker (`shade: uv_checker`). A mesh scene's colour atlas holds the checker and every texture of the workspace. A part with one texture, and the checker, repeat as in mesh-workbench. The vertex paint tints the texture; a face with no texture is grey.
+- [ ] Textured, the rest: both shades are lit (mesh-workbench draws them unlit); a missing UV draws at the image's corner, not magenta (the reader does not say which corners are unmapped); a part with several textures holds a tiling UV at the image's edge; `alpha_cutoff` is not read.
+- [x] The engine drew every texture at its coarsest mip in the scene program (fixed 22 Nov 2026, `Streamer::load`'s starvation floor and the draw call's own time as the streamer's frame time). Sponza draws textured after about 20 seconds.
 - [ ] Unlit vertex colour.
 - [x] Face IDs (`shade: face_ids`).
 - [x] Normals, depth and base colour: the engine's `view` modes `normal`, `depth` and `albedo`. They showed nothing in the scene program until the HDR compose stored the view's colour in the scene image the display pass draws.
