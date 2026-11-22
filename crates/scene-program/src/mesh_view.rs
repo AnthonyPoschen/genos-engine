@@ -175,6 +175,11 @@ pub struct MeshView {
     /// The mesh-workbench session on this workspace. Opened by the first
     /// `mesh_command`, so looking at a workspace writes nothing to it.
     bridge: Option<Box<dyn crate::MeshSession>>,
+    /// The commands that changed the mesh through this viewer, oldest first.
+    edits: Vec<Edit>,
+    /// A transaction mesh-workbench has prepared and not committed. The
+    /// picture shows its result.
+    preview: Option<Preview>,
 }
 
 /// The mesh tools that each take one family of mesh-workbench commands, and
@@ -404,6 +409,57 @@ const PANEL_EVENTS: usize = 12;
 
 /// Triangles with a colour per vertex: positions, normals, colours.
 pub type Painted = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>);
+
+/// One command that changed the mesh, as the context packet reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Edit {
+    /// The command's name, or the names of a batch.
+    command: String,
+    /// The request as sent, cut to [`EDIT_TEXT`] characters.
+    request: String,
+    ok: bool,
+    error: String,
+    /// The note in the viewer when the command ran: what the person asked for.
+    note: String,
+}
+
+/// A prepared transaction: mesh-workbench's `preview_id`, the revision it
+/// was made from, and the scratch workspace that holds its result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Preview {
+    id: String,
+    revision: u64,
+    dir: PathBuf,
+    commands: usize,
+}
+
+/// Edits kept for the context packet, characters of a request kept, and the
+/// selected faces the packet describes one by one.
+const EDITS_KEPT: usize = 32;
+const EDIT_TEXT: usize = 400;
+const CONTEXT_FACES: usize = 48;
+
+/// The fields `mesh_preview` and `mesh_context` take.
+pub const PREVIEW_ARGS: [&str; 4] = ["commands", "guards", "commit", "discard"];
+pub const CONTEXT_ARGS: [&str; 2] = ["screenshot", "edits"];
+
+/// Where the program writes (`--out`, default `./genos-debug`): the preview's
+/// scratch workspace goes under it.
+static OUT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn set_out_dir(dir: PathBuf) {
+    if let Ok(mut out) = OUT.lock() {
+        *out = Some(dir);
+    }
+}
+
+fn out_dir() -> PathBuf {
+    OUT.lock().ok().and_then(|out| out.clone()).unwrap_or_else(|| PathBuf::from("genos-debug"))
+}
+
+fn reply_ok(reply: &Value) -> bool {
+    reply.get("ok").and_then(Value::as_bool).unwrap_or(false)
+}
 
 /// What a panel line's check box acts on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -638,6 +694,8 @@ impl MeshView {
             rebuild: false,
             display_stale: true,
             bridge: None,
+            edits: Vec::new(),
+            preview: None,
         }
     }
 
@@ -1123,7 +1181,7 @@ impl MeshView {
         } else {
             self.replay_at(&session, event)?;
         }
-        set_source(self.replay.as_ref().map(|r| genos_workbench::state_path(&self.dir, &r.session, r.snapshot)));
+        self.sync_source();
         Ok(())
     }
 
@@ -1415,9 +1473,14 @@ impl MeshView {
     pub fn reload(&mut self, stamp: Option<SystemTime>) {
         self.stamp = stamp;
         self.rebuild = false;
-        self.workspace = match &self.replay {
-            Some(replay) => genos_workbench::load_state(&self.dir, &replay.session, replay.snapshot).ok(),
-            None => genos_workbench::load_workspace(&self.dir).ok(),
+        self.workspace = match (&self.preview, &self.replay) {
+            // The preview's copy stands in for the workspace it was made from.
+            (Some(preview), _) => genos_workbench::load_workspace(&preview.dir).ok().map(|mut shown| {
+                shown.dir.clone_from(&self.dir);
+                shown
+            }),
+            (None, Some(replay)) => genos_workbench::load_state(&self.dir, &replay.session, replay.snapshot).ok(),
+            (None, None) => genos_workbench::load_workspace(&self.dir).ok(),
         };
         if let Some(workspace) = &self.workspace {
             let objects: BTreeSet<u64> = workspace.parts.iter().map(|p| p.object).collect();
@@ -1712,7 +1775,7 @@ impl MeshView {
                     Some(_) => return Err("replay is \"live\", \"next\", \"previous\", \"play\", \"stop\", or {session, event}".into()),
                     None => {}
                 }
-                set_source(self.replay.as_ref().map(|r| genos_workbench::state_path(&self.dir, &r.session, r.snapshot)));
+                self.sync_source();
                 if args.bool("show_all")?.unwrap_or(false) {
                     self.hidden.clear();
                     self.display_stale = true;
@@ -1815,7 +1878,17 @@ impl MeshView {
             "mesh_command" => {
                 args.only("mesh_command", &["command"])?;
                 let command = args.0.get("command").ok_or("mesh_command needs command: one mesh-workbench command object, or a list of them")?;
-                self.run(command)
+                self.edit(command)
+            }
+            "mesh_preview" => {
+                args.only("mesh_preview", &PREVIEW_ARGS)?;
+                self.preview_command(&args)
+            }
+            "mesh_context" => {
+                args.only("mesh_context", &CONTEXT_ARGS)?;
+                let edits = args.0.get("edits").and_then(Value::as_u64).map_or(8, |n| n.min(EDITS_KEPT as u64));
+                #[expect(clippy::cast_possible_truncation, reason = "at most EDITS_KEPT")]
+                Ok(self.context_value(camera, edits as usize))
             }
             "mesh_help" => {
                 args.only("mesh_help", &HELP_ARGS)?;
@@ -1834,7 +1907,7 @@ impl MeshView {
                 if belongs != family {
                     return Err(format!("{command} is a {belongs} command, not {family}"));
                 }
-                self.run(args.0)
+                self.edit(args.0)
             }
             other => Err(format!("unknown command {other}")),
         }
@@ -1856,6 +1929,241 @@ impl MeshView {
             self.looked = earlier;
         }
         Ok(reply)
+    }
+
+    /// Run a request a tool sent, and keep it for the context packet when it
+    /// is not a query. An edit ends a preview: mesh-workbench drops its
+    /// prepared transaction when the revision moves.
+    fn edit(&mut self, request: &Value) -> Result<Value, String> {
+        let names: Vec<&str> = match request {
+            Value::Array(items) => items.iter().filter_map(|item| item.get("command").and_then(Value::as_str)).collect(),
+            one => one.get("command").and_then(Value::as_str).into_iter().collect(),
+        };
+        let changes = names.iter().any(|name| family_of(name) != "mesh_query");
+        let command = names.join(", ");
+        let result = self.run(request);
+        if changes {
+            self.note_edit(command, request, &result);
+            self.end_preview();
+        }
+        result
+    }
+
+    fn note_edit(&mut self, command: String, request: &Value, result: &Result<Value, String>) {
+        let mut sent = json::encode(request);
+        if sent.len() > EDIT_TEXT {
+            let cut = (0..=EDIT_TEXT).rev().find(|at| sent.is_char_boundary(*at)).unwrap_or(0);
+            sent.truncate(cut);
+            sent.push_str("...");
+        }
+        let (ok, error) = match result {
+            Ok(reply) => (reply_ok(reply), reply.get("error").and_then(Value::as_str).unwrap_or("").to_string()),
+            Err(err) => (false, err.clone()),
+        };
+        self.edits.push(Edit { command, request: sent, ok, error, note: self.selection.note.clone() });
+        if self.edits.len() > EDITS_KEPT {
+            self.edits.remove(0);
+        }
+    }
+
+    /// The picture's source: the preview's scratch workspace, else the
+    /// replayed state, else the live file.
+    fn sync_source(&self) {
+        set_source(match (&self.preview, &self.replay) {
+            (Some(preview), _) => Some(genos_workbench::project_path(&preview.dir)),
+            (None, Some(replay)) => Some(genos_workbench::state_path(&self.dir, &replay.session, replay.snapshot)),
+            (None, None) => None,
+        });
+    }
+
+    /// Stop showing a preview. The scratch workspace is this viewer's own.
+    fn end_preview(&mut self) {
+        if let Some(preview) = self.preview.take() {
+            let _ = std::fs::remove_dir_all(&preview.dir);
+            self.rebuild = true;
+            self.sync_source();
+        }
+    }
+
+    /// `mesh_preview`. With `commands`: mesh-workbench prepares them as one
+    /// transaction and does not commit, and the picture shows the result.
+    /// The result is made by running the same commands on a copy of the
+    /// workspace under the output directory, because mesh-workbench keeps its
+    /// prepared mesh to itself. `commit: true` commits the prepared
+    /// transaction; `discard: true` drops the picture.
+    fn preview_command(&mut self, args: &Args) -> Result<Value, String> {
+        if args.bool("discard")?.unwrap_or(false) {
+            self.end_preview();
+            return Ok(obj(vec![("preview", Value::Null)]));
+        }
+        if args.bool("commit")?.unwrap_or(false) {
+            let preview = self.preview.clone().ok_or("no preview is shown: send commands first")?;
+            let request = obj(vec![
+                ("command", text("transaction")),
+                ("commit", Value::Bool(true)),
+                ("preview_id", text(preview.id.clone())),
+                ("revision", id(preview.revision)),
+            ]);
+            let result = self.run(&request);
+            self.note_edit(format!("transaction ({} commands, previewed)", preview.commands), &request, &result);
+            self.end_preview();
+            return result;
+        }
+        let commands = match args.0.get("commands") {
+            Some(Value::Array(items)) if !items.is_empty() => items.clone(),
+            _ => return Err("mesh_preview takes commands (a list of mesh-workbench commands), commit: true, or discard: true".into()),
+        };
+        let transaction = |commit: bool| {
+            let mut request = vec![
+                ("command", text("transaction")),
+                ("commit", Value::Bool(commit)),
+                ("commands", Value::Array(commands.clone())),
+            ];
+            if let Some(guards) = args.0.get("guards") {
+                request.push(("guards", guards.clone()));
+            }
+            obj(request)
+        };
+        self.end_preview();
+        let mut reply = self.run(&transaction(false))?;
+        if !reply_ok(&reply) {
+            return Ok(reply);
+        }
+        let result = reply.get("result").unwrap_or(&reply);
+        let id = result.get("preview_id").and_then(Value::as_str).ok_or("mesh-workbench gave no preview_id")?.to_string();
+        let revision = result.get("revision").and_then(Value::as_u64).ok_or("mesh-workbench gave no revision")?;
+        // The same commands, committed on a copy, are the picture.
+        let dir = out_dir().join("mesh-preview");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+        std::fs::copy(genos_workbench::project_path(&self.dir), genos_workbench::project_path(&dir))
+            .map_err(|err| format!("{}: {err}", dir.display()))?;
+        let open = crate::program().mesh_session.ok_or("this program does not link mesh-workbench: run genos-editor")?;
+        let mut scratch = open(&dir)?;
+        let shown = scratch.execute(&transaction(true))?;
+        drop(scratch);
+        if !reply_ok(&shown) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(format!("the preview's copy refused the commands: {}", json::encode(&shown)));
+        }
+        self.preview = Some(Preview { id, revision, dir, commands: commands.len() });
+        self.rebuild = true;
+        self.sync_source();
+        if let Value::Object(pairs) = &mut reply {
+            pairs.push(("previewing".to_string(), Value::Bool(true)));
+        }
+        Ok(reply)
+    }
+
+    fn preview_value(&self) -> Value {
+        self.preview.as_ref().map_or(Value::Null, |preview| {
+            obj(vec![
+                ("preview_id", text(preview.id.clone())),
+                ("revision", id(preview.revision)),
+                ("commands", num(preview.commands as f64)),
+            ])
+        })
+    }
+
+    /// `mesh_context`: what an agent needs to act on a request in one reply.
+    /// The selection with the note and the camera, each selected face's
+    /// vertices, centre and normal, the objects in the picture, how the
+    /// picture is shown, and the latest edits with the note each ran under.
+    fn context_value(&self, camera: &Camera, edits: usize) -> Value {
+        let mut faces = Vec::new();
+        'parts: for part in self.workspace.iter().flat_map(|w| &w.parts) {
+            let mut last = None;
+            for (triangle, face) in part.face_ids.iter().enumerate() {
+                if last == Some(*face) || !self.selection.faces.contains(face) {
+                    continue;
+                }
+                last = Some(*face);
+                if faces.len() == CONTEXT_FACES {
+                    break 'parts;
+                }
+                let corners: Vec<[f32; 3]> = part
+                    .face_ids
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, other)| *other == face)
+                    .flat_map(|(at, _)| (0..3).map(move |corner| at * 3 + corner))
+                    .filter_map(|at| part.positions.get(at).copied())
+                    .collect();
+                #[expect(clippy::cast_precision_loss, reason = "a face has few corners")]
+                let centre = [0, 1, 2].map(|axis| corners.iter().map(|p| p[axis]).sum::<f32>() / corners.len().max(1) as f32);
+                let first = triangle * 3;
+                let normal = match (part.positions.get(first), part.positions.get(first + 1), part.positions.get(first + 2)) {
+                    (Some(a), Some(b), Some(c)) => {
+                        normalise(cross([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]))
+                    }
+                    _ => [0.0; 3],
+                };
+                faces.push(obj(vec![
+                    ("face", id(*face)),
+                    ("object", id(part.object)),
+                    ("vertices", ids(self.face_vertices(*face))),
+                    ("centre", vec3(centre)),
+                    ("normal", vec3(normal)),
+                ]));
+            }
+        }
+        let visible: Vec<Value> = self
+            .workspace
+            .iter()
+            .flat_map(|w| &w.parts)
+            .filter(|part| !self.hidden.contains(&part.object))
+            .map(|part| {
+                let mut low = [f32::INFINITY; 3];
+                let mut high = [f32::NEG_INFINITY; 3];
+                for p in &part.positions {
+                    for axis in 0..3 {
+                        low[axis] = low[axis].min(p[axis]);
+                        high[axis] = high[axis].max(p[axis]);
+                    }
+                }
+                obj(vec![
+                    ("id", id(part.object)),
+                    ("name", text(part.name.clone())),
+                    ("triangles", num(part.triangles() as f64)),
+                    ("min", vec3(low)),
+                    ("max", vec3(high)),
+                ])
+            })
+            .collect();
+        let recent: Vec<Value> = self.edits[self.edits.len().saturating_sub(edits)..]
+            .iter()
+            .map(|edit| {
+                obj(vec![
+                    ("command", text(edit.command.clone())),
+                    ("request", text(edit.request.clone())),
+                    ("ok", Value::Bool(edit.ok)),
+                    ("error", text(edit.error.clone())),
+                    ("note", text(edit.note.clone())),
+                ])
+            })
+            .collect();
+        obj(vec![
+            ("workspace", text(self.dir.display().to_string())),
+            ("revision", id(self.workspace.as_ref().map_or(0, |w| w.revision))),
+            // What the person typed about the selection: the request to act on.
+            ("intent", text(self.selection.note.clone())),
+            ("selection", self.selection_value(camera)),
+            ("selected_faces", list(faces)),
+            ("selected_faces_listed", Value::Bool(self.selection.faces.len() <= CONTEXT_FACES)),
+            ("visible_objects", list(visible)),
+            ("hidden_objects", ids(self.hidden.iter().copied().collect())),
+            (
+                "view",
+                obj(vec![
+                    ("shade", text(self.shade.clone())),
+                    ("projection", text(if self.orthographic { "orthographic" } else { "perspective" })),
+                    ("pick", text(self.pick_mode.clone())),
+                    ("replay", self.replay.as_ref().map_or(Value::Null, |r| obj(vec![("session", text(r.session.clone())), ("event", id(r.event))]))),
+                    ("preview", self.preview_value()),
+                ]),
+            ),
+            ("recent_edits", list(recent)),
+        ])
     }
 
     fn view_value(&self) -> Value {
@@ -1911,6 +2219,7 @@ impl MeshView {
             ("grid", Value::Bool(self.grid)),
             ("shadow", Value::Bool(self.shadow)),
             ("projection", text(if self.orthographic { "orthographic" } else { "perspective" })),
+            ("preview", self.preview_value()),
             ("filter", text(self.filter.clone())),
             (
                 "pose",
@@ -2241,11 +2550,13 @@ mod tests {
             Some(genos_mcp::json::Value::Object(pairs)) => pairs.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>(),
             _ => Vec::new(),
         };
-        let lists: [(&str, &[&str]); 4] = [
+        let lists: [(&str, &[&str]); 6] = [
             ("mesh_view", &super::VIEW_ARGS),
             ("mesh_pick", &super::PICK_ARGS),
             ("mesh_selection", &super::SELECTION_ARGS),
             ("mesh_help", &super::HELP_ARGS),
+            ("mesh_preview", &super::PREVIEW_ARGS),
+            ("mesh_context", &super::CONTEXT_ARGS),
         ];
         for (tool, takes) in lists {
             let schema = genos_debug::commands::mesh_schema(tool).expect(tool);
@@ -2365,6 +2676,36 @@ mod tests {
         let back = genos_mcp::json::parse(r#"{"projection":"perspective"}"#).expect("json");
         view.command("mesh_view", &back, &mut camera, 1.0).expect("perspective");
         assert!((camera.view_tan - genos_scene::DEFAULT_VIEW_TAN).abs() < 1.0e-6 && (camera.position.x - stood).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn the_context_packet_carries_the_intent_the_selected_face_and_what_is_in_view() {
+        let mut view = view();
+        let mut camera = Camera::new(0.0, 4.0, 0.0);
+        let say = genos_mcp::json::parse(r#"{"faces":[2],"note":"pull this out 20 cm"}"#).expect("json");
+        view.command("mesh_selection", &say, &mut camera, 1.0).expect("select");
+        let hide = genos_mcp::json::parse(r#"{"hide":[2]}"#).expect("json");
+        view.command("mesh_view", &hide, &mut camera, 1.0).expect("hide");
+        let none = genos_mcp::json::parse("{}").expect("json");
+        let packet = view.command("mesh_context", &none, &mut camera, 1.0).expect("context");
+        assert_eq!(packet.get("intent").and_then(|v| v.as_str()), Some("pull this out 20 cm"));
+        let text = genos_mcp::json::encode(&packet);
+        // The face's own vertices, where it is and which way it faces.
+        assert!(text.contains(r#""selected_faces":[{"face":2,"object":1,"vertices":[5,6,7,8],"centre":[0,0.5,0.5],"normal":[0,0,1]}]"#), "{text}");
+        // The hidden bracket is not in view; the cube is, with its bounds.
+        assert!(text.contains(r#""visible_objects":[{"id":1,"name":"cube","triangles":12,"min":[-0.5,0,-0.5],"max":[0.5,1,0.5]}]"#), "{text}");
+        assert!(text.contains(r#""hidden_objects":[2]"#) && text.contains(r#""recent_edits":[]"#), "{text}");
+        // An edit needs the editor's session; the lighting program says so, and
+        // the failed command is still in the record with the note it ran under.
+        let cube = genos_mcp::json::parse(r#"{"command":{"command":"cube"}}"#).expect("json");
+        if crate::program().mesh_session.is_none() {
+            let refused = view.command("mesh_command", &cube, &mut camera, 1.0).expect_err("no session");
+            assert!(refused.contains("genos-editor"), "{refused}");
+            let packet = genos_mcp::json::encode(&view.command("mesh_context", &none, &mut camera, 1.0).expect("context"));
+            assert!(packet.contains(r#""command":"cube""#) && packet.contains(r#""ok":false"#) && packet.contains("pull this out"), "{packet}");
+        }
+        // A preview with nothing to show is refused before any session is opened.
+        assert!(view.command("mesh_preview", &none, &mut camera, 1.0).is_err());
     }
 
     #[test]

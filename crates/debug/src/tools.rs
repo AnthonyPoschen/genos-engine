@@ -375,6 +375,10 @@ struct Running {
 
 /// The debug tools for one picture. See `docs/systems/debugging.md`.
 pub struct Tools {
+    /// A value the command being dispatched wants joined to its job's reply
+    /// (`mesh_context` and its screenshot), then the same by command id.
+    attach_next: Option<Value>,
+    attach: Vec<(u64, Value)>,
     frame: u64,
     paused: bool,
     fixed_dt: Option<f32>,
@@ -416,6 +420,8 @@ impl Tools {
         genos_mcp::command::register(crate::commands::specs());
         genos_mcp::command::publish(crate::commands::public_names());
         Self {
+            attach_next: None,
+            attach: Vec::new(),
             frame: 0,
             paused: false,
             fixed_dt: None,
@@ -587,9 +593,13 @@ impl Tools {
         for cmd in genos_mcp::command::take() {
             let args = Args(&cmd.args);
             let result = self.dispatch(&cmd.name, &args, ctx.as_deref_mut());
+            let attached = self.attach_next.take();
             match result {
                 Ok(Step::Reply(value)) => genos_mcp::command::reply(cmd.id, Ok(value)),
-                Ok(Step::Job(job)) => self.jobs.push(Running { id: cmd.id, job }),
+                Ok(Step::Job(job)) => {
+                    self.attach.extend(attached.map(|value| (cmd.id, value)));
+                    self.jobs.push(Running { id: cmd.id, job });
+                }
                 Err(err) => genos_mcp::command::reply(cmd.id, Err(err)),
             }
         }
@@ -801,6 +811,16 @@ impl Tools {
         }
         for (index, result) in done.into_iter().rev() {
             let running = self.jobs.remove(index);
+            // A context packet waits on its screenshot: the capture's reply
+            // goes inside it.
+            let held = self.attach.iter().position(|(id, _)| *id == running.id).map(|at| self.attach.swap_remove(at).1);
+            let result = match (held, result) {
+                (Some(Value::Object(mut pairs)), Ok(shot)) => {
+                    pairs.push(("screenshot".to_string(), shot));
+                    Ok(Value::Object(pairs))
+                }
+                (_, result) => result,
+            };
             genos_mcp::command::reply(running.id, result);
         }
         if let Some(renderer) = renderer {
@@ -1784,6 +1804,21 @@ impl Tools {
                     .collect();
                 reply(obj(groups))
             }
+            "mesh_context" => {
+                let aspect = ctx.renderer.width() as f32 / ctx.renderer.height().max(1) as f32;
+                let packet = match ctx.host.scene_command(name, args.0, ctx.camera, aspect) {
+                    Some(result) => result?,
+                    None => return Err(format!("{name} needs a mesh scene; load one with load_scene")),
+                };
+                if args.bool("screenshot")? == Some(false) {
+                    return reply(packet);
+                }
+                // The picture the person is looking at, saved small, in the same reply.
+                let shot = genos_mcp::json::parse(r#"{"path":"mesh-context.png","width":960}"#)?;
+                let step = self.run("capture", &Args(&shot), ctx)?;
+                self.attach_next = Some(packet);
+                Ok(step)
+            }
             scene_command if scene_command.starts_with("mesh_") => {
                 let aspect = ctx.renderer.width() as f32 / ctx.renderer.height().max(1) as f32;
                 match ctx.host.scene_command(name, args.0, ctx.camera, aspect) {
@@ -2032,7 +2067,7 @@ fn level0_voxels_value(renderer: &mut Renderer, around: [f32; 3], radius: f32) -
         let ax = (v.axis >> 1) as usize;
         let mut normal = [0.0f32; 3];
         normal[ax] = if v.axis & 1 == 0 { 1.0 } else { -1.0 };
-        let size = 0.0625 * 2f32.powi(v.level as i32 + 1);
+        let size = 0.0625 * 2f32.powi(i32::try_from(v.level).unwrap_or(0) + 1);
         let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
         let queries: Vec<_> = (0..4)
             .map(|i| {

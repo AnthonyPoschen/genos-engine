@@ -56,7 +56,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] The catalogue is in six sections: `scene`, `lighting`, `render`, `capture`, `editor`, `mesh` (`section_of` in `crates/debug/src/commands.rs`). Every description starts with its section in brackets, and `list_commands` returns the catalogue grouped, or one section. The lighting commands are the `lighting` section.
 - [x] Section prefixes in the command names: a client sees `lighting.get_settings`, `scene.load`, `mesh.view`. The old names are deprecated aliases that log a warning on first use over MCP or HTTP. Scripts keep the old names (a Rhai name has no dot). `fx.*` and `fx_*` were already published twice and still are.
 - [x] Bones, skin weights and animation checked through `mesh_rig` and `mesh_animation`: a two-bone rig, four weighted vertices, a clip, and a sampled pose that moved those vertices 0.6 m.
-- [ ] Recent edits in the editor state, and a context packet for each request: camera pose, a screenshot, the selection, the visible objects.
+- [x] `mesh_context`: one reply with the intent (the note), the selection, each selected face's vertices, centre and normal, the camera, the objects in view with their bounds, how the picture is shown, the latest edits (each with its request, whether it ran, and the note it ran under), and a screenshot saved as a file.
 
 ### D. Viewer parity with the mesh-workbench web viewer (decision 5)
 
@@ -101,7 +101,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] The note typed in the window: `T` starts, letters, digits and the space bar type, Backspace removes, Enter ends, Escape clears. Hotkeys are off while typing. The Scene tab shows it as "Note".
 - [ ] Punctuation in the typed note (the window gives key codes, not text).
 - [ ] Box and lasso selection; select loop and select connected in the viewer.
-- [ ] Preview of a pending edit (mesh-workbench `transaction` with `preview_id`) before it is committed.
+- [x] Preview of a pending edit (`mesh_preview`): mesh-workbench prepares the commands as one transaction and does not commit; the picture shows the result; `commit: true` commits it as one undo step and `discard: true` drops it. The picture comes from running the same commands on a copy of the workspace under `./genos-debug/mesh-preview/`, because mesh-workbench keeps its prepared mesh private.
 
 ## For Nathan
 
@@ -114,6 +114,7 @@ Changes we would like in mesh-workbench. Add to this list as the bridge meets th
 - The crate, the repository and the docs under one name (`gpt-mesh`, `mesh-workbench`).
 - A read path that is not recorded as a session event (or a flag to skip recording), for queries a viewer repeats: `animation_sample` for playback, `query_rig`, `inspect`.
 - A page limit above 256 for `animation_sample` and `query_mesh`, or a whole-mesh pose in one reply.
+- Access to the prepared transaction's mesh (a `preview_state` query, or the preview written as a state file), so a viewer shows the candidate without running the commands a second time on a copy.
 - A machine-readable command list: each command's name, family, parameters and types, so the engine can publish a schema per tool.
 - A reference row for each of the roughly 40 commands that are in the code and not in `docs/command-reference.md`.
 

@@ -497,6 +497,7 @@ fn run() -> Result<i32, String> {
     let opts = options()?;
     apply_intent(&opts)?;
     std::fs::create_dir_all(opts.out.join("shots")).map_err(|err| err.to_string())?;
+    mesh_view::set_out_dir(opts.out.clone());
     std::fs::create_dir_all(opts.out.join("logs")).map_err(|err| err.to_string())?;
     std::fs::create_dir_all(opts.out.join("dumps")).map_err(|err| err.to_string())?;
     if std::env::var_os("GENOS_LIGHTING_DUMP").is_some() {
@@ -2026,7 +2027,9 @@ impl Host for App {
         // and the reply reports the mesh that is then on show.
         let rebuilt = self.mesh.as_ref().is_some_and(|view| view.rebuild);
         self.follow_mesh();
-        if rebuilt && result.is_ok() {
+        // Only the view's own report is asked for again: an edit or a preview
+        // keeps the reply mesh-workbench gave.
+        if rebuilt && result.is_ok() && name == "mesh_view" {
             let none = genos_mcp::json::Value::Object(Vec::new());
             result = self.mesh.as_mut()?.command(name, &none, camera, aspect);
         }
