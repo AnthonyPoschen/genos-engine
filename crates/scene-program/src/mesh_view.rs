@@ -3250,6 +3250,8 @@ impl MeshView {
         obj(vec![
             ("workspace", text(self.dir.display().to_string())),
             ("revision", id(self.workspace.as_ref().map_or(0, |w| w.revision))),
+            // Every position and length here and in mesh-workbench: metres, Y up.
+            ("units", text("metres, Y up")),
             // What the person typed about the selection: the request to act on.
             ("intent", text(self.selection.note.clone())),
             ("selection", self.selection_value(camera)),

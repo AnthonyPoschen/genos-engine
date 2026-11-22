@@ -119,6 +119,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 
 - [x] Run over an MCP session on 23 Nov 2026 with the assistant as the agent: a face picked in the viewer and the note "pull this face out by 30 cm"; `mesh.context` gave the note and the face's normal; `mesh.commands` gave `extrude`'s fields; `mesh.preview` showed the result with the workspace still at revision 1; `commit: true` moved it to revision 2; the face's vertices read z 0.8, from 0.5; the edit record held the command with the note.
 - [x] The same loop is a check: `debug/lighting/scripts/mesh_edit_from_selection.rhai` on `genos-editor` (15 checks). It builds its own workspace under the output directory.
+- [x] Through Claude Code itself: `.mcp.json` at the repository root names the editor's endpoint (`genos-editor`, port 8765) and the lighting program's (`genos-lighting`, 8766), so a Claude Code session in this repository has the tools. Checked on 23 Nov 2026 with a separate `claude -p` session that was given only that config and the task: it called `mesh_context`, `mesh_commands`, `mesh_preview` and the commit, and the selected face moved 0.25 m (z 0.5 to 0.75, revision 1 to 2). Claude Code shows a tool as `mcp__genos-editor__mesh_context`: it writes the dot of `mesh.context` as an underscore.
 - [ ] In both, the selection is made with `mesh_pick`, which runs the code a click runs; the pointer path itself is covered by the unit tests, not by a hand on the mouse.
 
 ### G. Compared with mesh-workbench's own renderer

@@ -428,7 +428,7 @@ fn host_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "mesh_context",
-            "Everything an agent needs to act on what the person asked for in the mesh viewer, in one reply: intent (the note they typed), selection (objects, faces, vertices, the picked point, the camera in mesh coordinates), selected_faces (each face's object, vertex ids, centre and normal, up to 48), visible_objects (id, name, triangles, bounds), hidden_objects, view (shade, projection, pick, replay, preview), recent_edits (the latest commands that changed the mesh, each with its request, whether it ran, and the note it ran under), and screenshot (the picture as it is now, saved as a file; screenshot: false leaves it out). edits sets how many edits are listed. Needs a mesh scene.",
+            "Everything an agent needs to act on what the person asked for in the mesh viewer, in one reply: units (metres, Y up), intent (the note they typed), selection (objects, faces, vertices, the picked point, the camera in mesh coordinates), selected_faces (each face's object, vertex ids, centre and normal, up to 48), visible_objects (id, name, triangles, bounds), hidden_objects, view (shade, projection, pick, replay, preview), recent_edits (the latest commands that changed the mesh, each with its request, whether it ran, and the note it ran under), and screenshot (the picture as it is now, saved as a file; screenshot: false leaves it out). edits sets how many edits are listed. Needs a mesh scene.",
         ),
         spec(
             "mesh_preview",

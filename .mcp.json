@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "genos-editor": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp"
+    },
+    "genos-lighting": {
+      "type": "http",
+      "url": "http://127.0.0.1:8766/mcp"
+    }
+  }
+}
