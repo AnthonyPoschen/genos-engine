@@ -114,7 +114,15 @@ void main() {
     // farther mover fragment cannot leave its oid on a nearer static surface.
     uint prev_dist = atomicMin(gbuf.words[i * GBUF_STRIDE], dist_bits);
     atomicMin(gbuf.words[i * GBUF_STRIDE + 1u], lighting_pack_normal(n));
-    atomicMin(gbuf.words[i * GBUF_STRIDE + 2u], packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
+    // The base colour is kept in 8 linear bits, so a dark gradient had a few
+    // visible steps (a base colour of 0.03 is byte 8). An ordered dither of
+    // under half a step, fixed to the pixel, turns the steps into a fine
+    // pattern. A colour that is exactly a byte stays that byte.
+    const float GBUF_BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    ivec2 cell = ivec2(gl_FragCoord.xy) & 3;
+    float dither = ((GBUF_BAYER[cell.y * 4 + cell.x] + 0.5) / 16.0 - 0.5) / 255.0;
+    vec3 stored_albedo = clamp(albedo + dither, 0.0, 1.0);
+    atomicMin(gbuf.words[i * GBUF_STRIDE + 2u], packUnorm4x8(vec4(stored_albedo, two_sided ? 1.0 / 255.0 : 0.0)));
     uint flags = (v_mat & 1u) != 0u ? 1u : 0u;
     const float gbuf_flag_byte = 255.0;
     atomicMin(gbuf.words[i * GBUF_STRIDE + 4u], packUnorm4x8(vec4(clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 0.0, float(flags) / gbuf_flag_byte)));

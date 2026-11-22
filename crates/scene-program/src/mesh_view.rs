@@ -946,6 +946,38 @@ fn reply_ok(reply: &Value) -> bool {
     reply.get("ok").and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// One clickable part of the axis gizmo: an axis end, or the projection's name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GizmoEnd {
+    /// Its middle, in pixels.
+    pub at: [f32; 2],
+    /// Half its width and height.
+    pub half: [f32; 2],
+    pub label: String,
+    pub color: [f32; 3],
+    /// The side a click looks from (`mesh_view look`); `None` is the projection toggle.
+    pub look: Option<&'static str>,
+    /// The gizmo's centre, for the ends that have a line to it.
+    pub line_from: Option<[f32; 2]>,
+    depth: f32,
+}
+
+impl GizmoEnd {
+    /// Whether the pixel `at` is on it.
+    #[must_use]
+    pub fn holds(&self, at: [f32; 2]) -> bool {
+        (at[0] - self.at[0]).abs() <= self.half[0] && (at[1] - self.at[1]).abs() <= self.half[1]
+    }
+}
+
+/// The gizmo: its centre's distance from the picture's top right corner, an
+/// arm's length, and half an end's size, in pixels.
+const GIZMO_INSET: f32 = 70.0;
+const GIZMO_ARM: f32 = 38.0;
+const GIZMO_DOT: f32 = 9.0;
+/// The side each end looks from: +X, -X, +Y, -Y, +Z, -Z.
+const GIZMO_LOOKS: [&str; 6] = ["+x", "-x", "+y", "-y", "+z", "-z"];
+
 /// An ID drawn on the picture: the number, where (screen, 0..1, origin top
 /// left), and whether it names a face (else a vertex).
 #[derive(Clone, Debug, PartialEq)]
@@ -2126,6 +2158,72 @@ impl MeshView {
 
     /// One frame of the pointer. Moves the camera, and on a click picks under
     /// the pointer with [`MeshView::pick_mode`]. `size` is the picture in pixels.
+    /// The axis gizmo in the picture's top right corner, as the web viewer
+    /// has it: an end for each side of each axis, placed by how the camera
+    /// is turned, and the projection's name under it. A click on an end looks
+    /// from that side; a click on the name changes the projection. Pixels.
+    pub fn gizmo(&self, camera: &Camera, size: [f32; 2]) -> Vec<GizmoEnd> {
+        let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
+        let right = forward.cross(genos_scene::Vec3::Y);
+        let length = right.length().max(1.0e-6);
+        let right = right / length;
+        let up = right.cross(forward);
+        let centre = [size[0] - GIZMO_INSET, GIZMO_INSET];
+        let mut ends = Vec::with_capacity(7);
+        for (axis, name, color) in [(0, "X", [0.95, 0.42, 0.45]), (1, "Y", [0.62, 0.85, 0.45]), (2, "Z", [0.45, 0.65, 1.0])] {
+            let unit: [f32; 3] = std::array::from_fn(|k| if k == axis { 1.0 } else { 0.0 });
+            let across = unit[0] * right.x + unit[1] * right.y + unit[2] * right.z;
+            let rise = unit[0] * up.x + unit[1] * up.y + unit[2] * up.z;
+            let toward = -(unit[0] * forward.x + unit[1] * forward.y + unit[2] * forward.z);
+            for (sign, label, look) in [(1.0, name.to_string(), GIZMO_LOOKS[axis * 2]), (-1.0, format!("-{name}"), GIZMO_LOOKS[axis * 2 + 1])] {
+                ends.push(GizmoEnd {
+                    at: [centre[0] + across * sign * GIZMO_ARM, centre[1] - rise * sign * GIZMO_ARM],
+                    half: [GIZMO_DOT, GIZMO_DOT],
+                    label,
+                    // The far ends are dimmer, as in the web viewer.
+                    color: if sign > 0.0 { color } else { color.map(|c| c * 0.45) },
+                    look: Some(look),
+                    line_from: (sign > 0.0).then_some(centre),
+                    depth: toward * sign,
+                });
+            }
+        }
+        // Nearer ends draw last, over the far ones.
+        ends.sort_by(|a, b| a.depth.total_cmp(&b.depth));
+        let name = if self.orthographic { "ORTHOGRAPHIC" } else { "PERSPECTIVE" };
+        #[expect(clippy::cast_precision_loss, reason = "a short word")]
+        let half_wide = name.len() as f32 * 3.0 + 6.0;
+        ends.push(GizmoEnd {
+            at: [centre[0], centre[1] + GIZMO_ARM + 22.0],
+            half: [half_wide, 8.0],
+            label: name.to_string(),
+            color: [0.8, 0.84, 0.9],
+            look: None,
+            line_from: None,
+            depth: 2.0,
+        });
+        ends
+    }
+
+    /// The words the picture carries, as the web viewer's corners do: the
+    /// workspace with what is shown and its revision, the counts, and how the
+    /// pointer moves the view.
+    pub fn hud(&self) -> [String; 3] {
+        let name = self.dir.file_name().map_or_else(|| self.dir.display().to_string(), |name| name.to_string_lossy().into_owned());
+        let shown = match (&self.preview, &self.replay) {
+            (Some(_), _) => "PREVIEW".to_string(),
+            (None, Some(replay)) => format!("REPLAY {}", replay.event),
+            (None, None) => "LIVE".to_string(),
+        };
+        let revision = self.workspace.as_ref().map_or(0, |w| w.revision);
+        let counts = self.workspace.as_ref().map_or_else(String::new, |w| format!("{} OBJECTS  {} VERTICES  {} FACES", w.parts.len(), w.vertices, w.faces));
+        [
+            format!("{name}   {shown}   REV {revision}").to_uppercase(),
+            counts,
+            "DRAG ORBITS   RIGHT-DRAG PANS   WHEEL ZOOMS   CTRL-DRAG BOX   ALT-DRAG LASSO   T NOTE".to_string(),
+        ]
+    }
+
     /// The ID labels of the topology shade (`wireframe`), as mesh-workbench's
     /// `topology` mode shows them: each face's ID at its centre and each
     /// vertex's ID at the vertex, for what the camera sees. Made again only
@@ -2522,6 +2620,21 @@ impl MeshView {
         }
         if changed {
             orbit.write(camera, self.orthographic);
+        }
+        // A click on the axis gizmo turns the view; it is not a pick.
+        if click {
+            if let Some(press) = self.gizmo(camera, size).into_iter().find(|end| end.holds([input.x, input.y])) {
+                match press.look {
+                    Some(side) => {
+                        let _ = self.look(camera, side);
+                    }
+                    None => {
+                        self.orthographic = !self.orthographic;
+                        self.set_projection(camera);
+                    }
+                }
+                return;
+            }
         }
         if click {
             let at = [input.x / size[0].max(1.0), input.y / size[1].max(1.0)];
@@ -4153,6 +4266,44 @@ not a row | `nothing` |\n";
         assert!(value.contains(r#""faces":{"type":"array"}"#), "{value}");
         assert!(value.contains(r#""tool":"mesh_material""#) && value.contains(r#""command":{"const":"uv_set"}"#), "{value}");
         assert!(value.contains(r#""required":["command"]"#) && value.contains(r#""object":{"description""#), "{value}");
+    }
+
+    #[test]
+    fn a_click_on_the_gizmo_turns_the_view_and_its_name_changes_the_projection() {
+        let mut view = view();
+        let mut camera = Camera::new(0.0, 4.0, 0.0);
+        let size = [1280.0, 720.0];
+        let rest = super::OrbitInput { x: 10.0, y: 400.0, ..super::OrbitInput::default() };
+        view.pointer(&mut camera, size, rest);
+        let click = |view: &mut MeshView, camera: &mut Camera, at: [f32; 2]| {
+            let here = super::OrbitInput { x: at[0], y: at[1], ..super::OrbitInput::default() };
+            view.pointer(camera, size, here);
+            view.pointer(camera, size, super::OrbitInput { left: true, ..here });
+            view.pointer(camera, size, here);
+        };
+        // Six ends and the projection's name, in the top right corner.
+        let ends = view.gizmo(&camera, size);
+        assert_eq!(ends.len(), 7);
+        assert!(ends.iter().all(|end| end.at[0] > 1100.0 && end.at[1] < 160.0), "{ends:?}");
+        // The +X end: the camera goes to the +X side, and nothing is picked.
+        let x = ends.iter().find(|end| end.label == "X").expect("X").at;
+        click(&mut view, &mut camera, x);
+        assert!(camera.position.x > 2.0 && camera.pitch.abs() < 1.0e-6, "{:?}", camera.position);
+        assert!(view.selection.is_empty(), "a gizmo click is not a pick");
+        // From +X, the X end is the nearest: it sits at the gizmo's centre.
+        let ends = view.gizmo(&camera, size);
+        let x = ends.iter().find(|end| end.label == "X").expect("X");
+        assert!((x.at[0] - (size[0] - super::GIZMO_INSET)).abs() < 1.0 && (x.at[1] - super::GIZMO_INSET).abs() < 1.0);
+        // The name under it toggles the projection.
+        let name = ends.iter().find(|end| end.look.is_none()).expect("projection").clone();
+        assert_eq!(name.label, "PERSPECTIVE");
+        click(&mut view, &mut camera, name.at);
+        assert!(view.orthographic && camera.parallel_half > 0.0);
+        assert_eq!(view.gizmo(&camera, size).last().map(|end| end.label.clone()), Some("ORTHOGRAPHIC".to_string()));
+        // The words on the picture.
+        let hud = view.hud();
+        assert_eq!(hud[0], "SAMPLE   LIVE   REV 1");
+        assert_eq!(hud[1], "2 OBJECTS  20 VERTICES  14 FACES");
     }
 
     #[test]

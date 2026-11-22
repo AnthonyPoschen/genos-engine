@@ -62,6 +62,10 @@ In a mesh scene the fly camera is off and the pointer works on the mesh:
 
 When a checkpoint, a script, or an agent moves the camera, the orbit continues about the point in front of that new pose.
 
+## On the picture
+
+A mesh scene writes the web viewer's corners on the picture: the workspace's name with what is shown (live, a replay step, a preview) and its revision at the top; the object, vertex and face counts at the bottom left; the pointer hints at the bottom right. The axis gizmo is at the top right: an end for each side of each axis, turned as the camera is. A click on an end looks from that side, and a click on the name under it (`PERSPECTIVE` or `ORTHOGRAPHIC`) changes the projection.
+
 ## Working from Claude Code
 
 `.mcp.json` at the repository root gives a Claude Code session in this repository the editor's tools (server `genos-editor`, `http://127.0.0.1:8765/mcp`) while `make editor` runs. A person selects in the window and types a note (`T`); the session reads `mesh_context` (the note, the selection, each selected face's vertices, centre and normal, a screenshot), looks a command up with `mesh_commands`, shows the edit with `mesh_preview`, and commits it. `debug/lighting/scripts/mesh_edit_from_selection.rhai` runs the same loop as a check.

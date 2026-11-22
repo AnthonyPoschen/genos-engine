@@ -921,8 +921,29 @@ fn run() -> Result<i32, String> {
         });
         overlay.extend_from_slice(tools.overlay());
         // The topology shade's ID labels, each on a dark plate.
+        let mut gizmo_lines: Vec<genos_render::ScreenLine> = Vec::new();
         if let Some(view) = &mut app.mesh {
             let (width, height) = (size.0 as f32, size.1 as f32);
+            // The web viewer's corners: the workspace line, the counts, the
+            // hints, and the axis gizmo. The menu has the top left corner.
+            let write = |overlay: &mut Vec<ScreenRect>, words: &str, x: f32, y: f32, color: [f32; 3]| {
+                let (paints, _) = genos_ui::small_text(words, 0.0, 0.0, color);
+                overlay.extend(paints.iter().map(|p| ScreenRect { x: x + p.x, y: y + p.y, w: p.w, h: p.h, color: p.color }));
+            };
+            let wide = |words: &str| words.chars().count() as f32 * 6.0;
+            let [title, counts, hints] = view.hud();
+            write(&mut overlay, &title, ((width - wide(&title)) * 0.5).round(), 10.0, HUD_BRIGHT);
+            write(&mut overlay, &counts, 16.0, height - 22.0, HUD_BRIGHT);
+            write(&mut overlay, &hints, (width - wide(&hints) - 16.0).round(), height - 22.0, HUD_DIM);
+            for end in view.gizmo(&camera, [width, height]) {
+                if let Some(centre) = end.line_from {
+                    gizmo_lines.push(genos_render::ScreenLine { a: centre, b: end.at, width: 2.0, color: end.color });
+                }
+                let plate = if end.look.is_some() { end.color.map(|c| c * 0.35) } else { LABEL_PLATE };
+                overlay.push(ScreenRect { x: end.at[0] - end.half[0], y: end.at[1] - end.half[1], w: end.half[0] * 2.0, h: end.half[1] * 2.0, color: plate });
+                let text = if end.look.is_some() { [1.0; 3] } else { end.color };
+                write(&mut overlay, &end.label, (end.at[0] - wide(&end.label) * 0.5).round(), (end.at[1] - 4.0).round(), text);
+            }
             for label in view.id_labels(&camera, width / height.max(1.0)) {
                 let color = if label.face { mesh_view::FACE_LABEL_COLOR } else { mesh_view::VERTEX_LABEL_COLOR };
                 let (paints, wide) = genos_ui::small_text(&label.text, 0.0, 0.0, color);
@@ -961,7 +982,9 @@ fn run() -> Result<i32, String> {
             })
             .collect();
         if app.mesh.is_some() {
-            renderer.set_overlay_lines(&dragged);
+            let mut lines = gizmo_lines;
+            lines.extend(dragged);
+            renderer.set_overlay_lines(&lines);
         }
         if want_read && !tools.show_capture_overlay(capture_ui) {
             overlay.clear();
@@ -2753,6 +2776,11 @@ fn flush_checks(section: &mut SectionAcc) {
 /// as a share of the sun's. mesh-workbench's web viewer has lights towards
 /// (-3, 5, 4), (4, 2, 1) and (1, 3, -4) at 0.8, 0.27 and 0.38.
 const MESH_FILL_LIGHTS: [([f32; 3], f32); 2] = [([-4.0, -2.0, -1.0], 0.27 / 0.8), ([-1.0, -3.0, 4.0], 0.38 / 0.8)];
+
+/// The words on a mesh scene's picture: the workspace line and the counts,
+/// and the hints.
+const HUD_BRIGHT: [f32; 3] = [0.82, 0.85, 0.9];
+const HUD_DIM: [f32; 3] = [0.5, 0.53, 0.58];
 
 /// The height of a label's small text in pixels, and the plate behind it.
 const LABEL_HEIGHT: f32 = 8.0;

@@ -140,8 +140,9 @@ A workspace with three objects, an extruded face, box UVs scaled to tile, a text
 - [x] Contact shadows that would overlap are one patch: two patches at the same height flickered into rings (seen in the window).
 - [x] The sky is the lit ground's colour, so the ground has no visible edge: it fades into the background as the web viewer's does.
 - [x] `normals` and `depth` are shades in mesh-workbench's encodings (RGB = (N + 1) / 2; 255 at the nearest shown vertex and 32 at the farthest), compared with its `capture` side by side. The engine's `view` modes `normal` and `depth` remain as they were.
-- [ ] Not matched: the contact shadow shows a few steps on the dark ground, because the G-buffer keeps base colour in 8 linear bits.
-- Decision: the web viewer's toolbar, axis gizmo, inspector panel and footer are the Mesh tab of the engine's menu here (a folder picker, readouts, dropdowns, check boxes, the Objects and Replay sections). The editor stays basic: a person looks, selects and types a note, and an agent edits.
+- [x] The contact shadow is a smooth gradient. It showed steps on the dark ground because the G-buffer keeps base colour in 8 linear bits; `gbuffer.frag` now adds an ordered dither of under half a step, fixed to the pixel, so a dark gradient anywhere in the engine has no steps. A colour that is exactly a byte is unchanged, and the render suite fails the same tests with and without it.
+- [x] The web viewer's corners are on the picture: the workspace with what is shown and its revision (top), the counts (bottom left), the pointer hints (bottom right), and the axis gizmo (top right). A click on a gizmo end looks from that side, and a click on the projection's name under it changes the projection. Read from a picture of the window.
+- Decision: the web viewer's toolbar and inspector panel are the Mesh tab of the engine's menu here (a folder picker, dropdowns, check boxes, the Objects and Replay sections). The editor stays basic: a person looks, selects and types a note, and an agent edits.
 
 ## For Nathan
 
