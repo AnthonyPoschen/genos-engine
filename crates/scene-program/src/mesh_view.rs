@@ -2624,14 +2624,11 @@ impl MeshView {
         // A click on the axis gizmo turns the view; it is not a pick.
         if click {
             if let Some(press) = self.gizmo(camera, size).into_iter().find(|end| end.holds([input.x, input.y])) {
-                match press.look {
-                    Some(side) => {
-                        let _ = self.look(camera, side);
-                    }
-                    None => {
-                        self.orthographic = !self.orthographic;
-                        self.set_projection(camera);
-                    }
+                if let Some(from) = press.look {
+                    let _ = self.look(camera, from);
+                } else {
+                    self.orthographic = !self.orthographic;
+                    self.set_projection(camera);
                 }
                 return;
             }
