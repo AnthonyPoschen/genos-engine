@@ -173,7 +173,17 @@ pub trait Host {
     ) -> Option<Result<genos_mcp::json::Value, String>> {
         None
     }
+
+    /// A scene command may answer with one field, [`SCENE_PENDING`], whose
+    /// value is a ticket: the command runs off the frame thread. This is
+    /// asked each frame until it gives the answer.
+    fn scene_command_poll(&mut self, _ticket: u64) -> Option<Result<genos_mcp::json::Value, String>> {
+        Some(Err("no scene command is running".into()))
+    }
 }
+
+/// The field of a scene command's reply that says the answer comes later.
+pub const SCENE_PENDING: &str = "genos_pending_ticket";
 
 /// A bare scene: no knobs of its own.
 impl Host for genos_scene::Scene {

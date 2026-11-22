@@ -259,6 +259,10 @@ enum Job {
         frames_dir: Option<PathBuf>,
         index: u32,
     },
+    /// A scene command is running off the frame thread; the host answers by ticket.
+    SceneCommand {
+        ticket: u64,
+    },
     /// A scene file is loading off the frame thread.
     SceneLoad {
         name: String,
@@ -543,6 +547,7 @@ impl Tools {
     pub fn before_draw(&mut self, ctx: &mut Ctx) -> bool {
         self.accept_commands(Some(ctx));
         self.poll_scene_loads(ctx);
+        self.poll_scene_commands(ctx);
         self.apply_edits(ctx.host.scene());
         self.apply_camera_path(ctx.camera);
         let materials = self.materials(ctx.host.scene().solids.len());
@@ -762,7 +767,7 @@ impl Tools {
                         }
                     }
                 },
-                Job::SceneLoad { .. } => None,
+                Job::SceneLoad { .. } | Job::SceneCommand { .. } => None,
                 Job::Flicker {
                     left,
                     flicker,
@@ -1822,11 +1827,36 @@ impl Tools {
             scene_command if scene_command.starts_with("mesh_") => {
                 let aspect = ctx.renderer.width() as f32 / ctx.renderer.height().max(1) as f32;
                 match ctx.host.scene_command(name, args.0, ctx.camera, aspect) {
-                    Some(result) => reply(result?),
+                    Some(result) => {
+                        let value = result?;
+                        // The host runs it off the frame thread and answers by ticket.
+                        match value.get(crate::knobs::SCENE_PENDING).and_then(Value::as_u64) {
+                            Some(ticket) => Ok(Step::Job(Job::SceneCommand { ticket })),
+                            None => reply(value),
+                        }
+                    }
                     None => Err(format!("{name} needs a mesh scene; load one with load_scene")),
                 }
             }
             _ => Err(format!("unknown command {name}")),
+        }
+    }
+
+    /// Answer the scene commands the host has finished.
+    fn poll_scene_commands(&mut self, ctx: &mut Ctx) {
+        let mut index = 0;
+        while index < self.jobs.len() {
+            let Job::SceneCommand { ticket } = self.jobs[index].job else {
+                index += 1;
+                continue;
+            };
+            match ctx.host.scene_command_poll(ticket) {
+                Some(result) => {
+                    let running = self.jobs.remove(index);
+                    genos_mcp::command::reply(running.id, result);
+                }
+                None => index += 1,
+            }
         }
     }
 

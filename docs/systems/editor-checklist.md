@@ -34,8 +34,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] [ADR 0042](../adr/0042-mesh-workbench-is-linked-into-the-editor.md). `deny.toml` allows the one git source.
 - [x] `crates/meshbench` over `gpt_mesh::session::Session`: `open`, `execute` (one command or a batch), `revision`. No other crate sees serde.
 - [x] `mesh_command` calls the bridge. The child process, the HTTP client, `--mesh-server` and `--mesh-port` are removed.
-- [ ] The viewer reads the mesh from the bridge's state when a session is open, in place of re-reading `project.json`. The file reader stays for a workspace another process owns, and for replay.
-- [ ] Run the session on a worker so a long command does not stall the frame.
+- [x] The viewer keeps reading `project.json`, by decision: the session rewrites that file as each command ends, and the viewer reloads it on the frame the reply arrives. One read path serves a session in this program, a workspace another process edits, a replayed state and a preview.
+- [x] The session runs on its own thread (`Worker` in `mesh_view.rs`). A mesh tool's command is sent to it and the reply goes out when it finishes (`Host::scene_command_poll`, `Job::SceneCommand`), so a long command does not hold the frame. `mesh_preview` and a pose sample still wait for their own short requests.
 
 ### B. The editor binary (decision 1)
 

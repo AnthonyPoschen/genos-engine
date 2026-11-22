@@ -438,7 +438,7 @@ pub struct Program {
 
 /// A mesh-workbench session on one workspace: it runs a command, or a list
 /// of commands, and gives mesh-workbench's reply.
-pub trait MeshSession {
+pub trait MeshSession: Send {
     /// # Errors
     ///
     /// The session could not run the request at all. A command mesh-workbench
@@ -2148,6 +2148,17 @@ impl Host for App {
             let none = genos_mcp::json::Value::Object(Vec::new());
             result = self.mesh.as_mut()?.command(name, &none, camera, aspect);
         }
+        self.refresh_mesh_overlay();
+        Some(result)
+    }
+
+    fn scene_command_poll(&mut self, ticket: u64) -> Option<Result<genos_mcp::json::Value, String>> {
+        let Some(view) = &mut self.mesh else {
+            return Some(Err("the mesh scene was closed before the command finished".into()));
+        };
+        let result = view.poll_edit(ticket)?;
+        // Show what the command changed before the reply goes out.
+        self.follow_mesh();
         self.refresh_mesh_overlay();
         Some(result)
     }

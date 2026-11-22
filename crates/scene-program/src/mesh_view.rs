@@ -187,7 +187,11 @@ pub struct MeshView {
     pub display_stale: bool,
     /// The mesh-workbench session on this workspace. Opened by the first
     /// `mesh_command`, so looking at a workspace writes nothing to it.
-    bridge: Option<Box<dyn crate::MeshSession>>,
+    /// The mesh-workbench session, on its own thread: a long command does
+    /// not hold the frame.
+    bridge: Option<Worker>,
+    /// Tool requests the session has not answered yet.
+    waiting: Vec<Waiting>,
     /// The commands that changed the mesh through this viewer, oldest first.
     edits: Vec<Edit>,
     /// A transaction mesh-workbench has prepared and not committed. The
@@ -427,6 +431,69 @@ const PANEL_EVENTS: usize = 12;
 
 /// Triangles with a colour per vertex: positions, normals, colours.
 pub type Painted = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 3]>);
+
+/// The key of a reply that is not the answer yet: its value is the ticket to
+/// ask [`MeshView::poll_edit`] with.
+pub const PENDING_KEY: &str = genos_debug::knobs::SCENE_PENDING;
+
+/// A tool request the session is running.
+struct Waiting {
+    ticket: u64,
+    command: String,
+    request: Value,
+    /// It is not a query: it goes in the edit record and ends a preview.
+    changes: bool,
+}
+
+/// The mesh-workbench session on its own thread. Requests are answered in
+/// the order they were sent. Dropping it closes the session.
+struct Worker {
+    requests: std::sync::mpsc::Sender<(u64, Value)>,
+    replies: std::sync::mpsc::Receiver<(u64, Result<Value, String>)>,
+    next: u64,
+    done: Vec<(u64, Result<Value, String>)>,
+}
+
+impl Worker {
+    fn start(mut session: Box<dyn crate::MeshSession>) -> Self {
+        let (requests, inbox) = std::sync::mpsc::channel::<(u64, Value)>();
+        let (outbox, replies) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Ends when the viewer drops its sender.
+            for (ticket, request) in inbox {
+                if outbox.send((ticket, session.execute(&request))).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { requests, replies, next: 1, done: Vec::new() }
+    }
+
+    fn send(&mut self, request: Value) -> Result<u64, String> {
+        let ticket = self.next;
+        self.next += 1;
+        self.requests.send((ticket, request)).map_err(|_| "the mesh session stopped".to_string())?;
+        Ok(ticket)
+    }
+
+    /// The reply to `ticket` if it has arrived.
+    fn take(&mut self, ticket: u64) -> Option<Result<Value, String>> {
+        self.done.extend(self.replies.try_iter());
+        let at = self.done.iter().position(|(done, _)| *done == ticket)?;
+        Some(self.done.swap_remove(at).1)
+    }
+
+    /// Block until `ticket` is answered.
+    fn wait(&mut self, ticket: u64) -> Result<Value, String> {
+        loop {
+            if let Some(reply) = self.take(ticket) {
+                return reply;
+            }
+            let reply = self.replies.recv().map_err(|_| "the mesh session stopped".to_string())?;
+            self.done.push(reply);
+        }
+    }
+}
 
 /// One command that changed the mesh, as the context packet reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -811,6 +878,7 @@ impl MeshView {
             rebuild: false,
             display_stale: true,
             bridge: None,
+            waiting: Vec::new(),
             edits: Vec::new(),
             preview: None,
         }
@@ -2346,22 +2414,50 @@ impl MeshView {
         }
     }
 
-    /// Run a mesh-workbench command, or a list, on the linked session. The
-    /// first call opens the session on the workspace.
-    fn run(&mut self, command: &Value) -> Result<Value, String> {
+    /// Open the session on the workspace, on its worker thread, if it is not open.
+    fn open_session(&mut self) -> Result<(), String> {
         if self.bridge.is_none() {
             let open = crate::program()
                 .mesh_session
                 .ok_or("this program does not link mesh-workbench: run genos-editor to edit a mesh")?;
-            self.bridge = Some(open(&self.dir)?);
+            self.bridge = Some(Worker::start(open(&self.dir)?));
         }
-        let bridge = self.bridge.as_mut().ok_or("the mesh session did not open")?;
-        let reply = bridge.execute(command)?;
-        // The session wrote project.json: show it on the next frame.
+        Ok(())
+    }
+
+    /// Run a mesh-workbench command, or a list, and wait for the reply. For
+    /// the viewer's own short requests (a pose sample, a preview).
+    fn run(&mut self, command: &Value) -> Result<Value, String> {
+        self.open_session()?;
+        let worker = self.bridge.as_mut().ok_or("the mesh session did not open")?;
+        let ticket = worker.send(command.clone())?;
+        let reply = worker.wait(ticket)?;
+        self.follow_now();
+        Ok(reply)
+    }
+
+    /// The session wrote project.json: show it on the next frame.
+    fn follow_now(&mut self) {
         if let Some(earlier) = Instant::now().checked_sub(FOLLOW_NOW) {
             self.looked = earlier;
         }
-        Ok(reply)
+    }
+
+    /// The reply to the tool request `ticket`, once the session has it.
+    /// `None` while it runs. A ticket this view does not hold belongs to a
+    /// workspace that was closed.
+    pub fn poll_edit(&mut self, ticket: u64) -> Option<Result<Value, String>> {
+        let Some(at) = self.waiting.iter().position(|waiting| waiting.ticket == ticket) else {
+            return Some(Err("the workspace was closed before the command finished".into()));
+        };
+        let result = self.bridge.as_mut()?.take(ticket)?;
+        let waiting = self.waiting.remove(at);
+        self.follow_now();
+        if waiting.changes {
+            self.note_edit(waiting.command, &waiting.request, &result);
+            self.end_preview();
+        }
+        Some(result)
     }
 
     /// Run a request a tool sent, and keep it for the context packet when it
@@ -2374,12 +2470,24 @@ impl MeshView {
         };
         let changes = names.iter().any(|name| family_of(name) != "mesh_query");
         let command = names.join(", ");
-        let result = self.run(request);
-        if changes {
-            self.note_edit(command, request, &result);
-            self.end_preview();
+        // The session runs it on its thread. The reply is a ticket: the
+        // program asks `poll_edit` for the answer each frame.
+        let sent = self.open_session().and_then(|()| {
+            let worker = self.bridge.as_mut().ok_or("the mesh session did not open")?;
+            worker.send(request.clone())
+        });
+        match sent {
+            Ok(ticket) => {
+                self.waiting.push(Waiting { ticket, command, request: request.clone(), changes });
+                Ok(obj(vec![(PENDING_KEY, id(ticket))]))
+            }
+            Err(err) => {
+                if changes {
+                    self.note_edit(command, request, &Err(err.clone()));
+                }
+                Err(err)
+            }
         }
-        result
     }
 
     fn note_edit(&mut self, command: String, request: &Value, result: &Result<Value, String>) {
@@ -3282,6 +3390,33 @@ mod tests {
             all.sort_unstable();
             all
         });
+    }
+
+    #[test]
+    fn a_slow_command_does_not_hold_the_caller_and_replies_come_by_ticket() {
+        use std::time::{Duration, Instant};
+        struct Slow;
+        impl crate::MeshSession for Slow {
+            fn execute(&mut self, request: &genos_mcp::json::Value) -> Result<genos_mcp::json::Value, String> {
+                std::thread::sleep(Duration::from_millis(150));
+                Ok(request.clone())
+            }
+        }
+        let mut worker = super::Worker::start(Box::new(Slow));
+        let began = Instant::now();
+        let first = worker.send(genos_mcp::json::parse(r#"{"command":"one"}"#).expect("json")).expect("send");
+        let second = worker.send(genos_mcp::json::parse(r#"{"command":"two"}"#).expect("json")).expect("send");
+        assert!(began.elapsed() < Duration::from_millis(100), "sending does not wait for the session");
+        assert!(worker.take(first).is_none(), "still running");
+        // The second is answered after the first, and each by its own ticket.
+        let two = worker.wait(second).expect("reply");
+        assert_eq!(two.get("command").and_then(|v| v.as_str()), Some("two"));
+        let one = worker.take(first).expect("the first finished before the second").expect("reply");
+        assert_eq!(one.get("command").and_then(|v| v.as_str()), Some("one"));
+        assert!(began.elapsed() >= Duration::from_millis(290));
+        // A ticket the view does not hold is a closed workspace, not a wait for ever.
+        let mut view = view();
+        assert!(view.poll_edit(7).is_some_and(|reply| reply.is_err()));
     }
 
     #[test]
