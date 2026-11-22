@@ -166,6 +166,10 @@ pub struct MeshView {
     pub typing_filter: bool,
     /// The recorded sessions, oldest first, as of the last poll.
     pub recorded: Vec<genos_workbench::Session>,
+    /// The workspaces found on disk at the last poll. The open one is first.
+    pub found: Vec<PathBuf>,
+    /// Put the whole mesh in view on the next pointer step (a new workspace).
+    pub frame_next: bool,
     /// The recorded state the picture shows in place of the live mesh.
     pub replay: Option<Replay>,
     /// The picture has to be rebuilt from [`MeshView::load`].
@@ -186,7 +190,8 @@ pub struct MeshView {
 /// what the family is for. `mesh_command` takes any of them.
 /// The fields each of the viewer's own tools takes. The schema a client sees
 /// (`genos_debug::commands::mesh_schema`) names the same ones; a test checks it.
-pub const VIEW_ARGS: [&str; 21] = [
+pub const VIEW_ARGS: [&str; 22] = [
+    "workspace",
     "projection",
     "filter",
     "pick",
@@ -446,6 +451,47 @@ const CONTEXT_FACES: usize = 48;
 /// The fields `mesh_preview` and `mesh_context` take.
 pub const PREVIEW_ARGS: [&str; 4] = ["commands", "guards", "commit", "discard"];
 pub const CONTEXT_ARGS: [&str; 2] = ["screenshot", "edits"];
+
+/// The workspace the picker or `mesh_view workspace` chose, in place of the
+/// one the scene file or `--mesh-workspace` names.
+static WORKSPACE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn set_workspace(dir: Option<PathBuf>) {
+    if let Ok(mut chosen) = WORKSPACE.lock() {
+        *chosen = dir;
+    }
+}
+
+#[must_use]
+pub fn chosen_workspace() -> Option<PathBuf> {
+    WORKSPACE.lock().ok().and_then(|chosen| chosen.clone())
+}
+
+/// The workspaces on disk a person can pick: every directory that holds a
+/// `project.json` beside the open one and under each of `roots`.
+fn find_workspaces(open: &std::path::Path, roots: &[PathBuf]) -> Vec<PathBuf> {
+    // One spelling a directory, so the open one is not listed twice.
+    let plain = |dir: &std::path::Path| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut found = vec![plain(open)];
+    let beside = open.parent().map(std::path::Path::to_path_buf);
+    for root in beside.iter().chain(roots) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let dir = plain(&entry.path());
+            if genos_workbench::project_path(&dir).is_file() && !found.contains(&dir) {
+                found.push(dir);
+            }
+        }
+    }
+    found[1..].sort();
+    found.truncate(WORKSPACES_LISTED);
+    found
+}
+
+/// The most workspaces the picker lists.
+const WORKSPACES_LISTED: usize = 64;
 
 /// Where the program writes (`--out`, default `./genos-debug`): the preview's
 /// scratch workspace goes under it.
@@ -732,6 +778,8 @@ impl MeshView {
             filter: String::new(),
             typing_filter: false,
             recorded: Vec::new(),
+            found: Vec::new(),
+            frame_next: false,
             replay: None,
             rebuild: false,
             display_stale: true,
@@ -788,6 +836,29 @@ impl MeshView {
     /// workspace poll, not every frame: it reads the session index files.
     pub fn poll_sessions(&mut self) {
         self.recorded = genos_workbench::sessions(&self.dir);
+        let samples = genos_scene_lib::repo_root().join("debug/scenes/mesh");
+        self.found = find_workspaces(&self.dir, &[samples, out_dir()]);
+    }
+
+    /// One line on the mesh that is shown, for the window's readout.
+    pub fn statistics(&self) -> String {
+        self.workspace.as_ref().map_or_else(
+            || "no workspace".to_string(),
+            |w| {
+                let triangles: usize = w.parts.iter().map(Part::triangles).sum();
+                format!("rev {} - {} objects, {} faces, {} tris, {} verts", w.revision, w.parts.len(), w.faces, triangles, w.vertices)
+            },
+        )
+    }
+
+    /// What the picture is and whether a session is open, for the readout.
+    pub fn state(&self) -> String {
+        let shown = match (&self.preview, &self.replay) {
+            (Some(preview), _) => format!("preview of {} commands", preview.commands),
+            (None, Some(replay)) => format!("replay {} {}", replay.event, replay.command),
+            (None, None) => "live".to_string(),
+        };
+        format!("{shown}, {}", if self.bridge.is_some() { "session open" } else { "viewing" })
     }
 
     fn passes(&self, name: &str) -> bool {
@@ -1448,6 +1519,9 @@ impl MeshView {
     }
 
     pub fn pointer(&mut self, camera: &mut Camera, size: [f32; 2], input: OrbitInput) {
+        if std::mem::take(&mut self.frame_next) {
+            self.frame(camera);
+        }
         if std::mem::take(&mut self.projection_stale) {
             self.set_projection(camera);
         }
@@ -1780,6 +1854,14 @@ impl MeshView {
                 if let Some(on) = args.bool("grid")? {
                     self.grid = on;
                     self.overlay_stale = true;
+                }
+                if let Some(dir) = args.str("workspace")? {
+                    // The program opens it at its next look; a directory with
+                    // no project.json is an empty workspace to build in.
+                    let dir = PathBuf::from(dir);
+                    let dir = if dir.is_absolute() { dir } else { std::env::current_dir().map_err(|err| err.to_string())?.join(dir) };
+                    set_workspace(Some(dir));
+                    self.rebuild = true;
                 }
                 if let Some(kind) = args.str("projection")? {
                     self.orthographic = match kind.as_str() {
@@ -2275,6 +2357,8 @@ impl MeshView {
         });
         obj(vec![
             ("workspace", text(self.dir.display().to_string())),
+            ("workspaces", list(self.found.iter().map(|dir| text(dir.display().to_string())).collect())),
+            ("state", text(self.state())),
             ("loaded", Value::Bool(self.workspace.is_some())),
             ("revision", id(revision)),
             ("vertices", num(vertices as f64)),
@@ -2831,6 +2915,17 @@ mod tests {
         let same = super::posed_normals_of(part, &part.positions);
         assert!(part.normals.iter().zip(&same).all(|(a, b)| (0..3).all(|k| (a[k] - b[k]).abs() < 1.0e-4)));
         assert!(view.posed_normals().iter().all(Option::is_none), "no pose, no posed normals");
+    }
+
+    #[test]
+    fn the_picker_lists_the_open_workspace_first_and_each_once_and_the_readout_counts_the_mesh() {
+        let mut view = view();
+        view.poll_sessions();
+        let sample = std::fs::canonicalize(&view.dir).expect("sample");
+        assert_eq!(view.found[0], sample);
+        assert_eq!(view.found.iter().filter(|dir| **dir == sample).count(), 1);
+        assert_eq!(view.statistics(), "rev 1 - 2 objects, 14 faces, 32 tris, 20 verts");
+        assert_eq!(view.state(), "live, viewing");
     }
 
     #[test]

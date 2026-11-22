@@ -44,7 +44,8 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] The frame loop is its own crate, `crates/scene-program` (`genos-scene-program`): the loop, the menu and its layout file, and the mesh viewer. `debug/lighting` and `editor` are two small binaries on it.
 - [x] mesh-workbench is linked by the editor binary only. `genos-editor` gives the scene program the function that opens a session (`Program::mesh_session`); `genos-scene-program` and `genos-lighting` no longer depend on `genos-meshbench`, `gpt-mesh` or `serde_json` (`cargo tree -p genos-lighting`). A mesh command that edits says so on a program without it.
 - [ ] The viewer's own code (`mesh_view.rs`, the reader `genos-workbench`) is still in the shared library; `genos-lighting` lists no mesh scene, so it never runs there.
-- [ ] The scene picker lists game scenes and mesh workspaces found on disk, not only the files in `debug/scenes`.
+- [x] Mesh workspaces found on disk are in the menu's "Workspace" picker.
+- [ ] The scene picker lists the scene files in `debug/scenes` only; a game's own scenes are not listed.
 - [ ] ADR note: this starts the editor program of ADR 0002 and ADR 0006, as a thin view over agent commands ([agent-driven editing](agent-driven-editing.md), ADR 0019).
 
 ### C. The MCP server (decision 2)
@@ -94,7 +95,7 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] Animation play (`pose: {clip, play: true}`, `"stop"`, the menu's "Play clip"). The clip is sampled once, 12 poses a second of clip and at most 48, and the frames between are blended, so playing does not record a command a frame.
 - [x] Picking and the selection highlight follow the pose.
 - [x] Posed normals: the normals follow the pose, smooth where the rest normals are.
-- [ ] Workspace picker; connection and revision readout; statistics footer.
+- [x] Workspace picker (the menu's "Workspace", `mesh_view workspace`): the workspaces found beside the open one, under `debug/scenes/mesh` and under the output directory. A directory with no `project.json` opens as an empty workspace to build in. Readouts: "Mesh" (revision, objects, faces, triangles, vertices) and "Showing" (live, replay or preview, and whether the session is open).
 
 ### E. Beyond the web viewer
 

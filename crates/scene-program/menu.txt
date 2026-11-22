@@ -14,6 +14,9 @@ Scene | - | - | open | checkpoint
 Scene | - | - | open | view
 Scene | - | - | open | lighting_preset
 Scene | - | - | open | sky
+Scene | - | - | open | mesh_workspace
+Scene | - | - | open | mesh_statistics
+Scene | - | - | open | mesh_state
 Scene | - | - | open | mesh_pick
 Scene | - | - | open | mesh_note
 Scene | - | - | open | mesh_shade

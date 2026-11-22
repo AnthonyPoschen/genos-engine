@@ -349,6 +349,8 @@ const SLIDER_KNOBS: &[&str] = &[
     "mesh_time",
     "mesh_note",
     "mesh_filter",
+    "mesh_statistics",
+    "mesh_state",
 ];
 /// Unordered choices. A long list of scenes uses the same dropdown.
 const DROP_KNOBS: &[&str] = &[
@@ -363,6 +365,7 @@ const DROP_KNOBS: &[&str] = &[
     "mesh_solo",
     "mesh_clip",
     "mesh_session",
+    "mesh_workspace",
 ];
 const VIEWS: [&str; 10] = [
     "full", "direct", "bounce", "albedo", "normal", "depth", "texels", "variance", "path",
@@ -1179,6 +1182,10 @@ const MESH_GROUND_MIN: f32 = 6.0;
 /// The workspace a mesh scene opens: `--mesh-workspace`, then
 /// `GENOS_MESH_WORKSPACE`, then the scene file's path under the repository.
 fn mesh_workspace_dir(root: &Path, named: &str) -> PathBuf {
+    // The picker's choice comes first: it was made after the program started.
+    if let Some(chosen) = mesh_view::chosen_workspace() {
+        return chosen;
+    }
     match std::env::var_os("GENOS_MESH_WORKSPACE") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => root.join(named),
@@ -1384,8 +1391,19 @@ impl App {
                 // A replayed state does not follow the live file.
                 watch.rebuild || (watch.replay.is_none() && watch.stamp != stamp)
             }
-            _ => {
-                self.mesh = Some(mesh_view::MeshView::new(dir, stamp));
+            Some(_) => {
+                // Another workspace: a new view, a new world, the mesh in frame.
+                let mut view = mesh_view::MeshView::new(dir, stamp);
+                view.frame_next = true;
+                view.poll_sessions();
+                self.mesh = Some(view);
+                self.mesh_overlay = None;
+                true
+            }
+            None => {
+                let mut view = mesh_view::MeshView::new(dir, stamp);
+                view.poll_sessions();
+                self.mesh = Some(view);
                 false
             }
         };
@@ -1826,6 +1844,37 @@ impl Host for App {
                                 .map_or_else(|| "live".to_string(), |r| format!("{} {}", r.event, r.command)),
                         });
                     }
+                    // The readouts: what is shown, and whether a session is open.
+                    for (name, label, words) in
+                        [("mesh_statistics", "Mesh", view.statistics()), ("mesh_state", "Showing", view.state())]
+                    {
+                        knobs.push(Knob {
+                            name: name.into(),
+                            label: label.into(),
+                            value: 0.0,
+                            min: 0.0,
+                            max: 0.0,
+                            step: 0.0,
+                            choices: Vec::new(),
+                            text: words,
+                        });
+                    }
+                    if !view.found.is_empty() {
+                        // The open workspace is first. A name is the directory's own.
+                        let root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+                        let names: Vec<String> =
+                            view.found.iter().map(|dir| dir.strip_prefix(&root).unwrap_or(dir).display().to_string()).collect();
+                        knobs.push(Knob {
+                            name: "mesh_workspace".into(),
+                            label: "Workspace".into(),
+                            value: 0.0,
+                            min: 0.0,
+                            max: (names.len() - 1) as f64,
+                            step: 1.0,
+                            text: names[0].clone(),
+                            choices: names,
+                        });
+                    }
                     // Read-only: typed with Shift and T, or set by mesh_view filter.
                     let typing = view.typing && view.typing_filter;
                     knobs.push(Knob {
@@ -1965,6 +2014,17 @@ impl Host for App {
             let at = (value.round().max(0.0) as usize).min(mesh_view::SHADES.len() - 1);
             view.shade = mesh_view::SHADES[at].to_string();
             view.display_stale = true;
+            return Ok(());
+        }
+        if name == "mesh_statistics" || name == "mesh_state" {
+            return Err(format!("{name} is a readout"));
+        }
+        if name == "mesh_workspace" {
+            let view = self.mesh.as_mut().ok_or("mesh_workspace needs a mesh scene")?;
+            let dir = view.found.get(value.round().max(0.0) as usize).ok_or("no such workspace")?.clone();
+            mesh_view::set_workspace(Some(dir));
+            // Look now, not at the next poll.
+            view.rebuild = true;
             return Ok(());
         }
         if name == "mesh_filter" {
