@@ -6,8 +6,6 @@
 #![expect(
     clippy::disallowed_types,
     clippy::undocumented_unsafe_blocks,
-    clippy::borrow_as_ptr,
-    clippy::ptr_as_ptr,
     clippy::cast_ptr_alignment,
     reason = "offline benchmark on its own Vulkan device through ash, as genos-gpuref (ADR 0007 covers the renderer)"
 )]
@@ -48,7 +46,7 @@ fn err<E: std::fmt::Debug>(what: &'static str) -> impl Fn(E) -> String {
 struct Device {
     _entry: ash::Entry,
     instance: ash::Instance,
-    device: ash::Device,
+    logical: ash::Device,
     phys: vk::PhysicalDevice,
     queue: vk::Queue,
     pool: vk::CommandPool,
@@ -97,7 +95,7 @@ impl Device {
                     None,
                 )
                 .map_err(err("pool"))?;
-            Ok(Self { _entry: entry, instance, device, phys, queue, pool, name })
+            Ok(Self { _entry: entry, instance, logical: device, phys, queue, pool, name })
         }
     }
 
@@ -112,15 +110,15 @@ impl Device {
     fn buffer(&self, size: u64, usage: vk::BufferUsageFlags) -> Result<(vk::Buffer, *mut u8), String> {
         unsafe {
             let buffer = self
-                .device
+                .logical
                 .create_buffer(&vk::BufferCreateInfo::default().size(size.max(16)).usage(usage), None)
                 .map_err(err("buffer"))?;
-            let req = self.device.get_buffer_memory_requirements(buffer);
+            let req = self.logical.get_buffer_memory_requirements(buffer);
             let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
             let mut memory = None;
             for want in [host | vk::MemoryPropertyFlags::DEVICE_LOCAL, host] {
                 if let Some(ty) = self.memory_type(req.memory_type_bits, want) {
-                    if let Ok(m) = self.device.allocate_memory(
+                    if let Ok(m) = self.logical.allocate_memory(
                         &vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty),
                         None,
                     ) {
@@ -130,9 +128,9 @@ impl Device {
                 }
             }
             let memory = memory.ok_or("gpu bench: no host-visible memory")?;
-            self.device.bind_buffer_memory(buffer, memory, 0).map_err(err("bind buffer"))?;
+            self.logical.bind_buffer_memory(buffer, memory, 0).map_err(err("bind buffer"))?;
             let ptr = self
-                .device
+                .logical
                 .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
                 .map_err(err("map"))?
                 .cast::<u8>();
@@ -144,26 +142,26 @@ impl Device {
     fn run(&self, f: impl FnOnce(vk::CommandBuffer)) -> Result<f64, String> {
         unsafe {
             let cmd = self
-                .device
+                .logical
                 .allocate_command_buffers(
                     &vk::CommandBufferAllocateInfo::default().command_pool(self.pool).command_buffer_count(1),
                 )
                 .map_err(err("cmd"))?[0];
-            self.device
+            self.logical
                 .begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default())
                 .map_err(err("begin"))?;
             f(cmd);
-            self.device.end_command_buffer(cmd).map_err(err("end"))?;
-            let fence = self.device.create_fence(&vk::FenceCreateInfo::default(), None).map_err(err("fence"))?;
+            self.logical.end_command_buffer(cmd).map_err(err("end"))?;
+            let fence = self.logical.create_fence(&vk::FenceCreateInfo::default(), None).map_err(err("fence"))?;
             let cmds = [cmd];
             let started = std::time::Instant::now();
-            self.device
+            self.logical
                 .queue_submit(self.queue, &[vk::SubmitInfo::default().command_buffers(&cmds)], fence)
                 .map_err(err("submit"))?;
-            let waited = self.device.wait_for_fences(&[fence], true, u64::MAX);
+            let waited = self.logical.wait_for_fences(&[fence], true, u64::MAX);
             let ms = started.elapsed().as_secs_f64() * 1000.0;
-            self.device.destroy_fence(fence, None);
-            self.device.free_command_buffers(self.pool, &cmds);
+            self.logical.destroy_fence(fence, None);
+            self.logical.free_command_buffers(self.pool, &cmds);
             waited.map_err(err("wait"))?;
             Ok(ms)
         }
@@ -174,7 +172,7 @@ impl Device {
         unsafe {
             let extent = vk::Extent3D { width: SIDE, height: SIDE, depth: SIDE * LEVELS };
             let image = self
-                .device
+                .logical
                 .create_image(
                     &vk::ImageCreateInfo::default()
                         .image_type(vk::ImageType::TYPE_3D)
@@ -187,15 +185,15 @@ impl Device {
                     None,
                 )
                 .map_err(err("image"))?;
-            let req = self.device.get_image_memory_requirements(image);
+            let req = self.logical.get_image_memory_requirements(image);
             let ty = self
                 .memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
                 .ok_or("gpu bench: no device memory for a volume")?;
             let memory = self
-                .device
+                .logical
                 .allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None)
                 .map_err(err("volume memory"))?;
-            self.device.bind_image_memory(image, memory, 0).map_err(err("bind image"))?;
+            self.logical.bind_image_memory(image, memory, 0).map_err(err("bind image"))?;
             let bytes = std::mem::size_of_val(texels);
             let (staging, ptr) = self.buffer(bytes as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
             std::ptr::copy_nonoverlapping(texels.as_ptr().cast::<u8>(), ptr, bytes);
@@ -215,7 +213,7 @@ impl Device {
                     .subresource_range(range)
             };
             self.run(|cmd| {
-                self.device.cmd_pipeline_barrier(
+                self.logical.cmd_pipeline_barrier(
                     cmd,
                     vk::PipelineStageFlags::TOP_OF_PIPE,
                     vk::PipelineStageFlags::TRANSFER,
@@ -229,7 +227,7 @@ impl Device {
                         vk::AccessFlags::TRANSFER_WRITE,
                     )],
                 );
-                self.device.cmd_copy_buffer_to_image(
+                self.logical.cmd_copy_buffer_to_image(
                     cmd,
                     staging,
                     image,
@@ -242,7 +240,7 @@ impl Device {
                         )
                         .image_extent(extent)],
                 );
-                self.device.cmd_pipeline_barrier(
+                self.logical.cmd_pipeline_barrier(
                     cmd,
                     vk::PipelineStageFlags::TRANSFER,
                     vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -257,8 +255,8 @@ impl Device {
                     )],
                 );
             })?;
-            self.device.destroy_buffer(staging, None);
-            self.device
+            self.logical.destroy_buffer(staging, None);
+            self.logical
                 .create_image_view(
                     &vk::ImageViewCreateInfo::default()
                         .image(image)
@@ -279,7 +277,7 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
     unsafe {
         let views: Vec<vk::ImageView> = input.volumes.iter().map(|v| gpu.volume(v)).collect::<Result<_, _>>()?;
         let sampler = gpu
-            .device
+            .logical
             .create_sampler(
                 &vk::SamplerCreateInfo::default()
                     .mag_filter(vk::Filter::LINEAR)
@@ -329,7 +327,7 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let layout = gpu
-            .device
+            .logical
             .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)
             .map_err(err("set layout"))?;
         let sizes = [
@@ -338,12 +336,12 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
             vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1 },
         ];
         let pool = gpu
-            .device
+            .logical
             .create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None)
             .map_err(err("descriptor pool"))?;
         let layouts = [layout];
         let set = gpu
-            .device
+            .logical
             .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts))
             .map_err(err("set"))?[0];
         let images: Vec<vk::DescriptorImageInfo> = views
@@ -357,7 +355,7 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
             .collect();
         let whole = |buffer| [vk::DescriptorBufferInfo::default().buffer(buffer).range(vk::WHOLE_SIZE)];
         let (surface_info, out_info, uniform_info) = (whole(surface), whole(out), whole(uniform));
-        gpu.device.update_descriptor_sets(
+        gpu.logical.update_descriptor_sets(
             &[
                 vk::WriteDescriptorSet::default()
                     .dst_set(set)
@@ -384,11 +382,11 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
         );
         let code = ash::util::read_spv(&mut std::io::Cursor::new(SPV)).map_err(err("spirv"))?;
         let module = gpu
-            .device
+            .logical
             .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
             .map_err(err("shader"))?;
         let pipe_layout = gpu
-            .device
+            .logical
             .create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts), None)
             .map_err(err("pipeline layout"))?;
         let stage = vk::PipelineShaderStageCreateInfo::default()
@@ -396,7 +394,7 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
             .module(module)
             .name(c"main");
         let pipeline = gpu
-            .device
+            .logical
             .create_compute_pipelines(
                 vk::PipelineCache::null(),
                 &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(pipe_layout)],
@@ -410,9 +408,9 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
             params[35] = frame as f32;
             std::ptr::copy_nonoverlapping(params.as_ptr().cast::<u8>(), uniform_ptr, 160);
             let ms = gpu.run(|cmd| {
-                gpu.device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
-                gpu.device.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[set], &[]);
-                gpu.device.cmd_dispatch(cmd, groups, 1, 1);
+                gpu.logical.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+                gpu.logical.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[set], &[]);
+                gpu.logical.cmd_dispatch(cmd, groups, 1, 1);
             })?;
             if frame >= warm {
                 times.push(ms);
@@ -431,7 +429,7 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
             }
         }
         let n = (cones.max(1)) as f64;
-        gpu.device.device_wait_idle().ok();
+        gpu.logical.device_wait_idle().ok();
         Ok(ConeTiming {
             device: gpu.name.clone(),
             ms_median: times[times.len() / 2],
