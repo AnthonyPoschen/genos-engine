@@ -1,4 +1,4 @@
-.PHONY: run room editor mesh stress-solo stress stress-big stress-bench lighting verify reference lighting-ref-check lighting-oracle restir-ref lint-docs lint
+.PHONY: run room editor mesh stress-solo stress stress-big stress-bench lighting verify reference lighting-ref-check sponza-gate lighting-oracle restir-ref lint-docs lint
 
 run:
 	cargo run -p genos-camera
@@ -72,3 +72,9 @@ lint-docs:
 # Clippy, cargo-deny, semgrep, and the env-mirror registry.
 lint:
 	./scripts/lint.sh
+
+# The Sponza picture regressions fixed on 23 Nov 2026, PASS or FAIL each.
+# Needs the Sponza asset and a GPU; opens one proof window that takes no focus.
+sponza-gate:
+	cargo build --release -p genos-lighting
+	python3 tools/lighting/sponza_gate.py $(if $(ONLY),--only $(ONLY),) $(if $(REFERENCE),--reference,)

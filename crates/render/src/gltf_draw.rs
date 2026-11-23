@@ -935,6 +935,36 @@ mod tests {
     }
 
     #[test]
+    fn a_masked_material_takes_its_metallic_from_the_texture() {
+        // Sponza's leaves: metallic factor 1, a metallic texel of 0, alpha
+        // mask. The atlas alpha is the cutoff test, so the factor alone was
+        // used and the leaves shaded black.
+        use genos_load::{Sampler, TextureSlot};
+        let slot = |image| {
+            Some(TextureSlot {
+                image,
+                texcoord: 0,
+                sampler: Sampler::default(),
+                scale: 1.0,
+            })
+        };
+        let texel = |blue: u8| Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 128, blue, 255],
+        };
+        let images = [texel(0), texel(255)];
+        let leaf = |image| genos_load::PbrMaterial {
+            metallic: 1.0,
+            metallic_roughness_texture: slot(image),
+            alpha_mode: genos_load::AlphaMode::Mask(0.5),
+            ..genos_load::PbrMaterial::default()
+        };
+        assert!(mean_metallic(&leaf(0), &images) < 1.0e-6, "a texel of 0 is not metal");
+        assert!((mean_metallic(&leaf(1), &images) - 1.0).abs() < 1.0e-6, "a texel of 1 is metal");
+    }
+
+    #[test]
     fn a_negative_u_is_shifted_by_a_whole_number() {
         // A negative u reads as "no uv" in the shaders. Sponza's floor has them.
         let primitive = genos_load::Primitive {

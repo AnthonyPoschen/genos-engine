@@ -464,6 +464,54 @@ mod tests {
     }
 
     #[test]
+    fn a_level_field_packs_its_shell_and_a_colour_word_in_each_brick() {
+        // Two open sheets, red and blue, as one level field.
+        let sheet = |x: f32, material: u32| {
+            let c = [[x, 0.0, 0.0], [x, 2.0, 0.0], [x, 2.0, 2.0], [x, 0.0, 2.0]];
+            [
+                MeshTriangle::flat([c[0], c[1], c[2]], material, true),
+                MeshTriangle::flat([c[0], c[2], c[3]], material, true),
+            ]
+        };
+        let mut triangles = Vec::new();
+        triangles.extend(sheet(0.0, 0));
+        triangles.extend(sheet(1.5, 1));
+        let mesh = BakeMesh::plain("sheets", triangles, &[[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]);
+        let settings = BakeSettings {
+            mode: BakeMode::OnLoad,
+            cache_dir: std::env::temp_dir()
+                .join(format!("genos-mesh-field-level-{}", std::process::id())),
+            ..BakeSettings::default()
+        };
+        let sdf = genos_bake::load_or_bake_level(&mesh, &settings).unwrap().sdf;
+        std::fs::remove_dir_all(&settings.cache_dir).ok();
+        assert!(sdf.thin && !sdf.brick_albedo.is_empty());
+        let inst = FieldInstance {
+            sdf: Arc::new(sdf),
+            pose: crate::world::identity_pose(),
+            albedo: [0.5; 3],
+            emission: [0.0; 3],
+            object: None,
+        };
+        let words = field_words(&[&inst]);
+        // Header word 3: half the shell, half a voxel (mesh_field.glsl mf_skin).
+        let skin = f32::from_bits(words[3]);
+        assert!((skin - 0.5 * inst.sdf.voxel).abs() < 1.0e-6, "skin {skin}");
+        // Record word 31: thin, and bricks carry a colour.
+        assert_eq!(words[FIELD_HEADER + 31], 3);
+        // Every stored brick is 128 distance words and then its colour.
+        let table = words[FIELD_HEADER + 27] as usize;
+        let dims = inst.sdf.bricks_dims;
+        for (brick, colour) in inst.sdf.bricks.iter().zip(&inst.sdf.brick_albedo) {
+            let cell = ((brick.at[2] * dims[1] + brick.at[1]) * dims[0] + brick.at[0]) as usize;
+            let at = words[table + cell] as usize;
+            assert!(at != 0, "a stored brick has a table word");
+            let word = words[at - 1 + 128].to_le_bytes();
+            assert_eq!([word[0], word[1], word[2]], *colour);
+        }
+    }
+
+    #[test]
     fn instances_share_one_copy_of_their_sdf() {
         let a = cube_instance(crate::world::identity_pose());
         let mut b = a.clone();

@@ -27,6 +27,22 @@ Isolate toggles attribute a change to one component: `GENOS_LIGHTING_TOGGLES`. T
 - `--unfilled-dump <percent>` saves an event when `pct` goes above that number (`0` saves any positive share). Each event is `shot.png`, `overlay.png`, `camera.json`, `counts.json`, and `frame.txt` under `./genos-debug/unfilled/<timestamp>/`. `--out <dir>` overrides that directory. `GENOS_UNFILLED_DIR` mirrors `DebugSettings.out` (MCP `get_debug_settings` / `set_debug_settings`, Rhai `debug_settings("out=...")`, and the stress panel's Out row) and applies only when `--out` was omitted. Pictures are downscaled so the longest edge is 480. `--unfilled-session-cap` (default 32) limits one process. Across runs, startup and each save delete folders older than `--unfilled-max-age-secs` (default 2 days), then the oldest until `--unfilled-max-folders` (default 200) and `--unfilled-max-bytes` (default 500 MiB) both hold. `GENOS_LIGHTING_UNFILLED_DUMP`, `GENOS_UNFILLED_SESSION_CAP`, `GENOS_UNFILLED_MAX_AGE_SECS`, `GENOS_UNFILLED_MAX_FOLDERS`, and `GENOS_UNFILLED_MAX_BYTES` mirror those arguments. A non-numeric directory is left alone. One event that by itself exceeds the byte cap is kept.
 - `Renderer::settle_stats` returns `SettleStats { settled, still_frames, cache_rays }`. `cache_rays` is stats word 16, the surface-cache rays that round, not the scout count. MCP `status` returns it. The MCP `timing` command returns fps, frame, draw CPU, and GPU.
 
+## Sponza gate
+
+`make sponza-gate` (`tools/lighting/sponza_gate.py`) starts `genos-lighting` headless on Sponza and grades, over the command port, each picture fault fixed on 23 Nov 2026. It prints PASS or FAIL for each check with the measured value, the limit, and the value the broken build gave, and exits 1 on a failure and 3 when it cannot run. `ONLY=pan,sky` runs some checks. `REFERENCE=1` adds the atrium against the CPU path trace. It needs the Sponza asset and a GPU, so CI on lavapipe does not run it; run it before a push that touches the cascade, the tracer, the G-buffer, or the glTF loader.
+
+| Check | What it reads | Limit | Broken build |
+|---|---|---|---|
+| leaf-holes | brightest pixel of the normal view at a plant | under 0.97 | 1.0 (an empty record is a white normal) |
+| colour | black share of the albedo view: atrium, dark-corner floor | under 0.03, under 0.02 | 0.054, about 0.5 to 1 |
+| still | bounce-view pop share on a still camera: atrium, dark corner, curtains | under 0.004, 0.01, 0.02 | 0.001 to 0.009, 0.03 to 0.11, 0.10 to 0.30 |
+| pan | voxel-steps that keep their seat; that change light by a tenth | over 0.95; under 0.04 | 0.095 to 0.15; 0.09 to 0.17 |
+| sky | indoor voxels whose blue over red is above 0.6, three views | under 0.02 | 0.18, 0.11, 0.024 |
+| void | black share inside the wall behind the gallery | over 0.4 | 0.18 |
+| lamp | frames until bounce is within a tenth of a lamp move's step | 30 or fewer | 69 to 90 |
+
+Run against the binary built at 13:31 on 23 Nov 2026, before the later fixes, 8 of the 13 lines fail: colour (both), still at the dark corner, pan (both), sky at the dark corner, void, and lamp. That run does not prove the other five. The leaf-hole fault was already fixed in that binary, and the two upper-gallery sky views and the curtains broke and were fixed after it; their broken values above were measured by hand on the builds that had the fault. The atrium still line read 0.0005 there, under its limit. The CPU tests beside it are `a_masked_material_takes_its_metallic_from_the_texture` and `a_negative_u_is_shifted_by_a_whole_number` (`gltf_draw.rs`), `a_level_field_packs_its_shell_and_a_colour_word_in_each_brick` (`mesh_field.rs`), `a_level_field_keeps_the_level_voxel_and_a_colour_per_brick` (`crates/bake/tests/bake.rs`), and `crates/debug/tests/gltf_reference.rs`.
+
 ## Movement probe
 
 A fault that shows only while the camera moves is read at every step of the move, not before and after it. Pause the scene, set the camera, step one frame, then call `lighting.level0_voxels` around a world point and save the bounce view. Between two steps compare, by voxel key (cell, level, axis): how many voxels kept their key, how many kept their seat position, and how much the radiance of the kept ones changed. A seat that changes with a turn of the camera, or light that changes with the seat kept, is the fault. The pan, strafe and walk numbers in [sparse-radiance-cascades.md](sparse-radiance-cascades.md) are this probe.
