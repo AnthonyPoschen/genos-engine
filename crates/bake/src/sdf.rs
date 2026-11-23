@@ -46,6 +46,7 @@ use std::collections::HashMap;
 
 use genos_mesh::{Bvh, MeshTriangle};
 
+use crate::cards::q8;
 use crate::{BakeMesh, BakeSettings};
 
 /// Voxels per brick edge.
@@ -93,7 +94,7 @@ pub struct MeshSdf {
 }
 
 pub fn encode(d: f32, band: f32) -> u8 {
-    (((d / band).clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8
+    q8((d / band).clamp(-1.0, 1.0) * 0.5 + 0.5)
 }
 
 pub fn decode(v: u8, band: f32) -> f32 {
@@ -109,7 +110,8 @@ impl MeshSdf {
             return self.coarse_band;
         }
         let v: [usize; 3] = std::array::from_fn(|a| g[a] as usize);
-        let b: [u32; 3] = std::array::from_fn(|a| (v[a] / BRICK) as u32);
+        // `v[a] / BRICK` is below `bricks_dims[a]`, a u32, so the clamp does not fire.
+        let b: [u32; 3] = std::array::from_fn(|a| u32::try_from(v[a] / BRICK).unwrap_or(u32::MAX));
         if let Some(brick) = self.bricks.iter().find(|k| k.at == b) {
             let l: [usize; 3] = std::array::from_fn(|a| v[a] % BRICK);
             return decode(
@@ -173,7 +175,8 @@ fn material_albedo(mesh: &BakeMesh) -> Vec<[f32; 3]> {
                         (f32::from(x) + 0.5) / f32::from(SIDE),
                         (f32::from(y) + 0.5) / f32::from(SIDE),
                     ];
-                    let shade = mesh.shade(m as u32, uv);
+                    // An index past u32 is no material: `shade` gives it the default paint.
+                    let shade = mesh.shade(u32::try_from(m).unwrap_or(u32::MAX), uv);
                     if shade.alpha < cutoff {
                         continue;
                     }
@@ -264,13 +267,13 @@ fn build_grid(mesh: &BakeMesh, voxel: f32, bvh: &Bvh, with_albedo: bool) -> Mesh
                 })
                 .collect();
             let mean = if weight > 0.0 {
-                colour.map(|v| ((v / weight).clamp(0.0, 1.0) * 255.0).round() as u8)
+                colour.map(|v| q8(v / weight))
             } else {
                 // No sampled voxel is inside the band (a brick off a sheet's
                 // edge): the material nearest the brick centre.
                 albedo_of
                     .get(tris[nearest as usize].material as usize)
-                    .map_or([204; 3], |a| a.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+                    .map_or([204; 3], |a| a.map(q8))
             };
             (SdfBrick { at: c, distances }, mean)
         });

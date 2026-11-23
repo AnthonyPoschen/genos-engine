@@ -180,6 +180,7 @@ pub fn build_with(mesh: &BakeMesh, s: &BakeSettings, bvh: &Bvh) -> Cards {
     Cards { cards }
 }
 
-fn q8(x: f32) -> u8 {
+/// A unit value as a byte: clamped to 0..=1, then rounded to 0..=255.
+pub(crate) fn q8(x: f32) -> u8 {
     (x.clamp(0.0, 1.0) * 255.0).round() as u8
 }

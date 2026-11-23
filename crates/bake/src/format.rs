@@ -6,10 +6,6 @@
     clippy::cast_lossless,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
-#![expect(
-    clippy::cast_possible_truncation,
-    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-)]
 
 //! The `.gbake` file: little-endian, versioned. A file of another version is
 //! ignored (and rebuilt in on-load mode).
@@ -33,18 +29,18 @@ pub fn encode(b: &Baked) -> Vec<u8> {
     f32_(&mut w, s.band);
     f32_(&mut w, s.coarse_band);
     w.push(s.thin as u8);
-    u32_(&mut w, s.coarse.len() as u32);
+    len_(&mut w, s.coarse.len());
     w.extend_from_slice(&s.coarse);
-    u32_(&mut w, s.bricks.len() as u32);
+    len_(&mut w, s.bricks.len());
     for brick in &s.bricks {
         brick.at.iter().for_each(|&v| u32_(&mut w, v));
         w.extend_from_slice(&brick.distances);
     }
-    u32_(&mut w, s.brick_albedo.len() as u32);
+    len_(&mut w, s.brick_albedo.len());
     for a in &s.brick_albedo {
         w.extend_from_slice(a);
     }
-    u32_(&mut w, b.cards.cards.len() as u32);
+    len_(&mut w, b.cards.cards.len());
     for c in &b.cards.cards {
         w.push(c.face);
         c.origin.iter().for_each(|&v| f32_(&mut w, v));
@@ -142,6 +138,11 @@ pub fn decode(bytes: &[u8]) -> Option<Baked> {
 
 fn u32_(w: &mut Vec<u8>, v: u32) {
     w.extend_from_slice(&v.to_le_bytes());
+}
+/// A section length. The grid cap keeps every section far below `u32::MAX`;
+/// a longer one would be written as `u32::MAX`, not wrapped.
+fn len_(w: &mut Vec<u8>, n: usize) {
+    u32_(w, u32::try_from(n).unwrap_or(u32::MAX));
 }
 fn f32_(w: &mut Vec<u8>, v: f32) {
     w.extend_from_slice(&v.to_le_bytes());

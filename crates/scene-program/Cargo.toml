@@ -13,6 +13,7 @@ workspace = true
 genos-debug = { path = "../debug" }
 genos-input = { path = "../input" }
 genos-load = { path = "../load" }
+genos-math = { path = "../math" }
 genos-mcp = { path = "../mcp" }
 genos-render = { path = "../render" }
 genos-scene = { path = "../scene" }

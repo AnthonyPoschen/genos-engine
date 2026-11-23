@@ -499,6 +499,7 @@ dependencies = [
  "genos-debug",
  "genos-input",
  "genos-load",
+ "genos-math",
  "genos-mcp",
  "genos-render",
  "genos-scene",
@@ -547,6 +548,7 @@ name = "genos-workbench"
 version = "0.1.0"
 dependencies = [
  "genos-json",
+ "genos-math",
 ]
 
 [[package]]
