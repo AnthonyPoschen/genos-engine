@@ -40,6 +40,7 @@ Isolate toggles attribute a change to one component: `GENOS_LIGHTING_TOGGLES`. T
 | sky | indoor voxels whose blue over red is above 0.6, three views | under 0.02 | 0.18, 0.11, 0.024 |
 | void | black share inside the wall behind the gallery | over 0.4 | 0.18 |
 | lamp | frames until bounce is within a tenth of a lamp move's step | 30 or fewer | 69 to 90 |
+| jump | peak auto exposure after a jump from the dark corner to the atrium, over the settled value | 1.05 or less | 3.9 |
 
 Run against the binary built at 13:31 on 23 Nov 2026, before the later fixes, 8 of the 13 lines fail: colour (both), still at the dark corner, pan (both), sky at the dark corner, void, and lamp. That run does not prove the other five. The leaf-hole fault was already fixed in that binary, and the two upper-gallery sky views and the curtains broke and were fixed after it; their broken values above were measured by hand on the builds that had the fault. The atrium still line read 0.0005 there, under its limit. The CPU tests beside it are `a_masked_material_takes_its_metallic_from_the_texture` and `a_negative_u_is_shifted_by_a_whole_number` (`gltf_draw.rs`), `a_level_field_packs_its_shell_and_a_colour_word_in_each_brick` (`mesh_field.rs`), `a_level_field_keeps_the_level_voxel_and_a_colour_per_brick` (`crates/bake/tests/bake.rs`), and `crates/debug/tests/gltf_reference.rs`.
 

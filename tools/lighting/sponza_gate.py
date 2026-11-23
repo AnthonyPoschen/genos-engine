@@ -103,9 +103,15 @@ def check_leaves_and_floor_colour():
 def check_still_flicker():
     # Patches of bounce light that came and went on a still picture.
     for name, limit, before in (("atrium", 0.004, "0.001 to 0.009"), ("dark-corner", 0.01, "0.03 to 0.11"), ("curtains", 0.02, "0.10 to 0.30")):
+        call("render.set_hdr_settings", {"exposure_mode": "auto"})
         call("scene.jump_checkpoint", {"name": name})
         call("scene.wait", {"frames": 240})
+        # Hold the exposure the meter chose, so the grade is the light and not
+        # the exposure still easing in after the jump.
+        call("render.set_hdr_settings", {"exposure_mode": "fixed", "ev100": call("render.get_hdr")["ev100"]})
+        call("scene.wait", {"frames": 60})
         worst = max(call("capture.flicker", {"frames": 60, "mode": "bounce"})["popped_share"] for _ in range(2))
+        call("render.set_hdr_settings", {"exposure_mode": "auto"})
         grade(f"still camera, bounce view, {name}", f"popped share {worst:.4f}", worst < limit, f"< {limit}", before)
 
 
@@ -183,6 +189,26 @@ def check_lamp_response():
     grade("bounce follows a moved lamp", f"within a tenth of the step after {frames} frames (step {step:.2f})", step > 0.1 and frames <= 30, "<= 30 frames", "69")
 
 
+def check_jump_exposure():
+    # A jump kept the old exposure: dark corner to atrium started four times over.
+    call("scene.jump_checkpoint", {"name": "dark-corner"})
+    call("scene.wait_settled", {"timeout_frames": 900})
+    call("scene.wait", {"frames": 120})
+    call("scene.time", {"pause": True})
+    try:
+        call("scene.jump_checkpoint", {"name": "atrium"})
+        seen = []
+        for _ in range(20):
+            call("scene.step", {"frames": 2})
+            seen.append(call("render.get_hdr")["exposure"])
+    finally:
+        call("scene.time", {"pause": False})
+    call("scene.wait", {"frames": 240})
+    settled = call("render.get_hdr")["exposure"]
+    peak = max(seen) / max(settled, 1e-6)
+    grade("exposure after a jump rises to the new view", f"peak {peak:.2f} of the settled exposure", peak <= 1.05, "<= 1.05", "3.9")
+
+
 def check_reference():
     call("scene.jump_checkpoint", {"name": "atrium"})
     call("scene.wait_settled", {"timeout_frames": 900})
@@ -202,6 +228,7 @@ CHECKS = [
     ("sky", check_sky_voxels),
     ("void", check_void),
     ("lamp", check_lamp_response),
+    ("jump", check_jump_exposure),
 ]
 if "reference" in FLAGS:
     CHECKS.append(("reference", check_reference))

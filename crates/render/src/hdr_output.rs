@@ -12,6 +12,33 @@ pub use genos_math::tonemap::{
     SCRGB_NITS_PER_CODE,
 };
 
+/// A camera move of more than this in one frame is a cut, not a walk, metres.
+pub const EXPOSURE_CUT_DISTANCE: f32 = 2.0;
+/// Frames auto exposure waits after a cut for a meter reading of the new view.
+/// The meter reads a finished frame, two flights back.
+pub const EXPOSURE_CUT_FRAMES: u8 = 4;
+/// The exposure scale while it waits: this share of the scale before the cut.
+pub const EXPOSURE_CUT_HOLD: f64 = 0.25;
+/// The scale it then starts from: this share of the new view's target, one stop
+/// under, so the picture comes up to its exposure and never down from a
+/// blown-out one.
+pub const EXPOSURE_CUT_START: f64 = 0.5;
+
+/// Auto exposure across a camera cut. `left` is the frames still to wait
+/// (`EXPOSURE_CUT_FRAMES` on the cut frame, 1 on the last). `before` is the
+/// scale when the camera cut. `target` is the new view's metered scale.
+///
+/// Until 23 Nov 2026 a cut kept the old scale and adapted from it. A jump from
+/// a dark corner to a sunlit hall started at four times the hall's exposure,
+/// with the bloom that goes with it, and fell for 40 frames.
+pub fn cut_exposure(left: u8, before: f64, target: f64) -> f64 {
+    if left > 1 {
+        before * EXPOSURE_CUT_HOLD
+    } else {
+        target * EXPOSURE_CUT_START
+    }
+}
+
 pub const FORMAT_BGRA8: i32 = 44;
 pub const FORMAT_RGBA8: i32 = 37;
 pub const FORMAT_A2R10: i32 = 58;
@@ -2069,6 +2096,30 @@ pub fn bloom_rgba_from_chain(raw: &[u8], width: u32, height: u32, levels: u32) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_camera_cut_starts_exposure_under_the_new_view_and_never_over_it() {
+        // Dark corner (scale 3.0) to a sunlit hall (target 0.7).
+        let before = 3.0;
+        let target = 0.7;
+        let mut left = EXPOSURE_CUT_FRAMES;
+        let mut shown = Vec::new();
+        while left > 0 {
+            shown.push(cut_exposure(left, before, target));
+            left -= 1;
+        }
+        // While it waits for the meter it is dimmer than before the cut.
+        assert!(shown[..shown.len() - 1].iter().all(|s| *s < before * 0.5));
+        // Then it starts one stop under the new view, and adapts up from there.
+        let start = shown[shown.len() - 1];
+        assert!((start - target * 0.5).abs() < 1.0e-9);
+        let mut scale = start;
+        for _ in 0..600 {
+            scale = step_exposure(scale, target, 1.0 / 60.0, 0.40, 0.80);
+            assert!(scale <= target + 1.0e-6, "exposure rose past the target: {scale}");
+        }
+        assert!((scale - target).abs() < 0.01);
+    }
 
     #[test]
     fn the_agx_lattice_is_agx_rec709() {

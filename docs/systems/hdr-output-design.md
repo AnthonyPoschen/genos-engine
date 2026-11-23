@@ -208,6 +208,10 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 | `output` | `auto`, `sdr`, `hdr10`, `scrgb` | `auto` on Medium and High; forced `sdr` on Potato and Low |
 | `transition` | seconds, 0 or more. The look transition | 0 on every preset |
 
+### Camera cut
+
+Auto exposure starts again at a camera cut. A cut is a camera move of more than 2 m in one frame (`EXPOSURE_CUT_DISTANCE`): a checkpoint jump, a teleport, a scene load. For 4 frames (`EXPOSURE_CUT_FRAMES`, the meter's delay) the scale is a quarter of the scale before the cut. Then it is half the new view's target, one stop under, and the usual adaptation brings it up. Until 23 Nov 2026 a cut kept the old scale: a jump from Sponza's dark corner to the atrium started at 3.9 times the atrium's exposure, with the bloom that goes with it, and fell for 40 frames. Now the peak after that jump is 1.0 times the settled value. Fixed and camera modes are not changed. The three numbers are constants, not settings. Failure modes: a fast vehicle that covers 2 m in a frame reads as a cut and dips, and a cut shorter than 2 m keeps the old scale. Probe: `render.get_hdr` returns the exposure scale each frame; the `jump` line of `make sponza-gate` grades it; `a_camera_cut_starts_exposure_under_the_new_view_and_never_over_it` is the unit test. Replicated state: none. Authority: the machine that shades. Prediction / rollback: none. Determinism: the same camera path and meter readings give the same scale. Headless server: a server that does not shade has no exposure.
+
 ### Look transition
 
 A game changes the look in play: a cave mouth lowers the compensation and the bloom. `transition` is the seconds that change takes. `0` applies it on the next frame, and the picture bytes are the ones the renderer drew before this key existed.

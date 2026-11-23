@@ -298,6 +298,12 @@ pub(crate) struct Lighting {
     bloom_probe: bool,
     /// EV100 from the last GPU histogram. Empty until a frame had samples.
     meter_ev: Option<f64>,
+    /// The camera position auto exposure last saw, to find a cut.
+    pub(crate) exposure_eye: Option<[f32; 3]>,
+    /// Frames auto exposure still waits after a camera cut, and the scale
+    /// when it cut (`hdr_output::cut_exposure`).
+    pub(crate) exposure_cut: u8,
+    exposure_cut_from: f64,
     hdr: genos_scene::HdrSettings,
     /// The blended look the last frame drew with. `None` before the first frame.
     hdr_look: Option<crate::hdr_output::HdrLook>,
@@ -781,6 +787,9 @@ impl Default for Lighting {
             budget_hdr10_listed: false,
             bloom_probe: false,
             meter_ev: None,
+            exposure_eye: None,
+            exposure_cut: 0,
+            exposure_cut_from: 0.0,
             hdr: genos_scene::HdrSettings::legacy_bytes(),
             hdr_look: None,
             exposure_scale: 1.0,
@@ -3543,6 +3552,18 @@ impl Gpu {
         };
         self.lighting.last_ev100 = ev;
         let target = crate::hdr_output::exposure_with_compensation(ev, settings.compensation);
+        if settings.exposure_mode == genos_scene::ExposureMode::Auto && self.lighting.exposure_cut > 0 {
+            let left = self.lighting.exposure_cut;
+            if left == crate::hdr_output::EXPOSURE_CUT_FRAMES {
+                self.lighting.exposure_cut_from = f64::from(self.lighting.exposure_scale);
+            }
+            self.lighting.exposure_cut = left.saturating_sub(1);
+            return crate::hdr_output::pack_f32(crate::hdr_output::cut_exposure(
+                left,
+                self.lighting.exposure_cut_from,
+                target,
+            ));
+        }
         let next = crate::hdr_output::step_exposure(
             f64::from(self.lighting.exposure_scale),
             target,

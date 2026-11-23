@@ -6592,6 +6592,15 @@ impl Gpu {
         self.frame_bytes.clone_from(&bytes);
         self.lighting.light_scene = lighting_scene_key(pack, &bytes);
         self.lighting.trace_key = lighting_trace_key(pack);
+        // A camera cut: auto exposure starts again from under the new view's
+        // value (hdr_output::cut_exposure).
+        if let Some(was) = self.lighting.exposure_eye {
+            let moved = (0..3).map(|a| (pack.eye[a] - was[a]).powi(2)).sum::<f32>().sqrt();
+            if moved > crate::hdr_output::EXPOSURE_CUT_DISTANCE {
+                self.lighting.exposure_cut = crate::hdr_output::EXPOSURE_CUT_FRAMES;
+            }
+        }
+        self.lighting.exposure_eye = Some(pack.eye);
         self.note_lighting_sun(pack);
         self.background = pack.sky.map(crate::mesh::tone);
         Ok(())
