@@ -1,5 +1,5 @@
-//! `genos-single-frame-cascade`: a CPU prototype of single-frame Split
-//! Radiance Cascades (Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384).
+//! `genos-single-frame-cascade`: a CPU prototype of the sparse cascade traced
+//! in one frame with split rays (Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384).
 //!
 //! It answers two questions with numbers and draws nothing on a GPU:
 //! how many rays one frame needs for the cascade to converge with no temporal
@@ -14,7 +14,6 @@
     clippy::cast_possible_wrap,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss,
-    clippy::cast_lossless,
     clippy::too_many_lines,
     clippy::many_single_char_names,
     clippy::similar_names,
@@ -36,7 +35,7 @@ use genos_stress::building::{Layout, LightMix};
 use genos_stress::stage::{Scale, Stage};
 
 const HELP: &str = "\
-genos-single-frame-cascade: single-frame Split Radiance Cascades on the CPU.
+genos-single-frame-cascade: the sparse cascade in one frame, split rays, on the CPU.
 
 Traces one frame of the cascade (and --frames of them with new jitter) from a
 camera pose, counts the rays, and compares the bounce irradiance at a grid of
@@ -182,9 +181,6 @@ fn parse_args() -> Result<Option<Options>, String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{arg} needs a value"));
-        fn num<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
-            text.parse().map_err(|_| format!("bad {name}: {text}"))
-        }
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--scene" => o.scene = value()?,
@@ -329,7 +325,7 @@ const AXES: [V3; 6] = [
     [0.0, 0.0, 1.0],
     [0.0, 0.0, -1.0],
 ];
-/// Finest and coarsest voxel level: 6.25 cm and 8 m (BASE_SPACING * 2^level).
+/// Finest and coarsest voxel level: 6.25 cm and 8 m (`BASE_SPACING * 2^level`).
 const VOXEL_FINEST: u8 = 2;
 const VOXEL_COARSEST: u8 = 9;
 /// Voxel level one direct-light sample is shared over: 6.25 cm. At 25 cm a
@@ -471,18 +467,33 @@ fn decode_dir(u: f32, v: f32) -> V3 {
     [r * phi.cos(), r * phi.sin(), z]
 }
 
+/// Parse one argument value.
+fn num<T: std::str::FromStr>(name: &str, text: &str) -> Result<T, String> {
+    text.parse().map_err(|_| format!("bad {name}: {text}"))
+}
+
+/// One deposit: what a ray or a cone learned about one cascade's interval:
+/// the radiance it met there and the share of light that passes through.
+struct Deposit {
+    pixel: u32,
+    dir: V3,
+    cascade: u8,
+    radiance: V3,
+    through: f32,
+}
+
 /// The direction bin of `dir` at angular resolution `theta` (2 theta by theta).
 fn dir_bin(dir: V3, theta: u32) -> usize {
     let u = (dir[1].atan2(dir[0]) / (2.0 * PI)).rem_euclid(1.0);
-    let v = ((dir[2] + 1.0) * 0.5).clamp(0.0, 1.0);
+    let v = f32::midpoint(dir[2], 1.0).clamp(0.0, 1.0);
     let x = ((u * (2 * theta) as f32) as u32).min(2 * theta - 1);
     let y = ((v * theta as f32) as u32).min(theta - 1);
     (y * 2 * theta + x) as usize
 }
 
 fn bin_dir(bin: usize, theta: u32) -> V3 {
-    let x = (bin as u32) % (2 * theta);
-    let y = (bin as u32) / (2 * theta);
+    let x = u32::try_from(bin).unwrap_or(u32::MAX) % (2 * theta);
+    let y = u32::try_from(bin).unwrap_or(u32::MAX) / (2 * theta);
     decode_dir((x as f32 + 0.5) / (2 * theta) as f32, (y as f32 + 0.5) / theta as f32)
 }
 
@@ -642,12 +653,12 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
         for (c, cascade) in cascades.iter_mut().enumerate() {
             let key = Key {
                 lod: pixel.lod,
-                cascade: c as u8,
+                cascade: u8::try_from(c).unwrap_or(u8::MAX),
                 cell: nearest_cell(pixel.point, spacing(pixel.lod, c)),
             };
             let slot = *index.entry(key).or_insert_with(|| {
                 cascade.keys.push(key);
-                (cascade.keys.len() - 1) as u32
+                u32::try_from(cascade.keys.len() - 1).unwrap_or(u32::MAX)
             });
             home[p * n + c] = slot;
         }
@@ -683,7 +694,7 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                 ];
                 let above = Key {
                     lod: key.lod,
-                    cascade: (c + 1) as u8,
+                    cascade: u8::try_from(c + 1).unwrap_or(u8::MAX),
                     cell: nearest_cell(centre, spacing(key.lod, c + 1)),
                 };
                 index.get(&above).copied().unwrap_or(0)
@@ -721,15 +732,6 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
     }
     // Trace. Each ray is split: the cascade whose interval holds the hit takes
     // its radiance, and every cascade under it learns the way was clear.
-    // One deposit: what a ray or a cone learned about one cascade's interval:
-    // the radiance it met there and the share of light that passes through.
-    struct Deposit {
-        pixel: u32,
-        dir: V3,
-        cascade: u8,
-        radiance: V3,
-        through: f32,
-    }
     let counted = Counted { inner: setup.surfaces, rays: AtomicU64::new(0) };
     let shadow_rays = AtomicU64::new(0);
     let sky = if o.mode == Mode::Emissive {
@@ -793,9 +795,9 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                                         through = 0.0;
                                     }
                                     out.push(Deposit {
-                                        pixel: p as u32,
+                                        pixel: u32::try_from(p).unwrap_or(u32::MAX),
                                         dir,
-                                        cascade: c as u8,
+                                        cascade: u8::try_from(c).unwrap_or(u8::MAX),
                                         radiance: scale(met, 1.0 / open),
                                         through,
                                     });
@@ -825,9 +827,9 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                             // way was clear; the hit's cascade takes its light.
                             for c in 0..=cascade {
                                 out.push(Deposit {
-                                    pixel: p as u32,
+                                    pixel: u32::try_from(p).unwrap_or(u32::MAX),
                                     dir,
-                                    cascade: c as u8,
+                                    cascade: u8::try_from(c).unwrap_or(u8::MAX),
                                     radiance: if c == cascade { radiance } else { [0.0; 3] },
                                     through: if c == cascade { 0.0 } else { 1.0 },
                                 });
@@ -873,8 +875,8 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                 let beta = cascade.through[at] / count as f32;
                 let mut cone = j;
                 if let (Some(above), true) = (above, beta > 0.0) {
-                    let x = (bin as u32) % (2 * cascade.theta);
-                    let y = (bin as u32) / (2 * cascade.theta);
+                    let x = u32::try_from(bin).unwrap_or(u32::MAX) % (2 * cascade.theta);
+                    let y = u32::try_from(bin).unwrap_or(u32::MAX) / (2 * cascade.theta);
                     // The four finer directions of the next cascade that
                     // have data; one with none is left out, not read as dark.
                     let mut far = [0.0; 3];
@@ -961,7 +963,7 @@ fn interpolate(
         }
         let key = Key {
             lod,
-            cascade: level as u8,
+            cascade: u8::try_from(level).unwrap_or(u8::MAX),
             cell: [
                 base[0] as i32 + o[0] as i32,
                 base[1] as i32 + o[1] as i32,
@@ -1167,7 +1169,7 @@ fn gpu_bench(
             volumes: &volumes,
             clip,
             width0: o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt(),
-            cascades: o.cascades as u32,
+            cascades: u32::try_from(o.cascades).unwrap_or(u32::MAX),
             sky,
         },
         60,
@@ -1213,8 +1215,8 @@ fn gpu_bench(
         right,
         up,
         fov_y_deg: FOV_Y,
-        width: o.width as u32,
-        height: o.height as u32,
+        width: u32::try_from(o.width).unwrap_or(u32::MAX),
+        height: u32::try_from(o.height).unwrap_or(u32::MAX),
         max_bounces: 1,
         noise_target: 0.0,
         max_spp: 32,
@@ -1422,8 +1424,8 @@ fn run(o: &Options) -> Result<(), String> {
     std::fs::create_dir_all(&o.out).map_err(|e| format!("{}: {e}", o.out.display()))?;
     let exposure = (0.35 / ref_mean.max(1.0e-6)) as f32;
     let picture = |values: &dyn Fn(usize) -> V3, w: usize, h: usize| Image {
-        width: w as u32,
-        height: h as u32,
+        width: u32::try_from(w).unwrap_or(u32::MAX),
+        height: u32::try_from(h).unwrap_or(u32::MAX),
         rgb: (0..w * h).flat_map(|i| tone(values(i), exposure)).collect(),
     };
     picture(&|i| first.irradiance[i], o.width, o.height).save(&o.out.join("frame.png"))?;

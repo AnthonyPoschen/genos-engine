@@ -1,6 +1,6 @@
 # genos-single-frame-cascade
 
-A CPU prototype of single-frame Split Radiance Cascades (Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384). It is not the renderer and it draws nothing on a GPU. It answers two questions for the lighting-stress building:
+A CPU prototype of the sparse cascade traced in one frame with split rays (Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384). It is not the renderer and it draws nothing on a GPU. It answers two questions for the lighting-stress building:
 
 1. How many rays does one frame need for the cascade to converge with no temporal mean?
 2. How far is that one frame from a path-traced reference?

@@ -21,6 +21,21 @@ const int FINEST = 2;
 const int COARSEST = 9;
 const float SIDE = 96.0;
 const float REACH = 200.0;
+// Levels stacked along z in each texture.
+const float LEVELS = 8.0;
+// A voxel read needs half a voxel of margin for the trilinear filter.
+const float EDGE = 0.5;
+// A surface record's w is 1 where the picture shows a surface.
+const float SHOWN = 0.5;
+// 16 bits of the hash as a uniform in [0, 1).
+const float U16 = 65536.0;
+const float TAU = 6.2831853;
+// A cone starts this share of the finest voxel off its surface.
+const float START = 0.75;
+// Cover past which a cone counts as stopped.
+const float FULL = 0.98;
+// Each cascade's interval ends this many times further out than the last.
+const float INTERVAL_GROWTH = 4.0;
 
 uint hash(uint x) {
     x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
@@ -45,10 +60,10 @@ void voxel(int level, vec3 at, vec3 dir, out float cover, out vec3 light) {
     light = vec3(0.0);
     float size = BASE * exp2(float(level));
     vec3 local = (at - clip[level - FINEST].xyz) / size;
-    if (any(lessThan(local, vec3(0.5))) || any(greaterThan(local, vec3(SIDE - 0.5)))) {
+    if (any(lessThan(local, vec3(EDGE))) || any(greaterThan(local, vec3(SIDE - EDGE)))) {
         return;
     }
-    vec3 uvw = vec3(local.xy / SIDE, (local.z + SIDE * float(level - FINEST)) / (SIDE * 8.0));
+    vec3 uvw = vec3(local.xy / SIDE, (local.z + SIDE * float(level - FINEST)) / (SIDE * LEVELS));
     vec4 lamp = textureLod(faces[6], uvw, 0.0);
     reads += 1.0;
     float facing = lamp.a;
@@ -78,23 +93,23 @@ void main() {
     for (uint c = 0u; c < 5u; c++) {
         result[5u * p + c] = vec4(0.0);
     }
-    if (facing.w < 0.5) {
+    if (facing.w < SHOWN) {
         return;
     }
     vec3 n = facing.xyz;
     // One direction in the hemisphere, new each frame.
     uint h = hash(p ^ hash(uint(misc.w) + 0x9e3779b9u));
-    float u = float(h & 0xffffu) / 65536.0;
-    float v = float(h >> 16u) / 65536.0;
-    float z = 2.0 * v - 1.0;
+    float u = float(h & 0xffffu) / U16;
+    float v = float(h >> 16u) / U16;
+    float z = v + v - 1.0;
     float r = sqrt(max(1.0 - z * z, 0.0));
-    vec3 dir = vec3(r * cos(6.2831853 * u), r * sin(6.2831853 * u), z);
+    vec3 dir = vec3(r * cos(TAU * u), r * sin(TAU * u), z);
     if (dot(dir, n) < 0.0) {
         dir = -dir;
     }
     float finest = BASE * exp2(float(FINEST));
-    vec3 start = at.xyz + n * (0.75 * finest);
-    float t = 0.75 * finest;
+    vec3 start = at.xyz + n * (START * finest);
+    float t = START * finest;
     float covered = 0.0;
     float reach = at.w;
     float steps = 0.0;
@@ -104,7 +119,7 @@ void main() {
         float width = misc.x / float(1 << c);
         float open = 1.0 - covered;
         vec3 met = vec3(0.0);
-        while (t < end && covered < 0.98) {
+        while (t < end && covered < FULL) {
             float wide = max(width * t, finest);
             int level = clamp(int(ceil(log2(wide / BASE))), FINEST, COARSEST);
             float cover;
@@ -124,10 +139,10 @@ void main() {
             through = 0.0;
         }
         result[5u * p + uint(c)] = vec4(met / open, through);
-        if (covered >= 0.98) {
+        if (covered >= FULL) {
             break;
         }
-        reach *= 4.0;
+        reach *= INTERVAL_GROWTH;
     }
     result[5u * p + 4u] = vec4(steps, reads, covered, 0.0);
 }
