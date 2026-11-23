@@ -9,8 +9,10 @@ Recorded from the session of 23 and 24 Nov 2026.
 - The lighting system handles any number of lamps, and the cost does not grow with them. A moving lamp costs the same as a still one.
 - Lighting reacts in the frame. The churn in a room no lamp lights, and the slow follow after a lamp goes out, both come from the temporal mean that hides too few rays. The mean and the "a lamp moved, treat this cell as changed" rules should go.
 - All lamps are part of the cascades, as Sannikov describes for Path of Exile: light sources are emitters, and everything is indirect light.
-- No commitment to hardware ray tracing. It can be a faster tracer behind the same interface. It is not a requirement.
+- No hardware ray tracing (24 Nov 2026). It is not a tracer in this plan.
 - Try cone tracing through our voxels, so the trace cost has a cap.
+- Every light is an emitter, the sun included, if the gates allow it (24 Nov 2026). The goal is to remove the direct-light calculations and their milliseconds. A light's shadow is then the occlusion the cone march collects on the way to it; there is no shadow ray or shadow map for it.
+- The voxel field is on or off (24 Nov 2026). The old GI path is deleted, not kept beside it for a smaller preset.
 
 Sources: Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384 (the text is in `genos-debug/paper-2607.20384/` on the machine that ran this). Sannikov, "The Engine of Path of Exile", ExileCon 2026, from 27:30. In that talk the Path of Exile version is screen-space, 1 to 2 ms, with no temporal accumulation. The world-space version is about 5 ms and uses hardware ray tracing. Tracing the probes with cones is "a very new direction" with "some accuracy issues".
 
@@ -43,11 +45,23 @@ One frame, in order. Each step names what exists and what is new.
    - A mover's voxels are re-written when it moves.
    - A lamp is written each frame from its position, colour and size. That is the only per-lamp work, and it does not depend on the picture size.
 2. **Surface light** (new). The light a voxel sends out is its albedo times the irradiance the cascade gathered there last frame, plus its emission. So bounce light gains one bounce a frame, and the lamps' own light arrives in the first frame. No shadow ray to a lamp is cast for this.
-3. **Cascade** (exists, changed). The probes are today's level-0 voxels and upper cells. Each visible point marches one cone through the voxel field. The cone's width in each cascade's interval is that cascade's direction spacing. Each interval deposits its light and the share that passes through, as the paper's split ray does. The cascades merge from the last one down. Every cascade is recomputed every frame. There is no running mean, no refresh period and no change signal.
-4. **Shade** (exists). A pixel reads the cascade-0 directions around it.
-5. **Exact lamps** (exists, kept as an option). The sun and the brightest few lamps at a pixel can keep an exact shadow ray, because a cone's shadow is as soft as a voxel. Whether to keep them, and how many, is a decision for phase 2.
+3. **Cascade** (exists, changed). The probes are today's level-0 voxels and upper cells. Each visible point marches one cone through the voxel field. The cone's width in each cascade's interval is that cascade's direction spacing. Each interval deposits its light and the share that passes through, as the paper's split ray does. The cascades merge from the last one down. Every cascade is recomputed every frame. There is no running mean, no refresh period and no change signal. A candidate, if the shadow gates need it: the cascade-0 interval is marched in screen space against the depth buffer, and only the upper intervals go through the voxels (step 6).
+4. **Shade** (exists). A pixel reads the cascade-0 directions around it. Lamp light and bounce light arrive the same way. There is no direct-light pass for point lamps.
+5. **Sun** (exists as an exact ray, to become an emitter). The sun is tried as an emitter in phase 2b, in this order:
+   - **A. The sun in the sky.** A cone that leaves the field with light still passing through reads the sky in its direction, and the sun is a small, very bright disc in that sky. No new pass. The sun is 0.5 degrees wide and a cascade-0 direction is one of 16, so the sun's energy is spread over the cone it falls in, to keep the total right. Risks: a coarse cosine, a blurred shadow from the coarse upper cascades, and any wall leak (E1) multiplied by the sun's brightness.
+   - **B. Sun visibility in the voxels.** Each voxel stores whether it sees the sun, written by a march through the field toward the sun when the sun or a mover moves. A voxel's light adds albedo times sun times visibility, so sun bounce costs nothing more. A pixel reads that visibility with one texture read. Fog can read the same visibility in place of `trace::sees`. The shadow is as soft as a voxel, and the cost follows the voxel count and the movers, not the pixels.
+   - **Fallback.** If A and B miss the phase 2b gate, the sun keeps its one exact ray a pixel (`lamp_pick.rs`, "the sun is one extra ray"). Its cost does not grow with the lamps. It is the only direct light left.
+6. **Screen-space first interval** (new, a candidate). Contact shadows and thin casters are finer than a voxel (E6, E15). The cascade-0 interval, the short one next to the surface, can march the depth buffer, which has pixel detail. It runs along the cascade's own directions, not toward each light, so it adds no per-lamp cost. It covers only casters on the screen. Path of Exile's version of the cascade is screen-space.
 
-The tracer stays behind one interface (`trace_ray` in `lighting_common.glsl`, `Surfaces` on the CPU). The cone march, the software tracer and hardware ray queries are three tracers behind it. The prototype already runs rays and cones through the same deposit, merge and shade.
+The tracer stays behind one interface (`trace_ray` in `lighting_common.glsl`, `Surfaces` on the CPU). The cone march and the software tracer are the two tracers behind it. The prototype already runs rays and cones through the same deposit, merge and shade. The prototype's GPU ray timing through `genos-gpuref` stays a measuring tool only.
+
+**Shadows.** With every light an emitter, a light's shadow is the share of the cone's light that a surface between the probe and the light blocks. No light has a shadow pass of its own. Where this is weak:
+
+- A shadow is no sharper than the voxel the cone passes (6.25 cm at the finest level) or the cascade's direction spacing. Contact shadows blur.
+- A caster thinner than a voxel adds a fraction of its area and casts a faint shadow or none: poles, railings, fingers.
+- A shadow follows its caster only when the caster's voxels are written that frame. A mover and a skinned character are re-written every frame they move.
+- A lamp in a fixture shares voxels with the shade or bracket around it. The march can block the lamp with its own fixture, or let its light out through the fixture.
+- A penumbra that widens away from the caster is about right for a lamp with a size. A sharp sun shadow 10 m from its caster is the hard case: the march is in the coarse levels there.
 
 ## 4. Errors to iterate on
 
@@ -57,10 +71,10 @@ Each row is a fault the prototype shows or a risk it has not tested. "Probe" is 
 |---|---|---|---|---|---|
 | E1 | Light leaks through walls into a room no lamp lights | +65% bias, 76% error (rays: +11%, 30%) | A voxel wider than a wall holds the lit surfaces behind it. The trilinear read reaches them before the wall has covered the cone. Narrower cones did not help (+85% and +91% at half and quarter width, before E8 was fixed) | Read only voxels on the near side of a surface that faces the cone. Cap the voxel level near thin walls. Keep occlusion at a finer level than light. Store a wall's two sides in separate voxels (an inset by the normal at every level) | `--eye 4.75393,1.7,7.51477 --yaw 0.0466 --pitch -0.079`: bias against the reference |
 | E2 | The cascade itself is 30% off in that room, with exact rays | 30% error, +11% bias; does not fall with more frames | Prototype gaps against the paper: no blend across the level-of-detail seam, no depth-aware weights in the sparse trilinear read, a direction that straddles the horizon takes its whole cosine | Do what the paper does for each. Fix this first: E1 cannot be graded against a baseline that is itself 30% off | Same pose, `--tracer ray` |
-| E3 | Lamp light through cones is blurred and still noisy at the tail | 16 to 21% error, 7.6 to 9.7% median noise, 46% at the 90th percentile | A lamp's light lands in one direction of 16 at cascade 0, so the cosine and the shadow edge are as coarse as that direction. A cone whose axis misses the lamp's voxels reads less of it | More directions at cascade 0 for the lamp term. Aim the lamp's voxel footprint at the cone width. Exact shadow rays for the brightest few lamps (step 5) | `--mode emissive --lamp-radius 0.05`, hall |
+| E3 | Lamp light through cones is blurred and still noisy at the tail | 16 to 21% error, 7.6 to 9.7% median noise, 46% at the 90th percentile | A lamp's light lands in one direction of 16 at cascade 0, so the cosine and the shadow edge are as coarse as that direction. A cone whose axis misses the lamp's voxels reads less of it | More directions at cascade 0 for the lamp term. Aim the lamp's voxel footprint at the cone width. The screen-space first interval (step 6) for the shadow edge near the surface. Not exact shadow rays: every lamp is an emitter | `--mode emissive --lamp-radius 0.05`, hall |
 | E4 | A slanted surface shows too much area | Not measured apart; up to 1.73 times for a diagonal | Area is kept by six axis directions, and the sum over them is the L1 norm of the direction | Keep a mean normal and one area, or renormalise by the L1 norm | A test wall turned 45 degrees |
 | E5 | Nothing is known past the clip volumes | 126,174 of 1,867,174 voxels were inside them in the hall | A level covers 96 voxels a side. The fine levels end 3 m from the eye | Coarser levels cover the far field; check that a cone moves to them before it leaves a fine level. Size the clip volumes for each preset | Voxels inside the clip volumes, and the mean cover of a cone (0.942 in the hall) |
-| E6 | Contact detail under one voxel is lost; a one-sided surface is clear from behind | Not measured | A cone starts 0.75 of the finest voxel off its surface, and only surfaces that face the cone cover it | A short exact ray, or a screen-space step, for the first voxel. Two-sided cover for surfaces marked two-sided | Contact shadow checkpoint `contact`; a curtain |
+| E6 | Contact detail under one voxel is lost; a one-sided surface is clear from behind | Not measured | A cone starts 0.75 of the finest voxel off its surface, and only surfaces that face the cone cover it | The screen-space first interval (step 6), or a short exact ray for the first voxel. Two-sided cover for surfaces marked two-sided | Contact shadow checkpoint `contact`; a curtain |
 | E7 | Two partial occluders in a row count as one surface | Not measured | Cover adds up along the cone and stops at 1. That is exact for one surface crossing several voxels and wrong for two separate ones | Multiply past the first full voxel of distance. Grade both against the reference | Two half walls, one behind the other |
 | E8 | One light sample shared by a patch lights the dark side of a wall | +85% became +65% when the patch went from 25 cm to 6.25 cm | A patch of floor or roof that runs under a wall took one sample for both rooms | In the full design the light is the cascade's irradiance at probe spacing, so the same fault returns at the probe size. The read of last frame's irradiance into a voxel needs the wall-aware weights of E2 | The glowing line where a wall meets the floor and the roof |
 | E9 | Bounce through feedback is not built | - | Step 2 of the design | Build it in the prototype before the renderer. Check the energy against the path-traced reference at 1, 2 and many bounces, and in the white room (albedo 1), where each bounce loses little | Mean irradiance by frame after a lamp goes on |
@@ -68,13 +82,18 @@ Each row is a fault the prototype shows or a risk it has not tested. "Probe" is 
 | E11 | Movers and moving lamps are not tested, and the voxel upkeep is not timed | - | A mover re-writes its voxels. A lamp re-writes its own | Time both. A lamp is cheap. A mover is the open cost | Milliseconds to re-write one mover's voxels |
 | E12 | Half-float voxels clip | Not seen yet | Light sums are radiance times area; a lamp's is its colour times 72 | Scale by level. Check the brightest lamp and the sun-lit roof | The largest value written to a voxel texture |
 | E13 | Only the analytic building is tested | - | The prototype loads a `kind stress` scene | Load glTF through `GltfSurface`. Sponza has curved surfaces, leaves and thin cloth, where E1, E4 and E6 bite | Sponza atrium, dark corner and curtains |
-| E14 | Systems that read the lamps are not covered | - | Fog takes its lamp picks from ReSTIR (ADR 0026). Reflections and specular read the direct pass | Decide for each whether it reads the voxel field or keeps its own lamp path | - |
+| E14 | Systems that read the lamps are not covered | - | Fog takes its lamp picks from ReSTIR (ADR 0026) and the sun from `trace::sees`. Reflections and specular read the direct pass | Each reads the voxel field: there is no direct pass left for them to read. Fog reads the sun visibility of step 5 B. Specular needs a sharp lamp highlight, which a cone does not give: find what it reads before phase 5 | - |
+| E15 | Shadows are softer than the reference, and thin casters lose theirs | Not measured | A shadow is no sharper than the voxel the cone passes or the cascade's direction spacing. A caster thinner than a voxel covers part of it | The screen-space first interval (step 6). A finer level near the eye. Cover kept at a finer level than light (E1) | Penumbra width at contact and 1, 3 and 10 m from the caster; the thinnest caster that still blocks half the light |
+| E16 | A lamp inside its fixture | Not tested; the prototype's lamps float free | A 5 cm lamp shares voxels with its shade or bracket | Write the lamp after the cover and do not let its own voxel cover it. Or set the lamp just outside the fixture's surface. Grade a lamp in a shade and a lamp on a bracket | The fixture scene: the room is lit and the shade's far side is not |
+| E17 | Sun leaks through walls | Not tested; the sun is not in the prototype | E1, with a light orders of magnitude brighter than a lamp | E1 first. Phase 2b does not start until phase 1 passes | The room next to Sponza's courtyard, sun on, lamps off |
+| E18 | A skinned character's shadow | Not tested | A skinned mesh changes shape every frame, so its voxels are re-written every frame | Voxelise its bones' capsules, not its triangles. Time it in phase 3 | Milliseconds to write one character; frames its shadow lags (must be 0) |
 
 ## 5. Cost to iterate on
 
 - **The march.** 11.8 ms for 910,660 cones in the hall: 29.9 steps and 104.8 filtered reads a cone, from seven textures. Candidates: one cone for each cascade-0 probe direction in place of one a pixel (a probe is 8 pixels wide, so about a quarter of the cones), the lamp term folded into the direction textures (three reads a step in place of four), longer steps at the coarse levels, and a stop at full cover that the hall's open cones do not reach.
-- **Memory.** Seven 96 x 96 x 768 RGBA16F volumes are 378 MiB. ADR 0012's lighting budget is about 200 MB, and ADR 0036 sizes the light cache for each preset. Candidates: RGB9E5 or R11G11B10 light with an 8-bit area, four directions' worth packed in two textures, fewer levels.
-- **Voxel upkeep.** Not timed. Still geometry is free after load. Movers and the surface-light write (step 2) run each frame.
+- **Memory.** Seven 96 x 96 x 768 RGBA16F volumes are 378 MiB. ADR 0012's lighting budget is about 200 MB, and ADR 0036 sizes the light cache for each preset. Candidates: RGB9E5 or R11G11B10 light with an 8-bit area, four directions' worth packed in two textures, fewer levels. A preset that cannot hold the field turns GI off. It does not fall back to the old path, which phase 6 deletes.
+- **Voxel upkeep.** Not timed. Still geometry is free after load. Movers, skinned characters (E18), the surface-light write (step 2) and the sun visibility (step 5 B, when the sun or a mover moves) run each frame.
+- **What goes.** Every point lamp's direct term and shadow ray, and the sun's if phase 2b passes. The sun ray's own time is not measured: time it in the debug binary before phase 2b, so the saving is known.
 - **The shared steps.** Probe insert, deposit, merge and shade are not timed. The paper gives 7.3 ms on an RTX 3080 laptop. The renderer has a level-0 insert and a merge today; their times are in `lighting.gi_metrics` and the cascade timers.
 - **The budget.** ADR 0013 caps lighting at 8 ms at 1080p. Today's renderer is 11.4 ms at 720p with 6 lamps.
 
@@ -86,17 +105,18 @@ Each phase is its own change, with the gate it names. A phase that misses its ga
 |---|---|---|
 | 0. A baseline to trust | E2 in the prototype. glTF scenes (E13). The same error measure as `capture.compare` (block means), so the prototype and the renderer are graded alike | Ray tracer, one frame: the room no lamp lights within 10% of the reference, the hall within 7%, Sponza atrium and dark corner within 10% |
 | 1. The leak | E1, E4, E7, E8 with cones | Cone tracer: the room no lamp lights within 1.5 times the ray tracer's error from phase 0, and bias under 10%. The hall and Sponza no worse than 1.5 times |
-| 2. Lamps and the full loop | E3, E9: lamps as emitters and bounce through feedback, together. Decide how many exact lamps stay | The full picture (lamp light and all bounces) within 10% of the path-traced reference in the hall, the room and Sponza after 8 frames, and within 15% in the frame after a lamp goes on. Noise under 3% median |
-| 3. Cost, and the decision | The GPU march tuned (section 5). The voxel write for a mover and for the surface light, timed. Camera motion and moving lamps on the GPU prototype (E10, E11). Then the ADR | Trace step, voxel upkeep and the shared steps together under today's `lighting_ms` at 6 lamps, and flat to 48 lamps, on the RTX 4070 at 720p. Memory inside the preset's budget. Anthony accepts the ADR, or the plan stops |
+| 2. Lamps and the full loop | E3, E9, E15, E16: every point lamp an emitter, and bounce through feedback, together. No exact lamps. If the contact or thin-caster gate misses, try the screen-space first interval (step 6) before anything else | The full picture (lamp light and all bounces) within 10% of the path-traced reference in the hall, the room and Sponza after 8 frames, and within 15% in the frame after a lamp goes on. Noise under 3% median. Shadows against the reference: penumbra width at contact and at 1, 3 and 10 m from the caster; the thinnest caster that blocks half the light; a mover's shadow lags 0 frames; a lamp in a shade lights the room and not the shade's far side |
+| 2b. The sun as an emitter | E17. The sun's exact ray timed first. Then step 5 A, and B if A misses | Sponza courtyard, sun only: within 10% of the reference, and the same penumbra checks as phase 2. The room next to the courtyard, sun on: bias under phase 1's limit. If A and B both miss, the sun keeps its exact ray and the plan goes on |
+| 3. Cost, and the decision | The GPU march tuned (section 5). The voxel write for a mover, a skinned character and the surface light, timed. Camera motion and moving lamps on the GPU prototype (E10, E11, E18). Then the ADR | Trace step, voxel upkeep and the shared steps together under today's `lighting_ms` at 6 lamps, and flat to 48 lamps, on the RTX 4070 at 720p. Memory inside the preset's budget, or the preset has GI off. Anthony accepts the ADR, or the plan stops |
 | 4. The voxel field in the renderer | The field and its upkeep in `crates/render`, behind a setting, with the software tracer still the default. Probes and the debug binary (section 7) | The field's cover of a known wall matches the CPU prototype's. `make sponza-gate` and `make moving-lamp-gate` unchanged with the setting off |
-| 5. Cones in the cascade | The cascade takes its radiance from the cone march, every cascade every frame. Lamps are written into the field. The per-lamp loops go: the pixel's cascade visibility sample for each lamp, and `lighting_cascade_direct_at` at every ray hit | The phase 2 numbers, read from the presented frame. `lighting_ms` flat from 6 to 48 lamps. A new gate in `scripts/ci-gate-knockout.sh` for the leak (the room no lamp lights) |
-| 6. Remove the temporal rules | Delete the lamp share, the drift rate, the change signals, the refresh period and the long mean in `lighting_cascade_upper_shade.comp`, and the level-0 long mean if it has landed | The moving-lamp gate's noise limits hold with no temporal mean, and its follow check passes in 1 frame |
+| 5. Cones in the cascade | The cascade takes its radiance from the cone march, every cascade every frame. Lamps are written into the field. The per-lamp loops go: the pixel's cascade visibility sample for each lamp, the pixel exact shadows (`RESTIR_EXACT_NEAR`), and `lighting_cascade_direct_at` at every ray hit. The sun's exact ray goes too if phase 2b passed. Fog, reflections and specular read the field (E14) | The phase 2 numbers, read from the presented frame. `lighting_ms` flat from 6 to 48 lamps. A new gate in `scripts/ci-gate-knockout.sh` for the leak (the room no lamp lights) |
+| 6. Remove the temporal rules and the old path | Delete the lamp share, the drift rate, the change signals, the refresh period and the long mean in `lighting_cascade_upper_shade.comp`. Delete the software-traced GI path: there is no preset that keeps it | The moving-lamp gate's noise limits hold with no temporal mean, and its follow check passes in 1 frame |
 
 ## 7. Probes, tunables and the debug binary
 
 The prototype is `debug/single-frame-cascade/`. From phase 4 the coverage moves into `debug/lighting`, as the rubric requires.
 
-Tunables, each a setting under [the settings principles](../../engine/settings-principles.md) from phase 4: the tracer (cone, software, hardware), the cone width, the cascade-0 probe size in pixels, the direction count at cascade 0, the cascade count, the clip volume side for each level, the finest and coarsest voxel level, the count of exact lamps.
+Tunables, each a setting under [the settings principles](../../engine/settings-principles.md) from phase 4: GI on or off, the tracer (cone, or software until phase 6), the cone width, the cascade-0 probe size in pixels, the direction count at cascade 0, the cascade count, the clip volume side for each level, the finest and coarsest voxel level, the screen-space first interval on or off, and the sun's path (sky, voxel visibility, or exact ray).
 
 Probes, each on the command catalogue from phase 4:
 
@@ -109,6 +129,10 @@ Probes, each on the command catalogue from phase 4:
 | The march costs too much | Steps and texture reads a cone, and the march's GPU time |
 | A voxel texture clips (E12) | The largest value written this frame |
 | Bounce energy drifts (E9) | Mean irradiance by frame after a lamp change |
+| A shadow is too soft or missing (E15) | Penumbra width over the reference's, by distance from the caster; the thinnest caster that blocks half the light |
+| A shadow lags its caster (E11, E18) | Frames between a caster's move and its shadow's |
+| A fixture blocks its own lamp (E16) | Light leaving a lamp's voxel over the lamp's emission |
+| The sun leaks indoors (E17) | Mean irradiance of a room with the sun outside it, over the reference |
 
 A view of the voxel field (cover and light, by level) goes in the debug menu with the other lighting views.
 
@@ -120,13 +144,17 @@ A view of the voxel field (cover and light, by level) goes in the debug menu wit
 - Determinism: the field is a function of the scene and the eye's clip volumes. The cone directions are a function of the frame number. Not bit-exact across GPUs (texture filtering).
 - Headless server: does not build the field or the cascades.
 
-## 9. Decisions still open
+## 9. Decisions
 
-1. Whether the product keeps exact shadow rays for the sun and the brightest few lamps. Cones give a shadow as soft as a voxel.
-2. Hardware ray queries as a second tracer. At 6 lamps the ray trace step is about 3.3 ms against 11.8 ms for the untuned march. ADR 0012 lists "Hardware RT as a requirement" as rejected; an optional tracer does not conflict with it.
-3. What a preset without the memory for the field gets: no GI, or today's software path kept alive beside the new one.
-4. The other session's level-0 long mean (branch `lighting/post-merge`, PR #322). Phase 6 would delete it.
+Made by Anthony on 24 Nov 2026:
+
+1. **Exact shadow rays.** None for point lamps: every lamp is an emitter, and its shadow comes from the cone march. The sun is tried as an emitter in phase 2b. It keeps its one exact ray only if that phase misses.
+2. **Hardware ray tracing.** Not part of this plan, as a GI tracer or as a shadow tracer.
+3. **A preset without the memory for the field.** GI is off. The old software path is not kept alive for it, and phase 6 deletes it.
+4. **The level-0 long mean of PR #322.** Not part of this plan. That work has stopped.
+
+Still open: what specular and reflections read for a sharp lamp highlight once the direct pass is gone (E14).
 
 ## 10. What stays from the session of 23 Nov
 
-Uncommitted in the main checkout when this was written: the frame-time step for auto exposure, the lamp share and drift rate in the upper cells, the two corner-leak fixes (`CASCADE_RECORD_PLANE`, `CASCADE_SEAT_INSET`), and `make moving-lamp-gate`. They are the stopgap until phase 6. The gate stays: phase 5 and phase 6 are graded by it.
+Committed on `lighting/stopgap-and-cone-prototype`: the frame-time step for auto exposure, the lamp share and drift rate in the upper cells, the two corner-leak fixes (`CASCADE_RECORD_PLANE`, `CASCADE_SEAT_INSET`), and `make moving-lamp-gate`. They are the stopgap until phase 6. The gate stays: phase 5 and phase 6 are graded by it.
