@@ -292,11 +292,25 @@ const uint CASCADE_CLAIMED_WORDS = 32768u;
 const uint CASCADE_UPPER_CAP = 16384u;
 const uint CASCADE_UPPER_RAYS_MAX = 64u;
 const float CASCADE_EXTENT_FACTOR = 16.0;
-// Share of a refresh an upper cell takes, and the irradiance change past
-// which it takes all of it (lighting_cascade_upper_shade.comp). 0.05 keeps a
-// still night scene from shimmering now that each refresh traces new
-// directions; a moving lamp is followed by the jump.
+// Share of a refresh an upper cell takes (lighting_cascade_upper_shade.comp).
+// 0.05 keeps a still night scene from shimmering now that each refresh traces
+// new directions.
 const float CASCADE_UPPER_RATE = 0.05;
+// A cell the scene has just changed under (a lamp that reaches it moved,
+// changed colour or went out since its last refresh; a mover; a host scene
+// change) takes half of each refresh, and all of one that differs by more
+// than CASCADE_UPPER_JUMP of its irradiance. Until 23 Nov 2026 the jump was
+// taken on the size of the difference alone. In a dim cell one refresh of a
+// few rays differs by more than that from the next by chance, so a still
+// cell took a whole new estimate every few refreshes: patches of bounce
+// light that came and went on a still picture.
+// An unchanged cell goes on averaging: after 1 / CASCADE_UPPER_RATE refreshes
+// its share is one over its refresh count, down to one in CASCADE_UPPER_LONG.
+// At a fixed 0.05 a dim cell's mean kept wandering by about a sixth of one
+// refresh's noise, a slow drift of soft patches. The count is the w of the
+// cell's irradiance word. A change puts it back to the warm count.
+const float CASCADE_UPPER_LONG = 128.0;
+const float CASCADE_UPPER_CHANGE_RATE = 0.5;
 const float CASCADE_UPPER_JUMP = 0.9;
 // Refreshes an upper cell takes whole, with fixed directions, before it is
 // damped and its directions change each refresh.
@@ -823,6 +837,9 @@ vec4 lighting_cascade_gated(uint s, vec3 q, vec3 n, float plane) {
     return vec4(max(v.rgb, vec3(0.0)), 1.0);
 }
 
+// How much closer to the cell's axis a normal has to be to take a seated
+// parent cell (lighting_cascade_parent_corner).
+const float CASCADE_SEAT_GAIN = 0.02;
 // One of the eight parent-grid cells around `pos` at exactly `size`.
 // `claim` allocates a missing corner so the rolling refresh can shade it;
 // a newly claimed cell is empty until that refresh.
@@ -853,10 +870,27 @@ void lighting_cascade_parent_corner(vec3 pos, vec3 n, float size, uint i, bool c
     q[ax] = pos[ax] - clamp(slope, -size, size);
     slot = lighting_cache_find_sized(q, n, claim, size, q);
     if (seat && slot != ~0u) {
-        cache.v[3u * slot + 1u].xyz = n;
-        float off = dot(cache.v[3u * slot].xyz - q, n);
-        if (off < -CASCADE_RESEAT || off > LIGHTING_CELL_HALF * size) {
-            cache.v[3u * slot].xyz = q;
+        // Every level-0 voxel under a parent offers its own normal and its
+        // own point on the cell. Until 23 Nov 2026 each one wrote them, and
+        // the last writer of the frame won: a race. On a curved surface
+        // (Sponza's curtains) the parent's seat changed at random from frame
+        // to frame, its gates passed and failed with it, and the voxels that
+        // read its bins pulsed: soft patches of light that came and went.
+        // Now the seat is kept. It is taken while the cell has no light yet,
+        // when it belongs to a surface that faces the other way, and by a
+        // normal that is closer to the cell's axis. That order does not
+        // depend on which thread ran last, so a still scene keeps one seat.
+        vec3 had_n = cache.v[3u * slot + 1u].xyz;
+        bool empty = !(cache.v[3u * slot + 2u].w > LIGHTING_CACHE_HAS_W);
+        bool take = empty
+            || !(dot(had_n, n) > 0.0)
+            || abs(n[ax]) > abs(had_n[ax]) + CASCADE_SEAT_GAIN;
+        if (take) {
+            cache.v[3u * slot + 1u].xyz = n;
+            float off = dot(cache.v[3u * slot].xyz - q, n);
+            if (off < -CASCADE_RESEAT || off > LIGHTING_CELL_HALF * size) {
+                cache.v[3u * slot].xyz = q;
+            }
         }
     }
 }

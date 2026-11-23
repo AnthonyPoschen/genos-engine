@@ -181,9 +181,8 @@ void main() {
         // new estimate, and its rays take new directions each refresh, so the
         // bins average many refreshes. One to four rays a bin, replaced
         // outright, kept a still scene popping: cells feed each other's
-        // bounce and each refresh moved the wall by a visible step. A change of more than
-        // CASCADE_UPPER_JUMP of the cell's irradiance is a real change (a
-        // lamp, a mover) and takes the new estimate.
+        // bounce and each refresh moved the wall by a visible step. A cell the
+        // scene changed under takes more of the refresh (CASCADE_UPPER_CHANGE_RATE).
         vec4 had = cache.v[3u * slot + 2u];
         float l_old = dot(had.xyz, vec3(0.2126, 0.7152, 0.0722));
         float l_new = dot(cur, vec3(0.2126, 0.7152, 0.0722));
@@ -193,10 +192,21 @@ void main() {
         // cut to full brightness. They trace fixed directions
         // (lighting_cascade_bin_seed), so taking them whole does not shimmer.
         bool warm = had.w > CASCADE_UPPER_WARM - 0.5;
-        bool keep = warm
-            && abs(l_new - l_old) <= CASCADE_UPPER_JUMP * max(max(l_new, l_old), CASCADE_EPS);
-        float rate = keep ? CASCADE_UPPER_RATE : 1.0;
-        float age = had.w > 0.5 ? min(had.w + 1.0, CASCADE_UPPER_WARM) : 1.0;
+        // The scene changed under this cell since its last refresh.
+        uint last = floatBitsToUint(cache.v[3u * slot].w);
+        bool changed = lighting_lamp_keep(pos, last) < LIGHTING_KEEP_ALL
+            || lighting_reach_noting()
+            || lighting_scene_changed();
+        bool big = abs(l_new - l_old) > CASCADE_UPPER_JUMP * max(max(l_new, l_old), CASCADE_EPS);
+        float rate = !warm ? 1.0
+            : !changed ? min(CASCADE_UPPER_RATE, 1.0 / max(had.w, 1.0))
+            : big ? 1.0 : CASCADE_UPPER_CHANGE_RATE;
+        // The refresh count: up to the warm count, then on to the long mean
+        // while nothing changes. A change starts the long mean again.
+        float age = had.w > 0.5 ? min(had.w + 1.0, CASCADE_UPPER_LONG) : 1.0;
+        if (warm && changed) {
+            age = CASCADE_UPPER_WARM;
+        }
         for (uint b = 0u; b < CASCADE_BINS; b++) {
             // A bin left with no weight (its rays all in the cone, no cone
             // ray in it) keeps its value.
