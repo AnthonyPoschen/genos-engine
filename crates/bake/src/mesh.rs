@@ -186,7 +186,7 @@ impl<'a> BakeMesh<'a> {
                 sets_kept = true;
             }
             for (index, tri) in mesh.triangles.iter().enumerate() {
-                let mut moved = tri.clone();
+                let mut moved = *tri;
                 moved.positions = tri.positions.map(point);
                 moved.normals = tri.normals.map(turn);
                 out.triangles.push(moved);

@@ -1,6 +1,14 @@
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![expect(clippy::cast_precision_loss, reason = "probe means")]
 #![expect(clippy::as_conversions, reason = "probe means")]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a hand-run probe (#[ignore]): cargo test passes no arguments to one test, so its knobs are variables"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    reason = "the probe keeps the letters of the estimator it checks"
+)]
 //! Level-0 voxels on the side faces of one box, against the CPU path reference.
 //! Run with --ignored --nocapture. `BOX_YAW` turns the box (radians, default 0.35).
 
@@ -178,6 +186,7 @@ fn hit_share(sc: &Scene, from: [f32; 3], n: [f32; 3], reach: f32) -> f32 {
     hits as f32 / (side * side) as f32
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "four independent facts printed per corner")]
 struct Corner {
     found: bool,
     filled: bool,
@@ -227,6 +236,7 @@ fn corners(renderer: &mut Renderer, sc: &Scene, v: &Level0Voxel, n: [f32; 3], s:
         .collect()
 }
 
+#[expect(clippy::too_many_lines, reason = "one hand-run probe, read top to bottom")]
 fn run(yaw: f32) {
     let (_gpu, mut owner) = open();
     let window = &mut *owner.window;
@@ -265,7 +275,7 @@ fn run(yaw: f32) {
         let pixels = renderer.draw(&world, &cam, true).expect("draw").expect("readback");
         let (w, h) = (renderer.width(), renderer.height());
         let mut ppm = format!("P6 {w} {h} 255\n").into_bytes();
-        for px in pixels.chunks_exact(4) {
+        for px in pixels.as_chunks::<4>().0 {
             ppm.extend_from_slice(&px[..3]);
         }
         std::fs::write(path, ppm).expect("shot");
@@ -296,10 +306,10 @@ fn run(yaw: f32) {
     for v in voxels.iter().filter(|v| v.weight > 0.5) {
         let Some(n) = face_normal(v.pos, sc.solid(0)) else { continue };
         let ax = axis_of(n);
-        if v.axis != (ax as u32) * 2 + u32::from(n[ax] < 0.0) {
+        if v.axis as usize != ax * 2 + usize::from(n[ax] < 0.0) {
             continue;
         }
-        let s = 0.0625 * 2f32.powi(v.level as i32);
+        let s = 0.0625 * (1u32 << v.level) as f32;
         let reference = luma(bounce_irradiance(&sc, v.pos, n, 512, 16, 7));
         let from = add(v.pos, n, 0.02);
         let cs = corners(renderer, &sc, v, n, s);

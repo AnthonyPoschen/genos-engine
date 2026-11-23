@@ -1079,10 +1079,10 @@ fn run() -> Result<i32, String> {
             let wide = |words: &str| words.chars().count() as f32 * 6.0;
             let [title, counts, hints] = view.hud();
             let [right, top] = view.hud_inset;
-            let room = width - right;
-            write(&mut overlay, &title, ((room - wide(&title)) * 0.5).round(), top + 10.0, HUD_BRIGHT);
+            let span = width - right;
+            write(&mut overlay, &title, ((span - wide(&title)) * 0.5).round(), top + 10.0, HUD_BRIGHT);
             write(&mut overlay, &counts, 16.0, height - 22.0, HUD_BRIGHT);
-            write(&mut overlay, &hints, (room - wide(&hints) - 16.0).round(), height - 22.0, HUD_DIM);
+            write(&mut overlay, &hints, (span - wide(&hints) - 16.0).round(), height - 22.0, HUD_DIM);
             for end in view.gizmo(&camera, [width, height]) {
                 if let Some(centre) = end.line_from {
                     gizmo_lines.push(genos_render::ScreenLine { a: centre, b: end.at, width: 2.0, color: end.color });
@@ -3858,7 +3858,7 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_lamp_pick" => "Lamp pick",
         "lighting_lamp_pick_samples" => "Samples",
         "lighting_lamp_pick_candidates" => "Candidates",
-        "lighting_probe_rays" => "Screen probe rays",
+        "lighting_probe_rays" => "Screen probe rays", // removed term, kept for the old key
         "lighting_probe_stale" => "Probe stale frames",
         "lighting_probes" => "Screen probes",
         "lighting_world_cache" => "Surface light cache",

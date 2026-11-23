@@ -4048,7 +4048,7 @@ mod tests {
         let (positions, normals, colors) = view.shadow_patches(ground);
         let per_object = (super::SHADOW_RINGS.len() - 1) * super::SHADOW_SIDES * 6;
         assert_eq!(positions.len(), per_object * 2, "the cube and the bracket stand apart: a patch each");
-        assert!(normals.iter().all(|n| *n == [0.0, 1.0, 0.0]));
+        assert_eq!(normals, vec![[0.0, 1.0, 0.0]; normals.len()]);
         // Dark at the centre, the ground's own colour at the rim, never brighter.
         let darkest = colors.iter().map(|c| c[0]).fold(f32::INFINITY, f32::min);
         assert!((darkest - 0.3 * (1.0 - super::SHADOW_DARK)).abs() < 1.0e-5, "{darkest}");
@@ -4073,7 +4073,7 @@ mod tests {
         assert_eq!(view.shadow_patches(ground).0.len(), per_object);
         let off = genos_mcp::json::parse(r#"{"shadow":false}"#).expect("json");
         view.command("mesh_view", &off, &mut camera, 1.0).expect("shadow off");
-        assert!(view.shadow_patches(ground).0.is_empty());
+        assert_eq!(view.shadow_patches(ground).0.len(), 0);
     }
 
     #[test]
@@ -4145,7 +4145,7 @@ mod tests {
         assert!(view.hidden.is_empty());
 
         // The Replay panel: nothing without a session, then live and the commands, newest first.
-        assert!(view.replay_lines().is_empty());
+        assert_eq!(view.replay_lines().len(), 0);
         let event = |id, command: &str, ok| Event { id, command: command.into(), ok, snapshot: None };
         view.recorded = vec![
             Session { id: "old".into(), initial_snapshot: 0, events: vec![event(1, "inspect", true)] },
@@ -4634,7 +4634,7 @@ not a row | `nothing` |\n";
         view.command("mesh_view", &faces, &mut camera, 1.0).expect("face ids");
         let cube = &view.display()[0].2;
         assert_eq!(cube.len(), 36);
-        assert!(cube[0] == cube[1] && cube[1] == cube[2]);
+        assert_eq!((cube[0], cube[1]), (cube[1], cube[2]));
         assert_ne!(cube[0], cube[35], "the first and last faces differ");
         assert!(view.command("mesh_view", &none, &mut camera, 1.0).is_ok());
         // The grid: the sample is 2.9 m across, so lines are 1 m apart, 6 each
@@ -4642,7 +4642,7 @@ not a row | `nothing` |\n";
         assert_eq!(view.grid_strips().0.len(), 13 * 2 * 2 * 12);
         let off = genos_mcp::json::parse(r#"{"grid":false}"#).expect("json");
         view.command("mesh_view", &off, &mut camera, 1.0).expect("grid off");
-        assert!(view.grid_strips().0.is_empty());
+        assert_eq!(view.grid_strips().0.len(), 0);
         // Tessellation: every triangle edge once, the diagonal of each quad
         // included. The cube: 12 edges and 6 diagonals.
         let hide = genos_mcp::json::parse(r#"{"shade":"tessellation","hide":[2]}"#).expect("json");
@@ -4661,12 +4661,12 @@ not a row | `nothing` |\n";
         assert!(["5", "6", "7", "8"].iter().all(|vertex| named(false, vertex)), "{labels:?}");
         let off = genos_mcp::json::parse(r#"{"labels":false}"#).expect("json");
         view.command("mesh_view", &off, &mut camera, 1.0).expect("labels off");
-        assert!(view.id_labels(&camera, 1.0).is_empty());
+        assert_eq!(view.id_labels(&camera, 1.0).len(), 0);
         let on = genos_mcp::json::parse(r#"{"labels":true,"shade":"shaded","look":"frame"}"#).expect("json");
         view.command("mesh_view", &on, &mut camera, 1.0).expect("labels on");
         assert!(view.id_labels(&camera, 1.0).is_empty(), "only the topology shade has labels");
         // Wireframe: the cube has 12 edges and the bracket 18, two strips each.
-        assert!(view.wire().0.is_empty());
+        assert_eq!(view.wire().0.len(), 0);
         let wire = genos_mcp::json::parse(r#"{"shade":"wireframe"}"#).expect("json");
         view.command("mesh_view", &wire, &mut camera, 1.0).expect("wireframe");
         assert_eq!(view.wire().0.len(), (12 + 18) * 2 * 12);
@@ -4728,7 +4728,7 @@ not a row | `nothing` |\n";
     #[test]
     fn the_overlay_covers_a_selected_object_and_marks_a_selected_vertex() {
         let mut view = view();
-        assert!(view.overlay().0.is_empty());
+        assert_eq!(view.overlay().0.len(), 0);
         view.selection = Selection { objects: [1].into(), ..Selection::default() };
         // The cube: 6 quads, 12 triangles.
         assert_eq!(view.overlay().0.len(), 36);

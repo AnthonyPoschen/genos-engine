@@ -164,7 +164,7 @@ fn material_albedo(mesh: &BakeMesh) -> Vec<[f32; 3]> {
         .map(|m| {
             let cutoff = match mesh.materials[m].pbr.alpha_mode {
                 genos_load::AlphaMode::Mask(cutoff) => cutoff,
-                _ => 0.0,
+                genos_load::AlphaMode::Opaque | genos_load::AlphaMode::Blend => 0.0,
             };
             let (mut sum, mut n) = ([0.0f32; 3], 0.0f32);
             for y in 0..SIDE {
@@ -192,6 +192,10 @@ fn material_albedo(mesh: &BakeMesh) -> Vec<[f32; 3]> {
         })
         .collect()
 }
+
+/// One cell of the brick grid: its coarse distance, and its brick with the
+/// brick's mean albedo when the cell touches the band.
+type CellBake = (u8, Option<(SdfBrick, [u8; 3])>);
 
 fn build_grid(mesh: &BakeMesh, voxel: f32, bvh: &Bvh, with_albedo: bool) -> MeshSdf {
     let tris = &mesh.triangles;
@@ -230,7 +234,7 @@ fn build_grid(mesh: &BakeMesh, voxel: f32, bvh: &Bvh, with_albedo: bool) -> Mesh
     };
     let half_diag = brick_size * 0.5 * 3.0f32.sqrt();
     // Coarse grid and the list of bricks that touch the band, in parallel.
-    let results: Vec<(u8, Option<(SdfBrick, [u8; 3])>)> = parallel_map(&cells, |&c| {
+    let results: Vec<CellBake> = parallel_map(&cells, |&c| {
         let p = centre(c);
         let near = bvh.closest(tris, p, half_diag + band);
         let coarse = encode(signed(p, coarse_band), coarse_band);

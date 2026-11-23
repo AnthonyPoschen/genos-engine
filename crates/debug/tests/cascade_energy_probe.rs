@@ -1,6 +1,15 @@
 #![cfg_attr(test, expect(clippy::expect_used, reason = "a test aborts when a fixture fails"))]
 #![expect(clippy::cast_precision_loss, reason = "probe means")]
 #![expect(clippy::as_conversions, reason = "probe means")]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "a hand-run probe (#[ignore]): cargo test passes no arguments to one test, so its knobs are variables"
+)]
+#![expect(
+    clippy::many_single_char_names,
+    clippy::similar_names,
+    reason = "the probe keeps the letters of the estimator it checks"
+)]
 //! Energy-closure probe: level-0 stored irradiance against the CPU path
 //! reference's bounce irradiance at the same point and normal, per level,
 //! for one-bounce and many-bounce references. Run with --ignored --nocapture.
@@ -237,8 +246,8 @@ fn cpu_cell_sh(scene: &Scene, p: [f32; 3], n: [f32; 3], size: f32, rays: u32) ->
     let parent = cpu_cell_sh(scene, p, n, size * 2.0, rays);
     let from = [p[0] + n[0] * 0.02, p[1] + n[1] * 0.02, p[2] + n[2] * 0.02];
     let (t0, t1) = (4.0 * size, (8.0 * size).min(200.0));
-    let side = (rays as f32).sqrt() as u32;
-    let mut rng = Rng(0xABCD_EF01 ^ size.to_bits() as u64);
+    let side = rays.isqrt();
+    let mut rng = Rng(0xABCD_EF01 ^ u64::from(size.to_bits()));
     let (mut c0, mut c) = (0.0f32, [0.0f32; 3]);
     for k in 0..rays {
         let u = ((k % side) as f32 + rng.next()) / side as f32;
@@ -270,7 +279,7 @@ fn sh_eval(n: [f32; 3], c0: f32, c: [f32; 3], d: [f32; 3]) -> f32 {
 fn cpu_chain_e(scene: &Scene, p: [f32; 3], n: [f32; 3], s: f32, rays: u32) -> f32 {
     let parent = cpu_cell_sh(scene, p, n, 2.0 * s, rays);
     let from = [p[0] + n[0] * 0.02, p[1] + n[1] * 0.02, p[2] + n[2] * 0.02];
-    let side = (rays as f32).sqrt() as u32;
+    let side = rays.isqrt();
     let mut rng = Rng(0x5555_1234);
     let mut sum = 0.0f32;
     for k in 0..rays {
@@ -315,8 +324,10 @@ fn bins_eval(n: [f32; 3], bins: &[f32; 16], d: [f32; 3]) -> f32 {
     let wu = fu - r0;
     let c0 = fp.floor();
     let wp = fp - c0;
-    let ci = |c: f32| (c.rem_euclid(4.0)) as usize;
-    let r = r0 as usize;
+    // The whole part of a value in 0..4, without a float to integer cast.
+    let whole = |v: f32| usize::from(v >= 1.0) + usize::from(v >= 2.0) + usize::from(v >= 3.0);
+    let ci = |c: f32| whole(c.rem_euclid(4.0));
+    let r = whole(r0);
     let at = |row: usize, col: usize| bins[row * 4 + col];
     let a = at(r, ci(c0)) * (1.0 - wp) + at(r, ci(c0 + 1.0)) * wp;
     let b = at(r + 1, ci(c0)) * (1.0 - wp) + at(r + 1, ci(c0 + 1.0)) * wp;
@@ -330,7 +341,7 @@ fn cpu_cell_bins(scene: &Scene, p: [f32; 3], n: [f32; 3], size: f32, per_bin: u3
     let parent = cpu_cell_bins(scene, p, n, size * 2.0, per_bin);
     let from = [p[0] + n[0] * 0.02, p[1] + n[1] * 0.02, p[2] + n[2] * 0.02];
     let (t0, t1) = (4.0 * size, (8.0 * size).min(200.0));
-    let mut rng = Rng(0xABCD_EF01 ^ size.to_bits() as u64);
+    let mut rng = Rng(0xABCD_EF01 ^ u64::from(size.to_bits()));
     let mut bins = [0.0f32; 16];
     let mut counts = [0u32; 16];
     let clear_only = std::env::var("PROBE_CLEAR").is_ok();
@@ -369,7 +380,7 @@ fn cpu_cell_bins(scene: &Scene, p: [f32; 3], n: [f32; 3], size: f32, per_bin: u3
 fn cpu_chain_bins_e(scene: &Scene, p: [f32; 3], n: [f32; 3], s: f32, rays: u32) -> f32 {
     let parent = cpu_cell_bins(scene, p, n, 2.0 * s, 16);
     let from = [p[0] + n[0] * 0.02, p[1] + n[1] * 0.02, p[2] + n[2] * 0.02];
-    let side = (rays as f32).sqrt() as u32;
+    let side = rays.isqrt();
     let mut rng = Rng(0x5555_1234);
     let mut sum = 0.0f32;
     for k in 0..rays {
@@ -421,7 +432,7 @@ fn level0_energy_closure() {
         let (mut e_sum, mut r1_sum, mut rn_sum, mut near_sum, mut far_sum, mut c) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0u32);
         for v in list.iter().step_by(step).take(6) {
             let n = axis_vec(*axis);
-            let size = 0.0625 * 2f32.powi(*level as i32);
+            let size = 0.0625 * (1u32 << *level) as f32;
             let r1 = luma(bounce_irradiance(&sc, v.pos, n, 1024, 1, 7));
             let rn = luma(bounce_irradiance(&sc, v.pos, n, 1024, 16, 7));
             let (near, far) = split_one_bounce(&sc, v.pos, n, 8.0 * size, 2048);
@@ -437,7 +448,7 @@ fn level0_energy_closure() {
         }
         if let Some(v) = list.get(list.len() / 2) {
             let n = axis_vec(*axis);
-            let mut size = 0.0625 * 2f32.powi(*level as i32 + 1);
+            let mut size = 0.0625 * (2u32 << *level) as f32;
             let mut queries = Vec::new();
             while size <= 32.0 {
                 queries.push(CacheQuery { position: v.pos, normal: n, size });

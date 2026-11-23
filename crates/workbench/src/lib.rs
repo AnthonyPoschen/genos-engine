@@ -737,6 +737,7 @@ fn narrow(v: [f64; 3]) -> [f32; 3] {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "a test aborts when a fixture fails")]
 mod tests {
     use super::{parse_project, triangulate};
 
@@ -762,7 +763,7 @@ mod tests {
         assert_eq!((colors[0], colors[1]), ([1.0, 1.0, 1.0], [1.0, 0.0, 0.0]));
         assert_eq!(part.vertex_ids, vec![1, 2, 3, 1, 3, 4]);
         // Counter-clockwise seen from +Z: the normal is +Z on every corner.
-        assert!(part.normals.iter().all(|n| *n == [0.0, 0.0, 1.0]), "{:?}", part.normals);
+        assert_eq!(part.normals, vec![[0.0, 0.0, 1.0]; part.normals.len()]);
     }
 
     #[test]
@@ -805,7 +806,7 @@ mod tests {
         assert_eq!(workspace.bones[1].parent.as_deref(), Some("root"));
         assert_eq!(workspace.bones[1].position, [0.0, 1.0, 0.0]);
         assert_eq!((workspace.clips[0].name.as_str(), workspace.clips[0].duration), ("Lean", 2.0));
-        assert!(parse_project(PANEL).expect("parse").bones.is_empty());
+        assert_eq!(parse_project(PANEL).expect("parse").bones.len(), 0);
         let grouped = PANEL.replace("\"selection\":[2]", "\"selection\":[2],\"collections\":{\"3\":{\"name\":\"props\",\"objects\":[5]}}");
         let collections = parse_project(&grouped).expect("parse").collections;
         assert_eq!((collections[0].id, collections[0].name.as_str(), collections[0].objects.clone()), (3, "props", vec![5]));

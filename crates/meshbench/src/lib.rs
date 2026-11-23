@@ -101,6 +101,7 @@ impl Bridge {
 }
 
 #[cfg(test)]
+#[expect(clippy::expect_used, reason = "a test aborts when a fixture fails")]
 mod tests {
     use super::Bridge;
     use genos_json::Value;

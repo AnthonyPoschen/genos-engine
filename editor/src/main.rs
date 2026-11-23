@@ -96,7 +96,7 @@ mod tests {
         let after = call(&mut view, "mesh_context", r#"{"screenshot":false}"#);
         let now = after.get("selected_faces").and_then(Value::as_array).and_then(|faces| faces.first()).and_then(|face| face.get("centre")).and_then(third).expect("centre");
         assert!((now - before - 0.3).abs() < 1.0e-6, "the face moved 0.3 m: {before} to {now}");
-        let edits = after.get("recent_edits").and_then(Value::as_array).map(<[Value]>::to_vec).unwrap_or_default();
+        let edits = after.get("recent_edits").and_then(Value::as_array).map_or_default(<[Value]>::to_vec);
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].get("note").and_then(Value::as_str), Some("pull this face out by 30 cm"), "the edit carries the request");
         drop(view);

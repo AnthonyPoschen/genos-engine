@@ -255,6 +255,7 @@ fn two_sheets() -> BakeMesh<'static> {
     BakeMesh::plain("sheets", triangles, &[[0.8, 0.1, 0.1], [0.1, 0.1, 0.8]])
 }
 
+#[expect(clippy::cast_precision_loss, reason = "a brick index is far below 2^24")]
 #[test]
 fn a_level_field_keeps_the_level_voxel_and_a_colour_per_brick() {
     let mesh = two_sheets();
@@ -265,7 +266,7 @@ fn a_level_field_keeps_the_level_voxel_and_a_colour_per_brick() {
     assert!((sdf.voxel - LEVEL_VOXEL).abs() < 1.0e-6, "voxel {}", sdf.voxel);
     assert!(sdf.thin, "two open sheets are an open mesh");
     assert_eq!(sdf.brick_albedo.len(), sdf.bricks.len());
-    assert!(baked.cards.cards.is_empty());
+    assert_eq!(baked.cards.cards.len(), 0);
     let brick = sdf.voxel * 8.0;
     let (mut red, mut blue) = (0, 0);
     for (b, albedo) in sdf.bricks.iter().zip(&sdf.brick_albedo) {
@@ -286,6 +287,6 @@ fn a_level_field_keeps_the_level_voxel_and_a_colour_per_brick() {
     // The per-mesh bake of the same triangles is another file and has no colours.
     let plain = load_or_bake(&mesh, &s).unwrap();
     assert_ne!(plain.key, baked.key);
-    assert!(plain.sdf.brick_albedo.is_empty());
+    assert_eq!(plain.sdf.brick_albedo.len(), 0);
     std::fs::remove_dir_all(&s.cache_dir).ok();
 }
