@@ -1,5 +1,5 @@
-//! `genos-single-frame-cascade`: a CPU prototype of single-frame Split
-//! Radiance Cascades (Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384).
+//! `genos-single-frame-cascade`: a CPU prototype of the sparse cascade traced
+//! in one frame with split rays (Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384).
 //!
 //! It answers two questions with numbers and draws nothing on a GPU:
 //! how many rays one frame needs for the cascade to converge with no temporal
@@ -36,7 +36,7 @@ use genos_stress::building::{Layout, LightMix};
 use genos_stress::stage::{Scale, Stage};
 
 const HELP: &str = "\
-genos-single-frame-cascade: single-frame Split Radiance Cascades on the CPU.
+genos-single-frame-cascade: the sparse cascade in one frame, split rays, on the CPU.
 
 Traces one frame of the cascade (and --frames of them with new jitter) from a
 camera pose, counts the rays, and compares the bounce irradiance at a grid of
