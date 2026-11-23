@@ -34,6 +34,7 @@ members = [
     "examples/stress",
     "debug/scene-lib",
     "debug/lighting",
+    "debug/single-frame-cascade",
     "editor",
     "debug/particles",
     "debug/physics",

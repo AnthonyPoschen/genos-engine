@@ -272,7 +272,7 @@ Adaptation is exponential on the exposure scale:
 e += (target − e) × (1 − exp(−dt / τ))
 ```
 
-`τ` is `adapt_down` when the target is below `e`, and `adapt_up` when it is above. When `|target − e| / max(e, 10⁻⁶) < 0.001`, `e` is held. **Departure from a pure exponential:** the hold is ours. It is the no-flicker rule. A still histogram must not move the picture by a ulp per frame.
+`dt` is the wall seconds since the previous frame (`Renderer::set_frame_dt`; a script or a fixed step passes that step), so the adaptation and the look transition take the same time at every frame rate. Until 23 Nov 2026 `dt` was a constant 1/60 s and a 40 fps session adapted at two thirds of the set speed. `get_hdr` replies `frame_dt`. `τ` is `adapt_down` when the target is below `e`, and `adapt_up` when it is above. When `|target − e| / max(e, 10⁻⁶) < 0.001`, `e` is held. **Departure from a pure exponential:** the hold is ours. It is the no-flicker rule. A still histogram must not move the picture by a ulp per frame.
 
 The one-frame latency of the histogram is a departure from a textbook meter that finishes inside the frame. It is how the draw stays free of a fence wait, which [renderer.md](renderer.md) already requires.
 
@@ -504,3 +504,38 @@ P2 is before P5 on purpose. AgX is not invertible. Shipping it before the linear
 4. FXAA's shader is 8-bit. Phase 6 skips it on HDR10 and on scRGB rather than widening it in the same change.
 5. ADR 0013's 8 ms lighting cap is 1080p. The stress sum at 1440p is unmeasured. Post stays at 1.20 ms on High either way.
 6. Whether `display=aces` ships in phase 5 or in a later phase depends on the Academy transform fitting in the display pass without a LUT asset. A LUT under `assets/` is a last resort and needs the asset record. A fit that is not the Academy's code does not ship under the name ACES.
+
+## 14. Exposure: future work
+
+Recorded on 23 Nov 2026 from a live session. The camera walked out of the lit room into the unlit gap between two walls, then into the lit room. The picture went to full white and took about 9 s to settle.
+
+Measured (`render.get_hdr`, polled during a scripted walk, `adapt_down=0.4`, `adapt_up=0.8`):
+
+| Quantity | Value |
+|---|---|
+| Median scene luminance in the gap | about 2⁻¹⁴ |
+| Median scene luminance in the room | about 2⁻²·⁵ (12 stops brighter) |
+| Exposure scale in the gap | about 1,960 (EV100 −11.2) |
+| Exposure scale in the room | 0.43 (EV100 +1.0) |
+| Time from the room appearing to a scale under 30× | 3.5 s |
+| Time to within 2× of the target | 6.5 s |
+| Time to settle | 9 s |
+
+Causes:
+
+1. **The step was a constant 1/60 s.** Fixed on 23 Nov 2026: the step is the wall time between frames (§5). The session ran at 40 to 53 fps, so the effective `adapt_down` was about 0.8 s.
+2. **The adaptation is exponential on the linear scale, not in stops.** The time to cross a jump is `τ × ln(ratio)`. A fall of 12 stops is 8.4 time constants, and each stop costs the same time. A rise is the opposite: the scale covers most of the linear distance in the first fraction of `adapt_up`, so 0.1 s in the gap is already about 9 stops over the room's exposure and 0.5 s is within about one stop of the gap's. An eye is slow to adapt to the dark and quick to recover from the light. The engine does the reverse.
+3. **Auto exposure has no limit.** An unlit view drives the meter to EV100 −11 and the scale to about 2,000.
+4. **The camera-cut rule does not see a walk.** It applies only when the camera moves more than `EXPOSURE_CUT_DISTANCE` (2 m) in one frame.
+
+The settings today are `adapt_down` and `adapt_up` only. They set the speed. Nothing sets the shape or the range.
+
+Work to do, in this order:
+
+1. **Adapt in stops.** Step `log2(scale)`, not the scale. A jump then takes time in proportion to the stops it crosses, in both directions, and a short pass through a dark place moves the exposure only part of the way.
+2. **A range for auto exposure.** A minimum and a maximum EV100 (or a maximum scale) for the meter's result, so an unlit view cannot ask for a scale of thousands.
+3. **A curve a person can define and edit.** The owner asked for this. Candidates: a speed in stops per second for each direction in place of a time constant; a different speed for a large gap than for a small one; a delay before the dark adaptation starts; a meter curve that maps the metered EV100 to the target EV100 (the compensation curve of Unreal and Frostbite). Each value follows `docs/engine/settings-principles.md`: a serializable setting, on the MCP catalogue, on the Output page, with a probe.
+4. **A metered jump as a cut.** A change of more than a set number of stops in one frame can start the exposure near the new target, as the 2 m rule does.
+5. **A gate.** A scripted walk from a lit view through an unlit one and back, with a ceiling on the seconds the picture is above a set share of white pixels.
+
+Also open: the frame-counted constants that a person sees as time are not yet in seconds. `EXPOSURE_CUT_FRAMES` is one. The lighting ones (`CASCADE_CHANGE_FRAMES`, `LIGHTING_WRC_REFRESH_FRAMES`, `LIGHTING_WRC_CHANGE_FRAMES`, `LIGHTING_BOOST_FRAMES`, `LIGHTING_SETTLE_FRAMES`) and the loader's `STARVE_FRAMES` need a check each.

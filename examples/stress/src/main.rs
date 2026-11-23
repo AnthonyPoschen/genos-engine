@@ -1452,6 +1452,11 @@ fn run() -> Result<i32, String> {
         }
         let draw_start = Instant::now();
         renderer.set_particle_dt(dt);
+        renderer.set_frame_dt(tools.fixed_step().unwrap_or(if fixed_step {
+            bench::STEP
+        } else {
+            real_dt.min(MAX_FRAME_SECONDS)
+        }));
         let pixels =
             renderer.draw_with_overlay(&stage.world, &camera, &overlay, want_read, false)?;
         if let Some(profile) = profile.as_mut() {

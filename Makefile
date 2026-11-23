@@ -1,4 +1,4 @@
-.PHONY: run room editor mesh stress-solo stress stress-big stress-bench lighting verify reference lighting-ref-check sponza-gate lighting-oracle restir-ref lint-docs lint
+.PHONY: run room editor mesh stress-solo stress stress-big stress-bench lighting verify reference lighting-ref-check sponza-gate moving-lamp-gate lighting-oracle restir-ref lint-docs lint
 
 run:
 	cargo run -p genos-camera
@@ -78,3 +78,10 @@ lint:
 sponza-gate:
 	cargo build --release -p genos-lighting
 	python3 tools/lighting/sponza_gate.py $(if $(ONLY),--only $(ONLY),) $(if $(REFERENCE),--reference,)
+
+# Bounce light in a room no lamp lights while the stress scene's lamps move,
+# PASS or FAIL each. Needs a GPU; opens one proof window that takes no focus.
+moving-lamp-gate:
+	cargo build --release -p genos-lighting
+	python3 tools/lighting/moving_lamp_gate.py $(if $(ONLY),--only $(ONLY),)
+	$(if $(ONLY),,python3 tools/lighting/moving_lamp_gate.py --only leaks --size 2526x1376)

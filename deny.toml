@@ -42,14 +42,15 @@ external-default-features = "allow"
 allow = []
 
 # The renderer, window, input, audio, and network call the OS or Vulkan.
-# genos-gpuref is the offline ray-query reference and the only ash wrapper.
+# genos-gpuref is the offline ray-query reference. genos-single-frame-cascade is the
+# offline cone-march timing of the cone-traced cascades plan. They are the only ash wrappers.
 deny = [
     { name = "winit", reason = "ADR 0007: the window is a native call, not a toolkit" },
     { name = "sdl2", reason = "ADR 0007: the window is a native call, not a toolkit" },
     { name = "sdl3", reason = "ADR 0007: the window is a native call, not a toolkit" },
     { name = "glfw", reason = "ADR 0007: the window is a native call, not a toolkit" },
     { name = "wgpu", reason = "ADR 0007: the renderer calls Vulkan, not a graphics toolkit" },
-    { name = "ash", wrappers = ["genos-gpuref"], reason = "ADR 0007: the renderer loads libvulkan itself. ash is only the offline ray-query reference." },
+    { name = "ash", wrappers = ["genos-gpuref", "genos-single-frame-cascade"], reason = "ADR 0007: the renderer loads libvulkan itself. ash is only the offline ray-query reference and the offline cone-march timing." },
     { name = "vulkano", reason = "ADR 0007: the renderer calls Vulkan, not a graphics toolkit" },
     { name = "x11rb", reason = "ADR 0007: window and input call X11 or Wayland, not a client crate" },
     { name = "cpal", reason = "ADR 0007: audio calls ALSA, WASAPI, or CoreAudio" },

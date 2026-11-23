@@ -722,11 +722,13 @@ fn run() -> Result<i32, String> {
             .map(|then| now.saturating_duration_since(then).as_secs_f32())
             .unwrap_or(STEP);
         let paced = opts.frames.is_some() || opts.script.is_some();
-        let dt = tools.scene_dt(if paced {
+        // Wall time between frames. A script or a frame count runs on the fixed step.
+        let frame_dt = if paced {
             STEP
         } else {
             real_dt.min(MAX_FRAME_SECONDS)
-        });
+        };
+        let dt = tools.scene_dt(frame_dt);
         clock = Some(now);
         window
             .stall()
@@ -1143,6 +1145,7 @@ fn run() -> Result<i32, String> {
         }
         let draw_start = Instant::now();
         renderer.set_particle_dt(dt);
+        renderer.set_frame_dt(tools.fixed_step().unwrap_or(frame_dt));
         let drawn_world = if loading { &load_world } else { app.world() };
         let pixels =
             renderer.draw_with_overlay(drawn_world, &camera, &overlay, want_read, false)?;

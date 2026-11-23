@@ -16,6 +16,8 @@ shared bool sh_ok;
 shared vec3 sh_sum[64];
 shared vec3 sh_rad[64];
 shared float sh_w[64];
+// The part of a ray's radiance that is lamp light leaving the surface it hit.
+shared vec3 sh_lamp[64];
 shared uint sh_bin[64];
 
 bool lighting_cascade_hit_is_lamp(vec3 hp) {
@@ -114,6 +116,7 @@ void main() {
     barrier();
     memoryBarrierShared();
     vec3 li = vec3(0.0);
+    vec3 lamp_part = vec3(0.0);
     float nd = 0.0;
     float w = 0.0;
     uint bin = 0u;
@@ -142,10 +145,12 @@ void main() {
                 vec3 bounce = lighting_cascade_bounce(hp, hn);
                 vec3 e = lighting_cascade_direct_at(hp + hn * 0.02, hn);
                 li = reflectance * (e + bounce);
+                lamp_part = reflectance * e;
             }
         }
     }
     sh_w[k] = w;
+    sh_lamp[k] = lamp_part * nd * w;
     sh_bin[k] = bin;
     sh_sum[k] = li * nd * w;
     sh_rad[k] = li;
@@ -184,14 +189,15 @@ void main() {
         // bounce and each refresh moved the wall by a visible step. A cell the
         // scene changed under takes more of the refresh (CASCADE_UPPER_CHANGE_RATE).
         vec4 had = cache.v[3u * slot + 2u];
-        float l_old = dot(had.xyz, vec3(0.2126, 0.7152, 0.0722));
-        float l_new = dot(cur, vec3(0.2126, 0.7152, 0.0722));
-        // .w counts refreshes up to CASCADE_UPPER_WARM (1 is the first). The
-        // first refreshes take the new estimate whole: a cold start builds its
-        // bounce through the chain of parents, and damping each link slowed a
-        // cut to full brightness. They trace fixed directions
-        // (lighting_cascade_bin_seed), so taking them whole does not shimmer.
-        bool warm = had.w > CASCADE_UPPER_WARM - 0.5;
+        // .w is the refresh count, up to CASCADE_UPPER_LONG (1 is the first),
+        // with the cell's lamp share in its fraction
+        // (lighting_cascade_lamp_share). The first refreshes take the new
+        // estimate whole: a cold start builds its bounce through the chain of
+        // parents, and damping each link slowed a cut to full brightness. They
+        // trace fixed directions (lighting_cascade_bin_seed), so taking them
+        // whole does not shimmer.
+        float count = floor(had.w);
+        bool warm = count > CASCADE_UPPER_WARM - CASCADE_COUNT_HALF;
         // The scene changed under this cell since its last refresh.
         // A lamp that reaches the cell changed within the window. One fast
         // refresh is not enough: it is one noisy estimate, and the light the
@@ -200,16 +206,47 @@ void main() {
         bool changed = (lamp_at != 0u && int(lighting_frame() - lamp_at) <= int(CASCADE_CHANGE_FRAMES))
             || lighting_reach_noting()
             || lighting_lit_changed();
+        // Those signals are wide: a lamp's range sphere has no walls in it,
+        // and the other two are scene-wide. In a scene whose lamps move every
+        // frame they held every cell at the fast rate, and a room no lamp
+        // lights showed each refresh's ray noise. The lamp share says how much
+        // of the cell's light a lamp change reaches at once: the share that
+        // is lamp light leaving the surfaces its rays hit. The rest is light
+        // from other cells, which changes only as fast as they do. A cell
+        // takes the fast rate by its lamp share and the drift rate otherwise.
+        // The share is the mean of the refreshes before this one. A rate that
+        // read this refresh's own rays took the bright refreshes more than
+        // the dim ones (or the reverse) and moved the cell's mean.
+        float share = lighting_cascade_lamp_share(had.w);
+        float l_old = dot(had.xyz, CASCADE_LUMA);
+        float l_new = dot(cur, CASCADE_LUMA);
         bool big = abs(l_new - l_old) > CASCADE_UPPER_JUMP * max(max(l_new, l_old), CASCADE_EPS);
+        float fast = smoothstep(CASCADE_UPPER_LAMP_SHARE_LOW, CASCADE_UPPER_LAMP_SHARE_HIGH, share);
+        float slow = min(CASCADE_UPPER_RATE, 1.0 / max(count, 1.0));
+        // The drift rate lasts as long as the lamp ring remembers the change
+        // (LIGHTING_WRC_CHANGE_FRAMES): the light from other cells is still
+        // arriving after the fast window has closed.
+        bool settling = changed || lamp_at != 0u;
+        float drift = max(slow, CASCADE_UPPER_DRIFT_RATE);
         float rate = !warm ? 1.0
-            : !changed ? min(CASCADE_UPPER_RATE, 1.0 / max(had.w, 1.0))
-            : big ? 1.0 : CASCADE_UPPER_CHANGE_RATE;
+            : changed ? mix(drift, big ? 1.0 : CASCADE_UPPER_CHANGE_RATE, fast)
+            : settling ? drift : slow;
         // The refresh count: up to the warm count, then on to the long mean
-        // while nothing changes. A change starts the long mean again.
-        float age = had.w > 0.5 ? min(had.w + 1.0, CASCADE_UPPER_LONG) : 1.0;
-        if (warm && changed) {
-            age = CASCADE_UPPER_WARM;
+        // while nothing changes. A change starts the long mean again, at the
+        // count that matches the rate the cell took.
+        float age = count > CASCADE_COUNT_HALF ? min(count + 1.0, CASCADE_UPPER_LONG) : 1.0;
+        if (warm && settling) {
+            age = min(age, max(CASCADE_UPPER_WARM, floor(1.0 / rate)));
         }
+        vec3 lamp_sum = vec3(0.0);
+        [[dont_unroll]] for (uint i = 0u; i < traced; i++) {
+            lamp_sum += sh_lamp[i];
+        }
+        float share_now = l_new > CASCADE_EPS
+            ? clamp(dot(lamp_sum, CASCADE_LUMA) / l_new, 0.0, 1.0)
+            : 0.0;
+        share = count > CASCADE_COUNT_HALF ? mix(share, share_now, CASCADE_UPPER_LAMP_SHARE_RATE) : share_now;
+        age = lighting_cascade_count_pack(age, share);
         for (uint b = 0u; b < CASCADE_BINS; b++) {
             // A bin left with no weight (its rays all in the cone, no cone
             // ray in it) keeps its value.

@@ -518,6 +518,20 @@ impl Renderer {
         self.gpu.lighting.histogram_counts.clone()
     }
 
+    /// Seconds the next draw steps auto exposure and the look transition by.
+    pub fn frame_dt(&self) -> f32 {
+        self.gpu.frame_dt
+    }
+
+    /// Wall seconds since the previous frame. The next draw steps auto exposure
+    /// and the look transition by it, so their speed does not follow the frame
+    /// rate. A value that is negative or not finite is ignored.
+    pub fn set_frame_dt(&mut self, dt: f32) {
+        if dt.is_finite() && dt >= 0.0 {
+            self.gpu.frame_dt = dt;
+        }
+    }
+
     /// Share of subsampled scene luma that moved by more than 0.01 since the previous copy.
     pub fn hdr_still_pop(&self) -> f64 {
         self.gpu.lighting.still_pop
@@ -2047,6 +2061,9 @@ struct Gpu {
     particle_job: Option<particle_pass::Job>,
     /// Seconds for the next particle step. Zero does not integrate or emit.
     particle_dt: f32,
+    /// Seconds since the previous frame. Auto exposure and the look transition
+    /// step by it. 1/60 until [`Renderer::set_frame_dt`] is called.
+    frame_dt: f32,
     /// Skip-dead or skip-indirect mutation. None is the specified step.
     particle_fault: crate::particle_sim::ParticleFault,
     /// The 4-byte sync witness. Off in a shipping recording. Tests turn it on.
@@ -2975,6 +2992,7 @@ impl Gpu {
                 particle_pass: None,
                 particle_job: None,
                 particle_dt: 0.0,
+                frame_dt: 1.0 / 60.0,
                 particle_fault: crate::particle_sim::ParticleFault::None,
                 particle_sync_witness: false,
                 particle_depth: Vec::new(),

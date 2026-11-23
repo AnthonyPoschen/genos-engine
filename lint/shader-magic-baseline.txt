@@ -10,7 +10,7 @@ crates/render/shaders/lighting_cache.glsl 303
 crates/render/shaders/lighting_cascade.glsl 34
 crates/render/shaders/lighting_cascade_l0_shade.comp 4
 crates/render/shaders/lighting_cascade_l0_trace.comp 2
-crates/render/shaders/lighting_cascade_upper_shade.comp 13
+crates/render/shaders/lighting_cascade_upper_shade.comp 5
 crates/render/shaders/lighting_cascade_upper_trace.comp 2
 crates/render/shaders/lighting_check.comp 4
 crates/render/shaders/lighting_common.glsl 35
