@@ -168,6 +168,9 @@ Role: STORE · Literature: voxel cone tracing's anisotropic voxels (Crassin et a
 **Cone march** (prototype, `shaders/cone.comp`): one cone from a visible point through the voxel field in place of a ray against the scene. Its width in each cascade's interval is that cascade's direction spacing, it steps one voxel at a time at the level as wide as the cone, and each interval deposits its light and the share that passes through into its cascade. Not in the renderer.
 Role: RAYS · Literature: voxel cone tracing (Crassin et al. 2011); ray splitting in Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384 · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md)
 
+**Direction moment** (prototype, `--bin-cosine mean`): for each cascade direction, the sum of each deposit's luma times its direction, merged as the cone is. The shade weighs the direction's light by the cosine of that mean direction, blended toward the direction centre's cosine as the light spreads out, so a bright patch in a small part of a direction lands where it is. Not in the renderer.
+Role: STORE · Literature: a first moment per bin, as in the dominant-direction terms of directional lightmaps and SG/SH-L1 irradiance; a departure from Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384, section 4 · More detail: [prototype README](../../debug/single-frame-cascade/README.md) Phase 0
+
 **Screen-space first interval** (proposal): the cascade-0 interval, the short one next to the surface, marched against the depth buffer in place of the voxel field, along the cascade's own directions. It gives contact shadows and thin casters pixel detail with no per-lamp cost, for casters on the screen only. Not in the renderer.
 Role: RAYS · Literature: screen-space radiance cascades (Sannikov, Path of Exile 2); screen-space contact shadows · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md) step 6
 

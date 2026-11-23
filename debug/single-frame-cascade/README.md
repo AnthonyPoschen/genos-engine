@@ -16,7 +16,7 @@ One frame, as the paper's Algorithm 1 and Algorithm 3:
 3. `--spp` rays per pixel from the visible point, on the R2 sequence, with probes under one coarser probe taking a contiguous run.
 4. Each ray is split: the cascade whose interval holds the hit takes its radiance, and every cascade under it records that the way was clear.
 5. The cascades merge from the last one down, with sparse trilinear reads.
-6. A pixel's bounce irradiance is the cosine-weighted sum of the cascade-0 directions around it.
+6. A pixel's bounce irradiance is the cosine-weighted sum of the cascade-0 directions around it. With `--bin-cosine mean` (the default) each direction is weighed by the cosine of the luma-weighted mean direction of the light it holds, not of its centre (see Phase 0 below).
 
 Two modes:
 
@@ -27,7 +27,26 @@ The reference is 1024 cosine rays per compared pixel, shaded the same way as a c
 
 ## Arguments
 
-`genos-single-frame-cascade --help` lists them. It reads no environment variable. It writes `frame.png`, `mean.png`, `grid-reference.png` and `grid-frame.png` under `./genos-debug/single-frame-cascade/`, or under `--out DIR`.
+`genos-single-frame-cascade --help` lists them. It reads no environment variable. It writes `frame.png`, `mean.png`, `grid-reference.png` and `grid-frame.png` under `./genos-debug/single-frame-cascade/`, or under `--out DIR`. `--dump` adds `samples.csv`, one row per compared block (pixel, point, normal, level of detail, distance, reference, frame).
+
+`--scene` takes a `kind stress` scene or a `kind gltf` scene (`sponza`), the second with the ray tracer only. `--block B` compares B x B pixel means, as `capture.compare` grades (default 4); the reference's `--ref-samples` rays are split over the block's pixels.
+
+## Phase 0, 24 Nov 2026
+
+The baseline the cone tracer is graded against. Ray tracer, one frame, 8 px probe, 4x4 blocks, 16,384 reference rays a block (1,024 left the dark corner's reference itself 9% noisy):
+
+| View | Gate | `--bin-cosine centre` (the paper) | `--bin-cosine mean` |
+|---|---|---|---|
+| Room no lamp lights | under 10% | 29.5%, bias +10.7% | 5.3%, bias −2.6% |
+| Hall | under 7% | 5.7% | 5.5% |
+| Sponza atrium | under 10% | 5.6% | 5.5% |
+| Sponza dark corner | under 10% | 9.4% | 6.1% |
+
+The cause of the room's 30% was not the three gaps listed below. With one cascade and rays to 200 m (no merge), and with one-pixel probes and 64 rays a pixel (no spatial sharing), the floor was still 50 to 69% too bright and the wall facing the camera 18 to 23% too dark. The room's light comes from a few bright patches. A cascade-0 direction is one of 32, and the shade weighed the light in it by the cosine of the direction's centre. A patch near the floor's horizon fell in a direction whose centre is well above it, so the floor took too much of it; a wall facing the patch took too little. Four times the directions halved it.
+
+The fix keeps, for each direction, the sum of each deposit's luma times its direction, merges that sum as the cone is merged, and shades with the cosine of its mean direction, blended toward the centre's cosine as the light in the direction spreads out. The weight that normalises the sum is still the centre's cosine. Cost: three numbers more per direction. This is a departure from the paper (section 4, equation 2 with the direction's centre).
+
+Not done, and not needed for the gate: the blend across the level-of-detail seam, and depth-aware weights in the sparse trilinear read.
 
 ## Results, 23 Nov 2026
 

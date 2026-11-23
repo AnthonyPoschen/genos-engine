@@ -17,19 +17,21 @@
     clippy::too_many_lines,
     clippy::many_single_char_names,
     clippy::similar_names,
+    clippy::struct_excessive_bools,
     reason = "prototype: index and grid arithmetic between float, i32, u32 and usize"
 )]
 
 mod gpu;
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use genos_debug::Image;
-use genos_render::{SceneMesh, Surfaces, TraceHit};
-use genos_scene::{look_direction, Scene};
+use genos_render::{identity_pose, GltfSurface, SceneMesh, Surfaces, TraceHit};
+use genos_scene::{look_direction, Floor, Light, Scene, Sky, Vec3};
 use genos_scene_lib::Kind;
 use genos_stress::building::{Layout, LightMix};
 use genos_stress::stage::{Scale, Stage};
@@ -41,8 +43,9 @@ Traces one frame of the cascade (and --frames of them with new jitter) from a
 camera pose, counts the rays, and compares the bounce irradiance at a grid of
 pixels with a path-traced reference. Prints the numbers and writes pictures.
 
-  --scene NAME         scene under debug/scenes (default lighting-stress; a
-                       `kind stress` scene only)
+  --scene NAME         scene under debug/scenes (default lighting-stress):
+                       a `kind stress` scene, or a `kind gltf` scene such as
+                       sponza with the ray tracer
   --checkpoint NAME    stand at a checkpoint of the scene (default its first)
   --eye X,Y,Z          eye position, metres (overrides the checkpoint)
   --yaw R --pitch R    view direction, radians (with --eye)
@@ -73,7 +76,15 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
   --spp N              rays per pixel per frame (default 1)
   --frames N           frames, each with new jitter (default 8)
   --stride N           compare every Nth pixel each way (default 16)
-  --ref-samples N      reference rays per compared pixel (default 1024)
+  --ref-samples N      reference rays per compared block (default 1024)
+  --block B            compare B x B pixel means, as capture.compare does; the
+                       reference rays are split over the block (default 4)
+  --dump               also write samples.csv: one row per compared block
+  --bin-cosine C       how the shade weighs a cascade-0 direction. centre: the
+                       cosine of the direction's centre (the paper). mean: the
+                       cosine of the luma-weighted mean direction of the light
+                       that direction holds, carried through the merge
+                       (default mean)
   --threads N          worker threads (default the machine's)
   --out DIR            output directory (default ./genos-debug/single-frame-cascade)
   -h, --help           this text
@@ -147,6 +158,9 @@ struct Options {
     frames: u32,
     stride: usize,
     ref_samples: u32,
+    block: usize,
+    dump: bool,
+    mean_cosine: bool,
     threads: usize,
     out: PathBuf,
 }
@@ -175,6 +189,9 @@ fn parse_args() -> Result<Option<Options>, String> {
         frames: 8,
         stride: 16,
         ref_samples: 1024,
+        block: 4,
+        dump: false,
+        mean_cosine: true,
         threads: std::thread::available_parallelism().map_or(4, std::num::NonZero::get),
         out: PathBuf::from("genos-debug/single-frame-cascade"),
     };
@@ -239,6 +256,15 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--frames" => o.frames = num(&arg, &value()?)?,
             "--stride" => o.stride = num(&arg, &value()?)?,
             "--ref-samples" => o.ref_samples = num(&arg, &value()?)?,
+            "--block" => o.block = num(&arg, &value()?)?,
+            "--dump" => o.dump = true,
+            "--bin-cosine" => {
+                o.mean_cosine = match value()?.as_str() {
+                    "centre" => false,
+                    "mean" => true,
+                    other => return Err(format!("bad --bin-cosine: {other}")),
+                }
+            }
             "--threads" => o.threads = num(&arg, &value()?)?,
             "--out" => o.out = PathBuf::from(value()?),
             other => return Err(format!("unknown argument {other}")),
@@ -250,11 +276,80 @@ fn parse_args() -> Result<Option<Options>, String> {
     o.spp = o.spp.max(1);
     o.frames = o.frames.max(1);
     o.stride = o.stride.max(1);
+    o.block = o.block.clamp(1, o.stride);
     o.threads = o.threads.max(1);
     Ok(Some(o))
 }
 
 /// The tracer interface with a ray count: every ray the cascade asks for.
+/// A glTF model's triangles as the scene's surfaces.
+struct GltfWalls(GltfSurface);
+
+impl Surfaces for GltfWalls {
+    fn first_hit(&self, origin: V3, dir: V3, reach: f32) -> Option<TraceHit> {
+        self.0.trace(origin, dir, reach)
+    }
+    fn blocked(&self, from: V3, to: V3) -> bool {
+        self.0.occluded(from, to)
+    }
+}
+
+/// The scene to trace: its lamps and sky, and its surfaces.
+fn load_scene(root: &std::path::Path, entry: &genos_scene_lib::Entry, o: &Options) -> Result<(Scene, Option<GltfWalls>), String> {
+    match &entry.kind {
+        Kind::Stress(spec) => {
+            let layout = Layout::parse(&spec.layout).ok_or_else(|| format!("unknown layout {}", spec.layout))?;
+            let mut stage = Stage::new(
+                Scale::parse(&spec.scale)?,
+                1,
+                LightMix { count: o.lamps.unwrap_or(spec.lights), dynamic_pct: spec.dynamic, layout },
+                1.0,
+                spec.time,
+                120.0,
+            );
+            stage.sun_frozen = spec.freeze_sun;
+            stage.boxes_still = spec.still_boxes;
+            stage.lamps_still = spec.still_lamps;
+            stage.sky_on = spec.sky;
+            stage.apply();
+            Ok((stage.world.scene.clone(), None))
+        }
+        Kind::Gltf { path, sun, sky, lamps } => {
+            let full = root.join(path);
+            let model = genos_load::load_gltf_file(&full).map_err(|e| format!("{}: {e}", full.display()))?;
+            // The analytic floor is not part of the model: park it far away, as
+            // the scene program does.
+            let mut scene = Scene::from_lists(
+                Floor { position: Vec3::new(1000.0, 0.0, 0.0), half_x: 0.01, half_z: 0.01, color: [0.2, 0.2, 0.2] },
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            );
+            scene.ceiling = None;
+            scene.sky = sky.map(|color| Sky { color });
+            if let Some(sun) = sun {
+                let d = normalize(sun.direction);
+                scene.push_light(Light {
+                    position: Vec3::new(0.0, 7.0, 0.0),
+                    color: sun.color,
+                    direction: Vec3::new(d[0], d[1], d[2]),
+                });
+            }
+            for lamp in lamps {
+                scene.push_light(Light {
+                    position: Vec3::new(lamp.position[0], lamp.position[1], lamp.position[2]),
+                    color: lamp.color,
+                    direction: Vec3::ZERO,
+                });
+            }
+            Ok((scene, Some(GltfWalls(GltfSurface::from_gltf(&model, &identity_pose())))))
+        }
+        Kind::Rhai { .. } | Kind::Mesh { .. } => {
+            Err(format!("{} is neither a `kind stress` nor a `kind gltf` scene", entry.name))
+        }
+    }
+}
+
 struct Counted<'a> {
     inner: &'a dyn Surfaces,
     rays: AtomicU64,
@@ -513,9 +608,13 @@ struct Cascade {
     theta: u32,
     keys: Vec<Key>,
     radiance: Vec<V3>,
+    /// Sum of each deposit's luma times its direction.
+    moment: Vec<V3>,
     through: Vec<f32>,
     count: Vec<u32>,
     cone: Vec<V3>,
+    /// The merged cone's luma-weighted direction sum, merged as `cone` is.
+    cone_moment: Vec<V3>,
     filled: Vec<bool>,
 }
 
@@ -640,9 +739,11 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
             theta: o.theta << c,
             keys: Vec::new(),
             radiance: Vec::new(),
+            moment: Vec::new(),
             through: Vec::new(),
             count: Vec::new(),
             cone: Vec::new(),
+            cone_moment: Vec::new(),
             filled: Vec::new(),
         })
         .collect();
@@ -666,9 +767,11 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
     for cascade in &mut cascades {
         let len = cascade.keys.len() * cascade.dirs();
         cascade.radiance = vec![[0.0; 3]; len];
+        cascade.moment = vec![[0.0; 3]; len];
         cascade.through = vec![0.0; len];
         cascade.count = vec![0; len];
         cascade.cone = vec![[0.0; 3]; len];
+        cascade.cone_moment = vec![[0.0; 3]; len];
         cascade.filled = vec![false; len];
     }
     // Ray generation (Algorithm 3): probes under one coarser probe take a
@@ -849,6 +952,7 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
         let at = slot * cascade.dirs() + dir_bin(d.dir, cascade.theta);
         cascade.count[at] += 1;
         cascade.radiance[at] = add(cascade.radiance[at], d.radiance);
+        cascade.moment[at] = add(cascade.moment[at], scale(d.dir, luma(d.radiance)));
         cascade.through[at] += d.through;
     }
     // Merge from the last cascade down (the paper's equation 7).
@@ -874,25 +978,30 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                 let j = scale(cascade.radiance[at], 1.0 / count as f32);
                 let beta = cascade.through[at] / count as f32;
                 let mut cone = j;
+                let mut cone_moment = scale(cascade.moment[at], 1.0 / count as f32);
                 if let (Some(above), true) = (above, beta > 0.0) {
                     let x = u32::try_from(bin).unwrap_or(u32::MAX) % (2 * cascade.theta);
                     let y = u32::try_from(bin).unwrap_or(u32::MAX) / (2 * cascade.theta);
                     // The four finer directions of the next cascade that
                     // have data; one with none is left out, not read as dark.
                     let mut far = [0.0; 3];
+                    let mut far_moment = [0.0; 3];
                     let mut found = 0.0;
                     for k in 0..4u32 {
                         let child = ((2 * y + (k >> 1)) * 2 * above.theta + 2 * x + (k & 1)) as usize;
-                        if let Some(v) = interpolate(above, &index, key.lod, c + 1, centre, child) {
+                        if let Some((v, m)) = interpolate(above, &index, key.lod, c + 1, centre, child) {
                             far = add(far, v);
+                            far_moment = add(far_moment, m);
                             found += 1.0;
                         }
                     }
                     if found > 0.0 {
                         cone = add(cone, scale(far, beta / found));
+                        cone_moment = add(cone_moment, scale(far_moment, beta / found));
                     }
                 }
                 cascade.cone[at] = cone;
+                cascade.cone_moment[at] = cone_moment;
                 cascade.filled[at] = true;
             }
         }
@@ -915,8 +1024,21 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
             }
             wanted += f64::from(cosine);
             match interpolate(first, &index, pixel.lod, 0, pixel.point, bin) {
-                Some(v) => {
-                    sum = add(sum, scale(v, cosine));
+                Some((v, m)) => {
+                    // The light's own cosine when it is known: a bright patch
+                    // that fills a small part of the direction is weighed where
+                    // it is, not at the direction's centre. The weight still
+                    // counts the direction's share of the hemisphere.
+                    let held = dot(m, m).sqrt();
+                    let lit = if o.mean_cosine && held > 1.0e-9 && luma(v) > 1.0e-9 {
+                        let spread = (held / luma(v)).min(1.0);
+                        let mean = dot(scale(m, 1.0 / held), pixel.normal).max(0.0);
+                        // A spread-out direction (spread near 0) keeps the centre's cosine.
+                        mean * spread + cosine * (1.0 - spread)
+                    } else {
+                        cosine
+                    };
+                    sum = add(sum, scale(v, lit));
                     weight += cosine;
                 }
                 None => missing += f64::from(cosine),
@@ -945,13 +1067,14 @@ fn interpolate(
     level: usize,
     at: V3,
     bin: usize,
-) -> Option<V3> {
+) -> Option<(V3, V3)> {
     let s = spacing(lod, level);
     let g = [at[0] / s - 0.5, at[1] / s - 0.5, at[2] / s - 0.5];
     let base = [g[0].floor(), g[1].floor(), g[2].floor()];
     let f = [g[0] - base[0], g[1] - base[1], g[2] - base[2]];
     let dirs = cascade.dirs();
     let mut sum = [0.0; 3];
+    let mut moment = [0.0; 3];
     let mut weight = 0.0;
     for corner in 0..8u32 {
         let o = [corner & 1, (corner >> 1) & 1, (corner >> 2) & 1];
@@ -974,10 +1097,11 @@ fn interpolate(
         let i = slot as usize * dirs + bin;
         if cascade.filled[i] {
             sum = add(sum, scale(cascade.cone[i], w));
+            moment = add(moment, scale(cascade.cone_moment[i], w));
             weight += w;
         }
     }
-    (weight > 0.0).then(|| scale(sum, 1.0 / weight))
+    (weight > 0.0).then(|| (scale(sum, 1.0 / weight), scale(moment, 1.0 / weight)))
 }
 
 /// Direct irradiance from the glowing spheres at a point: the lamp unit times
@@ -1245,28 +1369,18 @@ fn run(o: &Options) -> Result<(), String> {
         .iter()
         .find(|e| e.name == name)
         .ok_or_else(|| format!("no scene {name} under {}", root.display()))?;
-    let Kind::Stress(spec) = &entry.kind else {
-        return Err(format!("{name} is not a `kind stress` scene; this prototype traces the analytic building only"));
-    };
-    let layout = Layout::parse(&spec.layout).ok_or_else(|| format!("unknown layout {}", spec.layout))?;
-    let mut stage = Stage::new(
-        Scale::parse(&spec.scale)?,
-        1,
-        LightMix { count: o.lamps.unwrap_or(spec.lights), dynamic_pct: spec.dynamic, layout },
-        1.0,
-        spec.time,
-        120.0,
-    );
-    stage.sun_frozen = spec.freeze_sun;
-    stage.boxes_still = spec.still_boxes;
-    stage.lamps_still = spec.still_lamps;
-    stage.sky_on = spec.sky;
-    stage.apply();
-    let scene = &stage.world.scene;
+    let (scene, gltf) = load_scene(&root, entry, o)?;
+    if gltf.is_some() && (o.cone || o.gpu_bench) {
+        return Err(format!("{name}: the cone tracer voxelises the analytic building only so far"));
+    }
+    let scene = &scene;
     // The scene's triangles through the CPU BVH: the analytic tracer walks
     // every shape for every ray and is about a hundred times slower here.
     let mesh = SceneMesh::from_scene(scene);
-    let walls: &dyn Surfaces = &mesh;
+    let walls: &dyn Surfaces = match &gltf {
+        Some(model) => model,
+        None => &mesh,
+    };
     let (eye, yaw, pitch) = match (o.eye, &o.checkpoint) {
         (Some(eye), _) => (eye, o.yaw, o.pitch),
         (None, Some(cp)) => {
@@ -1331,11 +1445,25 @@ fn run(o: &Options) -> Result<(), String> {
     let cascade_seconds = started.elapsed().as_secs_f32();
 
     // The reference at a grid of pixels.
+    // A block of `--block` pixels each way around each grid point. A block
+    // is compared when at least half its pixels show a surface, as
+    // capture.compare grades.
     let samples: Vec<usize> = (o.stride / 2..o.height)
         .step_by(o.stride)
         .flat_map(|y| (o.stride / 2..o.width).step_by(o.stride).map(move |x| y * o.width + x))
         .filter(|&i| pixels[i].is_some())
         .collect();
+    let block_of = |i: usize| -> Vec<usize> {
+        let (x, y) = (i % o.width, i / o.width);
+        let x0 = x.saturating_sub(o.block / 2);
+        let y0 = y.saturating_sub(o.block / 2);
+        (y0..(y0 + o.block).min(o.height))
+            .flat_map(|yy| (x0..(x0 + o.block).min(o.width)).map(move |xx| yy * o.width + xx))
+            .filter(|&j| pixels[j].is_some())
+            .collect()
+    };
+    let samples: Vec<usize> = samples.into_iter().filter(|&i| 2 * block_of(i).len() >= o.block * o.block).collect();
+    let blocks: Vec<Vec<usize>> = samples.iter().map(|&i| block_of(i)).collect();
     let started = std::time::Instant::now();
     let chunk = samples.len().div_ceil(o.threads).max(1);
     let reference: Vec<V3> = std::thread::scope(|scope| {
@@ -1344,15 +1472,25 @@ fn run(o: &Options) -> Result<(), String> {
             .map(|part| {
                 let pixels = &pixels;
                 let glow = &glow;
+                let blocks = &blocks;
+                let samples = &samples;
                 scope.spawn(move || {
                     part.iter()
                         .map(|&i| {
-                            let Some(pixel) = &pixels[i] else { return [0.0; 3] };
-                            if o.mode == Mode::Emissive {
-                                sphere_light(walls, glow, o.lamp_radius, pixel.point, pixel.normal)
-                            } else {
-                                bounce_reference(scene, walls, pixel.point, pixel.normal, o.ref_samples, i as u64)
+                            let k = samples.binary_search(&i).unwrap_or(0);
+                            let block = &blocks[k];
+                            let each = (o.ref_samples / u32::try_from(block.len()).unwrap_or(1).max(1)).max(1);
+                            let mut sum = [0.0; 3];
+                            for &j in block {
+                                let Some(pixel) = &pixels[j] else { continue };
+                                let v = if o.mode == Mode::Emissive {
+                                    sphere_light(walls, glow, o.lamp_radius, pixel.point, pixel.normal)
+                                } else {
+                                    bounce_reference(scene, walls, pixel.point, pixel.normal, each, j as u64)
+                                };
+                                sum = add(sum, v);
                             }
+                            scale(sum, 1.0 / block.len().max(1) as f32)
                         })
                         .collect::<Vec<V3>>()
                 })
@@ -1364,12 +1502,16 @@ fn run(o: &Options) -> Result<(), String> {
 
     // Numbers.
     let ref_mean = reference.iter().map(|c| f64::from(luma(*c))).sum::<f64>() / samples.len().max(1) as f64;
+    let got_at = |f: &Frame, k: usize| -> f64 {
+        let block = &blocks[k];
+        block.iter().map(|&j| f64::from(luma(f.irradiance[j]))).sum::<f64>() / block.len().max(1) as f64
+    };
     let error_of = |take: usize| -> (f64, f64) {
         // Mean absolute error and signed error of the mean of `take` frames.
         let mut abs = 0.0;
         let mut signed = 0.0;
-        for (k, &i) in samples.iter().enumerate() {
-            let got = frames[..take].iter().map(|f| f64::from(luma(f.irradiance[i]))).sum::<f64>() / take as f64;
+        for k in 0..samples.len() {
+            let got = frames[..take].iter().map(|f| got_at(f, k)).sum::<f64>() / take as f64;
             let want = f64::from(luma(reference[k]));
             abs += (got - want).abs();
             signed += got - want;
@@ -1377,10 +1519,9 @@ fn run(o: &Options) -> Result<(), String> {
         let n = samples.len().max(1) as f64;
         (abs / n / ref_mean.max(1.0e-9), signed / n / ref_mean.max(1.0e-9))
     };
-    let mut noise: Vec<f64> = samples
-        .iter()
-        .filter_map(|&i| {
-            let values: Vec<f64> = frames.iter().map(|f| f64::from(luma(f.irradiance[i]))).collect();
+    let mut noise: Vec<f64> = (0..samples.len())
+        .filter_map(|k| {
+            let values: Vec<f64> = frames.iter().map(|f| got_at(f, k)).collect();
             let mean = values.iter().sum::<f64>() / values.len() as f64;
             if mean <= 1.0e-6 || values.len() < 2 {
                 return None;
@@ -1410,7 +1551,7 @@ fn run(o: &Options) -> Result<(), String> {
         );
     }
     println!("cascade-0 directions with no data {:.4}", first.holes);
-    println!("compared pixels {}  reference mean irradiance {ref_mean:.4}", samples.len());
+    println!("compared blocks {} of {}x{} pixels  reference mean irradiance {ref_mean:.4}", samples.len(), o.block, o.block);
     for take in [1usize, 4, 8, 16] {
         if take <= frames.len() {
             let (abs, signed) = error_of(take);
@@ -1446,6 +1587,31 @@ fn run(o: &Options) -> Result<(), String> {
         let (x, y) = (i % o.width / o.stride, i / o.width / o.stride);
         grid_ref[y * gw + x] = reference[k];
         grid_got[y * gw + x] = first.irradiance[i];
+    }
+    if o.dump {
+        // One row per compared block: where it is, what faces it, and the two values.
+        let mut csv = String::from("x,y,px,py,pz,nx,ny,nz,lod,distance,reference,frame\n");
+        for (k, &i) in samples.iter().enumerate() {
+            let Some(pixel) = &pixels[i] else { continue };
+            let away = sub(pixel.point, eye);
+            let _ = writeln!(
+                csv,
+                "{},{},{:.4},{:.4},{:.4},{:.3},{:.3},{:.3},{},{:.3},{:.6},{:.6}",
+                i % o.width,
+                i / o.width,
+                pixel.point[0],
+                pixel.point[1],
+                pixel.point[2],
+                pixel.normal[0],
+                pixel.normal[1],
+                pixel.normal[2],
+                pixel.lod,
+                dot(away, away).sqrt(),
+                luma(reference[k]),
+                got_at(first, k),
+            );
+        }
+        std::fs::write(o.out.join("samples.csv"), csv).map_err(|e| format!("samples.csv: {e}"))?;
     }
     picture(&|i| grid_ref[i], gw, gh).save(&o.out.join("grid-reference.png"))?;
     picture(&|i| grid_got[i], gw, gh).save(&o.out.join("grid-frame.png"))?;
