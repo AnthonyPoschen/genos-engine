@@ -32,11 +32,24 @@ if [[ "$wants_mesa" -eq 1 ]]; then
   done
 fi
 
+# With the PPA, a source that fails to update fails the attempt. apt-get
+# update otherwise treats a Launchpad 503 as a warning and installs Ubuntu's
+# Mesa without a word.
+update_mode=()
+if [[ "$wants_mesa" -eq 1 ]]; then
+  update_mode=(-o APT::Update::Error-Mode=any)
+fi
+
 for attempt in 1 2 3 4 5; do
-  if sudo apt-get update -o Acquire::Retries=5 \
+  if sudo apt-get update -o Acquire::Retries=5 "${update_mode[@]}" \
     && sudo apt-get install -y -o Acquire::Retries=5 "$@"; then
     if [[ "$wants_mesa" -eq 1 ]]; then
-      echo "lavapipe: mesa-vulkan-drivers $(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)"
+      version=$(dpkg-query -W -f='${Version}' mesa-vulkan-drivers)
+      echo "lavapipe: mesa-vulkan-drivers ${version}"
+      if [[ "$version" != *kisak* ]]; then
+        echo "lavapipe is not the kisak-mesa build" >&2
+        exit 1
+      fi
     fi
     exit 0
   fi
