@@ -63,6 +63,8 @@ const float CASCADE_RECORD_PLANE = 0.5;
 const float CASCADE_SEAT_PLANE_MIN = 0.01;
 // How far past the owner pixel an edge voxel seats, metres (lighting_cascade_seat).
 const float CASCADE_SEAT_INSET = 0.03;
+// The inset is at most this share of the cell, so a small cell keeps its seat inside it.
+const float CASCADE_SEAT_INSET_CELLS = 0.25;
 const uint CASCADE_TABLES = 2u;
 const uint CASCADE_PIXEL_WORDS = 4u;
 const uint CASCADE_AXIS_SHIFT = 8u;
@@ -346,13 +348,18 @@ const float CASCADE_UPPER_LAMP_SHARE_RATE = 0.25;
 // The lamp share rides in the fraction of the refresh count (the w of the
 // cell's irradiance word): 0.025 is none, 0.425 is all. A whole number (a
 // cell this rule has not refreshed) is none. The fraction stays under 0.45
-// so `count > WARM - 0.5` reads the count alone.
+// so `count > WARM - CASCADE_COUNT_HALF` reads the count alone.
+const float CASCADE_SHARE_FLOOR = 0.025;
+const float CASCADE_SHARE_SPAN = 0.4;
+// A stored refresh count is a whole number: half of one rounds it and
+// separates it from the next.
+const float CASCADE_COUNT_HALF = 0.5;
 float lighting_cascade_lamp_share(float w) {
-    return clamp((fract(w) - 0.025) * 2.5, 0.0, 1.0);
+    return clamp((fract(w) - CASCADE_SHARE_FLOOR) / CASCADE_SHARE_SPAN, 0.0, 1.0);
 }
 
 float lighting_cascade_count_pack(float count, float share) {
-    return floor(count + 0.5) + 0.025 + 0.4 * clamp(share, 0.0, 1.0);
+    return floor(count + CASCADE_COUNT_HALF) + CASCADE_SHARE_FLOOR + CASCADE_SHARE_SPAN * clamp(share, 0.0, 1.0);
 }
 // Frames after a lamp change that a cell it reaches stays at that rate.
 const uint CASCADE_CHANGE_FRAMES = 32u;
@@ -902,7 +909,7 @@ void lighting_cascade_seat(uint word) {
         away -= n * dot(away, n);
         float far = length(away);
         if (far > CASCADE_EPS) {
-            vec3 inset = pos + away * (min(CASCADE_SEAT_INSET, 0.25 * size) / far);
+            vec3 inset = pos + away * (min(CASCADE_SEAT_INSET, CASCADE_SEAT_INSET_CELLS * size) / far);
             if (lighting_cascade_seat_real(inset, n, CASCADE_SEAT_FACING)) {
                 stored = inset;
             }

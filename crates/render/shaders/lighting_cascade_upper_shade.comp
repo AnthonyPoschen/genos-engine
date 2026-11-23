@@ -197,7 +197,7 @@ void main() {
         // trace fixed directions (lighting_cascade_bin_seed), so taking them
         // whole does not shimmer.
         float count = floor(had.w);
-        bool warm = count > CASCADE_UPPER_WARM - 0.5;
+        bool warm = count > CASCADE_UPPER_WARM - CASCADE_COUNT_HALF;
         // The scene changed under this cell since its last refresh.
         // A lamp that reaches the cell changed within the window. One fast
         // refresh is not enough: it is one noisy estimate, and the light the
@@ -218,8 +218,8 @@ void main() {
         // read this refresh's own rays took the bright refreshes more than
         // the dim ones (or the reverse) and moved the cell's mean.
         float share = lighting_cascade_lamp_share(had.w);
-        float l_old = dot(had.xyz, vec3(0.2126, 0.7152, 0.0722));
-        float l_new = dot(cur, vec3(0.2126, 0.7152, 0.0722));
+        float l_old = dot(had.xyz, CASCADE_LUMA);
+        float l_new = dot(cur, CASCADE_LUMA);
         bool big = abs(l_new - l_old) > CASCADE_UPPER_JUMP * max(max(l_new, l_old), CASCADE_EPS);
         float fast = smoothstep(CASCADE_UPPER_LAMP_SHARE_LOW, CASCADE_UPPER_LAMP_SHARE_HIGH, share);
         float slow = min(CASCADE_UPPER_RATE, 1.0 / max(count, 1.0));
@@ -234,7 +234,7 @@ void main() {
         // The refresh count: up to the warm count, then on to the long mean
         // while nothing changes. A change starts the long mean again, at the
         // count that matches the rate the cell took.
-        float age = count > 0.5 ? min(count + 1.0, CASCADE_UPPER_LONG) : 1.0;
+        float age = count > CASCADE_COUNT_HALF ? min(count + 1.0, CASCADE_UPPER_LONG) : 1.0;
         if (warm && settling) {
             age = min(age, max(CASCADE_UPPER_WARM, floor(1.0 / rate)));
         }
@@ -243,9 +243,9 @@ void main() {
             lamp_sum += sh_lamp[i];
         }
         float share_now = l_new > CASCADE_EPS
-            ? clamp(dot(lamp_sum, vec3(0.2126, 0.7152, 0.0722)) / l_new, 0.0, 1.0)
+            ? clamp(dot(lamp_sum, CASCADE_LUMA) / l_new, 0.0, 1.0)
             : 0.0;
-        share = count > 0.5 ? mix(share, share_now, CASCADE_UPPER_LAMP_SHARE_RATE) : share_now;
+        share = count > CASCADE_COUNT_HALF ? mix(share, share_now, CASCADE_UPPER_LAMP_SHARE_RATE) : share_now;
         age = lighting_cascade_count_pack(age, share);
         for (uint b = 0u; b < CASCADE_BINS; b++) {
             // A bin left with no weight (its rays all in the cone, no cone
