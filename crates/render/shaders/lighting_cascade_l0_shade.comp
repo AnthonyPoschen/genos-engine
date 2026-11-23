@@ -146,10 +146,10 @@ void main() {
             CASCADE_L0_RAYS, CASCADE_CONE_L0);
         uint at = lighting_cascade_hit_at(slot, k);
         float t = uintBitsToFloat(ckeys.key[at]);
-        if (t < 0.0 || lighting_cascade_hit_is_lamp(pos + n * 0.02 + dir * t, ckeys.key[at + 3u])) {
+        if (t < 0.0 || lighting_cascade_hit_is_lamp(pos + n * lighting_cascade_l0_lift() + dir * t, ckeys.key[at + 3u])) {
             li = lighting_cascade_parent_eval(dir, n);
         } else {
-            vec3 hp = pos + n * 0.02 + dir * t;
+            vec3 hp = pos + n * lighting_cascade_l0_lift() + dir * t;
             vec3 hn = lighting_unpack_normal(ckeys.key[at + 1u]);
             vec3 reflectance = unpackUnorm4x8(ckeys.key[at + 2u]).rgb * (1.0 / LIGHTING_PI);
             vec3 bounce = lighting_cascade_bounce(hp, hn);

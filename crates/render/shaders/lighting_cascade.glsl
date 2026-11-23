@@ -247,6 +247,14 @@ float lighting_cascade_ray_weight(bool is_cone, bool has_cone, vec3 dir, vec3 ax
     return LIGHTING_TAU / float(uniform_count);
 }
 
+// How far off its seat a level-0 voxel's rays start. Clear of a thin field's
+// shell (mf_skin: half a voxel to each side, 3 cm in a level field). At 2 cm
+// the start was inside the shell, and on relief finer than a voxel (Sponza's
+// lion) a ray that left at a shallow angle ended on the surface beside it.
+float lighting_cascade_l0_lift() {
+    return max(0.02, 2.0 * mf_skin() + 0.01);
+}
+
 // Direction of level-0 ray k: k < CASCADE_L0_RAYS is the uniform set,
 // the rest are cone rays, fixed per voxel and ring slot like the set.
 vec3 lighting_cascade_l0_ray(uint key, vec3 n, uint k, bool has_cone, vec3 axis, float cos_a) {
@@ -1140,8 +1148,7 @@ uint lighting_cascade_find(ivec3 cell, uint level, uint axis) {
 // over the corners that pass the plane and facing gates. The stored
 // values are not written. Off-surface corners drop out, so a wall stays
 // a bilinear in its plane.
-vec4 lighting_cascade_at_in(uint parity, uint stamp, vec3 pos, vec3 n, uint level) {
-    uint axis = lighting_cascade_axis(n);
+vec4 lighting_cascade_at_axis(uint parity, uint stamp, vec3 pos, vec3 n, uint level, uint axis) {
     vec3 n_axis = lighting_cascade_axis_vec(axis);
     float size = lighting_cascade_l0_size(level);
     uint ax = axis >> 1u;
@@ -1172,6 +1179,37 @@ vec4 lighting_cascade_at_in(uint parity, uint stamp, vec3 pos, vec3 n, uint leve
         if (rec.w > LIGHTING_CACHE_HAS_W) {
             acc += w * rec.rgb;
             wsum += w;
+        }
+    }
+    if (wsum > 0.0) {
+        return vec4(acc / wsum, 1.0);
+    }
+    return vec4(0.0);
+}
+
+// A voxel belongs to one of six families, the axis its surface faces most.
+// A pixel used to read only the family of its own normal's largest
+// component. Each family holds the light for its own side: on Sponza's lion,
+// under a vault, the forward-facing voxels read 0.55 and the up-facing ones
+// 0.14. A normal that tipped past 45 degrees changed family and the pixel
+// stepped by that much, so the relief, and its normal map, showed darker
+// patches with hard edges. The pixel now mixes the families its normal has a
+// share of, by the squared component (they sum to one) less a small floor, so
+// the light turns with the normal. A family with no voxel there drops out.
+const float CASCADE_AXIS_FLOOR = 0.05;
+vec4 lighting_cascade_at_in(uint parity, uint stamp, vec3 pos, vec3 n, uint level) {
+    vec3 share = max(n * n - vec3(CASCADE_AXIS_FLOOR), vec3(0.0));
+    vec3 acc = vec3(0.0);
+    float wsum = 0.0;
+    [[dont_unroll]] for (uint a = 0u; a < 3u; a++) {
+        if (!(share[a] > 0.0)) {
+            continue;
+        }
+        uint axis = 2u * a + (n[a] >= 0.0 ? 0u : 1u);
+        vec4 v = lighting_cascade_at_axis(parity, stamp, pos, n, level, axis);
+        if (v.w > LIGHTING_CACHE_HAS_W) {
+            acc += share[a] * v.rgb;
+            wsum += share[a];
         }
     }
     if (wsum > 0.0) {

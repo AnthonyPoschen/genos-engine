@@ -75,7 +75,7 @@ void main() {
     }
     float w = lighting_cascade_ray_weight(is_cone, has_cone, dir, axis, cos_a,
         CASCADE_L0_RAYS, CASCADE_CONE_L0);
-    vec3 origin = pos + n * 0.02;
+    vec3 origin = pos + n * lighting_cascade_l0_lift();
     float t0;
     float t1;
     lighting_cascade_l0_interval(size, t0, t1);
