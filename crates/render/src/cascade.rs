@@ -700,8 +700,9 @@ mod tests {
         assert!(shader.contains("LIGHTING_DIAG_CASCADE_GAP = 11u"));
         assert!(shader.contains("LIGHTING_CELL_HALF * plane"));
         assert!(
-            shader.contains("abs(dot(stored - pos, n)) > size"),
-            "bounce/picture record accepts a hit in the cell, not only half a cell"
+            shader.contains("abs(dot(stored - pos, n)) > CASCADE_RECORD_PLANE * size")
+                && shader.contains("const float CASCADE_RECORD_PLANE = 0.5;"),
+            "bounce/picture record accepts a voxel within half a cell of the plane: a whole cell let a roof seam light the wall under it"
         );
         let probe = include_str!("../shaders/lighting_screen_probe.glsl");
         assert!(

@@ -53,7 +53,16 @@ const float CASCADE_SEAT_FACING = 0.9;
 // and of the surface under it (lighting_cascade_seat).
 const float CASCADE_SEAT_KEEP = 0.5;
 const float CASCADE_SEAT_PLANE = 0.1;
+// A pixel reads a voxel whose seat is within this share of the voxel's cell
+// of the pixel's own plane. Until 23 Nov 2026 it was one cell: a wall pixel
+// under the roof read the voxel of a roof seam 0.45 m in front of the wall,
+// seated on the roof's top edge in the sky's light, and the top of the wall
+// showed a bright streak. Half a cell still holds a surface that curves
+// inside its cell.
+const float CASCADE_RECORD_PLANE = 0.5;
 const float CASCADE_SEAT_PLANE_MIN = 0.01;
+// How far past the owner pixel an edge voxel seats, metres (lighting_cascade_seat).
+const float CASCADE_SEAT_INSET = 0.03;
 const uint CASCADE_TABLES = 2u;
 const uint CASCADE_PIXEL_WORDS = 4u;
 const uint CASCADE_AXIS_SHIFT = 8u;
@@ -310,7 +319,7 @@ const float CASCADE_UPPER_RATE = 0.05;
 // A cell the scene has just changed under (a lamp that reaches it moved,
 // changed colour or went out since its last refresh; a mover; a change in
 // what lights the scene, lighting_lit_changed, which a camera move is not) takes half of each refresh, and all of one that differs by more
-// than CASCADE_UPPER_JUMP of its irradiance. Until 23 Nov 2026 the jump was
+// than CASCADE_UPPER_JUMP of its irradiance, as far as its lamp share goes (below). Until 23 Nov 2026 the jump was
 // taken on the size of the difference alone. In a dim cell one refresh of a
 // few rays differs by more than that from the next by chance, so a still
 // cell took a whole new estimate every few refreshes: patches of bounce
@@ -322,6 +331,29 @@ const float CASCADE_UPPER_RATE = 0.05;
 // cell's irradiance word. A change puts it back to the warm count.
 const float CASCADE_UPPER_LONG = 128.0;
 const float CASCADE_UPPER_CHANGE_RATE = 0.5;
+// A cell the scene changed under takes that rate by its lamp share
+// (lighting_cascade_upper_shade.comp): the share of its irradiance that is
+// lamp light leaving the surfaces its rays hit. None of the fast rate below
+// SHARE_LOW, all of it above SHARE_HIGH. The rest of the way it takes the
+// drift rate: light that reaches it through other cells changes only as fast
+// as they do, and at the fast rate such a cell showed each refresh's ray
+// noise for as long as any lamp in range kept moving.
+const float CASCADE_UPPER_DRIFT_RATE = 0.125;
+const float CASCADE_UPPER_LAMP_SHARE_LOW = 0.1;
+const float CASCADE_UPPER_LAMP_SHARE_HIGH = 0.5;
+// Share of a refresh the stored lamp share takes.
+const float CASCADE_UPPER_LAMP_SHARE_RATE = 0.25;
+// The lamp share rides in the fraction of the refresh count (the w of the
+// cell's irradiance word): 0.025 is none, 0.425 is all. A whole number (a
+// cell this rule has not refreshed) is none. The fraction stays under 0.45
+// so `count > WARM - 0.5` reads the count alone.
+float lighting_cascade_lamp_share(float w) {
+    return clamp((fract(w) - 0.025) * 2.5, 0.0, 1.0);
+}
+
+float lighting_cascade_count_pack(float count, float share) {
+    return floor(count + 0.5) + 0.025 + 0.4 * clamp(share, 0.0, 1.0);
+}
 // Frames after a lamp change that a cell it reaches stays at that rate.
 const uint CASCADE_CHANGE_FRAMES = 32u;
 const float CASCADE_UPPER_JUMP = 0.9;
@@ -858,7 +890,23 @@ void lighting_cascade_seat(uint word) {
     }
     bool same = lighting_cascade_seat_shown(stored, n, size, CASCADE_SEAT_FACING);
     if (!same && !lighting_cascade_seat_real(stored, n, CASCADE_SEAT_FACING)) {
+        // The centre is off the surface, so the surface ends inside this
+        // cell and the owner pixel is at that end: the foot of a wall, a
+        // hair under the floor it stands on. Rays from there pass under the
+        // floor, and the parent cells under the floor are in plain view of
+        // it, so the foot of the wall took the sky's light: a blue band. The
+        // seat goes CASCADE_SEAT_INSET further from the centre, onto the
+        // surface, when a surface is there.
         stored = pos;
+        vec3 away = pos - centre;
+        away -= n * dot(away, n);
+        float far = length(away);
+        if (far > CASCADE_EPS) {
+            vec3 inset = pos + away * (min(CASCADE_SEAT_INSET, 0.25 * size) / far);
+            if (lighting_cascade_seat_real(inset, n, CASCADE_SEAT_FACING)) {
+                stored = inset;
+            }
+        }
     }
     ckeys.key[word + 6u] = floatBitsToUint(stored.x);
     ckeys.key[word + 7u] = floatBitsToUint(stored.y);
@@ -1302,7 +1350,7 @@ vec4 lighting_cascade_record(uint word, vec3 pos, vec3 n) {
     if (dot(sn, n) <= 0.0) {
         return vec4(0.0);
     }
-    if (abs(dot(stored - pos, n)) > size) {
+    if (abs(dot(stored - pos, n)) > CASCADE_RECORD_PLANE * size) {
         return vec4(0.0);
     }
     float weight = uintBitsToFloat(ckeys.key[word + 11u]);

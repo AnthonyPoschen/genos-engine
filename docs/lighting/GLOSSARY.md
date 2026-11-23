@@ -159,6 +159,9 @@ Role: STORE · Literature: surfel placement on the visible surface (GIBS); DDGI 
 **Lamp cone** (`lighting_cascade_cone`): extra rays a level-0 voxel (4) and an upper cell (8) aim at a cone around the strongest point lamp within 16 m, wide enough to hold 1.5 m around it. Uniform rays inside the cone carry no weight, and each ray is weighted by the solid angle it stands for, so the sum is the same integral.
 Role: RAYS · Literature: stratified sampling with a guided stratum; next-event estimation of a known bright region · More detail: [sparse cascade](../systems/lighting/sparse-radiance-cascades.md) Lamp cone
 
+**Lamp share** (`lighting_cascade_lamp_share`): the share of an upper cell's irradiance that is lamp light leaving the surfaces its rays hit, a running mean over refreshes. A cell the scene changed under takes the fast rate by this share and the **drift rate** (`CASCADE_UPPER_DRIFT_RATE`, one eighth of a refresh) otherwise.
+Role: STORE · Literature: change-adaptive temporal hysteresis (DDGI's per-probe hysteresis; Lumen's lighting-update speed), split by first-bounce share · More detail: [sparse cascade](../systems/lighting/sparse-radiance-cascades.md) lamp share
+
 **Parent re-seat**: a level-0 voxel that finds its parent cell stored behind its own surface (claimed while a mover stood elsewhere) moves the cell onto its surface and clears it, so the next refresh shades it from the right place.
 Role: STORE · Literature: GIBS surfel repositioning on moving geometry (loosely) · More detail: [per-frame-cascades.md](../systems/lighting/per-frame-cascades.md) Merge
 
