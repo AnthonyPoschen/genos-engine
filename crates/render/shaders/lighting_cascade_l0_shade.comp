@@ -29,7 +29,7 @@ vec3 lighting_cascade_parent_eval(vec3 dir, vec3 n_axis) {
 void lighting_cascade_parent_fetch(vec3 pos, vec3 n, float child_size) {
     vec3 bins[16];
     bool ok;
-    lighting_cascade_ancestor_bins(pos, n, child_size, true, bins, ok);
+    lighting_cascade_coarser_bins(pos, n, child_size, true, bins, ok);
     for (uint b = 0u; b < CASCADE_BINS; b++) {
         sh_bins[b] = bins[b];
     }

@@ -1021,7 +1021,7 @@ void lighting_cascade_parent_bins(vec3 pos, vec3 n, float child_size, bool seat,
 // two intervals is missed; that is less wrong than the sky. `ok` is false
 // only when no ancestor up to 32 m has light, and then the caller's sky is
 // the open air.
-void lighting_cascade_ancestor_bins(vec3 pos, vec3 n, float child_size, bool seat, out vec3 bins[16], out bool ok) {
+void lighting_cascade_coarser_bins(vec3 pos, vec3 n, float child_size, bool seat, out vec3 bins[16], out bool ok) {
     float size = child_size;
     ok = false;
     [[dont_unroll]] for (uint i = 0u; i < 9u; i++) {
