@@ -204,9 +204,12 @@ cannot hide a blocked phase.
 
 ### Debug menu
 
-`MenuSettings` on the scene (`visible`, `tab`, `collapsed`, `wheel`, `keys`)
-is the public setting. It implements `EngineSettings`. The default is shown,
-on the first page, with no stored folds, `wheel=hover`, and `keys=click`.
+`MenuSettings` on the scene (`visible`, `tab`, `collapsed`, `wheel`, `keys`,
+`place`) is the public setting. It implements `EngineSettings`. The default is
+shown, on the first page, with no stored folds, `wheel=hover`, `keys=click`,
+and `place=docked`. `place` is read by a program with a top bar (the editor):
+`docked` opens a page as a drawer on the right edge, `floating` as a panel
+that drags. The drawer's title bar has the button that changes it.
 Grave, F1, the title-bar hide button, and the corner tab write `visible`.
 The first grave while click-to-focus is held releases the keys and leaves the
 menu up. The next grave hides it. F1 hides it either way. `--menu shown|hidden`

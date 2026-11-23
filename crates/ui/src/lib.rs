@@ -117,7 +117,7 @@ pub use panel::{
     apply_frame_action, apply_lamp, button_panel, button_panel_blocks, button_panel_sections,
     lighting_frame, show_menu_tab, Frame, Paint, PanelBlock, PanelButton, PanelCheck,
     PanelDropdown, PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, Shown, State,
-    MENU_HIDE, MENU_SHOW, PANEL_ID,
+    MENU_DOCK, MENU_HIDE, MENU_SHOW, PANEL_ID, TOP_BAR_HEIGHT, top_bar,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,

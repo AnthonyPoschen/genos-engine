@@ -3022,6 +3022,7 @@ fn menu_value(settings: &MenuSettings) -> Value {
         ),
         ("wheel", text(settings.wheel.as_str())),
         ("keys", text(settings.keys.as_str())),
+        ("place", text(if settings.docked { "docked" } else { "floating" })),
     ])
 }
 

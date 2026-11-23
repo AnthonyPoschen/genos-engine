@@ -355,11 +355,11 @@ fn host_specs() -> Vec<CommandSpec> {
     vec![
         spec(
             "get_menu_settings",
-            "The debug menu in force (text form): visible (shown or hidden), tab (page title), collapsed (folded section keys), wheel, and keys. wheel and keys are hover, modal, click, or passive. Shown by default, with hover for the wheel and click for keys. --menu wins over GENOS_MENU, which wins over the scene value. tab, collapsed, wheel, and keys are the stored fields.",
+            "The debug menu in force (text form): visible (shown or hidden), tab (page title), collapsed (folded section keys), wheel, keys, and place. wheel and keys are hover, modal, click, or passive. place is docked or floating: where the editor's top bar opens a category (a drawer on the right edge, or a panel that drags); the tabbed menu does not read it. Shown by default, with hover for the wheel and click for keys. --menu wins over GENOS_MENU, which wins over the scene value. tab, collapsed, wheel, and keys are the stored fields.",
         ),
         spec(
             "set_menu_settings",
-            "Partial debug-menu update. Keys are visible (shown or hidden), tab, collapsed (comma-separated section keys), fold (add one key), open (remove one key), wheel, and keys (hover, modal, click, or passive). focus_wheel and focus_keys are the same as wheel and keys. A text field overlays key=value lines. Writes the scene. --menu and GENOS_MENU still overlay visible.",
+            "Partial debug-menu update. Keys are visible (shown or hidden), tab, collapsed (comma-separated section keys), fold (add one key), open (remove one key), wheel and keys (hover, modal, click, or passive), and place (docked or floating). focus_wheel and focus_keys are the same as wheel and keys. A text field overlays key=value lines. Writes the scene. --menu and GENOS_MENU still overlay visible.",
         ),
         spec("quit", "Stop the example with exit code (default 0)."),
         spec(
