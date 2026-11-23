@@ -8,6 +8,7 @@ mod fog_budget;
 mod fog_pass;
 mod gate;
 mod gltf_draw;
+mod gltf_surface;
 mod gpu;
 mod hdr_output;
 #[cfg(test)]
@@ -63,6 +64,7 @@ pub use gate::{
 };
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
+pub use gltf_surface::GltfSurface;
 pub use gpu::{
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
     gpu_times_flag_needs_value, lighting_change_head, lighting_sun_flag_needs_value, CacheRound,

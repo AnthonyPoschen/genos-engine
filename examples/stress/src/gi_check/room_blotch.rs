@@ -1740,6 +1740,7 @@ fn room_setup(pose: &Pose, seconds: f32) -> Result<RefSetup, String> {
         seconds,
         max_bounces: BOUNCES,
         triangles: false,
+        meshes: None,
         materials: Vec::new(),
         specular: false,
     })

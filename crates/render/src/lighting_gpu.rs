@@ -1273,7 +1273,9 @@ impl Gpu {
         let start = Instant::now();
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
+        self.depth_equal_only = true;
         let made = self.make_pipeline(true, false, false);
+        self.depth_equal_only = false;
         self.frag_override = None;
         self.vert_override = None;
         self.lighting.gbuffer_pipe = made?;
@@ -2158,7 +2160,9 @@ impl Gpu {
         }
         self.frag_override = Some(GBUFFER_FRAG_SPV);
         self.vert_override = Some(GBUFFER_VERT_SPV);
+        self.depth_equal_only = true;
         let made = block(|| self.make_pipeline(true, false, false));
+        self.depth_equal_only = false;
         self.frag_override = None;
         self.vert_override = None;
         self.lighting.gbuffer_pipe = made?;

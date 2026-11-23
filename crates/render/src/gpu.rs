@@ -2002,6 +2002,12 @@ struct Gpu {
     pipe_pass: Handle,
     /// Depth write for the next raster pipeline. `None` follows the depth test.
     depth_write_force: Option<bool>,
+    /// The next raster pipeline passes only at the depth the depth pass wrote
+    /// (EQUAL) and writes none. The G-buffer pass sets it: its fragment shader
+    /// has early tests, so a LESS_OR_EQUAL pass that wrote depth stored the
+    /// depth of a masked hole before the shader discarded it, and the surface
+    /// behind the hole then failed the test and left an empty record.
+    depth_equal_only: bool,
     /// How long each pipeline took to build.
     pipeline_times: Vec<(String, Duration)>,
     /// Driver pipeline cache, persisted across launches.
@@ -2940,6 +2946,7 @@ impl Gpu {
                 layout_override: std::ptr::null_mut(),
                 pipe_pass: std::ptr::null_mut(),
                 depth_write_force: None,
+                depth_equal_only: false,
                 pipeline_times: Vec::new(),
                 pipeline_cache: std::ptr::null_mut(),
                 desc_layout: std::ptr::null_mut(),
@@ -7345,7 +7352,9 @@ impl Gpu {
                 max: f32,
             }
             let depth_on = if depth_test { 1 } else { 0 };
-            let depth_write = u32::from(self.depth_write_force.unwrap_or(depth_test));
+            let depth_write = u32::from(
+                !self.depth_equal_only && self.depth_write_force.unwrap_or(depth_test),
+            );
             let depth = Depth {
                 s_type: 25,
                 next: std::ptr::null(),
@@ -7354,7 +7363,14 @@ impl Gpu {
                 write: depth_write,
                 // LESS for the depth pass, LESS_OR_EQUAL after it: the same shape
                 // (scene.vert's invariant position) passes at the depth it wrote.
-                compare: if depth_only { 1 } else { 3 },
+                // EQUAL for a pass that only shades what the depth pass kept.
+                compare: if depth_only {
+                    1
+                } else if self.depth_equal_only {
+                    2
+                } else {
+                    3
+                },
                 bounds: 0,
                 stencil: 0,
                 front_fail: 0,

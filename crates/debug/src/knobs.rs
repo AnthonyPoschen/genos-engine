@@ -118,6 +118,12 @@ pub trait Host {
     /// The scene the next draw uses. Edits land after the example's own update.
     fn scene(&mut self) -> &mut genos_scene::Scene;
 
+    /// The glTF triangles the scene draws, for the CPU reference tracer. None
+    /// when the scene is analytic shapes alone.
+    fn gltf_surface(&self) -> Option<std::sync::Arc<genos_render::GltfSurface>> {
+        None
+    }
+
     /// The example's own knobs (time of day, lamp count, ...).
     fn knobs(&self) -> Vec<Knob> {
         Vec::new()

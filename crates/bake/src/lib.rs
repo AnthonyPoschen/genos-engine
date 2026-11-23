@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 pub use cards::{Card, CardTexel, Cards};
 pub use mesh::{BakeMaterial, BakeMesh};
-pub use sdf::{decode as sdf_decode, MeshSdf, SdfBrick, BRICK};
+pub use sdf::{decode as sdf_decode, MeshSdf, SdfBrick, BRICK, LEVEL_MAX_VOXELS_PER_SIDE, LEVEL_VOXEL};
 
 /// When SDFs and cards are built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +193,44 @@ pub fn load_or_bake(mesh: &BakeMesh, settings: &BakeSettings) -> Result<Baked, B
         BakeMode::Prebuilt => Err(BakeError::Missing { path }),
         BakeMode::OnLoad => {
             let baked = bake_keyed(mesh, settings, key);
+            write(&path, &baked)?;
+            Ok(baked)
+        }
+    }
+}
+
+/// The cache key of a level field: the mesh's content key, the level voxel,
+/// and a salt so it never meets the per-mesh bake of the same triangles.
+fn level_key(mesh: &BakeMesh, settings: &BakeSettings) -> u64 {
+    let mut key = mesh.content_key(settings) ^ 0x4c45_5645_4c5f_5344;
+    for byte in LEVEL_VOXEL
+        .to_le_bytes()
+        .into_iter()
+        .chain(LEVEL_MAX_VOXELS_PER_SIDE.to_le_bytes())
+    {
+        key ^= u64::from(byte);
+        key = key.wrapping_mul(0x0100_0000_01b3);
+    }
+    key
+}
+
+/// The merged field of a static level ([`BakeMesh::from_gltf_scene`]): read
+/// from the cache, or built and stored when the mode allows. It has no cards.
+pub fn load_or_bake_level(mesh: &BakeMesh, settings: &BakeSettings) -> Result<Baked, BakeError> {
+    let key = level_key(mesh, settings);
+    let path = key_path(settings, key);
+    if let Some(baked) = read(&path) {
+        return Ok(baked);
+    }
+    match settings.mode {
+        BakeMode::Prebuilt => Err(BakeError::Missing { path }),
+        BakeMode::OnLoad => {
+            let bvh = genos_mesh::Bvh::build(&mesh.triangles);
+            let baked = Baked {
+                key,
+                sdf: sdf::build_level(mesh, settings, &bvh),
+                cards: Cards { cards: Vec::new() },
+            };
             write(&path, &baked)?;
             Ok(baked)
         }

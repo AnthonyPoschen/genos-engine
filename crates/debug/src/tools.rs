@@ -289,6 +289,9 @@ struct RefJob {
     max_bounces: u32,
     /// Trace the scene's triangles instead of its analytic shapes.
     triangles: bool,
+    /// What the trace saw ([`RefSetup::geometry`]), for the reply. A stored
+    /// reference keeps the name of the request.
+    geometry: &'static str,
     /// `aov`: which layers to write besides the full picture.
     aov: Aov,
     size: (u32, u32),
@@ -562,6 +565,7 @@ impl Tools {
                         seconds: job.seconds,
                         specular: job.aov == Aov::Specular,
                         materials: materials.clone(),
+                        meshes: ctx.host.gltf_surface(),
                         ..RefSetup::from_camera(
                             ctx.host.scene(),
                             ctx.camera,
@@ -570,6 +574,7 @@ impl Tools {
                             job.spp,
                         )
                     };
+                    job.geometry = setup.geometry();
                     let cache = job.cache.clone();
                     job.worker = Some(std::thread::spawn(move || {
                         use std::sync::atomic::Ordering;
@@ -1506,6 +1511,7 @@ impl Tools {
                     block: args.u32("block")?.unwrap_or(2).max(1),
                     max_bounces,
                     triangles,
+                    geometry: if triangles { "triangles" } else { "shapes" },
                     aov,
                     size: (width, height),
                     worker: None,
@@ -2169,10 +2175,7 @@ fn finish_reference(
         ("reference", text(path("reference").display().to_string())),
         ("spp", num(r.spp as f64)),
         ("bounces", num(job.max_bounces as f64)),
-        (
-            "geometry",
-            text(if job.triangles { "triangles" } else { "shapes" }),
-        ),
+        ("geometry", text(job.geometry)),
         ("width", num(r.image.width as f64)),
         ("height", num(r.image.height as f64)),
         ("trace_seconds", num(r.seconds as f64)),
@@ -3247,6 +3250,7 @@ mod tests {
             block: 1,
             max_bounces: 1,
             triangles: false,
+            geometry: "shapes",
             aov: Aov::Full,
             size: (1, 1),
             worker: Some(std::thread::spawn(move || {

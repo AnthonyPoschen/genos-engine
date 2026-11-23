@@ -23,10 +23,10 @@ layout(std430, set = 0, binding = 19) buffer RestirWords {
     uint restir_words[];
 };
 #include "restir_reach.glsl"
-// The sun and the single brightest near lamp keep a disc shadow ray. Every
-// other near lamp is a cascade sample: one disc ray per cell per frame, at
+// The sun and the brightest near lamps (RESTIR_EXACT_NEAR) keep a disc shadow
+// ray. Every other near lamp is a cascade sample: one disc ray per cell per frame, at
 // the level whose shell contains the lamp, shared by the pixels of that cell.
-// The brightest lamp is not added from the cascade, so it is not counted twice.
+// A lamp with its own ray is not added from the cascade, so it is not counted twice.
 const float RESTIR_TAIL_EPS = 1.0e-6;
 // Past the uploaded prefix (`PREFIX_CAP_WORDS` in restir_live.rs). Two frames,
 // 262144 slots, four words: key over frame, unused, visibility mean, count.
@@ -61,22 +61,52 @@ float restir_point_weight(LampList list, uint k, vec3 origin, vec3 n, bool two_s
 }
 
 // Lowest index wins a tie, so the choice is stable.
-uint restir_brightest(LampList list, uint count, vec3 origin, vec3 n, bool two_sided) {
+// Near lamps that keep their own disc shadow ray at a pixel: the brightest
+// few by unshadowed weight. One was not enough in a lit hall. In Sponza the
+// lamp that lights most of the atrium floor is not the brightest lamp at the
+// floor near the camera, so its shadow came from 1 to 2 m cascade cells:
+// square shadow edges, and a mean of 32 one-ray samples that kept stepping.
+const uint RESTIR_EXACT_NEAR = 4u;
+struct RestirBright {
+    uint k[RESTIR_EXACT_NEAR];
+};
+
+RestirBright restir_brightest(LampList list, uint count, vec3 origin, vec3 n, bool two_sided) {
     uint begin = list.suns.y;
     uint end = begin + list.near.y;
     if (end > count) {
         end = count;
     }
-    uint best = ~0u;
-    float best_w = 0.0;
+    RestirBright best;
+    float best_w[RESTIR_EXACT_NEAR];
+    for (uint i = 0u; i < RESTIR_EXACT_NEAR; i++) {
+        best.k[i] = ~0u;
+        best_w[i] = 0.0;
+    }
     [[dont_unroll]] for (uint k = begin; k < end; k++) {
         float w = restir_point_weight(list, k, origin, n, two_sided);
-        if (w > best_w) {
-            best_w = w;
-            best = k;
+        uint at = k;
+        // Insertion into the short sorted list: carry the displaced entry down.
+        for (uint i = 0u; i < RESTIR_EXACT_NEAR; i++) {
+            if (w > best_w[i]) {
+                float tw = best_w[i];
+                uint tk = best.k[i];
+                best_w[i] = w;
+                best.k[i] = at;
+                w = tw;
+                at = tk;
+            }
         }
     }
     return best;
+}
+
+bool restir_is_bright(RestirBright b, uint k) {
+    bool found = false;
+    for (uint i = 0u; i < RESTIR_EXACT_NEAR; i++) {
+        found = found || b.k[i] == k;
+    }
+    return found;
 }
 
 RestirCut restir_importance(LampList list, uint count, vec3 origin, vec3 n, bool two_sided, float u) {
@@ -1016,7 +1046,10 @@ void main() {
     restir_cut.tail_lamp = ~0u;
     bool restir_plan = restir_pix && RESTIR_EXACT_LIT != 0u;
     bool restir_split = false;
-    uint restir_bright = ~0u;
+    RestirBright restir_bright;
+    for (uint i = 0u; i < RESTIR_EXACT_NEAR; i++) {
+        restir_bright.k[i] = ~0u;
+    }
     bool restir_raw_move = false;
     if (restir_pix) {
         restir_bright = restir_brightest(list, count, origin, n, two_sided);
@@ -1061,9 +1094,9 @@ void main() {
     }
     [[dont_unroll]] for (uint k = 0u; k < count; k++) {
 #ifdef GENOS_RESTIR_DI
-        // Sun and the brightest near lamp stay in this loop. Other near lamps
+        // Sun and the brightest near lamps stay in this loop. Other near lamps
         // are the cascade sample below. The flame stays here, on the centre.
-        if (restir_split && k >= list.suns.y && k < list.suns.y + list.near.y && k != restir_bright) {
+        if (restir_split && k >= list.suns.y && k < list.suns.y + list.near.y && !restir_is_bright(restir_bright, k)) {
             continue;
         }
         if (restir_pix && !restir_few && !restir_plan && !restir_split && k >= list.suns.y && k < list.suns.y + list.near.y) {
@@ -1365,7 +1398,7 @@ void main() {
             end = count;
         }
         [[dont_unroll]] for (uint k = begin; k < end; k++) {
-            if (k == restir_bright) {
+            if (restir_is_bright(restir_bright, k)) {
                 continue;
             }
             if (view_only != LAMP_ALL && lamp_list_index(list, k) != view_only) {

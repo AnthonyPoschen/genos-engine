@@ -86,8 +86,9 @@ pub fn direct_light(scene: &Scene, origin: [f32; 3], normal: [f32; 3]) -> [f32; 
     direct_light_in(scene, scene, origin, normal)
 }
 
-/// What a tracer sees: the analytic shapes of a [`Scene`] or its triangles
-/// ([`crate::SceneMesh`]). Lamps and the sky always come from the scene.
+/// What a tracer sees: the analytic shapes of a [`Scene`], its triangles
+/// ([`crate::SceneMesh`]) or a glTF model's ([`crate::GltfSurface`]). Lamps and
+/// the sky always come from the scene.
 pub trait Surfaces: Sync {
     /// The first surface along `dir` within `reach`; the normal faces the ray.
     fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit>;
@@ -109,6 +110,15 @@ impl Surfaces for Scene {
     }
     fn inside(&self, p: [f32; 3]) -> bool {
         point_inside(self, p)
+    }
+}
+
+impl Surfaces for crate::gltf_surface::GltfSurface {
+    fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit> {
+        self.trace(origin, dir, reach)
+    }
+    fn blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        self.occluded(from, to)
     }
 }
 
@@ -405,7 +415,10 @@ fn path_in(scene: &Scene, origin: [f32; 3], dir: [f32; 3], hits: u32, seed: u32)
 pub struct Hit {
     pub point: [f32; 3],
     pub normal: [f32; 3],
+    /// Diffuse albedo: paint, or a glTF base colour × (1 − metallic).
     pub albedo: [f32; 3],
+    /// Emitted radiance. Zero on analytic shapes.
+    pub emissive: [f32; 3],
 }
 
 /// The first floor, roof, wall or solid face along `dir` from `origin`, within `reach`.
@@ -420,6 +433,7 @@ pub fn trace(scene: &Scene, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Opti
                     point: add(origin, scale(dir, t)),
                     normal,
                     albedo,
+                    emissive: [0.0; 3],
                 });
             }
         };

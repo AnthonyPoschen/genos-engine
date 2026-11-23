@@ -30,9 +30,10 @@
 //!   16..19 world bounds high, 19 albedo (unpackUnorm4x8; a = 1 when two-sided)
 //!   20..23 grid origin (object), 23 voxel
 //!   24..27 grid size in bricks (x y z), 27 brick table word
-//!   28 band, 29 coarse band, 30 coarse word, 31 thin (1) or closed (0)
+//!   28 band, 29 coarse band, 30 coarse word, 31 bit 0 thin, bit 1 bricks carry albedo
 //! brick table: one word per brick cell, 0 for none, else 1 + the brick's first word
-//! brick: 128 words, 512 distances as bytes, x fastest
+//! brick: 128 words, 512 distances as bytes, x fastest; a level field adds a 129th
+//!   word, the brick's mean albedo (unpackUnorm4x8)
 //! coarse: one byte per brick cell, four per word
 //! emission table (GI): one word per instance, shared-exponent RGB (9e5)
 //! ```
@@ -214,8 +215,10 @@ pub fn field_parts(instances: &[&FieldInstance], with_data: bool) -> FieldParts 
                     }
                 }
                 data_len += coarse_words;
-                for brick in &s.bricks {
-                    let words = brick.distances.len().div_ceil(4);
+                for (index, brick) in s.bricks.iter().enumerate() {
+                    // A level field's brick ends with one albedo word.
+                    let tail = usize::from(!s.brick_albedo.is_empty());
+                    let words = brick.distances.len().div_ceil(4) + tail;
                     if with_data {
                         let d = s.bricks_dims;
                         let cell =
@@ -225,6 +228,9 @@ pub fn field_parts(instances: &[&FieldInstance], with_data: bool) -> FieldParts 
                             let mut b = [0u8; 4];
                             b[..chunk.len()].copy_from_slice(chunk);
                             data.push(u32::from_le_bytes(b));
+                        }
+                        if let Some(a) = s.brick_albedo.get(index) {
+                            data.push(u32::from_le_bytes([a[0], a[1], a[2], 0]));
                         }
                     }
                     data_len += words;
@@ -256,7 +262,7 @@ pub fn field_parts(instances: &[&FieldInstance], with_data: bool) -> FieldParts 
         r[28] = f(s.band);
         r[29] = f(s.coarse_band);
         r[30] = coarse;
-        r[31] = u32::from(s.thin);
+        r[31] = u32::from(s.thin) | if s.brick_albedo.is_empty() { 0 } else { 2 };
         head.extend_from_slice(&r);
     }
     debug_assert!(!with_data || data.len() == data_len);

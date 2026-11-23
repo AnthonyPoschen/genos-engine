@@ -1870,6 +1870,13 @@ impl Host for App {
         }
     }
 
+    fn gltf_surface(&self) -> Option<std::sync::Arc<genos_render::GltfSurface>> {
+        match &self.show {
+            Show::Stress(stage) => stage.world.gltf_surface.clone(),
+            Show::Still(world) => world.gltf_surface.clone(),
+        }
+    }
+
     fn knobs(&self) -> Vec<Knob> {
         match &self.show {
             Show::Stress(stage) => Host::knobs(stage),
@@ -2547,14 +2554,17 @@ fn build_entry(root: &Path, entry: &Entry) -> Result<Show, String> {
                 );
                 if report.objects.is_empty() {
                     world
-                        .add_gltf_traced(&model, &identity_pose(), &bake)
+                        .add_gltf_level(&model, &identity_pose(), &bake)
                         .map_err(|err| format!("{}: bake: {err:?}", full.display()))?;
                 }
             } else {
                 world
-                    .add_gltf_traced(&model, &identity_pose(), &bake)
+                    .add_gltf_level(&model, &identity_pose(), &bake)
                     .map_err(|err| format!("{}: bake: {err:?}", full.display()))?;
             }
+            // The CPU reference traces the model's triangles (`reference`, `compare`).
+            // The cooked path draws the same model, so it keeps the same surface.
+            world.keep_gltf_surface(&model, &identity_pose());
             Ok(Show::Still(world))
         }
     }

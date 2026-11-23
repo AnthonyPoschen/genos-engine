@@ -76,6 +76,7 @@ fn stress_views_traced_as_triangles_match_the_shapes() {
             triangles,
             materials: Vec::new(),
             specular: false,
+            meshes: None,
         };
         let a = render(&setup(false));
         let b = render(&setup(true));

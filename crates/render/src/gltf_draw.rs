@@ -164,6 +164,40 @@ impl World {
         Ok(parts.into_iter().map(|p| p.object).collect())
     }
 
+    /// [`World::add_gltf_traced`] for a static level: every mesh instance is
+    /// drawn as usual, and the tracer gets one merged field in the scene's
+    /// space ([`genos_bake::load_or_bake_level`]) in place of one field per
+    /// mesh. A ray then marches one field, at the level voxel, and a hit takes
+    /// the albedo of its brick. The field follows the first part's object.
+    pub fn add_gltf_level(
+        &mut self,
+        scene: &GltfScene,
+        place: &[f32; 16],
+        settings: &genos_bake::BakeSettings,
+    ) -> Result<Vec<usize>, genos_bake::BakeError> {
+        let parts = self.add_gltf_parts(scene, place, false, None);
+        let baked = genos_bake::load_or_bake_level(
+            &genos_bake::BakeMesh::from_gltf_scene(scene),
+            settings,
+        )?;
+        let weight: f32 = parts.iter().map(|p| p.triangles as f32).sum::<f32>().max(1.0);
+        let mean = |pick: fn(&GltfPart) -> [f32; 3]| -> [f32; 3] {
+            std::array::from_fn(|c| {
+                parts.iter().map(|p| pick(p)[c] * p.triangles as f32).sum::<f32>() / weight
+            })
+        };
+        if !baked.sdf.bricks.is_empty() {
+            self.fields.push(crate::mesh_field::FieldInstance {
+                sdf: std::sync::Arc::new(baked.sdf),
+                pose: *place,
+                albedo: mean(|p| p.color),
+                emission: mean(|p| p.emission),
+                object: parts.first().map(|p| p.object),
+            });
+        }
+        Ok(parts.into_iter().map(|p| p.object).collect())
+    }
+
     pub(crate) fn add_gltf_cooked(
         &mut self,
         scene: &GltfScene,
@@ -335,6 +369,20 @@ fn expand(primitive: &Primitive) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>
     if !have_uv {
         texcoords.clear();
     }
+    // The shaders read a negative u as "this vertex has no uv" and shade the
+    // vertex colour. A tiled glTF has real negative coordinates: Sponza's
+    // floor ran to u = -1.89, drew untextured, and with metallic factor 1 and
+    // no metallic texel its diffuse albedo was black. The atlas fetch wraps,
+    // so a whole-number shift per triangle reads the same texels.
+    for corners in texcoords.chunks_exact_mut(3) {
+        let least = corners.iter().fold(f32::INFINITY, |m, uv| m.min(uv[0]));
+        if least < 0.0 && least.is_finite() {
+            let shift = (-least).ceil();
+            for uv in corners {
+                uv[0] += shift;
+            }
+        }
+    }
     (vertices, normals, texcoords)
 }
 
@@ -440,9 +488,35 @@ fn build_surface(
         cutoff: alpha_cutoff(m.alpha_mode),
         two_sided: m.double_sided,
         roughness: m.roughness,
-        metallic: if flags & MAT_BASE != 0 { m.metallic } else { 0.0 },
+        metallic: if flags & MAT_BASE == 0 {
+            0.0
+        } else if !store_metal && m.metallic_roughness_texture.is_some() {
+            mean_metallic(m, images)
+        } else {
+            m.metallic
+        },
         material_flags: flags,
     }
+}
+
+/// The metallic a masked or blended material shades with. Its atlas alpha is
+/// the cutoff test, so the metallic texture has no channel there. The factor
+/// alone is wrong when a texture scales it: Sponza's leaves have factor 1 and
+/// a texture of 0, and shaded black. This is the texture's mean over a 32 by
+/// 32 grid, times the factor.
+fn mean_metallic(m: &PbrMaterial, images: &[Image]) -> f32 {
+    const SIDE: u16 = 32;
+    let mut sum = 0.0f32;
+    for y in 0..SIDE {
+        for x in 0..SIDE {
+            let uv = [
+                (f32::from(x) + 0.5) / f32::from(SIDE),
+                (f32::from(y) + 0.5) / f32::from(SIDE),
+            ];
+            sum += shade_uv(m, images, uv).metallic;
+        }
+    }
+    sum / f32::from(SIDE * SIDE)
 }
 
 fn alpha_cutoff(mode: AlphaMode) -> f32 {
@@ -858,6 +932,26 @@ mod tests {
         };
         let (_albedo, glow) = surface_mean(&material, &[base, emissive], &primitive);
         assert!((glow[0] - 1.0).abs() < 1.0e-5, "emissive mean {}", glow[0]);
+    }
+
+    #[test]
+    fn a_negative_u_is_shifted_by_a_whole_number() {
+        // A negative u reads as "no uv" in the shaders. Sponza's floor has them.
+        let primitive = genos_load::Primitive {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            texcoords: vec![[-1.89, 0.25], [0.5, -4.95], [2.62, 0.0]],
+            indices: vec![0, 1, 2],
+            ..genos_load::Primitive::default()
+        };
+        let (_, _, uv) = expand(&primitive);
+        assert_eq!(uv.len(), 3);
+        for (was, now) in primitive.texcoords.iter().zip(&uv) {
+            assert!(now[0] >= 0.0, "u {} is still negative", now[0]);
+            let shift = now[0] - was[0];
+            assert!((shift - 2.0).abs() < 1.0e-5, "shift {shift} is not the whole number 2");
+            assert!((now[1] - was[1]).abs() < 1.0e-6, "v changed");
+        }
     }
 
     #[test]

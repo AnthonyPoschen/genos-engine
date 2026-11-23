@@ -331,6 +331,16 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
   instead of the analytic shapes (`"shapes"`, the default). Both agree within the
   trace's noise (`triangles_match_the_analytic_reference`); GI traces meshes only.
   Triangle traces are cached under a separate key.
+- A glTF scene (Sponza in `genos-lighting`) is traced as its own triangles
+  (`genos_render::GltfSurface`, world space, CPU BVH), together with the scene's
+  analytic shapes. The host gives the triangles through `Host::gltf_surface`.
+  A hit reads the shared shade at its UV: textured diffuse albedo and textured
+  emission. A ray continues through a texel under the alpha cutoff (MASK uses
+  `alphaCutoff`, BLEND uses 0.5, OPAQUE has no holes, as in the G-buffer). The
+  raster does not cull, so every triangle stops a ray from both sides. The reply
+  has `geometry: "shapes+gltf"`. These traces have their own cache key and stay
+  on the CPU. `cargo test -p genos-debug --release --test gltf_reference` checks
+  Sponza with no window.
 - Passes of `spp` paths per pixel run on every core until the mean relative
   standard error of a pixel is at most `noise` (default 0.03), `max_spp` or
   `seconds` (default 300). The reply carries `spp` done, `noise`, `trace_seconds`.

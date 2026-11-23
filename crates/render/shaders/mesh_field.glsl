@@ -38,6 +38,8 @@ struct MfInst {
     float coarse_band;
     uint coarse;
     bool thin;
+    // Bricks end with an albedo word (a level field).
+    bool brick_albedo;
 };
 
 uint mf_count() {
@@ -65,7 +67,8 @@ MfInst mf_inst(uint i) {
     m.band = mf_f(b + 28u);
     m.coarse_band = mf_f(b + 29u);
     m.coarse = mesh_field.words[b + 30u];
-    m.thin = mesh_field.words[b + 31u] != 0u;
+    m.thin = (mesh_field.words[b + 31u] & 1u) != 0u;
+    m.brick_albedo = (mesh_field.words[b + 31u] & 2u) != 0u;
     return m;
 }
 
@@ -205,6 +208,16 @@ bool mf_trace_one(uint i, vec3 origin, vec3 dir, float t0, inout SceneHit hit) {
             hit.t = t / s;
             hit.normal = nw;
             hit.albedo = unpackUnorm4x8(m.albedo).rgb;
+            if (m.brick_albedo) {
+                // The brick the hit is in. A march stops inside a stored
+                // brick, so the word is there; a miss keeps the mean.
+                vec3 hg = (o + d * t - m.origin) / m.voxel;
+                vec3 hb = clamp(floor(hg / 8.0), vec3(0.0), vec3(m.dims) - 1.0);
+                uint hat = mesh_field.words[m.table + mf_cell(m, uvec3(hb))];
+                if (hat != 0u) {
+                    hit.albedo = unpackUnorm4x8(mesh_field.words[hat - 1u + 128u]).rgb;
+                }
+            }
             hit.reflect = SCENE_LAMBERT;
             hit.color_mix = 1.0;
             return true;
