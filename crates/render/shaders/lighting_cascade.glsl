@@ -995,7 +995,14 @@ void lighting_cascade_parent_bins(vec3 pos, vec3 n, float child_size, bool seat,
         }
         lighting_cascade_mark_claimed(s);
         vec3 cpos = cache.v[3u * s].xyz;
-        if (trace_occluded(pos + n * 0.02, cpos + n * 0.02)) {
+        // Both ends stand clear of a thin field's shell (mf_skin: half a
+        // voxel to each side, 3 cm in a level field). At 2 cm they were
+        // inside it, and the ray to a parent on the same flat surface ran
+        // along inside the shell and counted as blocked. A floor voxel then
+        // had no parent at any size and read the sky: in Sponza's upper
+        // gallery 172 of 953 voxels in one view.
+        float lift = max(0.02, 2.0 * mf_skin() + 0.01);
+        if (trace_occluded(pos + n * lift, cpos + n * lift)) {
             continue;
         }
         for (uint b = 0u; b < CASCADE_BINS; b++) {

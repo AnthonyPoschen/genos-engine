@@ -46,6 +46,13 @@ uint mf_count() {
     return mesh_field.words[0];
 }
 
+// Half the thickness a thin field's surface has to a ray, world metres: the
+// largest mf_eps over the thin instances (header word 3). An open mesh is
+// unsigned, so its surface is a shell this far to each side.
+float mf_skin() {
+    return uintBitsToFloat(mesh_field.words[3]);
+}
+
 float mf_f(uint w) {
     return uintBitsToFloat(mesh_field.words[w]);
 }

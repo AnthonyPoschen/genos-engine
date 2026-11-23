@@ -23,7 +23,7 @@
 //!
 //! ```text
 //! [0]  instance count   [1] max march steps   [2] emission table word (0: none)
-//! [3] reserved
+//! [3] thin skin, world metres (f32)
 //! per instance, 32 words from word 4:
 //!   0..12  world -> object rows (3 x vec4: m0 m1 m2 t)
 //!   12..15 world bounds low, 15 distance scale (object metres -> world metres)
@@ -268,6 +268,14 @@ pub fn field_parts(instances: &[&FieldInstance], with_data: bool) -> FieldParts 
     debug_assert!(!with_data || data.len() == data_len);
     head[0] = kept.len() as u32;
     head[1] = FIELD_STEPS;
+    // Word 3: half the thickness of the thickest thin shell, world metres
+    // (mesh_field.glsl mf_skin, half a voxel as mf_eps has it).
+    let skin = kept
+        .iter()
+        .filter(|(inst, _)| inst.sdf.thin)
+        .map(|(inst, rows)| 0.5 * inst.sdf.voxel * distance_scale(rows))
+        .fold(0.0f32, f32::max);
+    head[3] = skin.to_bits();
     let mut emission = Vec::new();
     if kept
         .iter()
