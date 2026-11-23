@@ -58,7 +58,7 @@ Do not refactor these in a drive-by. Delete the `expect` when the sites in that 
 - `unwrap_used` / `expect_used` / `panic`: production sites are the totals above minus the test-only column. Build scripts stay allowed.
 - `wildcard_enum_match_arm`: 37 sites, 17 files.
 - `pedantic`: 3068 sites under per-lint expects. A file that expects `cast_possible_truncation` still fails a different pedantic lint it did not already expect.
-- `disallowed_methods` (`std::env::set_var`): 24 sites in `debug/lighting/src/main.rs`, `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. These push a CLI flag into the environment so another crate will read it. Write the settings value instead.
+- `disallowed_methods` (`std::env::set_var`): 24 sites in `crates/scene-program/src/lib.rs`, `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. These push a CLI flag into the environment so another crate will read it. Write the settings value instead.
 
 One real bug found while turning the lints on: `crates/ui/src/profile.rs` computed `1.0_f32.min(plot_w.max(1.0))`, which is always `1.0`. The mark width is now `1.0_f32.min(plot_w)`.
 
@@ -78,7 +78,7 @@ One real bug found while turning the lints on: `crates/ui/src/profile.rs` comput
 
 `std::env::var` and `std::env::var_os` are denied in every crate. Existing reads carry a function `#[allow(clippy::disallowed_methods, reason = "...")]`. A new read in a function that does not already have that allow fails. Build scripts are allowed at the file: Cargo passes `OUT_DIR` and the target triple. `GENOS_MCP_PORT` stays allowed on `listen_port` because the discovery directory is the primary path and that variable is the documented override. `HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, and `WAYLAND_DISPLAY` stay allowed on the one function that reads them.
 
-These files already `expect` `disallowed_methods` for `set_var`, so a new `env::var` in the same file is not gated yet: `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `debug/lighting/src/main.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. They are binaries and tests. The renderer library is gated per function.
+These files already `expect` `disallowed_methods` for `set_var`, so a new `env::var` in the same file is not gated yet: `examples/stress/src/main.rs`, `examples/stress/src/lighting_ref/capture.rs`, `crates/scene-program/src/lib.rs`, `crates/render/tests/lighting_frame.rs`, `crates/render/tests/lighting_sun.rs`, `crates/render/tests/lighting_toggles.rs`, `crates/debug/tests/lighting_mcp.rs`. They are binaries and tests. The renderer library is gated per function.
 
 ### TODO: renderer tuning reads
 
@@ -94,6 +94,10 @@ The renderer still reads 35 environment names itself. Each one should move onto 
 | `GENOS_LIGHTING_SURFACE_CACHE_FIREFLY_SIGMA` | `crates/scene/src/lighting.rs:1247` | `--surface-cache-firefly-sigma` |
 | `GENOS_LIGHTING_SURFACE_CACHE_RAY_BUDGET` | `crates/scene/src/lighting.rs:1248` | `--surface-cache-ray-budget` |
 | `GENOS_LIGHTING_SURFACE_CACHE_DORMANT_RAYS` | `crates/scene/src/lighting.rs:1249` | `--surface-cache-dormant-rays` |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS` | `crates/scene/src/lighting.rs` | `surface_cache.sh_cells` (stress knob) |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL` | `crates/scene/src/lighting.rs` | `surface_cache.sh_texel_detail` (stress knob) |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT` | `crates/scene/src/lighting.rs` | `surface_cache.sh_texel_ray_cut` (stress knob) |
+| `GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE` | `crates/scene/src/lighting.rs` | `surface_cache.sh_probe_retire` (stress knob) |
 | `GENOS_LIGHTING_DIRECT_SPECULAR` | `crates/scene/src/lighting.rs` | `--lighting-direct-specular` |
 
 | Variable | Where | CLI today |
@@ -223,7 +227,6 @@ Delete the casts, then lower that file's count in `lint/lossy-cast-baseline.txt`
 | `crates/render/shaders/gbuffer.frag` | 14 |
 | `crates/render/shaders/lighting_trace.comp` | 12 |
 | `crates/render/shaders/lighting_filter.comp` | 11 |
-| `crates/render/shaders/lighting_screen.comp` | 10 |
 | `crates/render/shaders/material_atlas.glsl` | 10 |
 | `crates/render/shaders/overlay.frag` | 10 |
 | `crates/render/shaders/lighting_place.comp` | 8 |
@@ -232,7 +235,6 @@ Delete the casts, then lower that file's count in `lint/lossy-cast-baseline.txt`
 | `crates/render/shaders/dither.glsl` | 4 |
 | `crates/render/shaders/lighting_check.comp` | 4 |
 | `crates/render/shaders/wire.frag` | 3 |
-| `crates/render/shaders/lighting_atrous.comp` | 1 |
 | `crates/render/shaders/transmit.comp` | 1 |
 
 Bad shader (the check fails this):
@@ -291,10 +293,10 @@ A `GENOS_*` or `OCC_*` string in Rust must be listed. Kinds:
 |---|---|---|
 | `mirror` | 93 | A CLI argument exists and wins when both are set. `detail` is the flag. |
 | `todo` | 82 | Read today, and still has no argument. |
-| `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `debug/lighting/menu.txt`). |
+| `override` | 4 | `GENOS_MCP_PORT` (discovery directory is primary), `GENOS_ENGINE_COMMIT` (stamp when git is missing), `GENOS_DEBUG_KEYS` (a file replaces built-in chords), and `GENOS_MENU_LAYOUT` (a file replaces `crates/scene-program/menu.txt`). |
 | `test` | 14 | Harness only. |
 | `os` | 5 | `HOME`, `XDG_RUNTIME_DIR`, `XDG_STATE_HOME`, `WAYLAND_DISPLAY`, `VK_ICD_FILENAMES`. |
-| `build` | 3 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, and `GENOS_HDR_COMPOSE` (the HDR compose shader compile). |
+| `build` | 5 | `OUT_DIR`, `CARGO_CFG_TARGET_OS`, `GENOS_HDR_COMPOSE`, `GENOS_COMPOSE_MAINT`, and `GENOS_COMPOSE_NO_WALK` (shader compile defines, not process environment variables). |
 
 Do not add a new `kind = "todo"`. Add a `mirror` whose `detail` is the flag, or do not read the variable.
 

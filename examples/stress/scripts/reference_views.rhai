@@ -3,7 +3,7 @@
 // the building from outside, and room A's dark corner. Look at every
 // <view>-reference.png / -live.png / -heatmap.png as well as the numbers.
 time(#{ pause: true });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("time_of_day", 12.0);
 
 let views = [

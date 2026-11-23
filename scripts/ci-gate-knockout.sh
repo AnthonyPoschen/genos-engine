@@ -6,36 +6,54 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
+# binary:test:guard
 tests=(
-  "the_direct_light_is_in_the_presented_frame:${DIRECT_GUARD:-direct_in_compose}"
-  "the_bounce_adds_light_to_the_presented_frame:${BOUNCE_GUARD:-bounce_in_compose}"
+  "gate_presented:the_direct_light_is_in_the_presented_frame:${DIRECT_GUARD:-direct_in_compose}"
+  "gate_presented:the_bounce_adds_light_to_the_presented_frame:${BOUNCE_GUARD:-bounce_in_compose}"
+  "restir_moving_grain:a_moving_point_lamp_does_not_grain_a_flat_wall:${WALL_GUARD:-moving_lamp_wall}"
+  "penumbra:the_penumbra_is_in_the_presented_frame:${DISC_GUARD:-lamp_disc}"
 )
 
-# The knockout feature must stay test-only: no manifest but genos-render's
-# own may name it, and it is never a default feature.
-if git grep -n knockout -- '*.toml' ':!crates/render/Cargo.toml' | grep .; then
-  echo "FAIL: a manifest outside crates/render enables the knockout feature" >&2
+# The knockout feature must stay test-only, and it is never a default.
+# genos-render owns it. genos-stress forwards it so the fill gate
+# (examples/stress/tests/fill_knockout.rs) can compile the guard out.
+# That forward is not a default. No other manifest may name it.
+if git grep -n knockout -- '*.toml' \
+  ':!crates/render/Cargo.toml' \
+  ':!examples/stress/Cargo.toml' | grep .; then
+  echo "FAIL: a manifest other than genos-render or the stress fill forward names knockout" >&2
   exit 1
 fi
-if grep -nE '^default *=.*knockout' crates/render/Cargo.toml; then
-  echo "FAIL: knockout is a default feature of genos-render" >&2
+if grep -nE '^default *=.*knockout' crates/render/Cargo.toml examples/stress/Cargo.toml; then
+  echo "FAIL: knockout is a default feature" >&2
+  exit 1
+fi
+if ! grep -q '^knockout = \["genos-render/knockout"\]$' examples/stress/Cargo.toml; then
+  echo "FAIL: genos-stress knockout forward is not genos-render/knockout" >&2
   exit 1
 fi
 
 echo "==> presented-frame gates, guards on"
 cargo test -p genos-render --test gate_presented -- --test-threads=1 --nocapture
+cargo test -p genos-render --test restir_moving_grain -- --test-threads=1 --nocapture
+cargo test -p genos-render --test penumbra the_penumbra_is_in_the_presented_frame -- --test-threads=1 --exact --nocapture
 
 for entry in "${tests[@]}"; do
-  name=${entry%%:*}
-  guard=${entry##*:}
+  binary=${entry%%:*}
+  rest=${entry#*:}
+  name=${rest%%:*}
+  guard=${rest##*:}
   echo "==> knockout ${guard} on ${name} (must go red)"
   log=$(mktemp)
   set +e
-  GENOS_KNOCKOUT="$guard" cargo test -p genos-render --features knockout --test gate_presented \
+  GENOS_KNOCKOUT="$guard" cargo test -p genos-render --features knockout --test "$binary" \
     "$name" -- --test-threads=1 --exact 2>&1 | tee "$log"
   status=${PIPESTATUS[0]}
   set -e
   if [[ "$status" -eq 0 ]]; then
+    # A passing test hides its output. Run it once more for the numbers it grades.
+    GENOS_KNOCKOUT="$guard" cargo test -p genos-render --features knockout --test "$binary" \
+      "$name" -- --test-threads=1 --exact --nocapture 2>&1 | grep -E "gate|presented|^test " || true
     echo "FAIL: ${name} still passed with GENOS_KNOCKOUT=${guard}" >&2
     exit 1
   fi

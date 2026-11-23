@@ -1,0 +1,94 @@
+# Editor status
+
+Where the editor stands on 23 Nov 2026 (branch `lighting-v3`), and what is missing. The design is in [mesh workbench](mesh-workbench.md). The item-by-item record, with the evidence for each, is the [editor checklist](editor-checklist.md).
+
+## What it is
+
+`genos-editor` (`make editor`) is the scene program opened on the mesh scene. A person looks at a mesh-workbench workspace, selects parts of it, and types a note that says what they want. An agent reads that over MCP and makes the edit with mesh-workbench, which is linked into the editor ([ADR 0042](../adr/0042-mesh-workbench-is-linked-into-the-editor.md)). `genos-lighting` (`make stress`) is the same frame loop on the lighting scenes, with no mesh viewer.
+
+## What works
+
+**Scenes.** Scene files in `debug/scenes` open by name. The old stress scene is `lighting-stress`; `stress` still opens it. `--scenes DIR` adds another directory's scene files.
+
+**Viewing a mesh.**
+
+- A workspace opens as the `mesh` scene, and the picture follows `project.json` as it changes.
+- Orbit, pan, zoom, frame (`F`), axis views, a turntable, and a perspective or orthographic (parallel) projection.
+- Fifteen shades, named as mesh-workbench names its render modes: `shaded`, `textured`, `material`, `wireframe`, `uv_checker`, `vertex_colors`, `vertex_color_shaded`, `object_ids`, `face_ids`, `collection_ids`, `face_orientation`, `tessellation`, `normals`, `depth`, `silhouette`.
+- The look of the web viewer: its three lights, a dark ground that fades into a dark background, a faint grid, a contact shadow.
+- Hide, show and solo objects; collections; replay of recorded sessions; animation clips with bones; ID labels in the wireframe shade.
+- On the picture: the workspace line, the counts, the pointer hints, an axis gizmo with the projection toggle, and an Objects and Replay panel.
+- A workspace picker. A directory with no `project.json` opens as an empty workspace.
+
+**Selecting.** A click selects a face, an object or a vertex; Shift adds. A right drag draws a box (so does Control and a left drag), Alt and a left drag a lasso. A box and a lasso select only what is in sight. `T` types the note.
+
+**The layout.** A bar across the top has a button for each page of the menu. A click opens the page as a drawer docked on the right edge; `float` in its title bar makes it a panel that drags, and `dock` puts it back (`set_menu_settings place`). The Objects panel stands on the left. The plan for the asset list, the right-click menu and the views is in [mesh workbench](mesh-workbench.md), under "The editor's layout".
+
+**The mouse.** Left drag orbits, middle drag pans, the wheel zooms, right drag is the box.
+
+**Editing through MCP.** The tools are in six sections (scene, lighting, render, capture, editor, mesh); 16 are mesh tools. A Claude Code session sees 90 tools in all.
+
+- `mesh_context` gives one packet: the note, the selection, each selected face's vertices, centre and normal, the camera, the objects in view, the latest edits, and a screenshot.
+- `mesh_commands` lists mesh-workbench's 143 commands with their fields, read from the linked version's help.
+- `mesh_preview` shows an edit before it is committed, then commits or discards it.
+- A tool for each command family (`mesh_object`, `mesh_edit`, `mesh_select`, `mesh_material`, `mesh_rig`, `mesh_animation`, `mesh_query`, `mesh_document`), and `mesh_command` for any command or a batch.
+- `.mcp.json` at the repository root gives a Claude Code session in this repository these tools while the editor runs.
+
+## How it was checked
+
+- **Against the web viewer.** mesh-workbench's browser viewer was drawn in headless Chromium in twelve modes and the editor captured in the same modes: [the sheet](img/mesh-viewer-vs-web.png). The same was done against mesh-workbench's `capture` renderer. An object's ID colour reads 241, 53, 54 in the editor and 242, 53, 53 in mesh-workbench.
+- **The editing loop.** A separate Claude Code session, given only `.mcp.json` and the task, read a selection and a note, previewed an extrude and committed it. `cargo test -p genos-editor` runs the same loop with no window. `debug/lighting/scripts/mesh_edit_from_selection.rhai` runs it on the running editor.
+- **Tests.** 34 in the viewer (`cargo test -p genos-scene-program --features mesh`), 2 in the editor crate, 6 in the reader.
+
+## Missing or not confirmed
+
+**Confirmed with the real pointer on 23 Nov 2026.** `debug/lighting/scripts/mesh_pointer_check.sh` drives the desktop's own pointer and passes all nine checks: a click selects a face, a left drag orbits, the wheel zooms, a middle drag pans, a right drag and a Control drag draw a box, an Alt drag a lasso, a click on the projection's name changes the projection, and a click on the top bar opens and closes a page. It takes the pointer and the focus for about twenty seconds; a moving mouse spoils the run.
+
+That run found two faults in the Wayland window, both fixed: a wheel notch read as 15 notches, and the right and middle buttons were never reported (so the old right-drag pan could not work on Linux).
+
+**Not confirmed.** The pointer-lock test in `crates/window` (`the_first_click_locks_the_pointer_and_escape_releases_it`) failed twice on 23 Nov 2026 while the desktop was in use ("Escape did not release the pointer"). It was not rerun on a quiet desktop, so it is not known whether that is the desktop or a fault.
+
+**Not done.**
+
+- The editing loop has not been run from a person's own Claude chat, only from a scripted session and the tests.
+- 72 of 518 command field names have no type in `mesh_commands`. Many are not fields: the table parser also picks up a blend mode's values and the names of reply fields. A complete list needs a machine-readable command list from mesh-workbench.
+- The asset list, the right-click menu and the views of the new layout. The picture does not get narrower for a docked drawer.
+- "Select connected" and "select loop" (`mesh_selection grow`) have no key in the window.
+- The Objects panel lists at most 200 lines.
+- The typed note reads a US keyboard layout only.
+- The mesh casts no traced shadow: it has no distance field. The contact shadow is drawn, and does not follow the light.
+- The picture is re-read from `project.json` after each command. That is by decision: one read path serves a session in this program, another process's workspace, a replay and a preview.
+
+**Different from the web viewer, by decision.**
+
+- Its toolbar is the Mesh page of the editor's top bar.
+- The wireframe shade has ID labels, as mesh-workbench's `capture` has. The browser viewer has none.
+
+**Limits of what is built.**
+
+- A build of the whole workspace has the mesh viewer in `genos-lighting` too. Only a build of that program alone leaves it out, because Cargo gives a shared crate one set of features.
+- In the orthographic view the fog, particles and reflections are not drawn, and the reference tracer refuses the view.
+- The window list of shades shows six rows and scrolls.
+- Every launch of the editor opens a window that takes the pointer on a Hyprland desktop with no no-focus rule for `genos-editor`. The rule in use covers `genos-camera` only.
+
+## Open in the lighting engine
+
+Found while this work was done, and not fixed:
+
+- `a_bright_lamp_does_not_cross_an_opaque_wall` fails with the doubled voxel sizes ([sparse cascade](lighting/sparse-radiance-cascades.md), Sizes).
+- `bounce_counts_brighten_the_shadow_and_skip_work` fails on this branch.
+- `still_gi_pops.rhai` reads high on the scene program because of auto exposure; the script should fix the exposure.
+- The `legacy_shader` check of `hdr_output_gate` fails, with and without this work.
+
+## Asked of mesh-workbench
+
+The list is in the checklist, under "For Nathan". The ones that matter most here:
+
+- A machine-readable command list: each command's name, family, fields and types.
+- The prepared transaction's mesh, so a preview is not made by running the commands again on a copy.
+- A user selection kept apart from the tool selection, and a change notification in place of polling.
+
+## To pick the work up
+
+1. Start a Claude Code session in this repository with the editor running, select a face, type a note, and ask for the edit.
+2. Then the "Not done" list above, in the order that matters to the game.

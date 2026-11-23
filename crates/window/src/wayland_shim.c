@@ -52,6 +52,8 @@ struct GenosWindow {
     int key_escape;
     int resized;
     int mouse_left;
+    int mouse_right;
+    int mouse_middle;
     uint8_t keys_down[256];
     struct zwp_pointer_constraints_v1 *constraints;
     struct zwp_relative_pointer_manager_v1 *relative_manager;
@@ -78,16 +80,23 @@ struct GenosWindow {
     int fullscreen;
     /* Positive is wheel up. Cleared after pump copies it out. */
     double wheel_y;
-    int wheel_axis;
-    int wheel_120;
+    double wheel_axis;
+    double wheel_120;
+    double wheel_discrete;
+    int wheel_has_120;
+    int wheel_has_discrete;
 };
 
 int genos_wayland_copy_extra(void *window, struct GenosExtra *out) {
-    (void)window;
     if (!out) {
         return -1;
     }
     memset(out, 0, sizeof(*out));
+    if (window) {
+        struct GenosWindow *win = window;
+        out->mouse_right = win->mouse_right;
+        out->mouse_middle = win->mouse_middle;
+    }
     return 0;
 }
 
@@ -217,21 +226,44 @@ static void pointer_button(void *data, struct wl_pointer *pointer, uint32_t seri
             win->clicked_while_focused = 1;
             /* The frame locks the pointer after it accepts the click. */
         }
+    } else if (button == 0x111) { /* BTN_RIGHT */
+        win->mouse_right = state == WL_POINTER_BUTTON_STATE_PRESSED;
+    } else if (button == 0x112) { /* BTN_MIDDLE */
+        win->mouse_middle = state == WL_POINTER_BUTTON_STATE_PRESSED;
     }
 }
 
+/* One wheel event reaches the client as up to three values in one pointer
+ * frame: the continuous axis (15 units a notch on a click wheel), the discrete
+ * notch count, and value120 (120 a notch). They are kept apart here and
+ * pointer_frame takes one of them, so the wheel is in notches. */
+#define GENOS_AXIS_UNITS_PER_NOTCH 15.0
 static void pointer_axis(void *data, struct wl_pointer *pointer, uint32_t time, uint32_t axis, wl_fixed_t value) {
     (void)pointer; (void)time;
-    /* Wayland's vertical axis is positive downward. The frame's wheel is positive up. */
     if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
         return;
     }
     struct GenosWindow *win = data;
-    win->wheel_y -= wl_fixed_to_double(value);
-    win->wheel_axis = 1;
+    win->wheel_axis += wl_fixed_to_double(value);
 }
 static void pointer_frame(void *data, struct wl_pointer *pointer) {
-    (void)data; (void)pointer;
+    (void)pointer;
+    struct GenosWindow *win = data;
+    /* Wayland's vertical axis is positive downward. The frame's wheel is positive up.
+     * value120 is the finest notch count; then the discrete count; a touchpad
+     * sends the continuous axis alone. */
+    if (win->wheel_has_120) {
+        win->wheel_y -= win->wheel_120 / 120.0;
+    } else if (win->wheel_has_discrete) {
+        win->wheel_y -= win->wheel_discrete;
+    } else {
+        win->wheel_y -= win->wheel_axis / GENOS_AXIS_UNITS_PER_NOTCH;
+    }
+    win->wheel_axis = 0;
+    win->wheel_120 = 0;
+    win->wheel_discrete = 0;
+    win->wheel_has_120 = 0;
+    win->wheel_has_discrete = 0;
 }
 static void pointer_axis_source(void *data, struct wl_pointer *pointer, uint32_t source) {
     (void)data; (void)pointer; (void)source;
@@ -242,19 +274,20 @@ static void pointer_axis_stop(void *data, struct wl_pointer *pointer, uint32_t t
 static void pointer_axis_discrete(void *data, struct wl_pointer *pointer, uint32_t axis, int32_t discrete) {
     (void)pointer;
     struct GenosWindow *win = data;
-    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL || win->wheel_axis || win->wheel_120) {
+    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
         return;
     }
-    win->wheel_y -= (double)discrete;
+    win->wheel_discrete += (double)discrete;
+    win->wheel_has_discrete = 1;
 }
 static void pointer_axis_value120(void *data, struct wl_pointer *pointer, uint32_t axis, int32_t value) {
     (void)pointer;
     struct GenosWindow *win = data;
-    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL || win->wheel_axis) {
+    if (axis != WL_POINTER_AXIS_VERTICAL_SCROLL) {
         return;
     }
-    win->wheel_y -= (double)value / 120.0;
-    win->wheel_120 = 1;
+    win->wheel_120 += (double)value;
+    win->wheel_has_120 = 1;
 }
 static void pointer_axis_relative_direction(void *data, struct wl_pointer *pointer, uint32_t axis, uint32_t direction) {
     (void)data; (void)pointer; (void)axis; (void)direction;
@@ -759,8 +792,6 @@ void genos_wayland_pump(struct GenosWindow *win, struct GenosPump *out) {
     out->wheel_y = win->wheel_y;
     out->minimized = 0;
     win->wheel_y = 0;
-    win->wheel_axis = 0;
-    win->wheel_120 = 0;
     win->mouse_dx = 0;
     win->mouse_dy = 0;
     win->capture_click = 0;

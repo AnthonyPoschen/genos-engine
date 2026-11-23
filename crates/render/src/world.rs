@@ -164,6 +164,9 @@ pub enum DrawKind {
         /// Texture coordinates, one per vertex. Empty means the vertex albedo.
         texcoords: Vec<[f32; 2]>,
         color: [f32; 3],
+        /// Albedo of each vertex, one per vertex. Empty means `color` on
+        /// every vertex. A textured surface ignores it.
+        colors: Vec<[f32; 3]>,
         pose: [f32; 16],
         /// Emitted light (linear). Only GI draws it.
         emission: [f32; 3],
@@ -438,6 +441,9 @@ pub struct World {
     pub reflection_sky: [f32; 3],
     /// Meshes the GPU software tracer sees through their SDFs (GI).
     pub fields: Vec<crate::mesh_field::FieldInstance>,
+    /// glTF triangles the CPU reference tracer sees ([`World::keep_gltf_surface`]).
+    /// None traces the analytic scene alone.
+    pub gltf_surface: Option<std::sync::Arc<crate::gltf_surface::GltfSurface>>,
     /// Per-texel materials. Indexed by [`DrawKind::Mesh::surface`].
     pub surfaces: Vec<Surface>,
     /// Base colour (sRGB RGB, linear alpha) for every surface that has one.
@@ -491,6 +497,7 @@ impl World {
             reflection_swatch: false,
             reflection_sky: [0.45, 0.58, 0.72],
             fields: Vec::new(),
+            gltf_surface: None,
             surfaces: Vec::new(),
             color_atlas: MaterialAtlas::empty(),
             normal_atlas: MaterialAtlas::empty(),
@@ -682,6 +689,7 @@ mod tests {
                 normals: Vec::new(),
                 texcoords: Vec::new(),
                 color: [0.0, 1.0, 1.0],
+                colors: Vec::new(),
                 pose,
                 emission: [0.0; 3],
                 surface: None,

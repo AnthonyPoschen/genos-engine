@@ -167,6 +167,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::os::raw::c_char;
+use std::path::PathBuf;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -182,7 +183,19 @@ include!(concat!(env!("OUT_DIR"), "/shaders.rs"));
 mod fog;
 mod media_check;
 mod particle_pass;
+mod pass_sync;
 mod stage;
+mod texel_detail;
+mod texel_ray_cut;
+
+/// Return lavapipe's compiler scratch to the OS. The software fixture calls
+/// this after it drops the device that planted the read-only scene, and before
+/// it opens the device that compiles the reader. A product frame does not call it.
+pub fn release_software_compiler_heap() {
+    texel_detail::release_compiler_heap();
+}
+
+pub use texel_detail::TexelDetailPlant;
 mod traffic;
 
 pub use traffic::VkTraffic;
@@ -202,6 +215,8 @@ const VK_TIMEOUT: i32 = 2;
 /// `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
 const VK_ERROR_OUT_OF_DEVICE_MEMORY: i32 = -2;
 const FRAME_BUDGET_MS: f32 = 16.0;
+/// The streamer's frame time before any draw has been timed.
+const STREAM_FIRST_FRAME_MS: f32 = 8.0;
 /// A fence wait on the frame thread before the seat pump takes over.
 const FENCE_BUDGET_NS: u64 = 50_000_000;
 /// A mapped copy above this runs while the seat pump answers pings.
@@ -556,8 +571,10 @@ impl Renderer {
             .saturating_add(lighting.bloom.size)
             .saturating_add(lighting.hdr_encode.size)
             .saturating_add(lighting.hdr_params.size)
-            .saturating_add(lighting.meter_dev.size)
-            .saturating_add(lighting.meter_host.size);
+            .saturating_add(lighting.meter_dev[0].size)
+            .saturating_add(lighting.meter_dev[1].size)
+            .saturating_add(lighting.meter_host[0].size)
+            .saturating_add(lighting.meter_host[1].size);
         bytes as f64
     }
 
@@ -572,7 +589,7 @@ impl Renderer {
             size: source.size,
             align: source.align,
         };
-        crate::hdr_output::post_device_bytes(
+        let matched = crate::hdr_output::post_device_bytes(
             chain,
             crate::hdr_output::PostDevice {
                 scene: buffer(&lighting.scene_lin),
@@ -581,9 +598,21 @@ impl Renderer {
                 encode: buffer(&lighting.hdr_encode),
                 lut: crate::hdr_output::PostBuffer { size: 0, align: 0 },
                 params: buffer(&lighting.hdr_params),
-                meter: buffer(&lighting.meter_dev),
-                meter_host: buffer(&lighting.meter_host),
+                meter: buffer(&lighting.meter_dev[0]),
+                meter_host: buffer(&lighting.meter_host[0]),
             },
+        )?;
+        // The other flight has the same meter. One buffer was a WRITE_AFTER_WRITE
+        // when both frames filled it. The chain sizes one; the total counts both.
+        if lighting.meter_dev[1].size != lighting.meter_dev[0].size
+            || lighting.meter_host[1].size != lighting.meter_host[0].size
+        {
+            return None;
+        }
+        Some(
+            matched
+                .saturating_add(lighting.meter_dev[1].size)
+                .saturating_add(lighting.meter_host[1].size),
         )
     }
 
@@ -629,6 +658,70 @@ impl Renderer {
     /// One frame behind the draw that just returned. Zero when timestamps are off.
     pub fn lighting_pass_ms(&self) -> [f64; 12] {
         self.gpu.lighting.last_ms
+    }
+
+    /// Mean GPU milliseconds of the ReSTIR direct passes.
+    ///
+    /// Order: initial (candidates; temporal is fused here unless the passes are
+    /// split), temporal, spatial, prepare, shade. Shade is the direct dispatch
+    /// and includes that pixel's visibility ray. Zero until a timestamped frame
+    /// has been collected.
+    pub fn lighting_restir_ms(&self) -> [f64; 5] {
+        self.gpu.lighting_restir_ms()
+    }
+
+    /// Last collected ReSTIR frame, in milliseconds.
+    ///
+    /// Same order as [`Self::lighting_restir_ms`]. One frame behind the draw
+    /// that just returned. Shade includes that dispatch's visibility ray.
+    pub fn lighting_restir_last_ms(&self) -> [f64; 5] {
+        self.gpu.lighting_restir_last_ms()
+    }
+
+    /// How many lighting timestamp frames have been collected.
+    ///
+    /// A profile row is one of these. The draw that observes a new count is
+    /// one frame behind the GPU work.
+    pub fn lighting_pass_samples(&self) -> u32 {
+        self.gpu.lighting.pass_samples
+    }
+
+    /// Last collected frame by dispatch pass id, in milliseconds.
+    ///
+    /// Index 6 is the cache relight (the `cache` column of `LIGHTING_MS`).
+    /// Index 9 is the SH prep, which the cache bucket counts with the relight.
+    /// One frame behind the draw that just returned.
+    pub fn lighting_pass_id_ms(&self) -> [f64; 10] {
+        self.gpu.lighting.pass_id_ms
+    }
+
+    /// Bottom-of-pipe lighting span of the last collected frame, milliseconds.
+    ///
+    /// The `lighting` column of `GPU_MS` for that frame. Pass 9 (SH prep) and
+    /// the prepare stamp are inside this span and outside the nine-wide
+    /// `LIGHTING_MS` total. One frame behind the draw that just returned.
+    pub fn lighting_span_ms(&self) -> f64 {
+        self.gpu.lighting_span_ms()
+    }
+
+    /// Surface-cache counters from the latest world round, or the frame copy
+    /// when that round has not written yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when neither stats buffer can be mapped.
+    pub fn read_cache_round(&mut self) -> Result<CacheRound, String> {
+        self.gpu.lighting_cache_round()
+    }
+
+    /// ReSTIR scratch and the visibility mean for a few screen pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reservoirs are not allocated, a pixel is
+    /// outside the frame, or the device rejects the copy.
+    pub fn read_direct_samples(&mut self, pixels: &[u32]) -> Result<Vec<DirectSample>, String> {
+        self.gpu.read_direct_samples(pixels)
     }
 
     /// `--gi-metrics` is on, so pass times and work counters are recorded.
@@ -924,6 +1017,25 @@ impl Renderer {
         readback: bool,
         wireframe: bool,
     ) -> Result<Option<Vec<u8>>, String> {
+        // The texture streamer admits new mips from the time this call leaves
+        // under the frame budget. The time between two calls is not that
+        // time: a 60 Hz display paces them 16.7 ms apart however short the
+        // draw was, the leftover under 16 ms was always zero, and no texture
+        // ever left its coarsest mip (Sponza stayed at mip 12 of its atlas).
+        let began = Instant::now();
+        let result = self.draw_frame(world, camera, overlay, readback, wireframe);
+        self.gpu.draw_ms = Some(began.elapsed().as_secs_f32() * 1000.0);
+        result
+    }
+
+    fn draw_frame(
+        &mut self,
+        world: &World,
+        camera: &Camera,
+        overlay: &[ScreenRect],
+        readback: bool,
+        wireframe: bool,
+    ) -> Result<Option<Vec<u8>>, String> {
         // A different world is a scene switch: the cached texels belong to the
         // old one (docs/systems/lighting/surface-cache-wall-leak.md).
         if world.identity() != self.world_identity {
@@ -968,10 +1080,13 @@ impl Renderer {
             self.gpu.wait_flight(slot)?;
         }
         self.gpu.bind_flight();
+        // Field movers must be noted before instance oid tagging so mesh KEEP
+        // ids (10001+) match this frame's live set.
+        self.sync_fields(world)?;
         let mut dynamic = Vec::new();
         let mut draws = Vec::new();
         let mut instances = vec![identity_instance()];
-        for item in &pack.draws {
+        for (draw_i, item) in pack.draws.iter().enumerate() {
             match item {
                 pack::PackedDraw::Shape {
                     key,
@@ -999,6 +1114,11 @@ impl Renderer {
                         continue;
                     };
                     let instance = instances.len() as u32;
+                    // Stable draw→mover id: occluder KEEP index + 1, or mesh
+                    // field KEEP index + 10001. Static / non-KEEP stays 0.
+                    let occ = pack.draw_occluder.get(draw_i).copied().flatten();
+                    let obj = pack.draw_object.get(draw_i).copied();
+                    let object_id = self.gpu.mover_object_id_for_draw(occ, obj);
                     instances.push(InstanceRec {
                         model: *model,
                         // w: emitted light as shared-exponent bits (0: none) for the
@@ -1012,6 +1132,7 @@ impl Renderer {
                         atlas: *color_rect,
                         normal_atlas: *normal_rect,
                         extra: [*cutoff, *roughness, *metallic, f32::from_bits(*material_flags)],
+                        ids: [object_id, 0, 0, 0],
                     });
                     draws.push(DrawSpan {
                         shapes: true,
@@ -1098,7 +1219,6 @@ impl Renderer {
         }
         self.debug.apply(&mut pack);
         self.debug.view = saved_debug_view;
-        self.sync_fields(world)?;
         self.gpu.upload_scene(&pack)?;
         self.gpu.note_vertex_count(world_dynamic);
         self.gpu.set_draws(draws);
@@ -1208,10 +1328,92 @@ impl Renderer {
         self.gpu.lighting_stats()
     }
 
+    /// Read the surface-cache cells a still picture would hash at `queries`.
+    ///
+    /// The device must be idle. The read copies the key table and the stored
+    /// records. It does not change the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the cache is not allocated, a query list is longer
+    /// than 32, or the device rejects the copy.
+    pub fn read_cache_cells(
+        &mut self,
+        queries: &[crate::cache_probe::CacheQuery],
+    ) -> Result<Vec<crate::cache_probe::StoredCell>, String> {
+        self.gpu.read_cache_cells(queries)
+    }
+
     /// Five closed forms from `media_check.comp`. The parity test compares them
     /// with `genos_math::media`. This does not present.
     pub fn media_closed_forms(&mut self) -> Result<[f32; 5], String> {
         self.gpu.media_closed_forms()
+    }
+
+    /// One lavapipe dispatch of `lighting_screen_probe_indirect` with the
+    /// production cache. The rows are the stage 3 covered and uncovered cases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod()
+    }
+
+    /// Like [`Self::texel_detail_prod`], with the mover-pool slide measurement on
+    /// (`lamp.w = 1`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_slide(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_slide()
+    }
+
+    /// Compose stored-id lattice load (`GENOS_COMPOSE_NO_WALK`) for the mover
+    /// warm-up prior. Slide `warm_ok` locks the live gather only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_compose_lattice(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_compose_lattice()
+    }
+
+    /// Writing specialization with `lamp.x = 1`. The returned bytes are the
+    /// planted cache and key table. Drop this renderer before compiling the
+    /// reader: lavapipe keeps the compiler heap until the device is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_plant(&mut self) -> Result<TexelDetailPlant, String> {
+        self.gpu.texel_detail_prod_plant()
+    }
+
+    /// The same production function compiled with `LIGHTING_SC_WRITES` false.
+    /// `plant` was captured by [`Self::texel_detail_prod_plant`] on a device
+    /// that has since been dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_detail_prod_readonly(
+        &mut self,
+        plant: TexelDetailPlant,
+    ) -> Result<Vec<f32>, String> {
+        self.gpu.texel_detail_prod_readonly(plant)
+    }
+
+    /// One lavapipe dispatch of `lighting_compact_hold_texel_rays`.
+    ///
+    /// The rows are the stage 4 agreement cases. The shader does not trace.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the device rejects the dispatch.
+    pub fn texel_ray_cut(&mut self) -> Result<Vec<f32>, String> {
+        self.gpu.texel_ray_cut()
     }
 
     /// Milliseconds of one `media_check.comp` dispatch, from device timestamps.
@@ -1360,10 +1562,85 @@ impl Renderer {
         self.gpu.lighting_atrous_stats()
     }
 
+    /// Force the picture-wide unhold. The local mask is the default. A test
+    /// turns this on for the whole-picture control and compares the pixels
+    /// whose tile bit stayed clear.
+    pub fn lighting_picture_unhold(&mut self, on: bool) {
+        self.gpu.lighting.picture_unhold = on;
+    }
+
+    /// Tile bits from the last frame. Word 0 covers tiles 0..31.
+    pub fn lighting_reach_mask(&mut self) -> Vec<u32> {
+        self.gpu.lighting_reach_mask()
+    }
+
     /// Shadow rays and spatial merges from the last frame. Waits for that frame.
     /// The counters are zero unless `GENOS_LIGHTING_LAMP_PICK_DIAG` was set.
     pub fn lighting_lamp_pick_counts(&mut self) -> LampPickCounts {
         self.gpu.lighting_lamp_pick_counts()
+    }
+
+    /// Displaying picture pixels whose fine world-cache read was under a full
+    /// set count last frame. A real zero at that count is dark and is not
+    /// included. Waits for that frame.
+    pub fn lighting_under_trusted_pixels(&mut self) -> u32 {
+        self.gpu.lighting_under_trusted_pixels()
+    }
+
+    /// Visible surfaces last frame whose published bounce sample was empty.
+    /// Waits for that frame.
+    pub fn lighting_cascade_gaps(&mut self) -> u32 {
+        self.gpu.lighting_cascade_gaps()
+    }
+
+    /// Live level-0 voxels from the last finished frame. Waits for that frame.
+    pub fn lighting_level0_voxels(&mut self) -> Result<Vec<crate::Level0Voxel>, String> {
+        self.gpu.lighting_level0_voxels()
+    }
+
+    /// Level-0 voxels inserted and traced last frame. Waits for that frame.
+    pub fn lighting_level0_counts(&mut self) -> Result<(u32, u32), String> {
+        self.gpu.lighting_level0_counts()
+    }
+
+    /// Last frame's cascade GPU times, by level. Waits for that frame.
+    pub fn lighting_cascade_times(&mut self) -> crate::CascadeTimes {
+        self.gpu.lighting_cascade_times()
+    }
+
+    /// Debug/stress upper refresh period: 1, 2, 4, or 10. Default 4.
+    pub fn set_cascade_refresh_period(&mut self, period: u32) -> Result<(), String> {
+        let mut settings = self.lighting_settings();
+        settings.set_key("cascade_refresh_period", &period.to_string())?;
+        self.set_lighting_settings(settings);
+        Ok(())
+    }
+
+    /// Fill scheduler work from the last frame: serial plan iterations, then
+    /// the histogram dispatch's group count. Waits for that frame.
+    pub fn lighting_fill_compact_work(&mut self) -> [u32; 2] {
+        self.gpu.lighting_fill_compact_work()
+    }
+
+    /// Last frame: rays, on-screen, remainder, checks, cells committed, live.
+    pub fn lighting_fill_ray_split(&mut self) -> [u32; 6] {
+        self.gpu.lighting_fill_ray_split()
+    }
+
+    /// Last spatial pipeline the product frame bound. 1 is `restir-spatial`
+    /// (0–4 neighbours). 2 is `restir-spatial-wide`. 0 before a spatial pass.
+    pub fn restir_spatial_bound(&self) -> u8 {
+        self.gpu.lighting.restir_spatial_bound
+    }
+
+    /// Product frames that missed the reservoir and shaded the labelled exact sum.
+    pub fn lighting_restir_prepare_failures(&self) -> u32 {
+        self.gpu.lighting_restir_prepare_failures()
+    }
+
+    /// The next product prepare shades the labelled exact sum and counts a failure.
+    pub fn force_restir_prepare_failure(&mut self, on: bool) {
+        self.gpu.force_restir_prepare_failure(on);
     }
 
     /// Sun-step mark from the last submitted frame. Waits for that frame.
@@ -1473,6 +1750,10 @@ struct DrawSpan {
     instance: u32,
 }
 
+/// Bytes per instance in the SSBO (must match every `struct Instance` in
+/// `scene.vert`, `gbuffer.vert`, and `reflections_portal.vert`).
+const INSTANCE_REC_BYTES: usize = 144;
+
 struct InstanceRec {
     model: [f32; 16],
     color: [f32; 4],
@@ -1481,7 +1762,12 @@ struct InstanceRec {
     normal_atlas: [f32; 4],
     /// x is the alpha cutoff. 0 does not discard.
     extra: [f32; 4],
+    /// x = object / transform id for the mover cache (0 = none).
+    /// y = top-weight bone id for skinned meshes (0 = use object id).
+    ids: [u32; 4],
 }
+
+const _: () = assert!(std::mem::size_of::<InstanceRec>() == INSTANCE_REC_BYTES);
 
 fn identity_instance() -> InstanceRec {
     InstanceRec {
@@ -1491,6 +1777,7 @@ fn identity_instance() -> InstanceRec {
         atlas: [0.0; 4],
         normal_atlas: [0.0; 4],
         extra: [0.0; 4],
+        ids: [0; 4],
     }
 }
 
@@ -1634,7 +1921,12 @@ struct Gpu {
     cmds: [Handle; 2],
     fences: [Handle; 2],
     image_readies: [Handle; 2],
-    render_dones: [Handle; 2],
+    /// Present-wait semaphores, one per swapchain image, indexed by the image
+    /// `vkAcquireNextImageKHR` returns. The submit fence does not prove the
+    /// presentation engine has finished waiting, so a frames-in-flight semaphore
+    /// is still in use when the next submit signals it. `vkDestroySwapchainKHR`
+    /// then waits for a present that cannot complete.
+    present_sems: Vec<Handle>,
     colors: [Image; 2],
     depths: [Image; 2],
     framebuffers: [Handle; 2],
@@ -1710,8 +2002,16 @@ struct Gpu {
     pipe_pass: Handle,
     /// Depth write for the next raster pipeline. `None` follows the depth test.
     depth_write_force: Option<bool>,
+    /// The next raster pipeline passes only at the depth the depth pass wrote
+    /// (EQUAL) and writes none. The G-buffer pass sets it: its fragment shader
+    /// has early tests, so a LESS_OR_EQUAL pass that wrote depth stored the
+    /// depth of a masked hole before the shader discarded it, and the surface
+    /// behind the hole then failed the test and left an empty record.
+    depth_equal_only: bool,
     /// How long each pipeline took to build.
     pipeline_times: Vec<(String, Duration)>,
+    /// Driver pipeline cache, persisted across launches.
+    pipeline_cache: Handle,
     desc_layout: Handle,
     desc_pool: Handle,
     /// Raster set of the frame being recorded: `raster_sets[flight]`.
@@ -1733,6 +2033,10 @@ struct Gpu {
     audio_fence: Handle,
     /// Lazy `media_check.comp` dispatch. Absent until the parity test asks.
     media_check: Option<media_check::Pipe>,
+    /// Lazy ADR 0039 stage 3 production dispatch. Absent until that test asks.
+    texel_detail: Option<texel_detail::Pipe>,
+    /// Lazy ADR 0039 stage 4 ray-cut dispatch. Absent until that test asks.
+    texel_ray_cut: Option<texel_ray_cut::Pipe>,
     /// Last `media_check.comp` timestamp span, milliseconds. `None` before a dispatch.
     media_ms: Option<f64>,
     /// Workgroups for the next media dispatch. The parity check uses 1.
@@ -1879,7 +2183,8 @@ struct Gpu {
     heap_override: Option<(u64, u64)>,
     budget_extension: bool,
     memory_budget_query: Option<FnMemProps>,
-    frame_mark: Option<Instant>,
+    /// Milliseconds the last draw call took, for the streamer's budget.
+    draw_ms: Option<f32>,
     /// Host staging for device uploads. One slot per reused command buffer.
     /// Reset when that buffer's fence has retired, so the copy memory is not
     /// allocated again each frame.
@@ -1971,6 +2276,9 @@ struct Fns {
     create_render_pass: FnRenderPass,
     destroy_render_pass: Fn2,
     create_pipelines: FnPipelines,
+    create_pipeline_cache: FnPool,
+    destroy_pipeline_cache: Fn2,
+    get_pipeline_cache_data: FnCacheData,
     destroy_pipeline: Fn2,
     create_framebuffer: FnFramebuffer,
     destroy_framebuffer: Fn2,
@@ -2084,6 +2392,7 @@ type FnPipelines = unsafe extern "system" fn(
     *const c_void,
     *mut Handle,
 ) -> VkResult;
+type FnCacheData = unsafe extern "system" fn(Handle, Handle, *mut usize, *mut u8) -> VkResult;
 type FnFramebuffer =
     unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
 type FnPool = unsafe extern "system" fn(Handle, *const u8, *const c_void, *mut Handle) -> VkResult;
@@ -2460,16 +2769,21 @@ impl Gpu {
                 None
             };
             // VkPhysicalDeviceFeatures: fragmentStoresAndAtomics (26) for the GI
-            // G-buffer, and textureCompressionBC (22) when the device has it.
+            // G-buffer, textureCompressionBC (22) when the device has it, and
+            // shaderInt64 (40) only when the device reports it. A SPIR-V module
+            // that declares OpCapability Int64 is illegal without the feature.
             type FnFeatures = unsafe extern "system" fn(Handle, *mut u32);
             let get_features: FnFeatures = transmute(load(b"vkGetPhysicalDeviceFeatures\0"));
             let mut have = [0u32; 55];
             get_features(physical, have.as_mut_ptr());
-            let bc_textures = have[22] != 0;
             let mut features = [0u32; 55];
             features[26] = 1;
+            let bc_textures = have[22] != 0;
             if bc_textures {
                 features[22] = 1;
+            }
+            if have[40] != 0 {
+                features[40] = 1;
             }
             let swap_ext = b"VK_KHR_swapchain\0";
             let budget_ext = b"VK_EXT_memory_budget\0";
@@ -2591,7 +2905,7 @@ impl Gpu {
                 cmds: [std::ptr::null_mut(); 2],
                 fences: [std::ptr::null_mut(); 2],
                 image_readies: [std::ptr::null_mut(); 2],
-                render_dones: [std::ptr::null_mut(); 2],
+                present_sems: Vec::new(),
                 colors: [Image::empty(), Image::empty()],
                 depths: [Image::empty(), Image::empty()],
                 framebuffers: [std::ptr::null_mut(); 2],
@@ -2632,7 +2946,9 @@ impl Gpu {
                 layout_override: std::ptr::null_mut(),
                 pipe_pass: std::ptr::null_mut(),
                 depth_write_force: None,
+                depth_equal_only: false,
                 pipeline_times: Vec::new(),
+                pipeline_cache: std::ptr::null_mut(),
                 desc_layout: std::ptr::null_mut(),
                 desc_pool: std::ptr::null_mut(),
                 desc_set: std::ptr::null_mut(),
@@ -2652,6 +2968,8 @@ impl Gpu {
                 audio_cmd: std::ptr::null_mut(),
                 audio_fence: std::ptr::null_mut(),
                 media_check: None,
+                texel_detail: None,
+                texel_ray_cut: None,
                 media_ms: None,
                 media_groups: 1,
                 particle_pass: None,
@@ -2772,14 +3090,34 @@ impl Gpu {
                 heap_override: None,
                 budget_extension,
                 memory_budget_query,
-                frame_mark: None,
+                draw_ms: None,
                 stage: stage::StageSet::empty(),
             };
             let _ = (destroy_instance, surface_support);
+            let open_start = Instant::now();
+            gpu.create_pipeline_cache()?;
             gpu.create_static_objects()?;
+            note_startup("command resources", open_start);
+            let swap = Instant::now();
             gpu.recreate(width, height)?;
+            note_startup("swapchain", swap);
+            // The window is already mapped. Present a dark frame before the
+            // lighting pipelines compile, so the surface is not left blank.
+            let clear = Instant::now();
+            gpu.present_loading_frame()?;
+            note_startup("first present (clear)", clear);
+            let pipes = Instant::now();
+            gpu.create_startup_pipelines()?;
             block(|| gpu.make_lighting())?;
+            note_startup("pipelines", pipes);
+            // Before the scene exists. Otherwise a potato launch still builds
+            // the High cache once, and lavapipe holds it through quit.
+            gpu.apply_launch_preset()?;
+            let targets = Instant::now();
             gpu.make_lighting_targets()?;
+            note_startup("lighting targets", targets);
+            gpu.log_pipeline_times();
+            note_startup("renderer open", open_start);
             let launch = genos_scene::DebugSettings::default().effective(gpu.out_cli.as_deref());
             gpu.debug_out = launch.out.clone();
             crate::unfilled::enforce_unfilled_cap(std::path::Path::new(&gpu.debug_out))?;
@@ -2795,12 +3133,6 @@ impl Gpu {
             self.keep_pass_store = self.make_render_pass(true, true)?;
             self.desc_layout = self.make_desc_layout()?;
             self.layout = self.make_layout()?;
-            let start = Instant::now();
-            self.pipeline = block(|| self.make_pipeline(true, true, false))?;
-            self.note_pipeline_time("scene", start);
-            self.depth_pipeline = block(|| self.make_depth_pipeline())?;
-            self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
-            self.wire_pipeline = block(|| self.make_pipeline(false, false, true))?;
             #[repr(C)]
             struct PoolInfo {
                 s_type: i32,
@@ -2860,7 +3192,6 @@ impl Gpu {
             };
             for slot in 0..2 {
                 self.image_readies[slot] = self.make_sem()?;
-                self.render_dones[slot] = self.make_sem()?;
                 check(
                     (self.fns.create_fence)(
                         self.device,
@@ -2872,7 +3203,6 @@ impl Gpu {
                 )?;
             }
             self.image_ready = self.image_readies[0];
-            self.render_done = self.render_dones[0];
             self.fence = self.fences[0];
             let transfer_pool = PoolInfo {
                 s_type: 39,
@@ -2931,8 +3261,247 @@ impl Gpu {
             let start = Instant::now();
             self.make_scene_buffers()?;
             self.note_pipeline_time("scene buffers", start);
-            self.make_aa_pipes()?;
         }
+        Ok(())
+    }
+
+    /// Raster and AA pipelines, after the first clear present.
+    fn create_startup_pipelines(&mut self) -> Result<(), String> {
+        let start = Instant::now();
+        self.pipeline = block(|| self.make_pipeline(true, true, false))?;
+        self.note_pipeline_time("scene", start);
+        let start = Instant::now();
+        self.depth_pipeline = block(|| self.make_depth_pipeline())?;
+        self.note_pipeline_time("depth", start);
+        let start = Instant::now();
+        self.overlay_pipeline = block(|| self.make_pipeline(false, false, false))?;
+        self.note_pipeline_time("overlay", start);
+        let start = Instant::now();
+        self.wire_pipeline = block(|| self.make_pipeline(false, false, true))?;
+        self.note_pipeline_time("wire", start);
+        let start = Instant::now();
+        self.make_aa_pipes()?;
+        self.note_pipeline_time("aa", start);
+        if !self.aa_src[0].buffer.is_null() {
+            self.write_aa_sets()?;
+        }
+        Ok(())
+    }
+
+    fn log_pipeline_times(&self) {
+        let mut total = Duration::ZERO;
+        for (name, took) in &self.pipeline_times {
+            total += *took;
+            eprintln!(
+                "genos-startup pipeline {name}: {:.1} ms",
+                took.as_secs_f64() * 1000.0
+            );
+        }
+        eprintln!(
+            "genos-startup pipeline total: {:.1} ms ({} pipes)",
+            total.as_secs_f64() * 1000.0,
+            self.pipeline_times.len()
+        );
+    }
+
+    fn create_pipeline_cache(&mut self) -> Result<(), String> {
+        let path = pipeline_cache_path();
+        let bytes = std::fs::read(&path).ok();
+        let initial_len = bytes.as_ref().map_or(0, Vec::len);
+        #[repr(C)]
+        struct Info {
+            s_type: i32,
+            next: *const c_void,
+            flags: u32,
+            size: usize,
+            data: *const c_void,
+        }
+        let info = Info {
+            s_type: 17,
+            next: std::ptr::null(),
+            flags: 0,
+            size: initial_len,
+            data: bytes
+                .as_ref()
+                .map_or(std::ptr::null(), |b| b.as_ptr().cast()),
+        };
+        unsafe {
+            check(
+                (self.fns.create_pipeline_cache)(
+                    self.device,
+                    &info as *const Info as *const u8,
+                    std::ptr::null(),
+                    &mut self.pipeline_cache,
+                ),
+                "pipeline cache",
+            )?;
+        }
+        if initial_len == 0 {
+            eprintln!("genos-startup pipeline cache: new {}", path.display());
+        } else {
+            eprintln!(
+                "genos-startup pipeline cache: loaded {initial_len} B from {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+
+    fn save_pipeline_cache(&self) {
+        if self.pipeline_cache.is_null() || self.device.is_null() {
+            return;
+        }
+        let path = pipeline_cache_path();
+        let mut size = 0usize;
+        unsafe {
+            if (self.fns.get_pipeline_cache_data)(
+                self.device,
+                self.pipeline_cache,
+                &mut size,
+                std::ptr::null_mut(),
+            ) != VK_SUCCESS
+                || size == 0
+            {
+                return;
+            }
+        }
+        let mut data = vec![0u8; size];
+        let mut got = size;
+        unsafe {
+            if (self.fns.get_pipeline_cache_data)(
+                self.device,
+                self.pipeline_cache,
+                &mut got,
+                data.as_mut_ptr(),
+            ) != VK_SUCCESS
+            {
+                return;
+            }
+        }
+        data.truncate(got);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("bin.tmp");
+        if std::fs::write(&tmp, &data).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+            eprintln!(
+                "genos-startup pipeline cache: saved {} B to {}",
+                data.len(),
+                path.display()
+            );
+        }
+    }
+
+    fn destroy_pipeline_cache(&mut self) {
+        if self.pipeline_cache.is_null() || self.device.is_null() {
+            return;
+        }
+        unsafe {
+            (self.fns.destroy_pipeline_cache)(
+                self.device,
+                self.pipeline_cache,
+                std::ptr::null(),
+            );
+        }
+        self.pipeline_cache = std::ptr::null_mut();
+    }
+
+    /// Present a dark frame as soon as the swapchain exists, before the lighting
+    /// pipelines compile. The window is already mapped, and those compiles are
+    /// the wait after a shader change. This is not a counted game frame.
+    fn present_loading_frame(&mut self) -> Result<(), String> {
+        if self.cmd.is_null() || self.swapchain.is_null() || self.render_done.is_null() {
+            return Ok(());
+        }
+        if self.flight_live[self.flight] {
+            self.wait_fence(self.fence, "loading present wait")?;
+            self.flight_live[self.flight] = false;
+        }
+        let (acquire, index) = self.acquire_index();
+        if acquire == OUT_OF_DATE {
+            return Ok(());
+        }
+        if acquire != VK_SUCCESS && acquire != SUBOPTIMAL {
+            return Err(format!("acquire failed: {acquire}"));
+        }
+        let Some(&swap) = self.swap_images.get(index as usize) else {
+            return Err("swapchain image missing".into());
+        };
+        let fences = [self.fence];
+        unsafe {
+            check(
+                (self.fns.reset_fences)(self.device, 1, fences.as_ptr()),
+                "reset fence",
+            )?;
+            check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
+            self.begin_reused(self.cmd)?;
+            self.image_barrier(swap, 0, 7, 0x1, 0x1000, 0, 0x1000);
+            let color = [0.04f32, 0.04, 0.05, 1.0];
+            #[repr(C)]
+            struct Range {
+                aspect: u32,
+                mip: u32,
+                levels: u32,
+                layer: u32,
+                layers: u32,
+            }
+            let range = Range {
+                aspect: 1,
+                mip: 0,
+                levels: 1,
+                layer: 0,
+                layers: 1,
+            };
+            (self.fns.cmd_clear_color)(
+                self.cmd,
+                swap,
+                7,
+                color.as_ptr().cast(),
+                1,
+                &range as *const Range as *const u8,
+            );
+            self.image_barrier(swap, 7, 1000001002, 0x1000, 0x2000, 0x1000, 0);
+            check((self.fns.end_cmd)(self.cmd), "end cmd")?;
+            #[repr(C)]
+            struct Submit {
+                s_type: i32,
+                next: *const c_void,
+                wait_count: u32,
+                waits: *const Handle,
+                stages: *const u32,
+                cmd_count: u32,
+                cmds: *const Handle,
+                signal_count: u32,
+                signals: *const Handle,
+            }
+            let wait_sem = [self.image_ready];
+            let wait_stage = [0x1000u32];
+            let signal_sem = [self.render_done];
+            let cmd = [self.cmd];
+            let submit = Submit {
+                s_type: 4,
+                next: std::ptr::null(),
+                wait_count: 1,
+                waits: wait_sem.as_ptr(),
+                stages: wait_stage.as_ptr(),
+                cmd_count: 1,
+                cmds: cmd.as_ptr(),
+                signal_count: 1,
+                signals: signal_sem.as_ptr(),
+            };
+            check(
+                (self.fns.queue_submit)(
+                    self.queue,
+                    1,
+                    &submit as *const Submit as *const u8,
+                    self.fence,
+                ),
+                "loading present submit",
+            )?;
+        }
+        self.present_index = index;
+        let _ = self.queue_present()?;
+        self.wait_fence(self.fence, "loading present")?;
         Ok(())
     }
 
@@ -3339,6 +3908,7 @@ impl Gpu {
                 ),
                 "image list",
             )?;
+            self.make_present_sems()?;
 
             for slot in 0..2 {
                 self.colors[slot] = self.make_image(
@@ -3470,7 +4040,8 @@ impl Gpu {
     }
 
     fn write_instances(&mut self, items: &[InstanceRec]) -> Result<(), String> {
-        let mut bytes = Vec::with_capacity(items.len() * 128);
+        // mat4 + 4×vec4 + uvec4 ids = INSTANCE_REC_BYTES per instance.
+        let mut bytes = Vec::with_capacity(items.len() * INSTANCE_REC_BYTES);
         for item in items {
             for value in item
                 .model
@@ -3482,6 +4053,9 @@ impl Gpu {
             {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
+            for id in item.ids {
+                bytes.extend_from_slice(&id.to_ne_bytes());
+            }
         }
         // GI holds its light while nothing it sees changes (lighting_gpu.rs).
         self.lighting.draw_key = {
@@ -3492,6 +4066,8 @@ impl Gpu {
         };
         let slot = self.flight;
         if self.instance_bufs[slot].size < bytes.len() as u64 {
+            // Both raster sets are rewritten. The other flight may still be executing.
+            self.wait_all_inflight()?;
             let share = self.light_families();
             let next = self.make_buffer_queues(
                 (bytes.len() as u64).max(5120),
@@ -3512,7 +4088,6 @@ impl Gpu {
         self.cmd = self.cmds[slot];
         self.fence = self.fences[slot];
         self.image_ready = self.image_readies[slot];
-        self.render_done = self.render_dones[slot];
         self.color = copy_image(&self.colors[slot]);
         self.depth = copy_image(&self.depths[slot]);
         self.framebuffer = self.framebuffers[slot];
@@ -3579,6 +4154,8 @@ impl Gpu {
         {
             return Some(5);
         }
+        // The seed check records its own buffer and does not stage uploads.
+        // The stage table has six slots (0-5). A seventh index would panic.
         None
     }
 
@@ -3824,6 +4401,15 @@ impl Gpu {
             if acquire != VK_SUCCESS && acquire != SUBOPTIMAL {
                 check(acquire, "acquire")?;
             }
+            let image = usize::try_from(index).unwrap_or(usize::MAX);
+            let Some(present_sem) = self.present_sems.get(image).copied() else {
+                return Err(format!(
+                    "swapchain image {index} has no present semaphore"
+                ));
+            };
+            // This image was reacquired, so the presentation engine has released
+            // the semaphore it waited on for the previous present of this image.
+            self.render_done = present_sem;
             check((self.fns.reset_cmd)(self.cmd, 0), "reset cmd")?;
             self.begin_reused(self.cmd)?;
             if profiled {
@@ -3837,8 +4423,9 @@ impl Gpu {
             self.update_resident_scene()?;
             self.update_resident_fields()?;
             let swap = self.swap_images[index as usize];
-            // Wait stage for the acquire semaphore is color output. A top-of-pipe
-            // source races that acquire under synchronization validation.
+            // The acquire semaphore is waited in color output. The layout
+            // transition has to happen in that stage, or it races the
+            // presentation engine's read of this image.
             self.image_barrier(swap, 0, 7, 0x400, 0x1000, 0, 0x1000);
             let filtering = self.antialias != Antialias::Off;
             {
@@ -4066,14 +4653,14 @@ impl Gpu {
             }) {
             let c = self.lighting_lamp_pick_counts();
             format!(
-                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} lamp_spatial={} \
+                " lamp_px={} lamp_kept={} lamp_fill={} lamp_cache={} \
                  hit_kept_live={} hit_kept_due={} hit_kept_shade={} hit_fill_live={} hit_fill_shade={} \
-                 hit_near_tests={} px_lamps={} hit_lamps={}",
+                 hit_near_tests={} px_lamps={} hit_lamps={} \
+                 restir_hist_accept={} restir_hist_reject={} restir_point_adds={}",
                 c.pixels,
                 c.kept,
                 c.fills,
                 c.cache,
-                c.spatial,
                 c.kept_live,
                 c.kept_due,
                 c.kept_shade,
@@ -4081,7 +4668,10 @@ impl Gpu {
                 c.fill_shade,
                 c.near_tests,
                 c.px_lamps,
-                c.hit_lamps
+                c.hit_lamps,
+                c.history_accepts,
+                c.history_rejects,
+                c.restir_point_adds
             )
         } else {
             String::new()
@@ -4096,9 +4686,25 @@ impl Gpu {
         } else {
             [0; LIGHTING_STATS_WORDS]
         };
+        let cascade = if self.gpu_times.as_ref().is_some_and(|times| times.print) {
+            self.read_cascade_times();
+            Some(self.lighting.cascade_times)
+        } else {
+            None
+        };
         let Some(times) = self.gpu_times.as_mut() else {
             return;
         };
+        if let Some(c) = cascade {
+            let row = [c.claim_ms, c.upper_coarse_ms, c.upper_mid_ms, c.upper_fine_ms, c.l0_ms];
+            // A reset pool reads as a huge wrapped delta. Leave that frame out.
+            if row.iter().all(|v| v.is_finite() && *v >= 0.0 && *v < 1000.0) {
+                for (sum, v) in times.cascade.iter_mut().zip(row) {
+                    *sum += v;
+                }
+                times.cascade_frames += 1;
+            }
+        }
         if !times.written[slot] {
             times.written[slot] = true;
             return;
@@ -4119,27 +4725,39 @@ impl Gpu {
         if got != 0 {
             return;
         }
+        let mut lighting_span = 0.0;
         if times.print {
             for (k, w) in raw.windows(2).enumerate() {
-                times.frame[k] += tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                // Span 2 is gbuffer bottom to lighting bottom: the GPU_MS lighting column.
+                if k == 2 {
+                    lighting_span = ms;
+                }
+                times.frame[k] += ms;
             }
             times
                 .frame_spans
                 .push((raw[0], raw[FRAME_STAMPS as usize - 1]));
         }
         let ids = std::mem::take(&mut times.lighting_ids[slot]);
+        let geom = std::mem::take(&mut times.lighting_geom[slot]);
         let tags = std::mem::take(&mut self.lighting.frame_tags[slot]);
         let shadow = self.lighting.frame_shadow[slot];
         let prefill = self.lighting.frame_prefill[slot];
         let counts = self.lighting.frame_counts[slot];
         let mut bucket_ms = [0.0f64; BUCKETS];
         if !ids.is_empty() && !times.lighting_pool.is_null() {
-            let mut g = vec![0u64; ids.len() + 1];
+            // Pass stamps stop before the ReSTIR queries. A longer list is not timed.
+            let stamp_n = (ids.len() + 1).min(RESTIR_STAMP_AT as usize);
+            let mut g = vec![0u64; stamp_n];
+            // One cast for both query ranges. A second `slot as u32` is a new
+            // lossy-cast line, and the baseline does not allow it.
+            let stamp_base = slot as u32 * LIGHTING_STAMPS;
             let got = unsafe {
                 (self.fns.get_query_results)(
                     self.device,
                     times.lighting_pool,
-                    slot as u32 * LIGHTING_STAMPS,
+                    stamp_base,
                     g.len() as u32,
                     8 * g.len(),
                     g.as_mut_ptr() as *mut c_void,
@@ -4150,9 +4768,15 @@ impl Gpu {
             if got == 0 {
                 if times.print && times.lighting_disp.len() != ids.len() {
                     times.lighting_disp = ids.iter().map(|&p| (p, 0.0)).collect();
+                    times.lighting_shape = geom;
                 }
+                let mut shade_ms = 0.0;
+                let mut pass_id_ms = [0.0f64; 10];
                 for (i, (&pass, w)) in ids.iter().zip(g.windows(2)).enumerate() {
                     let ms = tick_delta(w[0], w[1], bits) as f64 * period / 1.0e6;
+                    if pass < pass_id_ms.len() {
+                        pass_id_ms[pass] += ms;
+                    }
                     if times.print && pass < times.lighting.len() {
                         times.lighting[pass] += ms;
                     }
@@ -4166,10 +4790,73 @@ impl Gpu {
                             times.lighting_bucket[tag] += ms;
                         }
                     }
+                    if tag == B_DIRECT as usize {
+                        shade_ms += ms;
+                    }
                     if shadow && (tag == B_DIRECT as usize || tag == B_HIT as usize) {
                         bucket_ms[B_SHADOWS as usize] += ms;
+                    }
+                }
+                let restir_at = self.lighting.restir_query[slot];
+                if restir_at != u32::MAX {
+                    let mut raw = [0u64; 4];
+                    let restir_got = unsafe {
+                        (self.fns.get_query_results)(
+                            self.device,
+                            times.lighting_pool,
+                            restir_at,
+                            4,
+                            32,
+                            raw.as_mut_ptr().cast::<c_void>(),
+                            8,
+                            0x1,
+                        )
+                    };
+                    let mut prepare_raw = [0u64; 2];
+                    let prepare_got = unsafe {
+                        (self.fns.get_query_results)(
+                            self.device,
+                            times.lighting_pool,
+                            stamp_base + RESTIR_PREPARE_AT,
+                            2,
+                            16,
+                            prepare_raw.as_mut_ptr().cast::<c_void>(),
+                            8,
+                            0x1,
+                        )
+                    };
+                    if restir_got == 0 {
+                        let part = |a, b| tick_delta(a, b, bits) as f64 * period / 1.0e6;
+                        let parts = [
+                            part(raw[0], raw[1]),
+                            part(raw[1], raw[2]),
+                            part(raw[2], raw[3]),
+                        ];
+                        let sum = parts[0] + parts[1] + parts[2];
+                        bucket_ms[B_DIRECT as usize] += sum;
+                        let prepare_ms = if prepare_got == 0 {
+                            part(prepare_raw[0], prepare_raw[1])
+                        } else {
+                            0.0
+                        };
+                        let frame_parts = [parts[0], parts[1], parts[2], prepare_ms, shade_ms];
+                        self.lighting.restir_ms_last = frame_parts;
+                        for (i, ms) in frame_parts.into_iter().enumerate() {
+                            self.lighting.restir_ms_sum[i] += ms;
+                        }
+                        self.lighting.restir_ms_frames =
+                            self.lighting.restir_ms_frames.saturating_add(1);
                         if times.print {
-                            times.lighting_bucket[B_SHADOWS as usize] += ms;
+                            times.lighting[3] += sum;
+                            times.lighting_bucket[B_DIRECT as usize] += sum;
+                            times.restir[0] += parts[0];
+                            times.restir[1] += parts[1];
+                            times.restir[2] += parts[2];
+                            if prepare_got == 0 {
+                                times.restir[3] += part(prepare_raw[0], prepare_raw[1]);
+                            }
+                            times.restir[4] += shade_ms;
+                            times.restir_frames += 1;
                         }
                     }
                 }
@@ -4181,6 +4868,9 @@ impl Gpu {
                 }
                 self.lighting.last_ms = bucket_ms;
                 self.lighting.last_dispatches = counts;
+                self.lighting.pass_id_ms = pass_id_ms;
+                self.lighting.span_ms = lighting_span;
+                self.lighting.pass_samples = self.lighting.pass_samples.saturating_add(1);
                 if times.record {
                     let world_rays = std::mem::take(&mut times.pending_world_rays);
                     let world_relit = std::mem::take(&mut times.pending_world_relit);
@@ -4235,7 +4925,24 @@ impl Gpu {
                 .lighting_disp
                 .iter()
                 .enumerate()
-                .map(|(i, (p, ms))| format!("{i}:{p}={:.3}", ms / lf))
+                .map(|(i, (p, ms))| {
+                    let (gx, gy) = times.lighting_shape.get(i).copied().unwrap_or((0, 0));
+                    let shape = if gy == LIGHTING_DENSE_ENTRIES {
+                        // gx is the resolve phase. The group count is the
+                        // indirect word, one group per 64 traced rays, and
+                        // each thread takes one ray.
+                        format!("phase={gx} groups=indirect local=64 trip=1")
+                    } else if gy == LIGHTING_DENSE_RAYS {
+                        "groups=indirect local=64".to_string()
+                    } else if gy >= 1u32 << 30 {
+                        format!("groups={gx}x1 local=64")
+                    } else if *p == 8 && gy > 1 {
+                        format!("groups={gx}x{gy} local=8x8")
+                    } else {
+                        format!("groups={gx}x{gy} local=64")
+                    };
+                    format!("{i}:p{p}={:.3} {shape}", ms / lf)
+                })
                 .collect();
             eprintln!("LIGHTING_DISPATCH {}", parts.join(" "));
             times.lighting_disp.clear();
@@ -4243,7 +4950,7 @@ impl Gpu {
         if times.lighting_frames > 0 {
             let g = times.lighting.map(|v| v / f64::from(times.lighting_frames));
             eprintln!(
-                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} shadows={:.3} prefill={:.3}{}{}",
+                "LIGHTING_MS frames={} compact={:.3} place={:.3} trace={:.3} light={:.3} gather={:.3} filter={:.3} cache={:.3} compose={:.3} atrous={:.3} total={:.3} async_rounds={} async_ms={:.3} async_compact={:.3} async_trace={:.3} async_light={:.3} async_cache={:.3} cache_rays={:.3} light_px={:.3} light_hit={:.3} prefill={:.3}{}{}{}",
                 times.lighting_frames,
                 g[0],
                 g[1],
@@ -4262,11 +4969,41 @@ impl Gpu {
                 times.world_pass[2] / f64::from(times.world_runs.max(1)),
                 times.world_pass[3] / f64::from(times.world_runs.max(1)),
                 times.lighting_bucket[B_CACHE_RAYS as usize] / f64::from(times.lighting_frames),
-                times.lighting_bucket[B_SHADOWS as usize] / f64::from(times.lighting_frames),
+                // `light=` splits into pixels + kept hits and cache-ray hits. The
+                // shadows bucket only mirrors those two dispatches (it is not a
+                // pass), so it is left out of this line to avoid a double count.
+                times.lighting_bucket[B_DIRECT as usize] / f64::from(times.lighting_frames),
+                times.lighting_bucket[B_HIT as usize] / f64::from(times.lighting_frames),
                 times.prefill_frames as f64 / f64::from(times.lighting_frames),
                 self.last_unfilled
                     .map_or_else(String::new, |stats| format!(" | {}", stats.line())),
-                lamp_pick_line
+                lamp_pick_line,
+                if times.restir_frames > 0 {
+                    let n = f64::from(times.restir_frames);
+                    format!(
+                        " restir_prepare={:.3} restir_initial={:.3} restir_temporal={:.3} restir_spatial={:.3} restir_shade={:.3}",
+                        times.restir[3] / n,
+                        times.restir[0] / n,
+                        times.restir[1] / n,
+                        times.restir[2] / n,
+                        times.restir[4] / n
+                    )
+                } else {
+                    String::new()
+                }
+            );
+        }
+        if times.cascade_frames > 0 {
+            let c = times.cascade.map(|v| v / f64::from(times.cascade_frames));
+            eprintln!(
+                "CASCADE_MS frames={} claim={:.3} upper_coarse={:.3} upper_mid={:.3} upper_fine={:.3} l0={:.3} total={:.3} (inside compose=)",
+                times.cascade_frames,
+                c[0],
+                c[1],
+                c[2],
+                c[3],
+                c[4],
+                c.iter().sum::<f64>(),
             );
         }
         if !times.light_spans.is_empty() {
@@ -4280,28 +5017,7 @@ impl Gpu {
             let [local, all] = self.upload_local.get();
             eprintln!("GPU_MEM upload buffers in device-local memory: {local} of {all}");
         }
-        let pool = times.pool;
-        let lighting_pool = times.lighting_pool;
-        let print = times.print;
-        let record = times.record;
-        let samples = std::mem::take(&mut times.samples);
-        let recorded = times.recorded;
-        let pending_world_rays = times.pending_world_rays;
-        let pending_world_relit = times.pending_world_relit;
-        **times = GpuTimes {
-            pool,
-            lighting_pool,
-            written: times.written,
-            every: times.every,
-            placed: true,
-            print,
-            record,
-            samples,
-            recorded,
-            pending_world_rays,
-            pending_world_relit,
-            ..GpuTimes::default()
-        };
+        roll_printed_times(times);
     }
 
     fn reset_queries(&self, slot: usize) {
@@ -4511,6 +5227,14 @@ impl Gpu {
     }
 
     fn present(&mut self) -> Result<VkResult, String> {
+        let result = self.queue_present()?;
+        if result != OUT_OF_DATE {
+            self.presented += 1;
+        }
+        Ok(result)
+    }
+
+    fn queue_present(&self) -> Result<VkResult, String> {
         unsafe {
             let swap = [self.swapchain];
             let index = [self.present_index];
@@ -4539,9 +5263,6 @@ impl Gpu {
             let result = (self.fns.present)(self.queue, &info as *const Present as *const u8);
             if result != VK_SUCCESS && result != SUBOPTIMAL && result != OUT_OF_DATE {
                 return Err(format!("present failed: {result}"));
-            }
-            if result != OUT_OF_DATE {
-                self.presented += 1;
             }
             Ok(result)
         }
@@ -4780,6 +5501,36 @@ impl Gpu {
         let mut host = std::mem::replace(&mut self.lighting.scene_host, Buffer::empty());
         self.destroy_buffer(&mut host);
         Ok(read)
+    }
+
+    /// One binary semaphore per current swapchain image. Replaces any previous set.
+    fn make_present_sems(&mut self) -> Result<(), String> {
+        self.destroy_present_sems();
+        let count = self.swap_images.len();
+        self.present_sems.reserve(count);
+        for _ in 0..count {
+            let sem = self.make_sem()?;
+            self.present_sems.push(sem);
+        }
+        if let Some(sem) = self.present_sems.first().copied() {
+            self.render_done = sem;
+        }
+        Ok(())
+    }
+
+    fn destroy_present_sems(&mut self) {
+        if self.device.is_null() {
+            self.present_sems.clear();
+            return;
+        }
+        let sems = std::mem::take(&mut self.present_sems);
+        for sem in sems {
+            if !sem.is_null() {
+                unsafe {
+                    (self.fns.destroy_sem)(self.device, sem, std::ptr::null());
+                }
+            }
+        }
     }
 
     fn make_sem(&mut self) -> Result<Handle, String> {
@@ -5389,7 +6140,7 @@ impl Gpu {
         unsafe {
             let result = (self.fns.create_compute)(
                 self.device,
-                std::ptr::null_mut(),
+                self.pipeline_cache,
                 1,
                 &pipe as *const Pipe as *const u8,
                 std::ptr::null(),
@@ -5818,6 +6569,7 @@ impl Gpu {
                     break;
                 };
                 self.write_device(cmd, dst, offset, &chunk)?;
+                self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
                 sent += end - at;
                 at = end;
             }
@@ -5839,6 +6591,15 @@ impl Gpu {
         self.frame_bytes.clone_from(&bytes);
         self.lighting.light_scene = lighting_scene_key(pack, &bytes);
         self.lighting.trace_key = lighting_trace_key(pack);
+        // A camera cut: auto exposure starts again from under the new view's
+        // value (hdr_output::cut_exposure).
+        if let Some(was) = self.lighting.exposure_eye {
+            let moved = (0..3).map(|a| (pack.eye[a] - was[a]).powi(2)).sum::<f32>().sqrt();
+            if moved > crate::hdr_output::EXPOSURE_CUT_DISTANCE {
+                self.lighting.exposure_cut = crate::hdr_output::EXPOSURE_CUT_FRAMES;
+            }
+        }
+        self.lighting.exposure_eye = Some(pack.eye);
         self.note_lighting_sun(pack);
         self.background = pack.sky.map(crate::mesh::tone);
         Ok(())
@@ -5894,6 +6655,7 @@ impl Gpu {
                     continue;
                 };
                 self.write_device(cmd, dst, offset, &bytes[start..stop])?;
+                self.memory_barrier(0x1000, 0x1000, 0x1000, 0x1000);
             }
             self.memory_barrier(0x1000, 0x10000, 0x1000, 0x20 | 0x8);
             if self.scene_shadow.len() < len {
@@ -6251,18 +7013,11 @@ impl Gpu {
         // Both variants share one external dependency so the keep and clear
         // passes stay render-pass compatible (VUID-VkRenderPassBeginInfo-renderPass-00904,
         // VUID-vkCmdDraw-renderPass-02684): framebuffers and pipelines are made
-        // against one variant and used with the other. The reflection composite
-        // pass uses this framebuffer, so its masks are these same values.
-        // Late-fragment depth writes are in the source scope: the keep pass's
-        // depth load otherwise races the scene pass when depth is discarded.
-        let in_stage = 0x1000 | 0x400 | 0x200 | 0x100;
-        let in_access = 0x800 | 0x100 | 0x400 | 0x200;
-        let in_dst_stage = 0x400 | 0x100;
-        let in_dst = 0x80 | 0x100 | 0x200 | 0x400;
-        let out_src_stage = 0x400 | 0x200;
-        let out_src_access = 0x100 | 0x400;
-        let out_dst_stage = 0x1000 | 0x100 | 0x400;
-        let out_dst_access = 0x800 | 0x400 | 0x100;
+        // against one variant and used with the other. The filter leaves the
+        // color image visible to a transfer read; the clear pass waits on the
+        // previous frame's color output.
+        let into = pass_sync::scene_pass_in();
+        let out = pass_sync::scene_pass_out();
         let atts = [
             Att {
                 flags: 0,
@@ -6311,19 +7066,19 @@ impl Gpu {
             Dep {
                 src: u32::MAX,
                 dst: 0,
-                src_stage: in_stage,
-                dst_stage: in_dst_stage,
-                src_access: in_access,
-                dst_access: in_dst,
+                src_stage: into.src_stage,
+                dst_stage: into.dst_stage,
+                src_access: into.src_access,
+                dst_access: into.dst_access,
                 flags: 0,
             },
             Dep {
                 src: 0,
                 dst: u32::MAX,
-                src_stage: out_src_stage,
-                dst_stage: out_dst_stage,
-                src_access: out_src_access,
-                dst_access: out_dst_access,
+                src_stage: out.src_stage,
+                dst_stage: out.dst_stage,
+                src_access: out.src_access,
+                dst_access: out.dst_access,
                 flags: 0,
             },
         ];
@@ -6605,7 +7360,9 @@ impl Gpu {
                 max: f32,
             }
             let depth_on = if depth_test { 1 } else { 0 };
-            let depth_write = u32::from(self.depth_write_force.unwrap_or(depth_test));
+            let depth_write = u32::from(
+                !self.depth_equal_only && self.depth_write_force.unwrap_or(depth_test),
+            );
             let depth = Depth {
                 s_type: 25,
                 next: std::ptr::null(),
@@ -6614,7 +7371,14 @@ impl Gpu {
                 write: depth_write,
                 // LESS for the depth pass, LESS_OR_EQUAL after it: the same shape
                 // (scene.vert's invariant position) passes at the depth it wrote.
-                compare: if depth_only { 1 } else { 3 },
+                // EQUAL for a pass that only shades what the depth pass kept.
+                compare: if depth_only {
+                    1
+                } else if self.depth_equal_only {
+                    2
+                } else {
+                    3
+                },
                 bounds: 0,
                 stencil: 0,
                 front_fail: 0,
@@ -6775,7 +7539,7 @@ impl Gpu {
             let mut pipeline = std::ptr::null_mut();
             let result = (self.fns.create_pipelines)(
                 self.device,
-                std::ptr::null_mut(),
+                self.pipeline_cache,
                 1,
                 &pipe as *const Pipe as *const u8,
                 std::ptr::null(),
@@ -7162,17 +7926,57 @@ impl Gpu {
             let req_size = u64::from_ne_bytes(req[0..8].try_into().unwrap());
             let align = u64::from_ne_bytes(req[8..16].try_into().unwrap());
             let bits = u32::from_ne_bytes(req[16..20].try_into().unwrap());
-            let memory = self.alloc(req_size, bits, memory)?;
+            let memory_kind = memory;
+            let memory = self.alloc(req_size, bits, memory_kind)?;
             check(
                 (self.fns.bind_buffer)(self.device, buffer, memory, 0),
                 "bind buffer",
             )?;
-            Ok(Buffer {
+            let created = Buffer {
                 buffer,
                 memory,
                 size: req_size,
                 align,
-            })
+            };
+            // CI GPU path: fill new host-visible buffers with NaN/garbage so
+            // out-of-bounds or uninitialised reads fail on lavapipe like NVIDIA.
+            self.poison_new_buffer(&created, memory_kind);
+            Ok(created)
+        }
+    }
+
+    fn poison_new_buffer(&self, buffer: &Buffer, memory_kind: Memory) {
+        if memory_kind == Memory::Device {
+            return;
+        }
+        if genos_scene::lighting_env_os("GENOS_BUFFER_POISON").is_none() {
+            return;
+        }
+        let size = buffer.size;
+        if size == 0 || buffer.memory.is_null() {
+            return;
+        }
+        unsafe {
+            let mut mapped = std::ptr::null_mut();
+            if (self.fns.map_mem)(self.device, buffer.memory, 0, size, 0, &mut mapped) != 0
+                || mapped.is_null()
+            {
+                return;
+            }
+            // 0xFFFFFFFF is NaN for f32 and ~0 for uint — never a quiet zero.
+            let words = (size / 4) as usize;
+            let ptr = mapped as *mut u32;
+            for i in 0..words {
+                *ptr.add(i) = 0xFFFF_FFFF;
+            }
+            let rem = (size % 4) as usize;
+            if rem > 0 {
+                let bytes = mapped as *mut u8;
+                for i in 0..rem {
+                    *bytes.add(words * 4 + i) = 0xFF;
+                }
+            }
+            (self.fns.unmap_mem)(self.device, buffer.memory);
         }
     }
 
@@ -7297,11 +8101,8 @@ impl Gpu {
         accounted: u64,
         views: &[genos_load::TextureView],
     ) -> Result<(), String> {
-        let now = Instant::now();
-        let base_ms = self.frame_mark.map_or(8.0, |then| {
-            now.saturating_duration_since(then).as_secs_f32() * 1000.0
-        });
-        self.frame_mark = Some(now);
+        // The last draw call's own time, not the gap between calls.
+        let base_ms = self.draw_ms.unwrap_or(STREAM_FIRST_FRAME_MS);
         let pixels = u64::from(self.extent_w)
             .saturating_mul(u64::from(self.extent_h))
             .saturating_mul(16);
@@ -7487,8 +8288,17 @@ impl Gpu {
         self.prepare_atlas_draw(true);
         self.prepare_atlas_draw(false);
         let show = self.ready_to_show();
+        let mut last_page = None;
         for (index, level) in &show {
-            self.record_mip_blit(*index, *level);
+            if let Some(image) = self.record_mip_blit(*index, *level) {
+                last_page = Some(image);
+            }
+        }
+        // One readback for the submit. Copying every page into the same
+        // 4-byte buffer was a WRITE_AFTER_WRITE (the allocation is often 16
+        // bytes). The host reads the last page.
+        if let Some(image) = last_page {
+            self.copy_page_texel(image);
         }
         for (index, level) in show {
             if let Some(source) = self
@@ -7736,24 +8546,18 @@ impl Gpu {
         self.copy_image_texel(image, 6, &self.page_readback);
     }
 
-    fn record_mip_blit(&self, index: usize, level: u32) {
-        let Some(source) = self
-            .stream_sources
-            .iter()
-            .find(|source| source.index == index)
-        else {
-            return;
-        };
-        let Some(slot) = usize::try_from(level).ok() else {
-            return;
-        };
-        let Some(mip) = source.chain.levels.get(slot) else {
-            return;
-        };
-        let Some(page) = self.copied_page(index, level, mip.width.max(1), mip.height.max(1)) else {
-            return;
-        };
-        self.publish_resident(&page, source.color, level);
+    /// Blit one resident page. Returns the page image when it is a colour page
+    /// the host can read, so the submit copies that texel once.
+    fn record_mip_blit(&self, index: usize, level: u32) -> Option<Handle> {
+        let source = self.stream_sources.iter().find(|source| source.index == index)?;
+        let slot = usize::try_from(level).ok()?;
+        let mip = source.chain.levels.get(slot)?;
+        let page = self.copied_page(index, level, mip.width.max(1), mip.height.max(1))?;
+        let color = source.color;
+        self.publish_resident(&page, color, level);
+        let atlas_slot = usize::from(!color);
+        let readable = color && !block_texel(self.sampled_format[atlas_slot]);
+        readable.then_some(page.image)
     }
 
     /// A device page after `vkCmdCopyBufferToImage`. An atlas write takes this
@@ -7794,9 +8598,6 @@ impl Gpu {
                 atlas_w.max(1),
                 atlas_h.max(1),
             );
-        }
-        if color && !block_texel(self.sampled_format[slot]) {
-            self.copy_page_texel(page.image);
         }
     }
 
@@ -8766,11 +9567,6 @@ impl Gpu {
 
     fn destroy_targets(&mut self) {
         unsafe {
-            if self.framebuffers[0].is_null() && self.framebuffer.is_null() {
-                self.destroy_aa_targets();
-                self.destroy_reflection_targets();
-                return;
-            }
             self.destroy_aa_targets();
             self.destroy_reflection_targets();
             for slot in 0..2 {
@@ -8833,6 +9629,9 @@ impl Gpu {
             }
             self.flight_live[slot] = false;
         }
+        // The present semaphore stays until after vkDestroySwapchainKHR.
+        // Destroying it here makes that call wait for a present that cannot
+        // finish, which is the teardown hang on a slow last frame.
     }
 
     /// Presentation images. The seat is dispatched around this call: the
@@ -8845,6 +9644,7 @@ impl Gpu {
         if self.device.is_null() || self.swapchain.is_null() {
             self.swapchain = std::ptr::null_mut();
             self.swap_images.clear();
+            self.destroy_present_sems();
             return;
         }
         let swapchain = self.swapchain;
@@ -8853,6 +9653,7 @@ impl Gpu {
             (self.fns.destroy_swapchain)(self.device, swapchain, std::ptr::null());
         }
         self.swap_images.clear();
+        self.destroy_present_sems();
     }
 
     fn destroy_image(&self, image: &mut Image) {
@@ -9271,6 +10072,8 @@ impl Gpu {
         // already did this. A path that skipped it still must not free over a
         // live frame. A fence that was reset and not submitted is not live.
         self.drain_for_teardown();
+        self.save_pipeline_cache();
+        self.destroy_pipeline_cache();
         // Stream pages and staging buffers are device memory. Free them here,
         // on the lifecycle step, instead of waiting idle in Drop.
         teardown_phase("drop_stages", || self.drop_stages());
@@ -9343,6 +10146,8 @@ impl Gpu {
             self.destroy_buffer(&mut audio_rays);
             self.destroy_buffer(&mut audio_gains);
             self.destroy_media_check();
+            self.destroy_texel_detail();
+            self.destroy_texel_ray_cut();
             self.destroy_particle_pass();
             self.destroy_froxel();
             if !self.audio_fence.is_null() {
@@ -9371,10 +10176,8 @@ impl Gpu {
                 if !self.image_readies[slot].is_null() {
                     (self.fns.destroy_sem)(self.device, self.image_readies[slot], std::ptr::null());
                 }
-                if !self.render_dones[slot].is_null() {
-                    (self.fns.destroy_sem)(self.device, self.render_dones[slot], std::ptr::null());
-                }
             }
+            self.destroy_present_sems();
             if !self.desc_pool.is_null() {
                 (self.fns.destroy_desc_pool)(self.device, self.desc_pool, std::ptr::null());
             }
@@ -9684,6 +10487,9 @@ fn load_fns(
             create_render_pass: d!("vkCreateRenderPass"),
             destroy_render_pass: d!("vkDestroyRenderPass"),
             create_pipelines: d!("vkCreateGraphicsPipelines"),
+            create_pipeline_cache: d!("vkCreatePipelineCache"),
+            destroy_pipeline_cache: d!("vkDestroyPipelineCache"),
+            get_pipeline_cache_data: d!("vkGetPipelineCacheData"),
             destroy_pipeline: d!("vkDestroyPipeline"),
             create_framebuffer: d!("vkCreateFramebuffer"),
             destroy_framebuffer: d!("vkDestroyFramebuffer"),
@@ -10027,12 +10833,20 @@ struct GpuTimes {
     /// passes, and the per-pass sums over `lighting_frames`.
     lighting_pool: Handle,
     lighting_ids: [Vec<usize>; 2],
+    /// Dispatch width and height beside `lighting_ids`, same slots.
+    lighting_geom: [Vec<(u32, u32)>; 2],
     // GENOS_GPU_DISPATCH: per-dispatch ms (pass id, summed ms) in dispatch order.
     lighting_disp: Vec<(usize, f64)>,
+    /// gx, gy for each `lighting_disp` row. Indirect kinds use gy past 1<<30.
+    lighting_shape: Vec<(u32, u32)>,
     lighting_frames: u32,
     lighting: [f64; 9],
-    /// Per-bucket sums, including cache rays, hit light, and shadows.
+    /// Per-bucket sums, including cache rays and hit light. The shadows slot stays
+    /// zero: it would only mirror the direct and hit-light dispatches.
     lighting_bucket: [f64; 12],
+    /// ReSTIR sums over `restir_frames`: initial, temporal, spatial, prepare, shade.
+    restir: [f64; 5],
+    restir_frames: u32,
     /// Frames in this line whose prefill scout was due. Printed as a fraction,
     /// not a millisecond: the scout shares the cache-ray dispatch.
     prefill_frames: u32,
@@ -10045,14 +10859,60 @@ struct GpuTimes {
     /// line, to show how much of that work ran while a frame was on the GPU.
     frame_spans: Vec<(u64, u64)>,
     light_spans: Vec<(u64, u64)>,
+    /// Cascade stamp sums over `cascade_frames`: claim and pick, the coarse,
+    /// mid and fine upper bands, then level 0. They sit inside the compose stamp.
+    cascade: [f64; 5],
+    cascade_frames: u32,
 }
 
 /// Stamps per frame for the GI passes, plus two for bloom and the display pass.
 /// One before the passes, one after each dispatch, then the HDR pair when it fits.
-const LIGHTING_STAMPS: u32 = 28;
+/// ReSTIR uses four pass queries at [`RESTIR_STAMP_AT`] and two prepare
+/// queries at [`RESTIR_PREPARE_AT`], past the pass list.
+const LIGHTING_STAMPS: u32 = 38;
+/// Before initial, after initial, after temporal, after spatial.
+const RESTIR_STAMP_AT: u32 = 32;
+/// Before the prefix upload, and after it. Shade is the direct-pass sum, not a query.
+const RESTIR_PREPARE_AT: u32 = 36;
 
 /// Frames kept for a gate's p50 and p99. One scenario is shorter than this.
 const GI_SAMPLE_CAP: usize = 16_384;
+
+/// Drop the printed sums. The other flight slot's pass list is still unread.
+///
+/// A print every frame used to replace `lighting_ids` with two empty vecs.
+/// The slot that had not been collected yet then had no pass list, the
+/// lighting queries were skipped, and `pass_samples` moved once per run.
+fn roll_printed_times(times: &mut GpuTimes) {
+    let pool = times.pool;
+    let lighting_pool = times.lighting_pool;
+    let written = times.written;
+    let every = times.every;
+    let print = times.print;
+    let record = times.record;
+    let samples = std::mem::take(&mut times.samples);
+    let recorded = times.recorded;
+    let pending_world_rays = times.pending_world_rays;
+    let pending_world_relit = times.pending_world_relit;
+    let lighting_ids = std::mem::take(&mut times.lighting_ids);
+    let lighting_geom = std::mem::take(&mut times.lighting_geom);
+    *times = GpuTimes {
+        pool,
+        lighting_pool,
+        written,
+        every,
+        placed: true,
+        print,
+        record,
+        samples,
+        recorded,
+        pending_world_rays,
+        pending_world_relit,
+        lighting_ids,
+        lighting_geom,
+        ..GpuTimes::default()
+    };
+}
 
 /// Milliseconds of `spans` that fall inside any of `within` (ticks, `period` ns each).
 fn overlap_ms(spans: &[(u64, u64)], within: &[(u64, u64)], period: f64) -> (f64, f64) {
@@ -10092,22 +10952,43 @@ impl Default for GpuTimes {
             placed: false,
             lighting_pool: std::ptr::null_mut(),
             lighting_ids: [Vec::new(), Vec::new()],
+            lighting_geom: [Vec::new(), Vec::new()],
             lighting_disp: Vec::new(),
+            lighting_shape: Vec::new(),
             world_runs: 0,
             world_ms: 0.0,
             world_pass: [0.0; 4],
             lighting_frames: 0,
             lighting: [0.0; 9],
             lighting_bucket: [0.0; 12],
+            restir: [0.0; 5],
+            restir_frames: 0,
             prefill_frames: 0,
             frame_spans: Vec::new(),
             light_spans: Vec::new(),
+            cascade: [0.0; 5],
+            cascade_frames: 0,
         }
     }
 }
 
 /// Run one teardown call and print how long it took, so a slow quit names
 /// the driver call that owns the time.
+fn note_startup(name: &str, start: Instant) {
+    eprintln!(
+        "genos-startup {name}: {:.1} ms",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+/// Driver pipeline cache file. Lives under ./genos-debug so the renderer
+/// does not read the environment to choose a path.
+fn pipeline_cache_path() -> PathBuf {
+    PathBuf::from("genos-debug")
+        .join("pipeline-cache")
+        .join("vk-pipeline-cache.bin")
+}
+
 fn teardown_phase(name: &str, f: impl FnOnce()) {
     let start = Instant::now();
     f();
@@ -10135,6 +11016,26 @@ mod pass_time_tests {
         let nonlight = 0.20 + 1.50 + 0.30 + 0.15 + 0.15;
         assert!((times.nonlight - nonlight).abs() < 1e-9);
         assert!((times.frame - (nonlight + 8.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_print_keeps_the_unread_slot_pass_list() {
+        let mut times = super::GpuTimes::default();
+        times.every = 1;
+        times.lighting_ids[1] = vec![3, 9, 7];
+        let _taken = std::mem::take(&mut times.lighting_ids[0]);
+        super::roll_printed_times(&mut times);
+        assert!(
+            times.lighting_ids[0].is_empty(),
+            "the slot just collected stays empty until the next record"
+        );
+        assert_eq!(
+            times.lighting_ids[1],
+            vec![3, 9, 7],
+            "the other slot's pass list is read on the next frame"
+        );
+        assert!(times.placed);
+        assert_eq!(times.every, 1);
     }
 }
 

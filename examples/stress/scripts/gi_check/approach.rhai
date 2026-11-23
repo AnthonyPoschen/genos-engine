@@ -17,7 +17,7 @@
 // the soaked end against fresh.png. Filled in: __DIR__.
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("time_of_day", 20.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "still");
 knob("dynamic", 0.0);
 let P = [11.59, 1.7, 23.52];

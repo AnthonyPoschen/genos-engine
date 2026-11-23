@@ -9,7 +9,7 @@
 // Filled in: __DIR__, __STRIDE__, __CLIP__ (only the first CLIP poses; 0: all).
 time(#{ fixed_dt: 1.0 / 60.0 });
 knob("time_of_day", 12.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "still");
 knob("dynamic", 0.0);
 const STRIDE = __STRIDE__;

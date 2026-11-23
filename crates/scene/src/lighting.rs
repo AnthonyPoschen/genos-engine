@@ -82,9 +82,9 @@ pub enum LightingPreset {
     Fallback,
     /// Direct light, shadows, and the time-of-day ambient curve. No GI.
     DayCycle,
-    /// One bounce of screen-probe GI. No surface cache, denoiser, or prefill.
+    /// One bounce of the world cache. No denoiser and no prefill.
     Gi1Bounce,
-    /// Probe GI, one bounce, coarse tile, refresh every other frame.
+    /// World-cache GI, one bounce, refresh every other frame.
     Low,
     /// Surface cache, two bounces, half the ray budget shift.
     Medium,
@@ -197,6 +197,19 @@ impl ShadowFilter {
     }
 }
 
+/// Spatial reservoirs the product pass merges. 0 skips spatial reuse.
+pub const RESTIR_SPATIAL_NEIGHBORS: u32 = 4;
+/// Chebyshev radius of that window, in reservoir pixels.
+pub const RESTIR_SPATIAL_RADIUS: u32 = 2;
+/// Screen pixels along one edge of a reservoir cell. 1 is full resolution.
+pub const RESTIR_RESOLUTION_SCALE: u32 = 1;
+/// Initial candidates per reservoir. Header word 9.
+pub const RESTIR_CANDIDATES: u32 = 4;
+/// 1 copies the even neighbour's spatial result onto odd reservoir pixels.
+pub const RESTIR_SPATIAL_CHECKERBOARD: u32 = 0;
+/// 1 keeps initial and temporal as two dispatches. 0 runs temporal in the
+/// initial invocation, on the sample just drawn.
+pub const RESTIR_SPLIT_PASSES: u32 = 0;
 /// Unshadowed reservoir candidates per pixel on Low. Design table, direct row.
 pub const LAMP_PICK_CANDIDATES_LOW: u32 = 2;
 /// Unshadowed reservoir candidates per pixel on Medium.
@@ -206,22 +219,22 @@ pub const LAMP_PICK_CANDIDATES_HIGH: u32 = 8;
 /// Previous-frame neighbour radius, in pixels, for Medium and High.
 /// Low stays at 0 (temporal only, one reservoir).
 pub const LAMP_PICK_SPATIAL_RADIUS: u32 = 16;
-/// Hold count written into an exact reservoir so the next quiet frame skips it.
-/// The shader constant `LIGHTING_DIRECT_HOLD` is this value.
-pub const LAMP_PICK_HOLD_FRAMES: u32 = 32;
-
 /// Which points sample point lamps instead of tracing every one.
 ///
-/// The sun is never a sample. It is traced on its own. `low`, `medium`, and
-/// `high` shade pixels from a reservoir ([`Reuse`](Self::Reuse)). `gi-1bounce`
-/// samples bounce hits and leaves pixels on the full sum. Fallback and day-cycle
-/// stay [`Off`](Self::Off).
+/// The sun is never a sample. It is traced on its own. With `restir_di` on,
+/// every preset shades screen pixels from the ReSTIR reservoir, including
+/// [`Hits`](Self::Hits) (`gi-1bounce`) and [`Off`](Self::Off) (fallback and
+/// day-cycle). A quiet view does not hold those pixels off the reservoir.
+/// `gi-1bounce` still samples bounce hits. The labelled exact path is
+/// `restir_di` off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LampPickMode {
-    /// Every lamp. Fallback and day-cycle.
+    /// Every lamp on the labelled exact path. Fallback and day-cycle. With
+    /// `restir_di` on, screen pixels still shade the reservoir.
     Off = 0,
-    /// Bounce hits, probe fills, and cache-ray hits. Pixels stay exact.
+    /// Bounce hits, probe fills, and cache-ray hits. `gi-1bounce`. With
+    /// `restir_di` on, screen pixels shade the reservoir, not the full sum.
     Hits = 1,
     /// Primary pixels only. No previous frame. Diagnostic.
     Pixels = 2,
@@ -259,7 +272,8 @@ impl LampPickMode {
 ///
 /// `rays` is the shadow-ray count (samples per shaded point). `candidates` is
 /// the unshadowed reservoir fill. They are not the same knob: a candidate is
-/// not a ray. `direct.max_lights` stays a hard cap and does not read these.
+/// not a ray. `direct.max_lights` caps the labelled exact walk and the hit
+/// picker. The production reservoir does not read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LampPickSettings {
     pub mode: LampPickMode,
@@ -314,7 +328,9 @@ impl LampPickSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectSettings {
     pub enabled: bool,
-    /// Lamps shaded per pixel. 0 means every lamp that reaches the point.
+    /// Lamps walked on the labelled exact path and the hit picker. 0 means
+    /// every lamp that reaches the point. Production ReSTIR samples the
+    /// reservoir and does not read this.
     pub max_lights: u32,
     /// Recompute every Nth frame. 1 is every frame. Older frames reuse the stored direct.
     pub refresh_frames: u32,
@@ -422,6 +438,10 @@ pub struct WorldCacheSettings {
     pub refresh_frames: u32,
     /// Frames before a cell is stale.
     pub staleness_frames: u32,
+    /// Upper-level refresh stride P. Every resident upper cell, on or off
+    /// screen and of any size, refreshes when `(hash(key)+frame)%P==0`.
+    /// Allowed values are 1, 2, 4, or 10. Default 4.
+    pub cascade_refresh_period: u32,
 }
 
 /// SVGF a-trous filter of the surface cache.
@@ -481,6 +501,7 @@ pub struct AmbientSettings {
     pub dusk_intensity: f32,
 }
 
+
 /// Knobs of the surface light cache. The world cache is this same cache.
 ///
 /// A cache entry is one hashed surface patch. `slot` is only its storage index.
@@ -494,6 +515,9 @@ pub struct SurfaceCacheSettings {
     /// transformed each frame. Static geometry stays on the world lattice.
     /// Off keeps those entries world-anchored.
     pub attach_movers: bool,
+    /// Fixed mover-texel pool size (object-attached lighting cache). High is
+    /// 32768 (~2 MiB at 64 B). `0` disables the pool. Scaled per preset.
+    pub mover_texels: u32,
     /// Published blend. Only a finished long-term mean is shown.
     pub blend: SurfaceCacheBlend,
     /// Firefly clamp in standard deviations of the short-term mean.
@@ -503,12 +527,63 @@ pub struct SurfaceCacheSettings {
     /// update. `0` leaves that `0.1` floor and still clamps. The hold path
     /// does not read this.
     pub firefly_sigma: f32,
-    /// Cap on rays dispatched in one cache round. `0` keeps the existing lists.
+    /// Cap on rays dispatched in one cache round for modes other than the world
+    /// cache. `0` keeps those lists. World mode 3 spends `fill.budget` instead.
     pub ray_budget: u32,
     /// Fresh rays per frame for a dormant cache entry, a whole number from 0 to 16.
     /// `0` keeps one sweep in eight. `1` through `16` trace one new 16-ray entry
     /// every `ceil(16 / rays)` frames, which is that many rays per frame.
     pub dormant_rays: u32,
+    /// Key `surface_cache.sh_cells` (ADR 0039 stage 2). On for High and Medium.
+    /// Off for Low and for presets with no world cache. The three product bits
+    /// below do nothing unless this is on. 25 cm world
+    /// cells keep a colour SH-L1 of the light their relight rays bring in (the
+    /// same rays, no new ones). Cells stay keyed by the dominant axis. The
+    /// screen and seed read blends the eight corners at the true normal. The
+    /// corner weight is the trilinear weight times the facing dot. Equal stored
+    /// normals cancel that dot. A
+    /// corner on the far side of a thin wall, or more than half a cell off the
+    /// query plane, is left out. An axis-aligned ray hit still tilts the one
+    /// owning cell. The read does not allocate. An empty slant keeps the
+    /// probes. Off is today's per-axis read. Forces `sc_flags` bit 23.
+    pub sh_cells: bool,
+    /// Key `surface_cache.sh_texel_detail` (ADR 0039 stage 3). On for High and
+    /// Medium. Off for Low and for presets with no world cache. The knob stays.
+    /// An empty fine world texel takes its first light from the trilinear
+    /// neighbour read, at the texel's true normal. The value is a
+    /// low-confidence seed, not an own sample. The detail mark is a negative
+    /// confidence. Sun word z is not that mark. A lamp change drops the seed,
+    /// and an empty neighbour read does not keep a marked seed on screen. The
+    /// cell is not written. An empty fine texel this setting covers does not
+    /// take resample or the hit patch, even when the neighbour read accepts
+    /// nothing. The probe seed still runs for that miss. Those two stay when
+    /// the texel is not a detail candidate, including SH cells on with this
+    /// setting off. The compose parent walk is gone. Ray hits still call
+    /// `lighting_sc_parent`. A mover is not seeded. With this setting on, a mover shows the
+    /// world-cell read at its current world position and true normal, claim
+    /// false, and skips the probe irradiance read when that read accepts a
+    /// corner. Detail off still has mover trust 0 and shows the probes. A slanted
+    /// pixel shows the same read and does not run those writers. A pixel whose
+    /// displayed indirect is
+    /// this read does not read screen-probe irradiance. Requires `sh_cells`;
+    /// on without it does nothing. Head 3.w bit 17.
+    pub sh_texel_detail: bool,
+    /// Key `surface_cache.sh_texel_ray_cut` (ADR 0039 stage 4). On for High and
+    /// Medium. Off for Low and for presets with no world cache. The knob stays.
+    /// A fine world texel skips its own rays when the live 25 cm neighbour read
+    /// is complete and the accepted corners agree within the existing sparse
+    /// luminance ratio. The texel's own samples, not its seed, are what is
+    /// compared with that read. No own samples means the cell is the estimate.
+    /// A missing, empty, stale, back-facing, or off-plane corner, a corner
+    /// split past that ratio, a stale texel, a settling lamp, a nearby move,
+    /// and an object-local texel keep their rays. A 25 cm cell is never skipped.
+    /// The read does not write the cell. Requires `sh_texel_detail`; on without
+    /// it does nothing. Head 3.w bit 18.
+    pub sh_texel_ray_cut: bool,
+    /// Key `surface_cache.sh_probe_retire`. Deprecated alias. The passes are
+    /// removed, so the key parses, warns once, and does not schedule. Head 3.w
+    /// bit 19 stays in the change block and is not a dispatch.
+    pub sh_probe_retire: bool,
     /// Drain check significance, in standard errors (ADR 0039 stage 1).
     ///
     /// Each round sums the mature 25 cm cells' new sample luminance and their
@@ -519,6 +594,18 @@ pub struct SurfaceCacheSettings {
     /// errors of the round's own per-cell differences. `0` drops that test (the
     /// 1 % gap alone, as before).
     pub drain_sigma: f32,
+    /// Metres from the player inside which a 12.5 cm texel is created for a
+    /// surface the world cache already hit, on screen or not.
+    /// `0` creates none. Key `surface_cache.fine_lod_create`.
+    pub fine_lod_create: f32,
+    /// Metres past which an off-screen 12.5 cm texel is dropped. Farther than
+    /// `fine_lod_create`, so a surface is not created and destroyed on the
+    /// same edge. `0` does not drop by distance. Key `surface_cache.fine_lod_drop`.
+    pub fine_lod_drop: f32,
+    /// Metres the create and drop distances stretch ahead of the player's
+    /// motion and turn. A still view does not stretch the band. `0` keeps
+    /// the band centred on the player. Key `surface_cache.fine_lod_lookahead`.
+    pub fine_lod_lookahead: f32,
 }
 
 /// Surface cache switches the renderer uses when nothing sets `sc_flags`
@@ -531,11 +618,16 @@ pub const LIGHTING_TOGGLE_FREEZE_CACHE: u32 = 1;
 pub const LIGHTING_TOGGLE_DIRECT_ONLY: u32 = 2;
 pub const LIGHTING_TOGGLE_BOUNCE_ONLY: u32 = 4;
 pub const LIGHTING_TOGGLE_FREEZE_PROBES: u32 = 8;
-const LIGHTING_TOGGLE_NAMES: [(&str, u32); 4] = [
+/// Cache-only view (ADR 0039 stage 0/2): every pixel shows the light of the
+/// 25 cm world cells at its point, with no texels and no probes, so the
+/// cells' own blotch can be scored against the path-traced reference.
+pub const LIGHTING_TOGGLE_CELLS_ONLY: u32 = 16;
+const LIGHTING_TOGGLE_NAMES: [(&str, u32); 5] = [
     ("freeze_cache", LIGHTING_TOGGLE_FREEZE_CACHE),
     ("direct_only", LIGHTING_TOGGLE_DIRECT_ONLY),
     ("bounce_only", LIGHTING_TOGGLE_BOUNCE_ONLY),
     ("freeze_probes", LIGHTING_TOGGLE_FREEZE_PROBES),
+    ("cells_only", LIGHTING_TOGGLE_CELLS_ONLY),
 ];
 
 /// Experiment and debug knobs of the lighting frame. Every preset uses the
@@ -568,7 +660,7 @@ pub struct LightingExperimentSettings {
     /// `surface_cache.blend` still forces bits 20 and 30.
     pub sc_flags: u32,
     /// Key `toggles`. Debug isolate words, comma separated: `freeze_cache`,
-    /// `direct_only`, `bounce_only`, `freeze_probes`, or `none`.
+    /// `direct_only`, `bounce_only`, `freeze_probes`, `cells_only`, or `none`.
     pub toggles: u32,
 }
 
@@ -638,15 +730,45 @@ pub struct LightingSettings {
     pub emissive: bool,
     pub prefill: bool,
     pub ambient: AmbientSettings,
-    /// Weighted lamp picking. `low`, `medium`, and `high` shade each pixel from
-    /// a reservoir. `gi-1bounce` samples hits and leaves pixels on the full sum.
-    /// Fallback and day-cycle trace every lamp.
+    /// Weighted lamp picking for hits and for the noise-gate sample.
+    /// Production screen pixels use [`Self::restir_di`].
     pub lamp_pick: LampPickSettings,
+    /// Screen-pixel direct. On in every preset: the sun and the brightest near
+    /// lamp keep a disc ray, and every other near lamp comes from the cascade
+    /// visibility table. Off is the labelled exact sum.
+    pub restir_di: bool,
+    /// Deprecated. The spatial pass is deleted. The value still parses and logs
+    /// once that it no longer dispatches. 0..=16.
+    pub restir_spatial_neighbors: u32,
+    /// Deprecated. The spatial pass is deleted. The value still parses and logs
+    /// once that it no longer dispatches. 0..=8.
+    pub restir_spatial_radius: u32,
+    /// Deprecated. The reservoir grid is deleted. The value still parses and
+    /// logs once that it no longer dispatches. 1..=4.
+    pub restir_resolution_scale: u32,
+    /// Deprecated. The initial pass is deleted. The value still parses and logs
+    /// once that it no longer dispatches. 1..=32.
+    pub restir_candidates: u32,
+    /// Deprecated. The spatial pass is deleted. The value still parses and logs
+    /// once that it no longer dispatches. 0 or 1.
+    pub restir_spatial_checkerboard: u32,
+    /// Deprecated. The initial and temporal dispatches are deleted. The value
+    /// still parses and logs once that it no longer dispatches. 0 or 1.
+    pub restir_split_passes: u32,
     /// Experiment and debug knobs. Defaults in every preset.
     pub experiments: LightingExperimentSettings,
     /// Clock hours in `[0, 24)`. Drives [`AmbientMode::Curve`] and the sky scale.
     /// `0` is midnight, `6` dawn, `12` noon, `18` dusk.
     pub time_of_day: f32,
+}
+
+/// High and Medium keep the directional product. Low and the presets with no
+/// world cache do not. The knobs stay, so a later `set_key` can turn a bit back on.
+fn clear_sh_product(cache: &mut SurfaceCacheSettings) {
+    cache.sh_cells = false;
+    cache.sh_texel_detail = false;
+    cache.sh_texel_ray_cut = false;
+    cache.sh_probe_retire = false;
 }
 
 impl Default for LightingSettings {
@@ -670,6 +792,8 @@ impl LightingSettings {
                 s.denoiser.screen = true;
             }
             LightingPreset::DayCycle => {
+                clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_texels = 0;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
                 s.probes.enabled = false;
@@ -690,14 +814,20 @@ impl LightingSettings {
             }
             LightingPreset::Gi1Bounce => {
                 s.bounce.count = 1;
+                s.probes.enabled = false;
                 s.probes.rays = 64;
-                s.world_cache.enabled = false;
+                s.world_cache.enabled = true;
+                // One bounce reads the world cache. The directional product
+                // stays a High and Medium default.
+                clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_texels = 16_384;
                 s.denoiser.enabled = false;
                 s.prefill = false;
                 s.lamp_pick.mode = LampPickMode::Hits;
             }
             LightingPreset::Fallback => {
-                s.direct.max_lights = 8;
+                clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_texels = 0;
                 s.shadows.filter = ShadowFilter::Hard;
                 s.gi.enabled = false;
                 s.bounce.count = 0;
@@ -712,16 +842,22 @@ impl LightingSettings {
                 s.ambient.intensity = 0.65;
             }
             LightingPreset::Low => {
-                s.direct.max_lights = 4;
+                // ADR 0039 open question 2: Low does not turn the directional
+                // product on until a 1060 measurement exists. Screen-probe
+                // passes are gone on every preset. The knobs can still turn
+                // the bits on.
+                clear_sh_product(&mut s.surface_cache);
+                s.surface_cache.mover_texels = 4_096;
                 s.shadows.cell_metres = 0.25;
                 s.bounce.count = 1;
+                s.probes.enabled = false;
                 s.probes.rays = 16;
                 s.probes.tile = 32;
                 s.probes.refresh_frames = 2;
-                s.world_cache.enabled = false;
+                s.world_cache.enabled = true;
                 s.denoiser.iterations = 1;
-                // The filter does not run (no surface cache). Adaptive failed
-                // the 4070 picture bar (S79), so it stays off.
+                // Adaptive failed the 4070 picture bar (S79), so it stays off.
+                // Bounce 1 still runs the world-cache filter.
                 s.denoiser.adaptive = false;
                 s.prefill = false;
                 s.gi.refresh_frames = 2;
@@ -731,7 +867,9 @@ impl LightingSettings {
                 s.lamp_pick = LampPickSettings::reservoir(LAMP_PICK_CANDIDATES_LOW, 0);
             }
             LightingPreset::Medium => {
-                s.direct.max_lights = 8;
+                // High's directional product stays on: SH cells, texel detail,
+                // the ray cut, and probe retire.
+                s.surface_cache.mover_texels = 16_384;
                 s.bounce.count = 2;
                 s.probes.rays = 32;
                 s.denoiser.iterations = 3;
@@ -774,17 +912,25 @@ impl LightingSettings {
             },
             surface_cache: SurfaceCacheSettings {
                 attach_movers: true,
+                mover_texels: 32_768,
                 blend: SurfaceCacheBlend::Msme,
                 firefly_sigma: 8.0,
                 ray_budget: 0,
                 dormant_rays: 0,
+                sh_cells: true,
+                sh_texel_detail: true,
+                sh_texel_ray_cut: true,
+                sh_probe_retire: true,
                 drain_sigma: 4.0,
+                fine_lod_create: 6.0,
+                fine_lod_drop: 8.0,
+                fine_lod_lookahead: 2.0,
             },
             bounce: BounceSettings {
                 count: LIGHTING_BOUNCES_UNLIMITED,
             },
             probes: ProbeSettings {
-                enabled: true,
+                enabled: false,
                 rays: 64,
                 tile: 0,
                 refresh_frames: 1,
@@ -795,6 +941,7 @@ impl LightingSettings {
                 cell_metres: 0.25,
                 refresh_frames: 1,
                 staleness_frames: 900,
+                cascade_refresh_period: 4,
             },
             denoiser: DenoiserSettings {
                 enabled: true,
@@ -825,6 +972,13 @@ impl LightingSettings {
                 dusk_intensity: 0.40,
             },
             lamp_pick: LampPickSettings::default(),
+            restir_di: true,
+            restir_spatial_neighbors: RESTIR_SPATIAL_NEIGHBORS,
+            restir_spatial_radius: RESTIR_SPATIAL_RADIUS,
+            restir_resolution_scale: RESTIR_RESOLUTION_SCALE,
+            restir_candidates: RESTIR_CANDIDATES,
+            restir_spatial_checkerboard: RESTIR_SPATIAL_CHECKERBOARD,
+            restir_split_passes: RESTIR_SPLIT_PASSES,
             experiments: LightingExperimentSettings::default(),
             time_of_day: 12.0,
         }
@@ -844,13 +998,25 @@ impl LightingSettings {
             8.0
         };
         self.surface_cache.dormant_rays = self.surface_cache.dormant_rays.min(16);
+        // Cap at the High pool; `0` turns the mover texel pool off.
+        self.surface_cache.mover_texels = self.surface_cache.mover_texels.min(32_768);
         self.surface_cache.drain_sigma = if self.surface_cache.drain_sigma.is_finite() {
             self.surface_cache.drain_sigma.max(0.0)
         } else {
             4.0
         };
+        self.surface_cache.fine_lod_create =
+            finite_nonneg(self.surface_cache.fine_lod_create, 6.0).min(64.0);
+        self.surface_cache.fine_lod_drop = finite_nonneg(self.surface_cache.fine_lod_drop, 8.0)
+            .max(self.surface_cache.fine_lod_create)
+            .min(96.0);
+        self.surface_cache.fine_lod_lookahead =
+            finite_nonneg(self.surface_cache.fine_lod_lookahead, 2.0).min(32.0);
         if let Some(mode) = self.gi.world_mode {
-            self.gi.world_mode = Some(mode.min(3));
+            // Mode 2 pushed screen-probe irradiance into world patches.
+            // That pass is removed, so the stored mode becomes the surface cache.
+            let mode = if mode == 2 { 3 } else { mode.min(3) };
+            self.gi.world_mode = Some(mode);
         }
         if self.probes.rays != 0 {
             self.probes.rays = self.probes.rays.clamp(4, 64);
@@ -863,6 +1029,9 @@ impl LightingSettings {
         self.world_cache.cell_metres = self.world_cache.cell_metres.clamp(0.05, 4.0);
         self.world_cache.refresh_frames = self.world_cache.refresh_frames.max(1);
         self.world_cache.staleness_frames = self.world_cache.staleness_frames.max(1);
+        if !matches!(self.world_cache.cascade_refresh_period, 1 | 2 | 4 | 10) {
+            self.world_cache.cascade_refresh_period = 4;
+        }
         self.denoiser.iterations = match self.denoiser.iterations {
             0 | 1 => 1,
             2 | 3 => 3,
@@ -895,17 +1064,22 @@ impl LightingSettings {
         };
         self.experiments.world_cap = self.experiments.world_cap.min(999);
         self.lamp_pick.history = self.lamp_pick.history.clamp(1, 64);
+        self.restir_spatial_neighbors = self.restir_spatial_neighbors.min(16);
+        self.restir_spatial_radius = self.restir_spatial_radius.min(8);
+        self.restir_resolution_scale = self.restir_resolution_scale.clamp(1, 4);
+        self.restir_candidates = self.restir_candidates.clamp(1, 32);
+        self.restir_spatial_checkerboard = u32::from(self.restir_spatial_checkerboard != 0);
+        self.restir_split_passes = u32::from(self.restir_split_passes != 0);
     }
 
-    /// World mode the shaders see. A forced mode wins once cache-to-cache is
-    /// allowed. Bounce 0 and 1 stay on the probe path (mode 0): the surface
-    /// cache is the extra bounce, so it is not live until bounce 2.
+    /// World mode the shaders see. Bounce 0 has no GI buffers. A world cache
+    /// from bounce 1 up is mode 3. Mode 2 (screen-probe push) is removed.
     pub fn world_mode(&self) -> u32 {
-        if !self.gi.enabled || self.bounce.count < 2 {
+        if !self.gi.enabled || self.bounce.count == 0 {
             return 0;
         }
         if let Some(mode) = self.gi.world_mode {
-            return mode;
+            return if mode == 2 { 3 } else { mode };
         }
         if self.world_cache.enabled {
             3
@@ -916,44 +1090,40 @@ impl LightingSettings {
 
     /// GI dispatches. Bounce 0 is direct light and flat ambient, so this is false.
     pub fn gi_passes(&self) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled && self.bounce.count > 0 && self.world_cache.enabled
     }
 
     /// The million-slot cache and its key table. Freed when GI is off or the
     /// bounce count does not use it.
     pub fn allocates_cache(&self) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && (self.probes.enabled || self.world_cache.enabled)
+        self.gi.enabled && self.bounce.count > 0 && self.world_cache.enabled
     }
 
-    /// Probe and cache-ray work buffer. Freed when bounce 0 skips GI.
+    /// Screen-probe work buffers are removed. The name stays so callers compile.
     pub fn allocates_probe_work(&self) -> bool {
-        self.gi.enabled && self.bounce.count > 0 && self.probes.enabled
+        false
     }
 
     pub fn direct_this_frame(&self, frame: u32) -> bool {
         self.direct.enabled && frame_due(frame, self.direct.refresh_frames)
     }
 
-    pub fn probes_this_frame(&self, frame: u32) -> bool {
-        self.gi.enabled
-            && self.bounce.count > 0
-            && self.probes.enabled
-            && frame_due(frame, self.probes.refresh_frames)
+    /// Screen-probe passes are removed. The key still parses and does not schedule.
+    pub fn probes_this_frame(&self, _frame: u32) -> bool {
+        false
     }
 
-    /// Surface-cache round. Recorded from bounce 2 up, where cache-to-cache runs.
+    /// Surface-cache round. Bounce 1 relights cells. Bounce 2 and above also
+    /// read the cache from a ray hit (`lighting_bounce_ok`).
     pub fn cache_round_this_frame(&self, frame: u32) -> bool {
         self.gi.enabled
-            && self.bounce.count >= 2
-            && (self.world_cache.enabled || self.probes.enabled)
+            && self.bounce.count >= 1
+            && self.world_cache.enabled
             && frame_due(frame, self.gi.refresh_frames)
     }
 
-    /// Cache-ray dispatches (cache-to-cache). Not recorded at bounce 0 or 1.
+    /// Cache-ray dispatches. Recorded from bounce 1 when the world cache is on.
+    /// Bounce 2 and above also let a hit read the cache (`lighting_bounce_ok`).
     pub fn cache_rays_this_frame(&self, frame: u32) -> bool {
         self.cache_round_this_frame(frame)
     }
@@ -983,7 +1153,7 @@ impl LightingSettings {
         self.gi.refresh_frames = 1;
         self.gi.budget_shift = 0;
         self.bounce.count = LIGHTING_BOUNCES_UNLIMITED;
-        self.probes.enabled = true;
+        self.probes.enabled = false;
         self.probes.rays = 64;
         self.probes.tile = 0;
         self.probes.refresh_frames = 1;
@@ -1160,6 +1330,11 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
+            "surface_cache.mover_texels={}",
+            self.surface_cache.mover_texels
+        );
+        let _ = writeln!(
+            out,
             "surface_cache.blend={}",
             self.surface_cache.blend.name()
         );
@@ -1180,8 +1355,43 @@ impl LightingSettings {
         );
         let _ = writeln!(
             out,
+            "surface_cache.sh_cells={}",
+            bit(self.surface_cache.sh_cells)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.sh_texel_detail={}",
+            bit(self.surface_cache.sh_texel_detail)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.sh_texel_ray_cut={}",
+            bit(self.surface_cache.sh_texel_ray_cut)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.sh_probe_retire={}",
+            bit(self.surface_cache.sh_probe_retire)
+        );
+        let _ = writeln!(
+            out,
             "surface_cache.drain_sigma={}",
             num_text(self.surface_cache.drain_sigma)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_create={}",
+            num_text(self.surface_cache.fine_lod_create)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_drop={}",
+            num_text(self.surface_cache.fine_lod_drop)
+        );
+        let _ = writeln!(
+            out,
+            "surface_cache.fine_lod_lookahead={}",
+            num_text(self.surface_cache.fine_lod_lookahead)
         );
         if let Some(mode) = self.gi.world_mode {
             let _ = writeln!(out, "world_mode={mode}");
@@ -1196,6 +1406,7 @@ impl LightingSettings {
         let _ = writeln!(out, "world_cell={}", num_text(self.world_cache.cell_metres));
         let _ = writeln!(out, "world_refresh={}", self.world_cache.refresh_frames);
         let _ = writeln!(out, "world_stale={}", self.world_cache.staleness_frames);
+        let _ = writeln!(out, "cascade_refresh_period={}", self.world_cache.cascade_refresh_period);
         let _ = writeln!(out, "denoise={}", bit(self.denoiser.enabled));
         let _ = writeln!(out, "denoise_iters={}", self.denoiser.iterations);
         let _ = writeln!(
@@ -1268,6 +1479,25 @@ impl LightingSettings {
         let _ = writeln!(out, "lamp_pick_history={}", self.lamp_pick.history);
         let _ = writeln!(out, "lamp_pick_unbiased={}", bit(self.lamp_pick.unbiased));
         let _ = writeln!(out, "lamp_pick_reuse={}", bit(self.lamp_pick.reuse()));
+        let _ = writeln!(out, "restir_di={}", bit(self.restir_di));
+        let _ = writeln!(
+            out,
+            "restir_spatial_neighbors={}",
+            self.restir_spatial_neighbors
+        );
+        let _ = writeln!(out, "restir_spatial_radius={}", self.restir_spatial_radius);
+        let _ = writeln!(
+            out,
+            "restir_resolution_scale={}",
+            self.restir_resolution_scale
+        );
+        let _ = writeln!(out, "restir_candidates={}", self.restir_candidates);
+        let _ = writeln!(
+            out,
+            "restir_spatial_checkerboard={}",
+            self.restir_spatial_checkerboard
+        );
+        let _ = writeln!(out, "restir_split_passes={}", self.restir_split_passes);
         let x = &self.experiments;
         let _ = writeln!(out, "cache_async={}", bit(x.cache_async));
         let _ = writeln!(out, "cache_hz={}", num_text(x.cache_hz));
@@ -1348,6 +1578,7 @@ impl LightingSettings {
             "gi_refresh" => self.gi.refresh_frames = num_u32(value)?.max(1),
             "budget_shift" => self.gi.budget_shift = num_u32(value)?.min(7),
             "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
+            "surface_cache.mover_texels" => self.surface_cache.mover_texels = num_u32(value)?,
             "surface_cache.blend" => {
                 self.surface_cache.blend = SurfaceCacheBlend::parse(value)
                     .ok_or_else(|| format!("surface_cache.blend is msme or hold, got {value}"))?
@@ -1363,6 +1594,13 @@ impl LightingSettings {
             }
             "surface_cache.ray_budget" => self.surface_cache.ray_budget = num_u32(value)?,
             "surface_cache.dormant_rays" => self.surface_cache.dormant_rays = num_u32(value)?,
+            "surface_cache.sh_cells" => self.surface_cache.sh_cells = on(value)?,
+            "surface_cache.sh_texel_detail" => self.surface_cache.sh_texel_detail = on(value)?,
+            "surface_cache.sh_texel_ray_cut" => self.surface_cache.sh_texel_ray_cut = on(value)?,
+            "surface_cache.sh_probe_retire" => {
+                warn_screen_probe_retired("surface_cache.sh_probe_retire");
+                self.surface_cache.sh_probe_retire = on(value)?;
+            }
             "surface_cache.drain_sigma" => {
                 let sigma = num_f32(value)?;
                 if !sigma.is_finite() || sigma < 0.0 {
@@ -1371,6 +1609,25 @@ impl LightingSettings {
                     ));
                 }
                 self.surface_cache.drain_sigma = sigma;
+            }
+            "surface_cache.fine_lod_create" => {
+                self.surface_cache.fine_lod_create =
+                    nonneg_f32("surface_cache.fine_lod_create", value)?;
+            }
+            "surface_cache.fine_lod_drop" => {
+                self.surface_cache.fine_lod_drop =
+                    nonneg_f32("surface_cache.fine_lod_drop", value)?;
+            }
+            "surface_cache.fine_lod_lookahead" => {
+                self.surface_cache.fine_lod_lookahead =
+                    nonneg_f32("surface_cache.fine_lod_lookahead", value)?;
+            }
+            // The fill histogram does not read these. Kept so a saved file
+            // still parses. One warning, then the value is dropped.
+            "surface_cache.fine_budget_share"
+            | "surface_cache.fine_screen_boost"
+            | "surface_cache.fine_close_boost" => {
+                warn_fine_rank_removed(key);
             }
             "cache_async" => self.experiments.cache_async = on(value)?,
             "cache_hz" => self.experiments.cache_hz = num_f32(value)?.max(0.0),
@@ -1387,15 +1644,40 @@ impl LightingSettings {
             "toggles" => self.experiments.toggles = parse_lighting_toggles(value)?,
             "world_mode" => self.gi.world_mode = Some(num_u32(value)?.min(3)),
             "bounces" => self.bounce.count = parse_bounces(value)?,
-            "probes" => self.probes.enabled = on(value)?,
-            "probe_rays" => self.probes.rays = num_u32(value)?,
-            "probe_tile" => self.probes.tile = num_u32(value)?,
-            "probe_refresh" => self.probes.refresh_frames = num_u32(value)?.max(1),
-            "probe_stale" => self.probes.staleness_frames = num_u32(value)?.max(1),
+            "probes" => {
+                warn_screen_probe_retired("probes");
+                self.probes.enabled = on(value)?;
+            }
+            "probe_rays" => {
+                warn_screen_probe_retired("probe_rays");
+                self.probes.rays = num_u32(value)?;
+            }
+            "probe_tile" => {
+                warn_screen_probe_retired("probe_tile");
+                self.probes.tile = num_u32(value)?;
+            }
+            "probe_refresh" => {
+                warn_screen_probe_retired("probe_refresh");
+                self.probes.refresh_frames = num_u32(value)?.max(1);
+            }
+            "probe_stale" => {
+                warn_screen_probe_retired("probe_stale");
+                self.probes.staleness_frames = num_u32(value)?.max(1);
+            }
             "world_cache" => self.world_cache.enabled = on(value)?,
             "world_cell" => self.world_cache.cell_metres = num_f32(value)?,
             "world_refresh" => self.world_cache.refresh_frames = num_u32(value)?.max(1),
             "world_stale" => self.world_cache.staleness_frames = num_u32(value)?.max(1),
+            "cascade_refresh_period" => {
+                let period = num_u32(value)?;
+                if matches!(period, 1 | 2 | 4 | 10) {
+                    self.world_cache.cascade_refresh_period = period;
+                } else {
+                    return Err(format!(
+                        "cascade_refresh_period is 1, 2, 4, or 10, got {value}"
+                    ));
+                }
+            }
             "denoise" | "denoiser" => self.denoiser.enabled = on(value)?,
             "denoise_iters" => self.denoiser.iterations = num_u32(value)?,
             "denoise_dirty" => self.denoiser.dirty_fraction = num_f32(value)?,
@@ -1459,6 +1741,31 @@ impl LightingSettings {
                 } else if self.lamp_pick.mode == LampPickMode::Reuse {
                     self.lamp_pick.mode = LampPickMode::Both;
                 }
+            }
+            "restir_di" => self.restir_di = on(value)?,
+            "restir_spatial_neighbors" => {
+                warn_restir_pass_retired("restir_spatial_neighbors");
+                self.restir_spatial_neighbors = num_u32(value)?;
+            }
+            "restir_spatial_radius" => {
+                warn_restir_pass_retired("restir_spatial_radius");
+                self.restir_spatial_radius = num_u32(value)?;
+            }
+            "restir_resolution_scale" => {
+                warn_restir_pass_retired("restir_resolution_scale");
+                self.restir_resolution_scale = num_u32(value)?;
+            }
+            "restir_candidates" => {
+                warn_restir_pass_retired("restir_candidates");
+                self.restir_candidates = num_u32(value)?;
+            }
+            "restir_spatial_checkerboard" => {
+                warn_restir_pass_retired("restir_spatial_checkerboard");
+                self.restir_spatial_checkerboard = num_u32(value)?;
+            }
+            "restir_split_passes" => {
+                warn_restir_pass_retired("restir_split_passes");
+                self.restir_split_passes = num_u32(value)?;
             }
             _ => return Err(format!("unknown lighting setting {key}")),
         }
@@ -1550,6 +1857,7 @@ impl LightingSettings {
             ("GENOS_LIGHTING_WORLD_CELL", "world_cell"),
             ("GENOS_LIGHTING_WORLD_REFRESH", "world_refresh"),
             ("GENOS_LIGHTING_WORLD_STALE", "world_stale"),
+            ("GENOS_LIGHTING_CASCADE_REFRESH_PERIOD", "cascade_refresh_period"),
             ("GENOS_LIGHTING_DENOISE", "denoise"),
             ("GENOS_LIGHTING_DENOISE_ITERS", "denoise_iters"),
             ("GENOS_LIGHTING_ATROUS_DIRTY", "denoise_dirty"),
@@ -1585,6 +1893,16 @@ impl LightingSettings {
             ("GENOS_LIGHTING_LAMP_PICK_HISTORY", "lamp_pick_history"),
             ("GENOS_LIGHTING_LAMP_PICK_UNBIASED", "lamp_pick_unbiased"),
             ("GENOS_LIGHTING_LAMP_PICK_REUSE", "lamp_pick_reuse"),
+            ("GENOS_RESTIR_DI", "restir_di"),
+            ("GENOS_RESTIR_SPATIAL_NEIGHBORS", "restir_spatial_neighbors"),
+            ("GENOS_RESTIR_SPATIAL_RADIUS", "restir_spatial_radius"),
+            ("GENOS_RESTIR_RESOLUTION_SCALE", "restir_resolution_scale"),
+            ("GENOS_RESTIR_CANDIDATES", "restir_candidates"),
+            (
+                "GENOS_RESTIR_SPATIAL_CHECKERBOARD",
+                "restir_spatial_checkerboard",
+            ),
+            ("GENOS_RESTIR_SPLIT_PASSES", "restir_split_passes"),
             ("GENOS_LIGHTING_ASYNC", "cache_async"),
             ("GENOS_LIGHTING_CACHE_HZ", "cache_hz"),
             ("GENOS_LIGHTING_CACHE_PICKS", "cache_picks"),
@@ -1594,6 +1912,46 @@ impl LightingSettings {
             ("GENOS_LIGHTING_SC_SETTLE", "sc_settle"),
             ("GENOS_LIGHTING_SC_FLAGS", "sc_flags"),
             ("GENOS_LIGHTING_TOGGLES", "toggles"),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS",
+                "surface_cache.sh_cells",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL",
+                "surface_cache.sh_texel_detail",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT",
+                "surface_cache.sh_texel_ray_cut",
+            ),
+            (
+                "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE",
+                "surface_cache.sh_probe_retire",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_CREATE",
+                "surface_cache.fine_lod_create",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_DROP",
+                "surface_cache.fine_lod_drop",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_LOD_LOOKAHEAD",
+                "surface_cache.fine_lod_lookahead",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_BUDGET_SHARE",
+                "surface_cache.fine_budget_share",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_SCREEN_BOOST",
+                "surface_cache.fine_screen_boost",
+            ),
+            (
+                "GENOS_LIGHTING_FINE_CLOSE_BOOST",
+                "surface_cache.fine_close_boost",
+            ),
         ];
         for (var, key) in keys {
             if key == "direct_specular" && launch.direct_specular.is_some() {
@@ -1654,20 +2012,19 @@ impl LightingSettings {
         GpuBuckets {
             direct: self.direct_this_frame(frame),
             shadows: self.shadows.enabled && (self.direct.enabled || self.gi_passes()),
-            place: self.probes_this_frame(frame),
-            probe_trace: self.probes_this_frame(frame),
-            gather: self.probes_this_frame(frame),
-            filter: self.probes_this_frame(frame),
+            place: false,
+            probe_trace: false,
+            gather: false,
+            filter: false,
             compact: self.cache_round_this_frame(frame),
             cache: self.cache_round_this_frame(frame),
             cache_rays: self.cache_rays_this_frame(frame),
             atrous: self.atrous_this_frame(frame),
-            // True when hits are shaded. The separate hit-light dispatch is only
-            // recorded for cache rays (bounce 2 and up). One bounce shades kept
-            // hits inside the direct dispatch.
+            // True when cache rays are shaded. Bounce 1 records that dispatch.
+            // A hit reads the cache only from bounce 2 (`lighting_bounce_ok`).
             hit_light: self.gi.enabled
                 && self.bounce.count > 0
-                && (self.probes.enabled || self.cache_rays_this_frame(frame)),
+                && self.cache_rays_this_frame(frame),
             compose_indirect: self.compose_reuse && self.world_mode() == 3,
             prefill: self.prefill_this_frame(),
             sky: self.sky && self.gi.enabled,
@@ -2117,6 +2474,36 @@ const GI2_ENV_ALIASES: &[(&str, &str)] = &[
     ("GENOS_GI_DEBUG", "GENOS_LIGHTING_DEBUG"),
 ];
 
+fn warn_fine_rank_removed(key: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(key.to_string()) {
+        eprintln!(
+            "warning: {key} is removed; the fill budget is not split and the rank is not scaled (alias kept for one release)"
+        );
+    }
+}
+
+fn warn_screen_probe_retired(key: &'static str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(key) {
+        eprintln!(
+            "warning: {key} is deprecated; screen-probe passes are removed and the world cache is the indirect light (alias kept for one release)"
+        );
+    }
+}
+
 fn warn_lamp_pick_reuse_alias() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
@@ -2125,6 +2512,22 @@ fn warn_lamp_pick_reuse_alias() {
             "warning: lamp_pick value \"reuse (experimental)\" is deprecated; use \"reuse\" (alias kept for one release)"
         );
     });
+}
+
+fn warn_restir_pass_retired(key: &'static str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if guard.insert(key) {
+        eprintln!(
+            "warning: {key} is deprecated; it no longer dispatches a pass \
+             (alias kept for one release)"
+        );
+    }
 }
 
 fn warn_gi2_alias(old: &'static str, neu: &'static str) {
@@ -2220,6 +2623,23 @@ fn parse_firefly_sigma(value: &str) -> Result<f32, String> {
         Err(format!("expected a non-negative number, got {value}"))
     }
 }
+
+fn nonneg_f32(key: &str, value: &str) -> Result<f32, String> {
+    let n = num_f32(value)?;
+    if !n.is_finite() || n < 0.0 {
+        return Err(format!("{key} is a non-negative number, got {value}"));
+    }
+    Ok(n)
+}
+
+fn finite_nonneg(value: f32, fallback: f32) -> f32 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        fallback
+    }
+}
+
 
 fn num_f32(value: &str) -> Result<f32, String> {
     value
@@ -2583,5 +3003,57 @@ mod launch_tests {
 
         std::env::remove_var("GENOS_LIGHTING_PRESET");
         std::env::remove_var("GENOS_GI2_PRESET");
+    }
+
+    #[test]
+    fn restir_env_defaults_match_the_preset() {
+        let env = |name: &str| -> Option<String> {
+            match name {
+                "GENOS_RESTIR_DI" => Some("on".to_string()),
+                "GENOS_RESTIR_SPATIAL_NEIGHBORS" => Some(RESTIR_SPATIAL_NEIGHBORS.to_string()),
+                "GENOS_RESTIR_SPATIAL_RADIUS" => Some(RESTIR_SPATIAL_RADIUS.to_string()),
+                "GENOS_RESTIR_RESOLUTION_SCALE" => Some(RESTIR_RESOLUTION_SCALE.to_string()),
+                "GENOS_RESTIR_CANDIDATES" => Some(RESTIR_CANDIDATES.to_string()),
+                "GENOS_RESTIR_SPATIAL_CHECKERBOARD" => {
+                    Some(RESTIR_SPATIAL_CHECKERBOARD.to_string())
+                }
+                "GENOS_RESTIR_SPLIT_PASSES" => Some(RESTIR_SPLIT_PASSES.to_string()),
+                _ => None,
+            }
+        };
+        for preset in [
+            LightingPreset::High,
+            LightingPreset::Fallback,
+            LightingPreset::Gi1Bounce,
+        ] {
+            let mut base = LightingSettings::preset(preset);
+            base.sanitize();
+            let mut over = base.clone();
+            over.apply_env_from(&[], &env).unwrap();
+            assert_eq!(over, base, "{}", preset.name());
+        }
+        // The picture gate's direct settings, then the same strings.
+        let mut gate = LightingSettings::preset(LightingPreset::Fallback);
+        gate.direct.max_lights = 0;
+        gate.direct.refresh_frames = 1;
+        gate.direct.resolution_scale = 1;
+        gate.sky = false;
+        gate.ambient.mode = AmbientMode::Off;
+        gate.shadows.enabled = true;
+        gate.gi.enabled = false;
+        gate.bounce.count = 0;
+        gate.probes.enabled = false;
+        gate.world_cache.enabled = false;
+        gate.lamp_pick.mode = LampPickMode::Off;
+        gate.lamp_pick.radius = 0;
+        gate.compose_reuse = false;
+        gate.restir_di = true;
+        gate.sanitize();
+        let mut over = gate.clone();
+        over.apply_env_from(&[], &env).unwrap();
+        assert_eq!(over.restir_resolution_scale, RESTIR_RESOLUTION_SCALE);
+        assert_eq!(over.restir_spatial_neighbors, RESTIR_SPATIAL_NEIGHBORS);
+        assert_eq!(over.direct.resolution_scale, 1);
+        assert_eq!(over, gate);
     }
 }

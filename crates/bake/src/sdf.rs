@@ -54,6 +54,14 @@ pub const BRICK: usize = 8;
 const BAND_VOXELS: f32 = 4.0;
 /// Grid cap: 512 voxels (64 bricks) along the largest side.
 pub const MAX_VOXELS_PER_SIDE: f32 = 512.0;
+/// Voxel of a merged level field ([`build_level`]), metres. A level's meshes
+/// each span the building, so the per-mesh rule (largest side / 64, at most
+/// 25 cm) gave Sponza 22 to 25 cm voxels: sun shadows a quarter of a metre
+/// off and curtains a quarter of a metre thick.
+pub const LEVEL_VOXEL: f32 = 0.06;
+/// Grid cap of a level field along its largest side. A level longer than
+/// 61 m gets a coarser voxel instead of a larger grid.
+pub const LEVEL_MAX_VOXELS_PER_SIDE: f32 = 1024.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SdfBrick {
@@ -78,6 +86,10 @@ pub struct MeshSdf {
     pub coarse_band: f32,
     /// Open mesh: distances are unsigned and the mesh is treated as two-sided.
     pub thin: bool,
+    /// Mean diffuse albedo of the surface in each brick, linear, as bytes.
+    /// Parallel to `bricks` in a level field ([`build_level`]). Empty in a
+    /// per-mesh field: its instance carries one mean albedo.
+    pub brick_albedo: Vec<[u8; 3]>,
 }
 
 pub fn encode(d: f32, band: f32) -> u8 {
@@ -120,15 +132,80 @@ impl MeshSdf {
 
 /// Build over a BVH already built on `mesh.triangles`.
 pub fn build_with(mesh: &BakeMesh, s: &BakeSettings, bvh: &Bvh) -> MeshSdf {
-    let tris = &mesh.triangles;
-    let bounds = mesh.bounds();
-    let extent: [f32; 3] = std::array::from_fn(|a| (bounds.max[a] - bounds.min[a]).max(0.0));
-    let largest = extent.iter().fold(0.0f32, |m, &e| m.max(e));
+    let largest = largest_side(mesh);
     // A mesh far larger than a room (a whole level as one mesh) gets coarser voxels
     // instead of an unbounded grid: at most MAX_VOXELS_PER_SIDE along its largest side.
     let voxel = (largest / s.voxels_per_side)
         .clamp(s.voxel_min, s.voxel_max)
         .max(largest / MAX_VOXELS_PER_SIDE);
+    build_grid(mesh, voxel, bvh, false)
+}
+
+/// The field of a whole static level: `mesh` holds every triangle in level
+/// space. The voxel is [`LEVEL_VOXEL`], never the mesh-size rule, and each
+/// brick carries the mean albedo of the surface inside it.
+pub fn build_level(mesh: &BakeMesh, s: &BakeSettings, bvh: &Bvh) -> MeshSdf {
+    let voxel = LEVEL_VOXEL
+        .max(s.voxel_min)
+        .max(largest_side(mesh) / LEVEL_MAX_VOXELS_PER_SIDE);
+    build_grid(mesh, voxel, bvh, true)
+}
+
+fn largest_side(mesh: &BakeMesh) -> f32 {
+    let bounds = mesh.bounds();
+    (0..3).fold(0.0f32, |m, a| m.max((bounds.max[a] - bounds.min[a]).max(0.0)))
+}
+
+/// Mean diffuse albedo of each material, linear: a 16 by 16 grid of its
+/// textures. A masked material counts only the texels that pass the cutoff.
+fn material_albedo(mesh: &BakeMesh) -> Vec<[f32; 3]> {
+    const SIDE: u16 = 16;
+    (0..mesh.materials.len())
+        .map(|m| {
+            let cutoff = match mesh.materials[m].pbr.alpha_mode {
+                genos_load::AlphaMode::Mask(cutoff) => cutoff,
+                genos_load::AlphaMode::Opaque | genos_load::AlphaMode::Blend => 0.0,
+            };
+            let (mut sum, mut n) = ([0.0f32; 3], 0.0f32);
+            for y in 0..SIDE {
+                for x in 0..SIDE {
+                    let uv = [
+                        (f32::from(x) + 0.5) / f32::from(SIDE),
+                        (f32::from(y) + 0.5) / f32::from(SIDE),
+                    ];
+                    let shade = mesh.shade(m as u32, uv);
+                    if shade.alpha < cutoff {
+                        continue;
+                    }
+                    let a = shade.diffuse_albedo();
+                    for c in 0..3 {
+                        sum[c] += a[c];
+                    }
+                    n += 1.0;
+                }
+            }
+            if n > 0.0 {
+                sum.map(|v| v / n)
+            } else {
+                [0.0; 3]
+            }
+        })
+        .collect()
+}
+
+/// One cell of the brick grid: its coarse distance, and its brick with the
+/// brick's mean albedo when the cell touches the band.
+type CellBake = (u8, Option<(SdfBrick, [u8; 3])>);
+
+fn build_grid(mesh: &BakeMesh, voxel: f32, bvh: &Bvh, with_albedo: bool) -> MeshSdf {
+    let tris = &mesh.triangles;
+    let bounds = mesh.bounds();
+    let extent: [f32; 3] = std::array::from_fn(|a| (bounds.max[a] - bounds.min[a]).max(0.0));
+    let albedo_of = if with_albedo {
+        material_albedo(mesh)
+    } else {
+        Vec::new()
+    };
     let band = BAND_VOXELS * voxel;
     // The grid reaches past the band, so every in-band point has a brick.
     let pad = band + voxel;
@@ -157,29 +234,59 @@ pub fn build_with(mesh: &BakeMesh, s: &BakeSettings, bvh: &Bvh) -> MeshSdf {
     };
     let half_diag = brick_size * 0.5 * 3.0f32.sqrt();
     // Coarse grid and the list of bricks that touch the band, in parallel.
-    let results: Vec<(u8, Option<SdfBrick>)> = parallel_map(&cells, |&c| {
+    let results: Vec<CellBake> = parallel_map(&cells, |&c| {
         let p = centre(c);
-        let near = bvh.closest(tris, p, half_diag + band).is_some();
+        let near = bvh.closest(tris, p, half_diag + band);
         let coarse = encode(signed(p, coarse_band), coarse_band);
-        let brick = near.then(|| SdfBrick {
-            at: c,
-            distances: (0..BRICK * BRICK * BRICK)
+        let brick = near.map(|(nearest, _, _)| {
+            // Albedo: the nearest triangle's material at each voxel inside
+            // the band, weighted towards the surface.
+            let (mut colour, mut weight) = ([0.0f32; 3], 0.0f32);
+            let distances = (0..BRICK * BRICK * BRICK)
                 .map(|i| {
                     let l = [i % BRICK, (i / BRICK) % BRICK, i / (BRICK * BRICK)];
                     let q: [f32; 3] = std::array::from_fn(|a| {
                         origin[a] + ((c[a] as usize * BRICK + l[a]) as f32 + 0.5) * voxel
                     });
+                    if with_albedo && l.iter().all(|v| v % 2 == 1) {
+                        if let Some((tri, _, d)) = bvh.closest(tris, q, band) {
+                            let m = tris[tri as usize].material as usize;
+                            let w = (1.0 - d / band).max(0.0).powi(2) + 1.0e-4;
+                            if let Some(a) = albedo_of.get(m) {
+                                for k in 0..3 {
+                                    colour[k] += a[k] * w;
+                                }
+                                weight += w;
+                            }
+                        }
+                    }
                     encode(signed(q, band * 1.01), band)
                 })
-                .collect(),
+                .collect();
+            let mean = if weight > 0.0 {
+                colour.map(|v| ((v / weight).clamp(0.0, 1.0) * 255.0).round() as u8)
+            } else {
+                // No sampled voxel is inside the band (a brick off a sheet's
+                // edge): the material nearest the brick centre.
+                albedo_of
+                    .get(tris[nearest as usize].material as usize)
+                    .map_or([204; 3], |a| a.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8))
+            };
+            (SdfBrick { at: c, distances }, mean)
         });
         (coarse, brick)
     });
     let mut coarse = Vec::with_capacity(results.len());
     let mut bricks = Vec::new();
+    let mut brick_albedo = Vec::new();
     for (c, b) in results {
         coarse.push(c);
-        bricks.extend(b);
+        if let Some((brick, mean)) = b {
+            bricks.push(brick);
+            if with_albedo {
+                brick_albedo.push(mean);
+            }
+        }
     }
     MeshSdf {
         origin,
@@ -190,6 +297,7 @@ pub fn build_with(mesh: &BakeMesh, s: &BakeSettings, bvh: &Bvh) -> MeshSdf {
         coarse,
         coarse_band,
         thin,
+        brick_albedo,
     }
 }
 

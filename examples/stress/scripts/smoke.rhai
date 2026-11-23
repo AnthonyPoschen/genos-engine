@@ -1,7 +1,7 @@
 // Smoke test of the debug tools: every view, a light edit, a diff and a flicker window.
 time(#{ pause: true });
 knob("time_of_day", 12.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
 let settled = wait_settled(#{ timeout_frames: 400 });
 log(`settled ${settled.settled} after ${settled.frames} frames, ${settled.wall_ms} ms wall`);

@@ -30,8 +30,8 @@ fn s7_noise_gate_grades_a_on_lavapipe() {
     );
     assert_eq!(code, 0, "{metrics}");
     assert!(
-        metrics.contains("\"still_restir\":") && !metrics.contains("\"still_restir\": 0"),
-        "the random path did not shade a reservoir sample\n{metrics}"
+        metrics.contains("\"still_rays\":") && !metrics.contains("\"still_rays\": 0"),
+        "the cutoff shade traced no shadow rays\n{metrics}"
     );
 }
 
@@ -51,8 +51,8 @@ fn s7_noise_gate_grades_a_with_direct_specular_on_lavapipe() {
     );
     assert_eq!(code, 0, "{metrics}");
     assert!(
-        metrics.contains("\"still_restir\":") && !metrics.contains("\"still_restir\": 0"),
-        "the random path did not shade a reservoir sample\n{metrics}"
+        metrics.contains("\"still_rays\":") && !metrics.contains("\"still_rays\": 0"),
+        "the cutoff shade traced no shadow rays\n{metrics}"
     );
 }
 

@@ -6,7 +6,7 @@
 // A 2.4x step at about 32.4 m was the window outgrowing the shader's brick table:
 // passes counted on the CPU never ran.
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("time_of_day", 12.0);
 knob("boxes", 1.0);
 knob("lights", 5.0);

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Age of the shown mean, headless on lavapipe, one process.
+#   scripts/lighting/shown_age.sh OUT
+# GENOS_STRESS_BIN overrides the binary. GENOS_LIGHTING_SC_TRACE turns the tally on.
+# --quarters and --budget are forwarded when the binary has those flags
+# (#265). This branch's binary does not.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../.." && pwd)
+out=$(realpath -m "${1:-$root/genos-debug/shown-age}")
+mkdir -p "$out"
+shift || true
+quarters=
+budget=
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --quarters) quarters=$2; shift 2;;
+    --budget) budget=$2; shift 2;;
+    *) echo "unknown argument $1" >&2; exit 2;;
+  esac
+done
+bin=${GENOS_STRESS_BIN:-$root/target/release/genos-stress}
+[[ -x "$bin" ]] || (cd "$root" && cargo build --release -p genos-stress)
+if [[ "${LAVAPIPE:-1}" == 1 ]]; then
+  export VK_ICD_FILENAMES=${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}
+  export VK_DRIVER_FILES=${VK_DRIVER_FILES:-$VK_ICD_FILENAMES}
+  if [[ -z "${WAYLAND_DISPLAY:-}" ]]; then
+    export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$(mktemp -d)}
+    chmod 700 "$XDG_RUNTIME_DIR"
+    weston --backend=headless --socket=genos-age >"$out/weston.log" 2>&1 &
+    weston_pid=$!
+    trap 'kill $weston_pid 2>/dev/null || true' EXIT
+    for _ in $(seq 40); do [[ -S "$XDG_RUNTIME_DIR/genos-age" ]] && break; sleep 0.25; done
+    [[ -S "$XDG_RUNTIME_DIR/genos-age" ]] || { echo "weston did not start" >&2; exit 1; }
+    export WAYLAND_DISPLAY=genos-age
+  fi
+fi
+export GENOS_LIGHTING_SC_TRACE=1
+export GENOS_STRESS_DYNAMIC=${GENOS_STRESS_DYNAMIC:-0}
+args=(
+  --proof --no-panel --preset high --size 640x360
+  --freeze-sun --still-boxes
+  --script "$root/examples/stress/scripts/shown_age.rhai"
+  --report "$out"
+)
+if [[ -n "$quarters" ]]; then
+  args+=(--lighting-bounded-quarters "$quarters")
+fi
+if [[ -n "$budget" ]]; then
+  args+=(--surface-cache-ray-budget "$budget")
+fi
+set +e
+"$bin" "${args[@]}" >"$out/run.log" 2>&1
+code=$?
+set -e
+if [[ $code -ne 0 ]]; then
+  echo "shown age failed ($code), see $out/run.log" >&2
+  tail -40 "$out/run.log" >&2
+  exit "$code"
+fi
+python3 "$root/scripts/lighting/shown_age.py" ages "$out/run.log"

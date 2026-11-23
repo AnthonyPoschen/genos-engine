@@ -204,6 +204,47 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 | `bloom_intensity` | float, scales the pyramid add | 0.05 (0 on Fallback) |
 | `bloom_levels` | 0..6 | 6 on High, 5 Medium, 4 Low, 0 Fallback |
 | `output` | `auto`, `sdr`, `hdr10`, `scrgb` | `auto` on Medium and High; forced `sdr` on Fallback and Low |
+| `transition` | seconds, 0 or more. The look transition | 0 on every preset |
+
+### Camera cut
+
+Auto exposure starts again at a camera cut. A cut is a camera move of more than 2 m in one frame (`EXPOSURE_CUT_DISTANCE`): a checkpoint jump, a teleport, a scene load. For 4 frames (`EXPOSURE_CUT_FRAMES`, the meter's delay) the scale is a quarter of the scale before the cut. Then it is half the new view's target, one stop under, and the usual adaptation brings it up. Until 23 Nov 2026 a cut kept the old scale: a jump from Sponza's dark corner to the atrium started at 3.9 times the atrium's exposure, with the bloom that goes with it, and fell for 40 frames. Now the peak after that jump is 1.0 times the settled value. Fixed and camera modes are not changed. The three numbers are constants, not settings. Failure modes: a fast vehicle that covers 2 m in a frame reads as a cut and dips, and a cut shorter than 2 m keeps the old scale. Probe: `render.get_hdr` returns the exposure scale each frame; the `jump` line of `make sponza-gate` grades it; `a_camera_cut_starts_exposure_under_the_new_view_and_never_over_it` is the unit test. Replicated state: none. Authority: the machine that shades. Prediction / rollback: none. Determinism: the same camera path and meter readings give the same scale. Headless server: a server that does not shade has no exposure.
+
+### Look transition
+
+A game changes the look in play: a cave mouth lowers the compensation and the bloom. `transition` is the seconds that change takes. `0` applies it on the next frame, and the picture bytes are the ones the renderer drew before this key existed.
+
+With `transition` above 0 the renderer keeps its own copy of three values and moves each toward the scene's value every frame: `ev100`, `compensation`, and the bloom intensity. The other keys step.
+
+```text
+v += (target − v) × (1 − exp(−3 × dt / transition))
+```
+
+The curve is an exponential approach. It covers 95% of the distance after `transition` seconds. When `v` is within 0.0001 of the target it lands on the target. `dt` is 1/60 s for every frame, the same fixed step the adaptation uses. A target that moves again before the blend lands is followed from where `v` is.
+
+Bloom that is switched off keeps its pass while the intensity fades to 0, and then the pass stops. Bloom that is switched on rises from 0. A fade from 0.05 reaches 0 after about twice `transition`.
+
+The transition comes before the adaptation. The adaptation (`adapt_down`, `adapt_up`) still smooths the exposure scale on top, in every mode. In `auto` mode `ev100` is the meter's, and only `compensation` and bloom blend. `iso`, `aperture`, and `shutter` do not blend. `legacy_bytes` does not blend. The first frame has nothing to blend from and draws the scene's value. A scene load is a change like any other: the new scene's `transition` blends from the old scene's look.
+
+The maths is `step_look` in `crates/render/src/hdr_output.rs`, with unit tests. No GPU gate measures a blend yet.
+
+### The look in a scene file
+
+A scene file in `debug/scenes/` stores its look as one line per key:
+
+```text
+hdr KEY VALUE
+```
+
+`KEY` and `VALUE` are the ones `HdrSettings::set_key` takes, for example `hdr compensation -1`, `hdr bloom_intensity 0.02`, and `hdr exposure_mode auto`. A bad key or a bad value fails the load of the scene directory with the file and the line number.
+
+The order is: the lighting preset's defaults (`HdrSettings::for_preset`), then the scene file's `hdr` lines, then the arguments, then the `GENOS_HDR_*` mirrors of omitted arguments. A key the file does not name keeps the preset's value. A mesh scene's own defaults (bloom off, fixed EV 1.2) come before the file's lines.
+
+`save_hdr_to_scene` (public name `render.save_hdr_to_scene`) and the Output page's `Save look to scene` button write the scene's value back. The file's `hdr` lines are removed. One line is appended for each of `exposure_mode`, `ev100`, `compensation`, `iso`, `aperture`, `shutter`, `adapt_down`, `adapt_up`, `display`, `bloom`, `bloom_intensity`, `bloom_levels`, and `transition`. `output` is the machine's choice, `histogram_bins` follows the preset, and `legacy_bytes` is internal, so those three are not written. Every other line and comment is kept byte for byte. The new text is written to a temporary file beside the scene file and renamed over it.
+
+The value saved is `Scene.hdr`: what `set_hdr_settings` and the Output page wrote. An argument or a `GENOS_HDR_*` mirror is not saved, and it still wins on the next start. The command replies `scene`, `path`, and `lines` (the lines written). A scene that was not read from a file is refused. Every scene in `debug/scenes/` and in a `--scenes` directory has a file.
+
+The program reads the scene files at startup. An edit to a file by hand needs a restart. A save also updates the running program's copy, so `scene.load` of that scene in the same run opens with the saved look.
 
 GPU images, all `R16G16B16A16_SFLOAT` unless noted:
 
@@ -337,7 +378,7 @@ The §7 ceilings are not rows. They are not measured, and comparing them to them
 
 HDR output is a renderer pass, not a new system. It does not add `debug/hdr/`. The lighting binary (`debug/lighting`) gains an Output page when phase 1 lands. The page is the shared scaffolding: the scene picker, checkpoints, reset, replay, screenshots, sliders, the guided-review panel, and the headless CLI. No new binary.
 
-The menu draws glossary terms. Exposure mode, display, and output are dropdowns. EV100, compensation, ISO, aperture, shutter, bloom intensity, and bloom levels are sliders. There is no description string and no tooltip. The exposure phase draws this page and serves `get_hdr`. The surface list is the swapchain pair in use. Swapchain selection fills that list. The output row is labeled `SDR output` because that is the glossary headword for the swapchain image; the choices are `auto`, `sdr`, `hdr10`, and `scrgb`.
+The menu draws glossary terms. Exposure mode, display, and output are dropdowns. EV100, compensation, ISO, aperture, shutter, adapt down (0.05 to 5 s), adapt up (0.05 to 5 s), look transition (0 to 5 s), bloom intensity, and bloom levels are sliders. `Save look to scene` is the page's one button. Its row then reads `Saved to <file>` or `Not saved: <reason>`. The menu layout names are `hdr_adapt_down`, `hdr_adapt_up`, `hdr_transition`, and `hdr_save`. There is no description string and no tooltip. The exposure phase draws this page and serves `get_hdr`. The surface list is the swapchain pair in use. Swapchain selection fills that list. The output row is labeled `SDR output` because that is the glossary headword for the swapchain image; the choices are `auto`, `sdr`, `hdr10`, and `scrgb`.
 
 Probes, one per failure mode. They land with the phase that can fail that way. Names are the MCP catalogue in `crates/debug/src/commands.rs`, so MCP, `POST /cmd`, and Rhai share the JSON.
 
@@ -352,7 +393,7 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 | HDR was asked and the surface is SDR | `get_hdr` lists every `(format, color_space)` and the chosen mode |
 | The legacy bytes moved | `legacy_shader`. The stored picture is the plain compose of the shipped hall |
 
-`get_hdr_settings` and `set_hdr_settings` are the settings commands. Arguments:
+`get_hdr_settings` and `set_hdr_settings` are the settings commands. `save_hdr_to_scene` writes the look into the scene file (section 5). Arguments:
 
 ```text
 --exposure-mode auto|camera|fixed
@@ -369,10 +410,11 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 --bloom-intensity F
 --bloom-levels N
 --output auto|sdr|hdr10|scrgb
+--hdr-transition F
 --out DIR
 ```
 
-`GENOS_HDR_EXPOSURE_MODE`, `GENOS_HDR_EV100`, `GENOS_HDR_COMPENSATION`, `GENOS_HDR_ISO`, `GENOS_HDR_APERTURE`, `GENOS_HDR_SHUTTER`, `GENOS_HDR_ADAPT_DOWN`, `GENOS_HDR_ADAPT_UP`, `GENOS_HDR_DISPLAY`, `GENOS_HDR_BLOOM`, `GENOS_HDR_BLOOM_INTENSITY`, `GENOS_HDR_BLOOM_LEVELS`, `GENOS_HDR_OUTPUT`, and `GENOS_HDR_OUT` mirror those arguments. The thirteen design-table keys are the first thirteen. `GENOS_HDR_OUT` mirrors `--out`. The argument wins. The variable applies only when the argument was omitted. `--help` lists each one. The debug menu does not. `get_hdr` and the lighting stats return `hdr_ms`, `post_ms_device`, `hdr_vram_bytes`, and `post_vram_device`. `post_ms_device` is `hdr_ms`: bloom plus the display pass, one frame behind, zero when the device has no timestamps. `post_vram_device` is the post buffers in MiB. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p. The gate applies it on a hardware device. A software rasterizer prints a finite positive timestamp and is not that score. The allocation ceiling is the preset row in §7. There is no 96 MiB ceiling.
+`GENOS_HDR_EXPOSURE_MODE`, `GENOS_HDR_EV100`, `GENOS_HDR_COMPENSATION`, `GENOS_HDR_ISO`, `GENOS_HDR_APERTURE`, `GENOS_HDR_SHUTTER`, `GENOS_HDR_ADAPT_DOWN`, `GENOS_HDR_ADAPT_UP`, `GENOS_HDR_DISPLAY`, `GENOS_HDR_BLOOM`, `GENOS_HDR_BLOOM_INTENSITY`, `GENOS_HDR_BLOOM_LEVELS`, `GENOS_HDR_OUTPUT`, `GENOS_HDR_TRANSITION`, and `GENOS_HDR_OUT` mirror those arguments. The fourteen design-table keys are the first fourteen. `GENOS_HDR_OUT` mirrors `--out`. The argument wins. The variable applies only when the argument was omitted. `--help` lists each one. The debug menu does not. `get_hdr` and the lighting stats return `hdr_ms`, `post_ms_device`, `hdr_vram_bytes`, and `post_vram_device`. `post_ms_device` is `hdr_ms`: bloom plus the display pass, one frame behind, zero when the device has no timestamps. `post_vram_device` is the post buffers in MiB. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p. The gate applies it on a hardware device. A software rasterizer prints a finite positive timestamp and is not that score. The allocation ceiling is the preset row in §7. There is no 96 MiB ceiling.
 
 Screenshots and the histogram dump go to `./genos-debug/hdr-output/` unless `--out` is set. Nothing is written under `$HOME`.
 
@@ -418,6 +460,8 @@ The path tracer stays the GI reference. Bloom and the display transform are grad
 - **Prediction / rollback:** none. Exposure is presentation. A rollback does not replay the histogram.
 - **Determinism:** the CPU clip of the GPU bin counts is deterministic. The GPU binning is not cross-device deterministic. The analytic gate is deterministic. Pixels are not.
 - **Headless server:** no swapchain, no pyramid, no histogram. It can store the struct and forward it.
+
+The look transition and the scene-file look keep those five lines. Replicated state: `HdrSettings`, which now carries `transition`; the blended values are not replicated. Authority: the client that presents. Prediction / rollback: none; a rollback does not replay a blend. Determinism: the blend is a fixed 1/60 s step on the CPU, the same on every machine for the same frame count; frame counts differ between clients, so the pixels do not. Headless server: it stores and forwards the struct and runs no blend. A scene-file save is an editor action on the machine that holds the file.
 
 ## 11. Papers and departures
 

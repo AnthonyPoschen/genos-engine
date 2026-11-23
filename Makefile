@@ -1,4 +1,4 @@
-.PHONY: run room stress stress-big stress-bench lighting verify reference lighting-ref-check lighting-oracle lint-docs lint
+.PHONY: run room editor mesh stress-solo stress stress-big stress-bench lighting verify reference lighting-ref-check sponza-gate lighting-oracle restir-ref lint-docs lint
 
 run:
 	cargo run -p genos-camera
@@ -6,7 +6,24 @@ run:
 room:
 	cargo run -p genos-camera -- --scene room.rhai
 
+# The lighting stress scene in the scene program. Page Up and Page Down, the
+# Scene tab, and the MCP load_scene command switch to the other scenes in
+# debug/scenes.
 stress:
+	cargo run --release -p genos-lighting -- --scene lighting-stress
+
+# A mesh-workbench workspace in the scene program. WORKSPACE names the
+# directory that holds project.json (default: the sample in debug/scenes/mesh).
+WORKSPACE ?= debug/scenes/mesh/sample
+mesh:
+	cargo run --release -p genos-editor -- --scene mesh --mesh-workspace $(abspath $(WORKSPACE))
+
+# The editor: opens on the mesh scene and lists every scene. MCP port 8765.
+editor:
+	cargo run --release -p genos-editor
+
+# The single-scene stress program the regression scripts and tests run on.
+stress-solo:
 	cargo run --release -p genos-stress
 
 stress-big:
@@ -15,9 +32,9 @@ stress-big:
 stress-bench:
 	cargo run --release -p genos-stress -- --bench 10
 
-# Lighting debug binary. SCENE picks debug/scenes/<name> (default stress).
+# Lighting debug binary. SCENE picks debug/scenes/<name> (default lighting-stress).
 # This is the Sponza benchmark: make lighting SCENE=sponza
-SCENE ?= stress
+SCENE ?= lighting-stress
 lighting:
 	cargo run --release -p genos-lighting -- --scene $(SCENE) --gpu-times 30
 
@@ -41,6 +58,11 @@ lighting-oracle:
 	cargo build --release -p genos-stress
 	scripts/lighting/oracle_run.sh $(if $(PROFILE),$(PROFILE),quick) $(if $(OUT),$(OUT),genos-debug/oracle)
 
+# CPU ReSTIR DI reference (docs/systems/lighting/restir-di-plan.md).
+# Writes ./genos-debug/restir/metrics.json and reference.json.
+restir-ref:
+	cargo run -p genos-restir-ref --bin restir-ref -- run --out genos-debug/restir
+
 # docs/systems/*/plan.md: a References section, and local links that resolve.
 # docs/systems/core-networking/plan.md is allowlisted until that plan lands.
 lint-docs:
@@ -50,3 +72,9 @@ lint-docs:
 # Clippy, cargo-deny, semgrep, and the env-mirror registry.
 lint:
 	./scripts/lint.sh
+
+# The Sponza picture regressions fixed on 23 Nov 2026, PASS or FAIL each.
+# Needs the Sponza asset and a GPU; opens one proof window that takes no focus.
+sponza-gate:
+	cargo build --release -p genos-lighting
+	python3 tools/lighting/sponza_gate.py $(if $(ONLY),--only $(ONLY),) $(if $(REFERENCE),--reference,)

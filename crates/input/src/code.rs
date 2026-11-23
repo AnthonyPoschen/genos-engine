@@ -161,6 +161,22 @@ pub enum InputCode {
     key_left_bracket = 219,
     /// `]` on a US keyboard. Windows virtual key OEM 6.
     key_right_bracket = 221,
+    /// `;` on a US keyboard. Windows virtual key OEM 1.
+    key_semicolon = 186,
+    /// `=` on a US keyboard. Windows virtual key OEM plus.
+    key_equal = 187,
+    /// `,` on a US keyboard. Windows virtual key OEM comma.
+    key_comma = 188,
+    /// `-` on a US keyboard. Windows virtual key OEM minus.
+    key_minus = 189,
+    /// `.` on a US keyboard. Windows virtual key OEM period.
+    key_period = 190,
+    /// `/` on a US keyboard. Windows virtual key OEM 2.
+    key_slash = 191,
+    /// `\\` on a US keyboard. Windows virtual key OEM 5.
+    key_backslash = 220,
+    /// `'` on a US keyboard. Windows virtual key OEM 7.
+    key_quote = 222,
 }
 
 pub fn name(code: InputCode) -> &'static str {
@@ -316,6 +332,14 @@ pub fn name(code: InputCode) -> &'static str {
         InputCode::key_grave => "key_grave",
         InputCode::key_left_bracket => "key_left_bracket",
         InputCode::key_right_bracket => "key_right_bracket",
+        InputCode::key_semicolon => "key_semicolon",
+        InputCode::key_equal => "key_equal",
+        InputCode::key_comma => "key_comma",
+        InputCode::key_minus => "key_minus",
+        InputCode::key_period => "key_period",
+        InputCode::key_slash => "key_slash",
+        InputCode::key_backslash => "key_backslash",
+        InputCode::key_quote => "key_quote",
     }
 }
 
@@ -472,6 +496,14 @@ pub fn parse(name: &str) -> Option<InputCode> {
         "key_grave" => InputCode::key_grave,
         "key_left_bracket" => InputCode::key_left_bracket,
         "key_right_bracket" => InputCode::key_right_bracket,
+        "key_semicolon" => InputCode::key_semicolon,
+        "key_equal" => InputCode::key_equal,
+        "key_comma" => InputCode::key_comma,
+        "key_minus" => InputCode::key_minus,
+        "key_period" => InputCode::key_period,
+        "key_slash" => InputCode::key_slash,
+        "key_backslash" => InputCode::key_backslash,
+        "key_quote" => InputCode::key_quote,
         _ => return None,
     })
 }

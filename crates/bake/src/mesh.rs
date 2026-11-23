@@ -147,6 +147,60 @@ impl<'a> BakeMesh<'a> {
         }
     }
 
+    /// Every mesh instance of a glTF scene as one mesh in scene space, for a
+    /// level field ([`crate::load_or_bake_level`]). Materials and images are
+    /// the scene's, so a triangle keeps its material index.
+    pub fn from_gltf_scene(scene: &'a GltfScene) -> BakeMesh<'a> {
+        let mut out = BakeMesh {
+            name: "level".to_string(),
+            triangles: Vec::new(),
+            uv_sets: Vec::new(),
+            materials: Vec::new(),
+            images: &scene.images,
+        };
+        let mut sets_kept = false;
+        for instance in &scene.instances {
+            if instance.mesh >= scene.meshes.len() {
+                continue;
+            }
+            let mesh = BakeMesh::from_gltf(scene, instance.mesh);
+            let m = &instance.transform;
+            let point = |p: [f32; 3]| -> [f32; 3] {
+                std::array::from_fn(|r| m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r])
+            };
+            // A normal turns with the linear part. A level's nodes are rigid
+            // or uniformly scaled; the length is restored either way.
+            let turn = |n: [f32; 3]| -> [f32; 3] {
+                let v: [f32; 3] =
+                    std::array::from_fn(|r| m[r] * n[0] + m[4 + r] * n[1] + m[8 + r] * n[2]);
+                let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                if len > 1.0e-12 {
+                    v.map(|c| c / len)
+                } else {
+                    n
+                }
+            };
+            if !mesh.uv_sets.is_empty() && !sets_kept {
+                // Earlier triangles had only set 0.
+                out.uv_sets = vec![Vec::new(); out.triangles.len()];
+                sets_kept = true;
+            }
+            for (index, tri) in mesh.triangles.iter().enumerate() {
+                let mut moved = *tri;
+                moved.positions = tri.positions.map(point);
+                moved.normals = tri.normals.map(turn);
+                out.triangles.push(moved);
+                if sets_kept {
+                    out.uv_sets.push(mesh.uv_sets.get(index).cloned().unwrap_or_default());
+                }
+            }
+            if out.materials.is_empty() {
+                out.materials = mesh.materials;
+            }
+        }
+        out
+    }
+
     /// A plain mesh with one flat material per slot (analytic shapes).
     pub fn plain(
         name: &str,

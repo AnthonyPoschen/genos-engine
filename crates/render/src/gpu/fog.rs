@@ -51,11 +51,19 @@ pub(super) struct Targets {
     pub(super) cmd: Handle,
     fence: Handle,
     image_ready: bool,
+    /// Last buffers written into `set`. A repeat update while the other flight
+    /// still executes this set is VUID-vkUpdateDescriptorSets-None-03047.
+    bound: bool,
+    bound_scene: Handle,
+    bound_params: Handle,
+    bound_columns: Handle,
+    bound_view: Handle,
 }
 
 impl Gpu {
     pub(super) fn set_froxel_frame(&mut self, scene: &Scene, camera: &Camera, aspect: f32) {
-        if !scene.fog.dispatches() {
+        // The froxels are a perspective frustum. A parallel view draws no fog.
+        if !scene.fog.dispatches() || camera.parallel_half > 0.0 {
             self.froxel_frame = None;
             self.froxel_vram = 0;
             return;
@@ -67,7 +75,7 @@ impl Gpu {
             return;
         }
         let origin = [camera.position.x, camera.position.y, camera.position.z];
-        let view = frame_fog_view(origin, camera.yaw, camera.pitch, aspect);
+        let view = frame_fog_view(origin, camera.yaw, camera.pitch, camera.view_tan, aspect);
         let (sun, lamps) = sun_and_lamps(scene);
         self.froxel_frame = Some(FrameJob {
             params: encode_params(&scene.fog, &view, size, &sun, &lamps, 0, 0, 0.0),
@@ -136,7 +144,9 @@ impl Gpu {
         }
         let cmd = self.cmd;
         let dst = self.frame_scene[0].buffer;
-        self.barrier_on(cmd, 0x8000 | 0x800, 0x1000, 0x20, 0x1000);
+        // The scene upload is a transfer write of this buffer, including the
+        // word at byte 12. Wait for that write, not only the earlier reads.
+        self.barrier_on(cmd, 0x8000 | 0x800 | 0x1000, 0x1000, 0x20 | 0x1000, 0x1000);
         let zero = 0u32.to_ne_bytes();
         self.write_device(cmd, dst, 12, &zero)?;
         self.barrier_on(cmd, 0x1000, 0x800, 0x1000, 0x20);
@@ -221,7 +231,13 @@ impl Gpu {
         let head = column_header(width, height, slices);
         let dst = self.frame_scene[0].buffer;
         self.write_device(cmd, dst, 12, &word)?;
+        // Two transfer writes of frame_scene. Sync validation without range
+        // tracking treats them as one buffer even though the ranges differ.
+        self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
         self.write_device(cmd, dst, scene_offset(), &head)?;
+        // The 16-byte header and the column copy are both transfer writes of
+        // frame_scene. Order them before the copy.
+        self.barrier_on(cmd, 0x1000, 0x1000, 0x1000, 0x1000);
         unsafe {
             let region = CopyRegion {
                 src: 0,
@@ -548,6 +564,21 @@ impl Gpu {
         {
             return Ok(());
         }
+        let replacing = self
+            .froxel
+            .as_ref()
+            .is_some_and(|targets| !targets.image.image.is_null());
+        if replacing {
+            // The current flight was waited by the caller. Its fence may already
+            // have been reset, so only the other flight is waited here.
+            let other = 1 - self.flight;
+            self.wait_flight(other)?;
+            let fence = self
+                .froxel
+                .as_ref()
+                .map_or(std::ptr::null_mut(), |targets| targets.fence);
+            self.wait_fence(fence, "froxel replace")?;
+        }
         let (image_bytes, image) = self.make_image_3d(size)?;
         let columns = self.make_buffer(
             column_bytes(size.width, size.height).max(16),
@@ -569,6 +600,7 @@ impl Gpu {
             targets.size = size;
             targets.bytes = bytes;
             targets.image_ready = false;
+            targets.bound = false;
             retired
         };
         self.destroy_image(&mut retired.0);
@@ -680,6 +712,11 @@ impl Gpu {
             cmd,
             fence,
             image_ready: false,
+            bound: false,
+            bound_scene: std::ptr::null_mut(),
+            bound_params: std::ptr::null_mut(),
+            bound_columns: std::ptr::null_mut(),
+            bound_view: std::ptr::null_mut(),
         })
     }
 
@@ -831,7 +868,7 @@ impl Gpu {
         unsafe {
             let result = (self.fns.create_compute)(
                 self.device,
-                std::ptr::null_mut(),
+                self.pipeline_cache,
                 1,
                 std::ptr::from_ref(&info).cast(),
                 std::ptr::null(),
@@ -950,7 +987,30 @@ impl Gpu {
         Ok((cmd, fence))
     }
 
-    fn write_froxel_set(&self, scene: Handle) -> Result<(), String> {
+    fn write_froxel_set(&mut self, scene: Handle) -> Result<(), String> {
+        let unchanged = self.froxel.as_ref().is_some_and(|targets| {
+            targets.bound
+                && targets.bound_scene == scene
+                && targets.bound_params == targets.params.buffer
+                && targets.bound_columns == targets.columns.buffer
+                && targets.bound_view == targets.image.view
+        });
+        if unchanged {
+            return Ok(());
+        }
+        // The set is shared by both frames and by the standalone dispatch.
+        // record_and_submit has already reset the current flight's fence, so
+        // waiting it here would hang. The other flight, and the froxel fence,
+        // are the command buffers that can still be executing this set.
+        let other = 1 - self.flight;
+        self.wait_flight(other)?;
+        let fence = self
+            .froxel
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |targets| targets.fence);
+        if !fence.is_null() {
+            self.wait_fence(fence, "froxel descriptor")?;
+        }
         let targets = self.froxel.as_ref().ok_or("froxel targets missing")?;
         #[repr(C)]
         struct BufInfo {
@@ -1049,6 +1109,16 @@ impl Gpu {
         ];
         unsafe {
             (self.fns.update_desc)(self.device, 4, writes.as_ptr().cast(), 0, std::ptr::null());
+        }
+        if let Some(targets) = self.froxel.as_mut() {
+            let params = targets.params.buffer;
+            let columns = targets.columns.buffer;
+            let view = targets.image.view;
+            targets.bound = true;
+            targets.bound_scene = scene;
+            targets.bound_params = params;
+            targets.bound_columns = columns;
+            targets.bound_view = view;
         }
         Ok(())
     }

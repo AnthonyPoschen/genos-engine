@@ -149,6 +149,8 @@ pub struct Streamer {
     rate: u64,
     /// Bytes `admit` handed to `load` on the last step.
     last_admit: u64,
+    /// Frames in a row that wanted a finer mip and admitted none.
+    starved: u32,
     frame_ms: f32,
     refused: u32,
     evictions: u32,
@@ -174,6 +176,7 @@ impl Streamer {
             dwell,
             rate: 0,
             last_admit: 0,
+            starved: 0,
             frame_ms: 0.0,
             refused: 0,
             evictions: 0,
@@ -555,6 +558,15 @@ impl Streamer {
         if !self.transfer_ready && !self.pending.is_empty() {
             return;
         }
+        // The starvation floor. `admit` comes from the time a frame leaves
+        // under its budget, so a scene that runs over budget admitted nothing,
+        // ever, and its textures stayed at their coarsest mip. After
+        // STARVE_FRAMES such frames with nothing in flight, the next mip of
+        // the nearest texture is let through whatever its size. One mip, then
+        // the count starts again, so the ceiling still holds between them.
+        let mut floor = self.starved >= STARVE_FRAMES && self.pending.is_empty();
+        let mut wanted = false;
+        let mut admitted = false;
         loop {
             let mut order: Vec<usize> = (0..self.textures.len()).collect();
             order.sort_by(|&a, &b| {
@@ -573,9 +585,12 @@ impl Streamer {
                 }
                 let next = have - 1;
                 let bytes = self.textures[index].levels[usize::try_from(next).unwrap_or(0)].bytes;
-                if bytes > admit {
+                wanted = true;
+                if bytes > admit && !floor {
                     continue;
                 }
+                floor = false;
+                admitted = true;
                 if !budget.admits(self.committed, bytes) {
                     self.refused = self.refused.saturating_add(1);
                     continue;
@@ -595,6 +610,7 @@ impl Streamer {
                 break;
             }
         }
+        self.starved = if wanted && !admitted { self.starved.saturating_add(1) } else { 0 };
     }
 
     fn count_sample_holes(&mut self) {
@@ -932,6 +948,10 @@ pub fn ultra_near() -> f32 {
 }
 
 /// Overrun halves the rate, headroom grows it, and the admit stays under
+/// Frames in a row with a finer mip wanted and none admitted before one is let
+/// through (`Streamer::load`).
+pub const STARVE_FRAMES: u32 = 30;
+
 /// `bytes_per_ms * leftover_ms` computed from the meter, not from `rate`.
 #[must_use]
 pub fn slow_bus() -> f32 {
@@ -1254,6 +1274,31 @@ mod tests {
         assert!(stream.evict_for_oom());
         assert!(!stream.holds_memory(0, 1));
         assert!(!stream.evict_for_oom());
+    }
+
+    #[test]
+    fn a_frame_that_never_has_time_to_spare_still_gets_a_finer_mip() {
+        // A near, visible texture with two mips. Only the coarse one is held.
+        let mut stream = Streamer::new(0, 0.0, 0);
+        stream.add_texture(8, 8, &[64, 16]);
+        stream.set_transfer_ready(true);
+        let budget = Budget::from_heap_size(1 << 30, 0, 0, Headroom::default());
+        let view = [TextureView {
+            index: 0,
+            distance: 1.0,
+            visible: true,
+            derivatives: Some(near_derivatives(8)),
+        }];
+        // Every frame runs over the budget: nothing is admitted by time.
+        let over = 40.0;
+        for _ in 0..STARVE_FRAMES {
+            stream.step(&budget, &view, over, 16.0);
+            assert!(stream.pending_copies().is_empty(), "admitted before the floor");
+        }
+        stream.step(&budget, &view, over, 16.0);
+        let pending = stream.pending_copies();
+        assert_eq!(pending.len(), 1, "the floor lets one mip through");
+        assert_eq!((pending[0].index, pending[0].level), (0, 0));
     }
 
     #[test]

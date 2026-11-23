@@ -54,6 +54,9 @@ pub struct HdrSettings {
     pub bloom_intensity: f64,
     pub bloom_levels: u32,
     pub output: OutputMode,
+    /// Seconds a change of `ev100`, `compensation`, or the bloom intensity takes
+    /// to reach the picture. 0 applies the change on the next frame.
+    pub transition: f64,
     /// Exact exposure 1. The meter is not applied. Picture bytes stay on the legacy shoulder.
     pub legacy_bytes: bool,
 }
@@ -74,11 +77,12 @@ pub struct HdrCli {
     pub bloom_intensity: Option<f64>,
     pub bloom_levels: Option<u32>,
     pub output: Option<OutputMode>,
+    pub transition: Option<f64>,
 }
 
 /// Environment mirrors of the design-table keys, then `GENOS_HDR_OUT` for `--out`.
 /// The argument wins. The variable applies only when that argument was omitted.
-pub const HDR_ENV_MIRRORS: [&str; 14] = [
+pub const HDR_ENV_MIRRORS: [&str; 15] = [
     "GENOS_HDR_EXPOSURE_MODE",
     "GENOS_HDR_EV100",
     "GENOS_HDR_COMPENSATION",
@@ -92,6 +96,7 @@ pub const HDR_ENV_MIRRORS: [&str; 14] = [
     "GENOS_HDR_BLOOM_INTENSITY",
     "GENOS_HDR_BLOOM_LEVELS",
     "GENOS_HDR_OUTPUT",
+    "GENOS_HDR_TRANSITION",
     "GENOS_HDR_OUT",
 ];
 
@@ -119,6 +124,7 @@ impl HdrSettings {
             bloom_intensity: 0.0,
             bloom_levels: 0,
             output: OutputMode::Sdr,
+            transition: 0.0,
             legacy_bytes: true,
         }
     }
@@ -226,6 +232,9 @@ impl HdrSettings {
                     cli.bloom_levels = Some(parse_u32("bloom_levels", &take(&mut index)?)?);
                 }
                 "--output" => cli.output = Some(parse_output(&take(&mut index)?)?),
+                "--hdr-transition" => {
+                    cli.transition = Some(parse_seconds("transition", &take(&mut index)?)?);
+                }
                 _ => {}
             }
             index += 1;
@@ -256,6 +265,7 @@ impl HdrSettings {
             bloom_intensity: env("GENOS_HDR_BLOOM_INTENSITY"),
             bloom_levels: env("GENOS_HDR_BLOOM_LEVELS"),
             output: env("GENOS_HDR_OUTPUT"),
+            transition: env("GENOS_HDR_TRANSITION"),
         }))
     }
 
@@ -340,12 +350,19 @@ impl HdrSettings {
         {
             out.output = value;
         }
+        if let Some(value) = cli.transition.or_else(|| {
+            env.transition
+                .as_deref()
+                .and_then(|v| parse_seconds("transition", v).ok())
+        }) {
+            out.transition = value;
+        }
         out
     }
 
     pub fn to_text(&self) -> String {
         format!(
-            "exposure_mode={}\nev100={}\ncompensation={}\niso={}\naperture={}\nshutter={}\nadapt_down={}\nadapt_up={}\nhistogram_bins={}\ndisplay={}\nbloom={}\nbloom_intensity={}\nbloom_levels={}\noutput={}\nlegacy_bytes={}\n",
+            "exposure_mode={}\nev100={}\ncompensation={}\niso={}\naperture={}\nshutter={}\nadapt_down={}\nadapt_up={}\nhistogram_bins={}\ndisplay={}\nbloom={}\nbloom_intensity={}\nbloom_levels={}\noutput={}\ntransition={}\nlegacy_bytes={}\n",
             exposure_name(self.exposure_mode),
             self.ev100,
             self.compensation,
@@ -360,6 +377,7 @@ impl HdrSettings {
             self.bloom_intensity,
             self.bloom_levels,
             output_name(self.output),
+            self.transition,
             if self.legacy_bytes { "on" } else { "off" },
         )
     }
@@ -401,10 +419,48 @@ impl HdrSettings {
             "bloom_intensity" => self.bloom_intensity = parse_f64("bloom_intensity", value)?,
             "bloom_levels" => self.bloom_levels = parse_u32("bloom_levels", value)?,
             "output" => self.output = parse_output(value)?,
+            "transition" => self.transition = parse_seconds("transition", value)?,
             "legacy_bytes" => self.legacy_bytes = parse_on(value)?,
             other => return Err(format!("unknown hdr setting {other}")),
         }
         Ok(())
+    }
+}
+
+/// The keys a scene file stores as its look, in the order they are written.
+/// `output` is the machine's choice. `histogram_bins` follows the preset.
+/// `legacy_bytes` is internal.
+pub const HDR_LOOK_KEYS: [&str; 13] = [
+    "exposure_mode",
+    "ev100",
+    "compensation",
+    "iso",
+    "aperture",
+    "shutter",
+    "adapt_down",
+    "adapt_up",
+    "display",
+    "bloom",
+    "bloom_intensity",
+    "bloom_levels",
+    "transition",
+];
+
+impl HdrSettings {
+    /// `(key, value)` for each of [`HDR_LOOK_KEYS`]. [`HdrSettings::set_key`]
+    /// reads every pair back to the same value.
+    pub fn look_pairs(&self) -> Vec<(String, String)> {
+        let text = self.to_text();
+        HDR_LOOK_KEYS
+            .iter()
+            .filter_map(|key| {
+                let value = text
+                    .lines()
+                    .find_map(|line| line.split_once('=').filter(|(name, _)| name == key))?
+                    .1;
+                Some(((*key).to_string(), value.to_string()))
+            })
+            .collect()
     }
 }
 
@@ -424,6 +480,7 @@ pub struct HdrEnv {
     pub bloom_intensity: Option<String>,
     pub bloom_levels: Option<String>,
     pub output: Option<String>,
+    pub transition: Option<String>,
 }
 
 impl EngineSettings for HdrSettings {
@@ -454,6 +511,15 @@ fn parse_f64(name: &str, value: &str) -> Result<f64, String> {
     } else {
         Err(format!("{name} needs a finite number, got {value}"))
     }
+}
+
+/// A length of time. Negative seconds are refused.
+fn parse_seconds(name: &str, value: &str) -> Result<f64, String> {
+    let seconds = parse_f64(name, value)?;
+    if seconds < 0.0 {
+        return Err(format!("{name} needs 0 or more seconds, got {value}"));
+    }
+    Ok(seconds)
 }
 
 fn parse_u32(name: &str, value: &str) -> Result<u32, String> {
@@ -549,6 +615,7 @@ pub fn hdr_flag_needs_value(arg: &str) -> Option<bool> {
             | "--bloom-intensity"
             | "--bloom-levels"
             | "--output"
+            | "--hdr-transition"
     );
     known.then_some(inline.is_none())
 }
@@ -631,9 +698,58 @@ mod tests {
         );
         assert_eq!(from_cli.adapt_down.to_bits(), 0.90_f64.to_bits());
         assert_eq!(from_cli.adapt_up.to_bits(), 1.25_f64.to_bits());
-        assert_eq!(HDR_ENV_MIRRORS.len(), 14);
+        assert_eq!(HDR_ENV_MIRRORS.len(), 15);
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_DOWN"));
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_UP"));
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_OUT"));
+    }
+
+    #[test]
+    fn transition_survives_the_text_and_the_argument_wins() {
+        let mut high = HdrSettings::for_preset(LightingPreset::High);
+        assert_eq!(high.transition.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(HdrSettings::legacy_bytes().transition.to_bits(), 0.0_f64.to_bits());
+        high.set_key("transition", "1.5").unwrap_or_else(|err| panic!("{err}"));
+        high.compensation = -1.25;
+        let back = HdrSettings::parse(&high.to_text()).unwrap_or_else(|err| panic!("{err}"));
+        assert_eq!(back, high);
+        assert!(high.set_key("transition", "-1").is_err());
+        assert!(high.set_key("transition", "soon").is_err());
+
+        let args = vec!["--hdr-transition".to_string(), "2".to_string()];
+        let cli = HdrSettings::cli_from(&args).unwrap_or_else(|err| panic!("{err}"));
+        let env = HdrEnv {
+            transition: Some("0.5".into()),
+            ..HdrEnv::default()
+        };
+        assert_eq!(high.resolve(&cli, &env).transition.to_bits(), 2.0_f64.to_bits());
+        assert_eq!(
+            high.resolve(&HdrCli::default(), &env).transition.to_bits(),
+            0.5_f64.to_bits()
+        );
+        assert_eq!(hdr_flag_needs_value("--hdr-transition"), Some(true));
+        assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_TRANSITION"));
+    }
+
+    #[test]
+    fn the_look_pairs_read_back_and_leave_the_machine_keys_out() {
+        let mut look = HdrSettings::for_preset(LightingPreset::Medium);
+        look.compensation = -1.0;
+        look.bloom_intensity = 0.02;
+        look.transition = 0.75;
+        let pairs = look.look_pairs();
+        let keys: Vec<&str> = pairs.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(keys, HDR_LOOK_KEYS);
+        // On another preset and another output, the pairs bring the look and
+        // nothing else.
+        let mut other = HdrSettings::for_preset(LightingPreset::Low);
+        for (key, value) in &pairs {
+            other.set_key(key, value).unwrap_or_else(|err| panic!("{err}"));
+        }
+        assert_eq!(other.output, OutputMode::Sdr);
+        assert_eq!(other.histogram_bins, 64);
+        other.output = look.output;
+        other.histogram_bins = look.histogram_bins;
+        assert_eq!(other, look);
     }
 }

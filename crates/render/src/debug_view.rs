@@ -41,18 +41,31 @@ pub enum ViewMode {
     Depth,
     /// Direct light only, as `Direct`; kept for the tools' lamp view.
     Light,
-    /// Surface cache: the texel size each pixel reads (red 6.25 cm, green
-    /// 12.5 cm, blue 25 cm, magenta coarser), dimmed where the texel holds fewer
-    /// than 4 sets; shaded by the normal so surfaces read.
+    /// Surface cache population. Red's low 7 bits are the texel's own-mean
+    /// luma (0–127) and its high bit is set when the cache ray origin is
+    /// inside geometry. Green is the seed luma. Blue's low 7 bits are the
+    /// set count and its high bit is set when the cell is coarser than
+    /// 12.5 cm. The bytes are exact (no dither). A hash miss is (0, 0, 0)
+    /// plus the size bits.
     Texels,
     /// Short-term relative standard deviation of the cache entry under each
     /// pixel. Grey is a missing or unallocated entry. Blue is quiet, red is noisy.
     Variance,
+    /// Where the bounce comes from in the cascade, as flat codes, not light:
+    /// red where the pixel has no published level-0 sample (a gap), green the
+    /// blend towards the coarser footprint level, blue the finer level over
+    /// the deepest. See `lighting_cascade_path_view`.
+    Path,
+    /// Level-0 surface voxel each pixel maps to. Colour is a hash of the
+    /// voxel's cell and ring, the same ring and cell size insert uses, so
+    /// the patches stay screen-constant and the ring boundaries move with
+    /// the camera. A bright line marks each ring start.
+    Voxels,
 }
 
 impl ViewMode {
     /// In the compose pass's code order (lighting_compose.comp).
-    pub const ALL: [ViewMode; 9] = [
+    pub const ALL: [ViewMode; 11] = [
         Self::Full,
         Self::Direct,
         Self::Bounce,
@@ -62,6 +75,8 @@ impl ViewMode {
         Self::Light,
         Self::Texels,
         Self::Variance,
+        Self::Path,
+        Self::Voxels,
     ];
 
     pub fn name(self) -> &'static str {
@@ -75,6 +90,8 @@ impl ViewMode {
             Self::Light => "light",
             Self::Texels => "texels",
             Self::Variance => "variance",
+            Self::Path => "path",
+            Self::Voxels => "voxels",
         }
     }
 
@@ -273,4 +290,20 @@ fn sphere_screen_share(matrix: &[f32; 16], center: [f32; 3], radius: f32) -> f32
     let w = (hi[0].min(1.0) - lo[0].max(-1.0)).max(0.0);
     let h = (hi[1].min(1.0) - lo[1].max(-1.0)).max(0.0);
     (w * h / 4.0).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn voxels_is_the_next_compose_mode() {
+        assert_eq!(ViewMode::parse("voxels"), Some(ViewMode::Voxels));
+        assert_eq!(ViewMode::Voxels.name(), "voxels");
+        assert_eq!(ViewMode::ALL.len(), 11);
+        assert_eq!(ViewMode::Full.code(), 0);
+        assert_eq!(ViewMode::Texels.code(), 7);
+        assert_eq!(ViewMode::Path.code(), 9);
+        assert_eq!(ViewMode::Voxels.code(), 10);
+    }
 }

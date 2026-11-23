@@ -80,6 +80,7 @@ fn gpu_reference_matches_the_cpu_proof() {
             triangles,
             materials: Vec::new(),
             specular: false,
+            meshes: None,
         };
         let cpu = render(&setup(64, 0.0, cpu_max, cpu_triangles));
         let gpu = render_gpu(&setup(16, cpu.noise / 8.0, 1 << 22, true)).expect("gpu reference");

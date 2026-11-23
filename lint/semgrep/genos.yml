@@ -70,7 +70,7 @@ rules:
         - crates/bake/src/mesh.rs
         - crates/mesh/src/bvh.rs
         - examples/stress/src/lighting_ref/capture.rs
-        - debug/lighting/src/main.rs
+        - crates/scene-program/src/lib.rs
         - examples/camera/src/main.rs
         - crates/lighting-ref/src/store.rs
         - crates/lighting-ref/src/picture.rs

@@ -7,23 +7,21 @@
 //! by 4096 sent the NVIDIA compiler past 17 GB without finishing the pipeline, while
 //! lavapipe compiled it in a moment. Loops run to a bound read from the scene block.
 
-const SHADERS: [&str; 25] = [
+const SHADERS: [&str; 23] = [
     "overlay.frag",
     "transmit.comp",
     "scene_rays.glsl",
     "scene_data.glsl",
     "mesh_field.glsl",
     "lighting_common.glsl",
+    "lighting_screen_probe.glsl",
     "lighting_pack.glsl",
     "gbuffer.frag",
-    "lighting_place.comp",
     "lighting_trace.comp",
     "lighting_direct.comp",
-    "lighting_gather.comp",
     "lighting_compose.comp",
     "lighting_sun_compose.comp",
     "lighting_cache.comp",
-    "lighting_filter.comp",
     "lighting_compact.comp",
     "lighting_cache.glsl",
     "lighting_cache_slots.glsl",
@@ -37,6 +35,30 @@ const SHADERS: [&str; 25] = [
 
 /// Largest constant trip count a loop may have.
 const MAX_CONSTANT_TRIPS: u64 = 64;
+
+fn function_body<'a>(src: &'a str, signature: &str) -> &'a str {
+    let at = src
+        .find(signature)
+        .unwrap_or_else(|| panic!("missing {signature}"));
+    let rest = &src[at + signature.len()..];
+    let open = rest
+        .find('{')
+        .unwrap_or_else(|| panic!("{signature} has no body"));
+    let mut depth = 0i32;
+    for (i, ch) in rest[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &rest[open + 1..open + i];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("{signature} body does not close")
+}
 
 fn source(name: &str) -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -108,6 +130,7 @@ fn picture_compose_does_not_walk_occluders() {
         "lighting_compose.comp",
         "lighting_sun_compose.comp",
         "lighting_common.glsl",
+        "lighting_screen_probe.glsl",
     ] {
         let text = source(name);
         assert!(
@@ -123,4 +146,24 @@ fn picture_compose_does_not_walk_occluders() {
             .count();
         assert_eq!(calls, 0, "{name} calls scene_candidates");
     }
+}
+
+/// A refine child starts from the parent's radiance at one set. An empty mean
+/// made the first ray throw that prior away.
+#[test]
+fn a_refine_child_inherits_the_parent_mean_at_one_set() {
+    let cache = source("lighting_cache.glsl");
+    let spawn = function_body(&cache, "void lighting_fine_spawn(");
+    assert!(
+        spawn.contains("cache.v[3u * born + 2u] = vec4(pre, LIGHTING_FINE_INHERIT_SETS)"),
+        "the child mean is the parent radiance at the inherit count"
+    );
+    assert!(
+        spawn.contains("LIGHTING_FINE_INHERIT_VALUE"),
+        "the child value starts high"
+    );
+    assert!(
+        !spawn.contains("1.0 - area"),
+        "the area step must not scale the inherited radiance"
+    );
 }

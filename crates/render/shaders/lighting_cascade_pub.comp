@@ -1,0 +1,39 @@
+#version 450
+// Level-0 resolve. Runs after the level-0 shade pass and before picture compose.
+// Compose loads the two words this writes and does not walk the hash.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "lighting_common.glsl"
+#include "lighting_cascade.glsl"
+
+void main() {
+    if (!lighting_gi_on()) {
+        return;
+    }
+    uvec2 p;
+    // Same coverage as picture compose. A full frame covers the image. A
+    // held frame publishes the dirty blocks compose will read.
+    bool reuse = (gstats.ctrl_bits & 4u) != 0u && (gstats.ctrl_bits & 128u) != 0u && (gstats.ctrl_bits & 32u) != 0u;
+    if (!reuse || ckeys.key[LIGHTING_COMPOSE_FULL] != 0u) {
+        p = gl_GlobalInvocationID.xy;
+    } else {
+        uint bw = (pc.dims.x + 7u) / 8u;
+        uint block = ckeys.key[LIGHTING_COMPOSE_LIST + gl_WorkGroupID.x];
+        uvec2 b = uvec2(block % bw, block / bw);
+        p = b * 8u + gl_LocalInvocationID.xy;
+    }
+    if (p.x >= pc.dims.x || p.y >= pc.dims.y) {
+        return;
+    }
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+        return;
+    }
+    if (two_sided && dot(n, scene.eye.xyz - pos) < 0.0) {
+        n = -n;
+    }
+    lighting_cascade_publish(p.y * pc.dims.x + p.x, p, pos, n);
+}

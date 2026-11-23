@@ -2,7 +2,7 @@
 // Yaw 0 looks down -Z. Right is (cos(yaw), sin(yaw)) at yaw -0.3554.
 // 0.1 m per frame. Pass --gi-metrics. CSV: <out>/gi/s2-strafe.csv
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "move");
 knob("lamps", "move");
 knob("dynamic", 50);

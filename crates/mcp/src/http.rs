@@ -196,13 +196,14 @@ fn serve_connection(
             }
         };
         let timeout = crate::rpc::command_timeout(&args);
-        return match crate::command::call(name, args, timeout) {
+        let registered = crate::command::resolve(name).unwrap_or_else(|| name.to_string());
+        return match crate::command::call(&registered, args, timeout) {
             Ok(value) => write_text(&mut stream, 200, "OK", &crate::json::encode(&value)),
             Err(body) => write_text(&mut stream, 400, "Bad Request", &body),
         };
     }
     if path == "/cmd" && request.method == "GET" {
-        let names: Vec<String> = crate::command::specs()
+        let names: Vec<String> = crate::command::published()
             .into_iter()
             .map(|spec| format!("{}: {}", spec.name, spec.description))
             .collect();

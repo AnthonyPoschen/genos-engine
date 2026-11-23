@@ -19,7 +19,7 @@ pub mod tools;
 mod value;
 
 pub use image::{Diff, Flicker, FlickerReport, Image, Luminance, Region};
-pub use knobs::{CheckpointPose, Host, Knob, LoadPace};
+pub use knobs::{CheckpointPose, Host, Knob, LoadPace, SavedLook};
 pub use reference::{
     compare, compare_linear, render as render_reference, Compare, RefSetup, Reference,
 };

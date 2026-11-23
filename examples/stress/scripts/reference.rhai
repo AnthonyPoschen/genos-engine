@@ -4,7 +4,7 @@
 // <name>-live.png and <name>-heatmap.png (red: live too bright, blue: too dark).
 // The first run traces for minutes; later runs reuse target/reference-cache.
 time(#{ pause: true });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
 
 fn judge(name, hours) {

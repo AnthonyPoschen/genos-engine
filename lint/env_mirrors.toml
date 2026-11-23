@@ -43,6 +43,11 @@ kind = "mirror"
 detail = "--gpu-times"
 
 [[var]]
+name = "GENOS_PROFILE_PASSES"
+kind = "mirror"
+detail = "--profile-passes"
+
+[[var]]
 name = "GENOS_GI_METRICS"
 kind = "mirror"
 detail = "--gi-metrics"
@@ -165,7 +170,7 @@ detail = "built-in chords are primary; this file replaces the listed actions"
 [[var]]
 name = "GENOS_MENU_LAYOUT"
 kind = "override"
-detail = "debug/lighting/menu.txt is primary; this path replaces that table"
+detail = "crates/scene-program/menu.txt is primary; this path replaces that table"
 
 [[var]]
 name = "HOME"
@@ -267,10 +272,16 @@ name = "GENOS_PIPELINE_LIMIT"
 kind = "test"
 detail = "harness only"
 
+
 [[var]]
 name = "GENOS_KNOCKOUT"
 kind = "test"
 detail = "harness only"
+
+[[var]]
+name = "GENOS_BUFFER_POISON"
+kind = "test"
+detail = "harness only: fill new host-visible GPU buffers with 0xFF/NaN"
 
 [[var]]
 name = "OCC_DUMP"
@@ -446,6 +457,36 @@ detail = "no CLI argument yet"
 name = "GENOS_LIGHTING_FILL"
 kind = "mirror"
 detail = "--lighting-fill (stress), LightingSettings key; MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_LOD_CREATE"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_lod_create; stress knob lighting_fine_lod_create; MCP set_key"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_LOD_DROP"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_lod_drop; stress knob lighting_fine_lod_drop; MCP set_key"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_LOD_LOOKAHEAD"
+kind = "mirror"
+detail = "LightingSettings surface_cache.fine_lod_lookahead; stress knob lighting_fine_lod_lookahead; MCP set_key"
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_BUDGET_SHARE"
+kind = "mirror"
+detail = "Removed. set_key warns and drops the value. The fill budget is not split."
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_SCREEN_BOOST"
+kind = "mirror"
+detail = "Removed. set_key warns and drops the value. The rank is not scaled."
+
+[[var]]
+name = "GENOS_LIGHTING_FINE_CLOSE_BOOST"
+kind = "mirror"
+detail = "Removed. set_key warns and drops the value. The rank is not scaled."
 
 [[var]]
 name = "GENOS_LIGHTING_GI"
@@ -628,6 +669,26 @@ kind = "mirror"
 detail = "--surface-cache-ray-budget"
 
 [[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_CELLS"
+kind = "mirror"
+detail = "surface_cache.sh_cells (stress knob lighting_surface_cache_sh_cells); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_DETAIL"
+kind = "mirror"
+detail = "surface_cache.sh_texel_detail (stress knob); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_TEXEL_RAY_CUT"
+kind = "mirror"
+detail = "surface_cache.sh_texel_ray_cut (stress knob); MCP set_lighting_settings"
+
+[[var]]
+name = "GENOS_LIGHTING_SURFACE_CACHE_SH_PROBE_RETIRE"
+kind = "mirror"
+detail = "surface_cache.sh_probe_retire (stress knob); MCP set_lighting_settings"
+
+[[var]]
 name = "GENOS_LIGHTING_SC_SETTLE"
 kind = "mirror"
 detail = "--lighting-sc-settle (stress), LightingSettings key; MCP set_lighting_settings"
@@ -706,6 +767,11 @@ detail = "no CLI argument yet"
 name = "GENOS_LIGHTING_WORLD_STALE"
 kind = "todo"
 detail = "no CLI argument yet"
+
+[[var]]
+name = "GENOS_LIGHTING_CASCADE_REFRESH_PERIOD"
+kind = "mirror"
+detail = "world_cache.cascade_refresh_period; LightingSettings key cascade_refresh_period; MCP set_lighting_settings"
 
 [[var]]
 name = "GENOS_LIGHTING_YOUNG_ONLY"
@@ -1295,6 +1361,11 @@ kind = "mirror"
 detail = "--output"
 
 [[var]]
+name = "GENOS_HDR_TRANSITION"
+kind = "mirror"
+detail = "--hdr-transition"
+
+[[var]]
 name = "GENOS_HDR_OUT"
 kind = "mirror"
 detail = "--out"
@@ -1512,6 +1583,71 @@ detail = "--out"
 
 
 [[var]]
+name = "GENOS_RESTIR_OUT"
+kind = "mirror"
+detail = "--out"
+
+[[var]]
+name = "GENOS_RESTIR_INITIAL"
+kind = "mirror"
+detail = "--initial"
+
+[[var]]
+name = "GENOS_RESTIR_TEMPORAL"
+kind = "mirror"
+detail = "--temporal"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL"
+kind = "mirror"
+detail = "--spatial"
+
+[[var]]
+name = "GENOS_RESTIR_DI"
+kind = "mirror"
+detail = "--restir-di"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_NEIGHBORS"
+kind = "mirror"
+detail = "--restir-spatial-neighbors (stress), LightingSettings key restir_spatial_neighbors"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_RADIUS"
+kind = "mirror"
+detail = "--restir-spatial-radius (stress), LightingSettings key restir_spatial_radius"
+
+[[var]]
+name = "GENOS_RESTIR_RESOLUTION_SCALE"
+kind = "mirror"
+detail = "--restir-resolution-scale (stress), LightingSettings key restir_resolution_scale"
+
+[[var]]
+name = "GENOS_RESTIR_CANDIDATES"
+kind = "mirror"
+detail = "--restir-candidates (stress), LightingSettings key restir_candidates"
+
+[[var]]
+name = "GENOS_RESTIR_SPATIAL_CHECKERBOARD"
+kind = "mirror"
+detail = "--restir-spatial-checkerboard (stress), LightingSettings key restir_spatial_checkerboard"
+
+[[var]]
+name = "GENOS_RESTIR_SPLIT_PASSES"
+kind = "mirror"
+detail = "--restir-split-passes (stress), LightingSettings key restir_split_passes"
+
+[[var]]
+name = "GENOS_RESTIR_COST"
+kind = "test"
+detail = "diagnostic: 1 prints reservoir iteration counts, not milliseconds"
+
+[[var]]
+name = "GENOS_RESTIR_REUSE"
+kind = "test"
+detail = "diagnostic: off drops ReSTIR temporal and spatial reuse"
+
+[[var]]
 name = "GENOS_LIFECYCLE_BLOCK_MS"
 kind = "mirror"
 detail = "--lifecycle-block-ms"
@@ -1542,6 +1678,41 @@ kind = "build"
 detail = "glslang -D for the lighting compose maintenance compile; not a process environment variable"
 
 [[var]]
+name = "GENOS_TEXEL_RO_DIR"
+kind = "test"
+detail = "harness only: directory of the planted cache handed from the read-only planter process to the reader process"
+
+[[var]]
+name = "GENOS_TEXEL_RO_ROLE"
+kind = "test"
+detail = "harness only: planter or reader, so the read-only test's child process does not compile both modules"
+
+[[var]]
+name = "GENOS_COMPOSE_NO_WALK"
+kind = "build"
+detail = "glslang -D for every compose compile; the neighbour walk stays in the cache relight and is not a process environment variable"
+
+[[var]]
+name = "GENOS_LEVEL0_PICTURE"
+kind = "build"
+detail = "glslang -D for picture and sun compose; the picture loads the published level-0 word and is not a process environment variable"
+
+[[var]]
 name = "GENOS_COMPOSE_SC_WRITES"
 kind = "override"
 detail = "read-only compose is primary; 1 sets compose spec constant 0 so compose writes the cache again (A/B kill switch)"
+
+[[var]]
+name = "GENOS_SCENES"
+kind = "mirror"
+detail = "--scenes"
+
+[[var]]
+name = "GENOS_MESH_WORKSPACE"
+kind = "mirror"
+detail = "--mesh-workspace"
+
+[[var]]
+name = "GENOS_LIGHTING_CASCADE_TIMES"
+kind = "todo"
+detail = "no CLI argument yet; prints the cascade stamps each frame"

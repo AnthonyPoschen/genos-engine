@@ -1,0 +1,10 @@
+#version 450
+// Same-frame gather. Maintenance has enqueued texels and requested lattices.
+// This dispatch fills both before compose loads them. It is not the cache relight.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+
+void main() {
+    lighting_sh_store_drain(gl_GlobalInvocationID.x);
+}

@@ -32,7 +32,8 @@ layout(std430, set = 0, binding = 0) readonly buffer SceneData {
     vec4 floor_center;
     // x is half extent on Z. yzw is the floor color.
     vec4 floor_data;
-    // xyz is the camera basis. w is tan(half fov), 0, aspect.
+    // xyz is the camera basis. w is tan(half fov); the parallel view's half
+    // height in metres (0 for a perspective view); aspect.
     vec4 view_right;
     vec4 view_up;
     vec4 view_forward;

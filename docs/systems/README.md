@@ -34,6 +34,9 @@ Each record uses these headings:
 - [Loading](loading.md) owns images, textures, texture maps, meshes, animations, PCM samples, and fonts.
 - [Animation](animation.md) owns glTF skins, clip sampling, blends, the state machine, root motion, and the foot IK hook ([ADR 0038](../adr/0038-animation-adopts-design-and-fills-gaps.md)).
 - [Asset loading](asset-loading.md) is the design for import, offline cook, and async streaming of glTF models (ADR 0020).
+- [Editor status](editor-status.md) says where the editor stands and what is missing.
+- [Editor checklist](editor-checklist.md) is the running list for the editor and mesh work: the decisions, what is done, and what is next.
+- [Mesh workbench](mesh-workbench.md) is the mesh viewer and the agent's path to mesh-workbench: a workspace opens as a `mesh` scene and the picture follows its edits.
 - [Audio](audio.md) owns playback, Doppler, stereo image, and direct-path transmission. The plan for one mix and device-output-only writes is [audio-design.md](audio-design.md) ([ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md), accepted).
 - [Scripting](scripting.md) owns Rhai for games and mods.
 - [Debugging](debugging.md) owns the shared debug scaffolding, the per-system binaries under `debug/<system>/`, the probes, the commands, the scripts, the captures, and the ground-truth reference.
@@ -54,6 +57,7 @@ These are plans. They are not system records. A step edits the matching record w
 - [Fog and volumetric lighting](fog-and-volumetric-lighting-design.md): a budgeted froxel volume, height fog, local volumes, shadowed shafts, and a world-cache read. [ADR 0018](../adr/0018-fog-and-volumetric-lighting.md) is accepted. The froxel holds height fog and local volumes. Sun and point-lamp shafts use traced shadows. The world-cache read waits for lighting phase 3. `fog-check` grades the closed forms and each live renderer row. `debug/lighting` exposes the Fog page and `get_fog_settings`, `set_fog_settings`, and `get_fog_stats`.
 - [UI plan](ui/plan.md): retained elements, text, input, and binding an element to replicated state. Steps that read `DamageTracker` require PR #5.
 - [Lamp layering](lamp-layering-design.md): optional baked GI layer for a static point lamp, and fast-blend settling for the shared live layer ([ADR 0017](../adr/0017-lamp-layering.md), proposed).
+- [ReSTIR DI plan](lighting/restir-di-plan.md): CPU reference first, then small GPU stages. The 4070 check is one batched run at the end ([ADR 0022](../adr/0022-lighting-v3-compute-architecture.md) stage C).
 - [Audio design](audio-design.md): one mix in `genos-audio`, device outputs that only write that mix, disk-fed clips, reverb zones, a later mix of propagation paths, and a bit-identical offline hash ([ADR 0041](../adr/0041-one-audio-mix-device-outputs-only.md), accepted).
 - [Navigation](navigation.md): tiled navigation meshes, a sparse volume graph, and several planners behind one trait ([ADR 0043](../adr/0043-navigation-planners.md)). Proposed. A* with a funnel is the first planner. There is no crate.
 

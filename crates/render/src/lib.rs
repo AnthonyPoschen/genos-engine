@@ -1,15 +1,19 @@
 mod aa;
 mod budget;
+mod cache_probe;
+mod cascade;
 mod cooked_load;
 mod fog;
 mod fog_budget;
 mod fog_pass;
 mod gate;
 mod gltf_draw;
+mod gltf_surface;
 mod gpu;
 mod hdr_output;
 #[cfg(test)]
 mod lamp_pick;
+pub mod lighting_sh;
 mod material_stream;
 mod mesh;
 mod mesh_field;
@@ -20,7 +24,9 @@ mod particles;
 mod pool;
 mod reflections;
 mod reflections_grade;
+mod restir_live;
 mod scene_mesh;
+mod shown_age;
 mod trace;
 mod unfilled;
 mod wire;
@@ -28,6 +34,8 @@ mod world;
 
 pub use aa::Antialias;
 pub use budget::{FrameMemory, ImageAdmit};
+pub use cache_probe::{offer_origin, CacheQuery, StoredCell};
+pub use cascade::{CascadeTimes, Level0Voxel};
 pub use cooked_load::{CookedReport, RenderSettings};
 pub use fog::{
     apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, dispatched_grid,
@@ -50,15 +58,21 @@ pub use fog_pass::{
     FogPointLamp, FOG_F2_REFERENCE, FOG_FLIP_G, FOG_IGNORE_SPHERE, FOG_LINEAR_SLICE,
     FOG_SKIP_EXTINCTION, FOG_SKIP_SHADOW, YAW_FRAMES,
 };
-pub use gate::{guard as gate_guard, BOUNCE_IN_COMPOSE, DIRECT_IN_COMPOSE};
+pub use gate::{
+    guard as gate_guard, BOUNCE_IN_COMPOSE, CACHE_FILL, DIRECT_IN_COMPOSE, LAMP_DISC,
+    MOVING_LAMP_WALL,
+};
 pub use genos_bake as bake;
 pub use genos_scene::{EngineSettings, LightingPreset, LightingSettings};
+pub use gltf_surface::GltfSurface;
 pub use gpu::{
     check_gi_metrics_arg, check_gpu_times_arg, check_lighting_sun_arg, gi_metrics_flag_needs_value,
-    gpu_times_flag_needs_value, lighting_sun_flag_needs_value, DebugView, DrawProfile, GiSample,
-    GpuKind, LampPickCounts, LampReport, LampShadeGate, LightingAtrousStats, LightingSunStats,
-    MaterialStats, Renderer, ScreenLine, ScreenRect, SettleStats, UnfilledControl, UnfilledStats,
-    ViewMode, VkTraffic,
+    gpu_times_flag_needs_value, lighting_change_head, lighting_sun_flag_needs_value, CacheRound,
+    DebugView, DirectSample, DrawProfile, GiSample, GpuKind, LampPickCounts, LampReport,
+    LampShadeGate, LightingAtrousStats,
+    LightingChangeHead, LightingSunStats, MaterialStats, Renderer, ScreenLine, ScreenRect,
+    SettleStats, TexelDetailPlant, UnfilledControl, UnfilledStats, ViewMode, VkTraffic,
+    release_software_compiler_heap,
 };
 pub use hdr_output::{
     aces2_rec709, agx_display_linear, agx_rec709, bloom_commute_error, bloom_downsample,
@@ -104,12 +118,12 @@ pub use reflections::{
 pub use reflections_grade::{grade_camera, grade_world, GRADE_HEIGHT, GRADE_WIDTH};
 pub use scene_mesh::{SceneMesh, ShapeRef, SurfaceMaterial, CIRCLE_SEGMENTS};
 pub use trace::{
-    agreement, direct_light, direct_light_in, first_outgoing, lamps_in, linear_from_display,
-    luminance, radiance, radiance_hits, ray_land, samples_toward, sees, solid_contains,
-    solid_contains_at, trace as trace_ray, Hit as TraceHit, Surfaces,
+    agreement, direct_light, direct_light_in, direct_light_samples, first_outgoing, lamps_in,
+    linear_from_display, luminance, radiance, radiance_hits, ray_land, samples_toward, sees,
+    solid_contains, solid_contains_at, trace as trace_ray, Hit as TraceHit, Surfaces, SUN_DISC,
 };
 pub use unfilled::{check_unfilled_arg, unfilled_flag_needs_value};
-pub use world::{
+pub use world::{MAT_BASE,
     fixed_bounds, identity_pose, in_view, solid_reach, Bounds, Displacement, DrawKind, FixedPart,
     MaterialAtlas, Object, ParticleFrame, ParticleImage, Reflector, ReflectorKind, ShadePlane,
     ShaderSpace, StreamedTexture, Surface, World,

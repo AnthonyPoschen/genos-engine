@@ -104,6 +104,17 @@ pub struct CheckpointPose {
     pub pitch: f32,
 }
 
+/// What [`Host::save_hdr_to_scene`] wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedLook {
+    /// The scene's name.
+    pub scene: String,
+    /// The scene file that was rewritten.
+    pub path: String,
+    /// The `hdr KEY VALUE` lines now in that file.
+    pub lines: Vec<String>,
+}
+
 /// Whether a scene load has installed its world yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadPace {
@@ -117,6 +128,12 @@ pub enum LoadPace {
 pub trait Host {
     /// The scene the next draw uses. Edits land after the example's own update.
     fn scene(&mut self) -> &mut genos_scene::Scene;
+
+    /// The glTF triangles the scene draws, for the CPU reference tracer. None
+    /// when the scene is analytic shapes alone.
+    fn gltf_surface(&self) -> Option<std::sync::Arc<genos_render::GltfSurface>> {
+        None
+    }
 
     /// The example's own knobs (time of day, lamp count, ...).
     fn knobs(&self) -> Vec<Knob> {
@@ -151,6 +168,14 @@ pub trait Host {
         Ok(LoadPace::Ready)
     }
 
+    /// Write the scene's HDR look (`scene().hdr`, without the arguments and
+    /// the `GENOS_HDR_*` mirrors) into the file the loaded scene was read
+    /// from, as its `hdr KEY VALUE` lines. The next start of that scene opens
+    /// with this look. A host whose scene has no file refuses.
+    fn save_hdr_to_scene(&mut self) -> Result<SavedLook, String> {
+        Err("this host has no scene file to save the HDR look to".into())
+    }
+
     /// Checkpoint names for the scene that is loaded.
     fn list_checkpoints(&self) -> Vec<String> {
         Vec::new()
@@ -160,7 +185,30 @@ pub trait Host {
     fn jump_checkpoint(&mut self, name: &str) -> Result<CheckpointPose, String> {
         Err(format!("this host has no checkpoint {name}"))
     }
+
+    /// A command that belongs to the scene the host shows (the `mesh_*`
+    /// commands of a mesh scene). `aspect` is the picture's width over its
+    /// height. `None` means the host has no such scene open.
+    fn scene_command(
+        &mut self,
+        _name: &str,
+        _args: &genos_mcp::json::Value,
+        _camera: &mut genos_scene::Camera,
+        _aspect: f32,
+    ) -> Option<Result<genos_mcp::json::Value, String>> {
+        None
+    }
+
+    /// A scene command may answer with one field, [`SCENE_PENDING`], whose
+    /// value is a ticket: the command runs off the frame thread. This is
+    /// asked each frame until it gives the answer.
+    fn scene_command_poll(&mut self, _ticket: u64) -> Option<Result<genos_mcp::json::Value, String>> {
+        Some(Err("no scene command is running".into()))
+    }
 }
+
+/// The field of a scene command's reply that says the answer comes later.
+pub const SCENE_PENDING: &str = "genos_pending_ticket";
 
 /// A bare scene: no knobs of its own.
 impl Host for genos_scene::Scene {

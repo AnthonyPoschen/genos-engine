@@ -68,4 +68,5 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# mesh-workbench, linked by genos-meshbench only (ADR 0042).
+allow-git = ["https://github.com/NathanChambers/mesh-workbench"]

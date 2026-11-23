@@ -637,13 +637,11 @@ fn launch(seat: &Seat, spec: &Spec, block_ms: Option<&str>) -> Result<Finished, 
         // Every binary quits at the Fallback preset. genos-camera and
         // `genos-stress lighting-ref` have no `--preset` argument, so the
         // mirror sets it for them; the others pass `--preset fallback`, which
-        // wins over this. Without it camera and lighting-ref run High, whose
-        // GI allocates and clears the compiled 1,048,576-slot world cache
-        // (~368 MiB). lavapipe keeps those pages until vkDestroyInstance,
-        // so their quit measured ~85 ms of driver memory release, not
-        // teardown. This gate measures teardown. The real fix is the lighting
-        // VRAM item in the roadmap (per-preset world-cache slot counts),
-        // which stays on the lighting side.
+        // wins over this. The device reads that launch before it sizes the
+        // cache. Without it, camera and lighting-ref run High, whose GI
+        // allocates the compiled 1,048,576-slot world cache. lavapipe keeps
+        // those pages until vkDestroyDevice, so their quit measured the
+        // driver memory release, not teardown. This gate measures teardown.
         .env("GENOS_LIGHTING_PRESET", "fallback")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

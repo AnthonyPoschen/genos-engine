@@ -2,7 +2,7 @@
 // Yaw delta -2.2006 is already the short arc. Pass --gi-metrics.
 // CSV: <out>/gi/s5-aba.csv
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "move");
 knob("lamps", "move");
 knob("dynamic", 50);

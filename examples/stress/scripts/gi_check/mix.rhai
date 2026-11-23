@@ -8,7 +8,7 @@
 let dt = 1.0 / 40.0;
 time(#{ fixed_dt: dt });
 knob("time_of_day", 20.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("dynamic", 50.0);
 fn settle() {
     for k in 0..4 { try { wait_settled(#{ timeout_frames: 900 }); break; } catch (e) { log(`settle ${k}: ${e}`); } }

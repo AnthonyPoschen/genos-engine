@@ -150,6 +150,7 @@ fn world() -> World {
             normals: Vec::new(),
             texcoords,
             color: [1.0, 1.0, 1.0],
+            colors: Vec::new(),
             pose: identity_pose(),
             emission: [0.0; 3],
             surface: Some(0),
@@ -189,6 +190,7 @@ fn stream_card(span: f32, place_z: f32, bounds_z: f32) -> Object {
             normals: Vec::new(),
             texcoords: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             color: [1.0, 1.0, 1.0],
+            colors: Vec::new(),
             pose: identity_pose(),
             emission: [0.0; 3],
             surface: None,
@@ -514,4 +516,35 @@ fn the_renderer_reports_the_live_streamer() {
     );
     assert!(line.contains(&format!("budget={}", stats.budget)), "{line}");
     eprintln!("material_stats {line}");
+}
+
+/// A scene program draws one world, then loads another. The second world's
+/// atlas has to reach the picture as the first world's would.
+#[test]
+fn a_world_swapped_in_after_the_first_draws_shows_its_atlas() {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    renderer.set_debug_view(DebugView {
+        mode: ViewMode::Albedo,
+        lamp: 0,
+    });
+    let camera = Camera::new(0.0, 4.0, 0.0);
+    let plain = World::from_scene(scene());
+    for _ in 0..3 {
+        let _frame = draw(window, renderer, &plain, &camera);
+    }
+    let textured = world();
+    let mut brightest = 0u8;
+    let mut finest = None;
+    for _ in 0..8 {
+        let frame = draw(window, renderer, &textured, &camera);
+        brightest = channel_max(&frame, 2);
+        finest = renderer.material_residency().1;
+    }
+    eprintln!("swapped_world brightest {brightest} finest {finest:?} texel {:?}", renderer.material_texel());
+    assert!(
+        brightest >= 40,
+        "the swapped-in world's atlas is not in the picture: brightest {brightest} finest {finest:?}"
+    );
 }

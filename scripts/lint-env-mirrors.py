@@ -23,7 +23,7 @@ ENTRY = re.compile(
     re.MULTILINE,
 )
 KINDS = {"mirror", "todo", "override", "os", "build", "test"}
-SKIP_PARTS = {"target", ".git", "lint"}
+SKIP_PARTS = {"target", ".git", "lint", ".claude"}
 
 
 def registry(path: Path) -> dict[str, str]:

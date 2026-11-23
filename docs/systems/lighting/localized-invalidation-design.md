@@ -153,7 +153,7 @@ Coarsening is a **merge**, not a delete. Before a fine entry is retired, its MSM
 All run at 1080p on the 4070 in the clean or exclusive window, 3 runs each, with `genos-lighting --headless` on ws6 silent. Per-frame GPU timestamps are needed for p99; phase 0 records them. Never genos-stress or port 8765.
 
 ```sh
-genos-lighting --headless --menu hidden --scene stress --checkpoint hall \
+genos-lighting --headless --menu hidden --scene lighting-stress --checkpoint hall \
   --preset high --gi-metrics --size 1920x1080 \
   --script debug/lighting/scripts/gates/s1-spin.rhai \
   --report genos-debug/gi/s1-spin

@@ -19,7 +19,7 @@ use crate::sdf::{MeshSdf, SdfBrick, BRICK};
 use crate::Baked;
 
 const MAGIC: &[u8; 4] = b"GBK1";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 pub fn encode(b: &Baked) -> Vec<u8> {
     let mut w = Vec::new();
@@ -39,6 +39,10 @@ pub fn encode(b: &Baked) -> Vec<u8> {
     for brick in &s.bricks {
         brick.at.iter().for_each(|&v| u32_(&mut w, v));
         w.extend_from_slice(&brick.distances);
+    }
+    u32_(&mut w, s.brick_albedo.len() as u32);
+    for a in &s.brick_albedo {
+        w.extend_from_slice(a);
     }
     u32_(&mut w, b.cards.cards.len() as u32);
     for c in &b.cards.cards {
@@ -78,6 +82,15 @@ pub fn decode(bytes: &[u8]) -> Option<Baked> {
         let at = [r.u32()?, r.u32()?, r.u32()?];
         let distances = r.take(BRICK * BRICK * BRICK)?.to_vec();
         bricks.push(SdfBrick { at, distances });
+    }
+    let n = r.u32()? as usize;
+    if n != 0 && n != bricks.len() {
+        return None;
+    }
+    let mut brick_albedo = Vec::with_capacity(n);
+    for _ in 0..n {
+        let a = r.take(3)?;
+        brick_albedo.push([a[0], a[1], a[2]]);
     }
     let n = r.u32()? as usize;
     let mut cards = Vec::with_capacity(n.min(64));
@@ -121,6 +134,7 @@ pub fn decode(bytes: &[u8]) -> Option<Baked> {
             coarse,
             coarse_band,
             thin,
+            brick_albedo,
         },
         cards: Cards { cards },
     })

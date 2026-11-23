@@ -1,0 +1,14 @@
+[package]
+name = "genos-meshbench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+genos-json = { path = "../json" }
+# mesh-workbench, pinned (ADR 0042). Move the revision in its own commit.
+gpt-mesh = { git = "https://github.com/NathanChambers/mesh-workbench", rev = "c88a38fb99b87f8e82788212b7a3828f425a25d6" }
+serde_json = "1"

@@ -162,6 +162,7 @@ impl SceneMesh {
             point: std::array::from_fn(|a| origin[a] + dir[a] * hit.t),
             normal,
             albedo: self.materials[tri.material as usize].albedo,
+            emissive: self.materials[tri.material as usize].emissive,
         })
     }
 

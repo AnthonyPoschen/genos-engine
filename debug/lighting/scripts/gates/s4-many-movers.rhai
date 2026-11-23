@@ -4,7 +4,7 @@
 // Hold the hall for 240 frames. Pass --gi-metrics.
 // CSV: <out>/gi/s4-many-movers.csv
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("scale", "big");
 knob("lights", 16);
 knob("dynamic", 100);

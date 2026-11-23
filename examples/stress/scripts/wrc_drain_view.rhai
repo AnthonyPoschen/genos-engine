@@ -19,7 +19,7 @@ fn hold(frames) {
 }
 time(#{ fixed_dt: 0.0 });
 knob("time_of_day", 22.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "still");
 knob("lamps", "still");
 knob("dynamic", 0.0);
