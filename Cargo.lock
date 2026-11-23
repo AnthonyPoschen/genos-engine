@@ -510,6 +510,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "genos-single-frame-cascade"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "genos-debug",
+ "genos-gpuref",
+ "genos-render",
+ "genos-scene",
+ "genos-scene-lib",
+ "genos-stress",
+]
+
+[[package]]
 name = "genos-stress"
 version = "0.1.0"
 dependencies = [

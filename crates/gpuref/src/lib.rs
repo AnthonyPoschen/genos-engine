@@ -81,6 +81,11 @@ pub struct Output {
     /// The same from the two halves: mean |A - B| / 2 * sqrt(pi / 2) / mean.
     pub noise_halves: f32,
     pub device: String,
+    /// Mean wall milliseconds of one dispatch (submit and wait), without the
+    /// host's sums. A timing probe: one dispatch traces `paths_per_dispatch`
+    /// paths a pixel.
+    pub dispatch_ms: f32,
+    pub paths_per_dispatch: u32,
 }
 
 struct Buf {
@@ -673,6 +678,7 @@ unsafe fn trace(
     let mut done: u64 = 0;
     let mut pass = 0u32;
     let (mut noise, mut noise_halves);
+    let mut dispatch_seconds = 0.0f64;
     loop {
         let push = Push {
             eye: [setup.eye[0], setup.eye[1], setup.eye[2], tan_y],
@@ -693,6 +699,7 @@ unsafe fn trace(
             dims: [w, h, paths, seed],
         };
         // Tiles of 64 rows so no one submit runs long enough to trip the driver's watchdog.
+        let dispatch_started = std::time::Instant::now();
         gpu.run(|cmd| {
             d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipe);
             d.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, layout, 0, &[set], &[]);
@@ -703,6 +710,7 @@ unsafe fn trace(
             d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::COMPUTE, 0, bytes);
             d.cmd_dispatch(cmd, w.div_ceil(8), h.div_ceil(8), groups);
         })?;
+        dispatch_seconds += dispatch_started.elapsed().as_secs_f64();
         let px =
             std::slice::from_raw_parts(obuf.ptr as *const [f32; 4], 2 * n_px * groups as usize);
         for g in 0..groups as usize {
@@ -763,6 +771,8 @@ unsafe fn trace(
         noise,
         noise_halves,
         device: gpu.name.clone(),
+        dispatch_ms: (dispatch_seconds * 1000.0 / f64::from(pass.max(1))) as f32,
+        paths_per_dispatch: 2 * paths * groups,
     })
 }
 

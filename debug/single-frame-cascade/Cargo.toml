@@ -1,0 +1,21 @@
+[package]
+name = "genos-single-frame-cascade"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "genos-single-frame-cascade"
+path = "src/main.rs"
+
+[dependencies]
+ash = "0.38"
+genos-gpuref = { path = "../../crates/gpuref" }
+genos-debug = { path = "../../crates/debug" }
+genos-render = { path = "../../crates/render" }
+genos-scene = { path = "../../crates/scene" }
+genos-scene-lib = { path = "../scene-lib" }
+genos-stress = { path = "../../examples/stress" }

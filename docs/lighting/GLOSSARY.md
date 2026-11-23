@@ -162,6 +162,12 @@ Role: RAYS · Literature: stratified sampling with a guided stratum; next-event 
 **Lamp share** (`lighting_cascade_lamp_share`): the share of an upper cell's irradiance that is lamp light leaving the surfaces its rays hit, a running mean over refreshes. A cell the scene changed under takes the fast rate by this share and the **drift rate** (`CASCADE_UPPER_DRIFT_RATE`, one eighth of a refresh) otherwise.
 Role: STORE · Literature: change-adaptive temporal hysteresis (DDGI's per-probe hysteresis; Lumen's lighting-update speed), split by first-bounce share · More detail: [sparse cascade](../systems/lighting/sparse-radiance-cascades.md) lamp share
 
+**Voxel field** (prototype, `debug/single-frame-cascade`): a sparse hierarchy of world voxels, 6.25 cm to 8 m. A voxel holds, for each of the six axis directions, the surface area that faces that way and the light that area sends out, and a lamp's disc area and light. It is what a cone march reads in place of the scene. Not in the renderer.
+Role: STORE · Literature: voxel cone tracing's anisotropic voxels (Crassin et al. 2011); the probes traced as geometry in Sannikov's ExileCon 2026 talk · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md)
+
+**Cone march** (prototype, `shaders/cone.comp`): one cone from a visible point through the voxel field in place of a ray against the scene. Its width in each cascade's interval is that cascade's direction spacing, it steps one voxel at a time at the level as wide as the cone, and each interval deposits its light and the share that passes through into its cascade. Not in the renderer.
+Role: RAYS · Literature: voxel cone tracing (Crassin et al. 2011); ray splitting in Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384 · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md)
+
 **Parent re-seat**: a level-0 voxel that finds its parent cell stored behind its own surface (claimed while a mover stood elsewhere) moves the cell onto its surface and clears it, so the next refresh shades it from the right place.
 Role: STORE · Literature: GIBS surfel repositioning on moving geometry (loosely) · More detail: [per-frame-cascades.md](../systems/lighting/per-frame-cascades.md) Merge
 
