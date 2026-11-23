@@ -1706,3 +1706,8 @@ detail = "--scenes"
 name = "GENOS_MESH_WORKSPACE"
 kind = "mirror"
 detail = "--mesh-workspace"
+
+[[var]]
+name = "GENOS_LIGHTING_CASCADE_TIMES"
+kind = "todo"
+detail = "no CLI argument yet; prints the cascade stamps each frame"
