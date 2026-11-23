@@ -54,13 +54,26 @@ Until 22 Nov 2026 the scene program started `mesh-server` as a child process and
 
 In a mesh scene the fly camera is off and the pointer works on the mesh:
 
-- Left drag orbits about the point in front of the camera. Right drag pans. The wheel zooms. `F` frames the whole mesh.
+- Left drag orbits about the point in front of the camera. Middle drag pans. The wheel zooms. Right drag draws a box and selects what is inside it and in sight (a face hidden behind another is left out); a right click in place does nothing. `F` frames the whole mesh.
 - A click (a press that moves under 4 pixels) selects what is under the pointer and clears the rest. Shift and a click adds it, or removes it when it was selected.
 - What a click selects is the pick mode: `face` (default), `object`, or `vertex`. `mesh_view` with `pick` sets it, and its reply reports it. The knob `mesh_pick` is the same value, and the menu's Scene tab shows it as "Click selects".
 - A press on the menu is the menu's.
 - `T` starts typing the note. Letters, digits and the space bar type into it (Shift gives capitals), Backspace removes a letter, Enter ends, and Escape ends and clears it. While typing, the hotkeys are off. The Scene tab shows the note. An agent reads it with `mesh_selection`.
 
 When a checkpoint, a script, or an agent moves the camera, the orbit continues about the point in front of that new pose.
+
+## The editor's layout
+
+Decided with Anthony on 23 Nov 2026. The editor does not carry the lighting program's tabbed menu.
+
+- **Top bar.** A bar across the top has a button for each page of the menu (Scene, the lighting pages, Mesh, and so on). A click opens that page; a click on the open page's button closes it. `genos-lighting` keeps the tabbed menu (`Program::top_bar`).
+- **Drawer.** The page opens docked on the right edge. Its title bar has `float`, which makes it a panel that drags, and `dock`, which puts it back. The setting is `place` on the menu settings (`set_menu_settings place=floating`).
+- **Built on 23 Nov 2026:** the top bar, the drawer, `place`, and the Objects panel on the left. The words and the gizmo on the picture stand clear of the bar and of a docked drawer.
+- **Next, in order:** an asset list on the left (every asset of the scene by kind: meshes, lamps, and later particle systems and clips), in place of the Objects panel; a right-click menu on an asset or on an object in the picture (open in the mesh viewer, frame, hide, solo); views on the right of the top bar (the scene, and an asset opened on its own), so the mesh viewer is a view entered from an asset, and a particle or animation viewer is added the same way.
+- **Right click.** A right drag is the box. The right-click menu will open on a right click in place, which does nothing today.
+- **Read and write.** Every control in a drawer is bound to a setting value ([settings principles](../engine/settings-principles.md)). A view brings its own page: Mesh today, Animation and Particles later.
+
+Not built: the picture does not get narrower for a docked drawer, which is painted over its right edge. The renderer has no sub-viewport for the main picture. `place` is not kept across runs.
 
 ## On the picture
 

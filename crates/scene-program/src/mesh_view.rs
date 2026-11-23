@@ -61,7 +61,7 @@ pub fn id_color(index: usize) -> [f32; 3] {
 
 /// Radians of orbit per pixel of drag.
 const ORBIT_TURN: f32 = 0.006;
-/// Share of the orbit distance one pixel of right drag pans.
+/// Share of the orbit distance one pixel of middle drag pans.
 const ORBIT_PAN: f32 = 0.0016;
 /// Each wheel step moves this share of the distance toward or away.
 const ORBIT_ZOOM: f32 = 0.12;
@@ -82,7 +82,10 @@ pub struct OrbitInput {
     pub x: f32,
     pub y: f32,
     pub left: bool,
+    /// The right button: a drag draws a box and selects what is in it.
     pub right: bool,
+    /// The middle button: a drag pans.
+    pub middle: bool,
     pub wheel: f32,
     /// The UI has the pointer: a press there is not for the mesh.
     pub over_ui: bool,
@@ -97,7 +100,7 @@ pub struct OrbitInput {
     pub lasso_key: bool,
 }
 
-/// Orbit about a point: left drag turns, right drag pans, the wheel zooms.
+/// Orbit about a point: left drag turns, middle drag pans, the wheel zooms.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Orbit {
     target: [f32; 3],
@@ -202,8 +205,14 @@ pub struct MeshView {
     /// A box or a lasso being dragged, in pixels: the box's two corners, or
     /// the lasso's path.
     pub region: Option<Vec<[f32; 2]>>,
+    /// Room the program's own UI takes on the picture's right edge and its
+    /// top edge, in pixels: the gizmo and the words on the picture stand
+    /// clear of it.
+    pub hud_inset: [f32; 2],
     /// The drag is a lasso, not a box.
     region_lasso: bool,
+    /// The right button holds the drag, not the left one.
+    region_right: bool,
     /// The workspaces found on disk at the last poll. The open one is first.
     pub found: Vec<PathBuf>,
     /// Put the whole mesh in view on the next pointer step (a new workspace).
@@ -1401,7 +1410,9 @@ impl MeshView {
             panel_open: true,
             label_cache: None,
             region: None,
+            hud_inset: [0.0, 0.0],
             region_lasso: false,
+            region_right: false,
             found: Vec::new(),
             frame_next: false,
             replay: None,
@@ -2298,7 +2309,7 @@ impl MeshView {
         let length = right.length().max(1.0e-6);
         let right = right / length;
         let up = right.cross(forward);
-        let centre = [size[0] - GIZMO_INSET, GIZMO_INSET];
+        let centre = [size[0] - self.hud_inset[0] - GIZMO_INSET, self.hud_inset[1] + GIZMO_INSET];
         let mut ends = Vec::with_capacity(7);
         for (axis, name, color) in [(0, "X", [0.95, 0.42, 0.45]), (1, "Y", [0.62, 0.85, 0.45]), (2, "Z", [0.45, 0.65, 1.0])] {
             let unit: [f32; 3] = std::array::from_fn(|k| if k == axis { 1.0 } else { 0.0 });
@@ -2364,7 +2375,7 @@ impl MeshView {
         [
             format!("{name}   {shown}   REV {revision}").to_uppercase(),
             counts,
-            "DRAG ORBITS   RIGHT-DRAG PANS   WHEEL ZOOMS   CTRL-DRAG BOX   ALT-DRAG LASSO   T NOTE".to_string(),
+            "DRAG ORBITS   MIDDLE-DRAG PANS   WHEEL ZOOMS   RIGHT-DRAG BOX   ALT-DRAG LASSO   T NOTE".to_string(),
         ]
     }
 
@@ -2429,16 +2440,27 @@ impl MeshView {
         faces
     }
 
-    /// A left drag with Control (a box) or Alt (a lasso). Returns whether the
-    /// drag has the left button this frame. The release selects what is
-    /// inside, by [`Self::pick_mode`]; Shift adds to the selection.
+    /// A right drag (a box), or a left drag with Control (a box) or Alt (a
+    /// lasso). Returns whether the drag has the left button this frame. The
+    /// release selects what is inside and in sight, by [`Self::pick_mode`];
+    /// Shift adds to the selection. A right press released where it went
+    /// down is not a box and leaves the selection as it is.
     fn drag_region(&mut self, camera: &Camera, size: [f32; 2], input: &OrbitInput) -> bool {
         let at = [input.x, input.y];
-        match (&mut self.region, input.left) {
-            (None, true) if !input.over_ui && (input.box_key || input.lasso_key) && self.orbit.is_none_or(|o| o.dragged.is_none()) => {
-                self.region_lasso = input.lasso_key && !input.box_key;
+        let held = if self.region_right { input.right } else { input.left };
+        match (&mut self.region, held) {
+            (None, _) => {
+                let free = !input.over_ui && self.orbit.is_none_or(|o| o.dragged.is_none());
+                let keyed = input.left && (input.box_key || input.lasso_key);
+                let right = input.right && !input.left && !input.middle;
+                if !free || !(keyed || right) {
+                    self.region_right = false;
+                    return false;
+                }
+                self.region_right = !keyed;
+                self.region_lasso = keyed && input.lasso_key && !input.box_key;
                 self.region = Some(vec![at, at]);
-                true
+                keyed
             }
             (Some(points), true) => {
                 if self.region_lasso {
@@ -2450,20 +2472,24 @@ impl MeshView {
                 } else {
                     points[1] = at;
                 }
-                true
+                !self.region_right
             }
-            (Some(_), false) => {
-                let outline: Vec<[f32; 2]> = self
-                    .region_outline()
-                    .into_iter()
-                    .map(|p| [p[0] / size[0].max(1.0), p[1] / size[1].max(1.0)])
-                    .collect();
+            (Some(points), false) => {
+                let travel = (points[0][0] - points[1][0]).abs() + (points[0][1] - points[1][1]).abs();
+                let taken = !self.region_right;
+                if taken || travel >= CLICK_PIXELS {
+                    let outline: Vec<[f32; 2]> = self
+                        .region_outline()
+                        .into_iter()
+                        .map(|p| [p[0] / size[0].max(1.0), p[1] / size[1].max(1.0)])
+                        .collect();
+                    let mode = self.pick_mode.clone();
+                    self.select_inside(camera, size[0] / size[1].max(1.0), &outline, &mode, input.add, false);
+                }
                 self.region = None;
-                let mode = self.pick_mode.clone();
-                self.select_inside(camera, size[0] / size[1].max(1.0), &outline, &mode, input.add, false);
-                true
+                self.region_right = false;
+                taken
             }
-            (None, _) => false,
         }
     }
 
@@ -2706,7 +2732,7 @@ impl MeshView {
         }
         let dragging = self.drag_region(camera, size, &input);
         // A press takes the camera back from the turntable for that frame.
-        let turning = self.turntable && !input.left && !input.right;
+        let turning = self.turntable && !input.left && !input.right && !input.middle;
         let Some(orbit) = &mut self.orbit else {
             return;
         };
@@ -2737,7 +2763,7 @@ impl MeshView {
             }
             _ => {}
         }
-        if input.right && !input.left {
+        if input.middle && !input.left {
             if orbit.panning {
                 let forward = genos_scene::look_direction(camera.yaw, camera.pitch);
                 let right = forward.cross(genos_scene::Vec3::Y);
@@ -4312,6 +4338,19 @@ mod tests {
         assert_eq!(view.region_outline().len(), 4, "the box is drawn while it is dragged");
         view.pointer(&mut camera, size, super::OrbitInput { x: 1270.0, y: 710.0, ..at });
         assert!(view.region_outline().is_empty() && (camera.yaw - yaw).abs() < 1.0e-6);
+        // A right drag is the box too: it selects the faces in sight, not the
+        // backs, and the camera stays.
+        let place = camera.position;
+        view.pointer(&mut camera, size, super::OrbitInput { right: true, ..at });
+        view.pointer(&mut camera, size, super::OrbitInput { right: true, x: 1270.0, y: 710.0, ..at });
+        assert_eq!(view.region_outline().len(), 4, "the right drag draws the box");
+        view.pointer(&mut camera, size, super::OrbitInput { x: 1270.0, y: 710.0, ..at });
+        assert_eq!(view.selection.faces, seen, "the faces in sight");
+        assert!(view.region_outline().is_empty() && (camera.yaw - yaw).abs() < 1.0e-6 && (camera.position - place).length() < 1.0e-6);
+        // A right click in place is not a box: the selection stays.
+        view.pointer(&mut camera, size, super::OrbitInput { right: true, ..at });
+        view.pointer(&mut camera, size, at);
+        assert_eq!(view.selection.faces, seen);
         assert_eq!(view.selection.faces, seen, "the drag selected what the box command did");
         assert!(!super::inside(&[[0.0, 0.0], [1.0, 0.0], [1.0, 1.0]], [0.1, 0.9]));
     }
@@ -4559,6 +4598,20 @@ not a row | `nothing` |\n";
         view.pointer(&mut camera, size, OrbitInput { x: 840.0, dt: 1.0, ..at });
         assert!(camera.yaw - yaw > 0.3, "the turntable turned {}", camera.yaw - yaw);
         assert!((far(&camera) - distance).abs() < 1.0e-3);
+        view.turntable = false;
+        // A middle drag pans: the camera moves and does not turn.
+        let (yaw, place) = (camera.yaw, camera.position);
+        view.pointer(&mut camera, size, OrbitInput { x: 840.0, middle: true, ..at });
+        view.pointer(&mut camera, size, OrbitInput { x: 800.0, middle: true, ..at });
+        view.pointer(&mut camera, size, OrbitInput { x: 800.0, ..at });
+        assert!((camera.position - place).length() > 0.05, "a middle drag moved the camera");
+        assert!((camera.yaw - yaw).abs() < 1.0e-6);
+        // A right drag does not move it.
+        let place = camera.position;
+        view.pointer(&mut camera, size, OrbitInput { x: 800.0, right: true, ..at });
+        view.pointer(&mut camera, size, OrbitInput { x: 840.0, right: true, ..at });
+        view.pointer(&mut camera, size, OrbitInput { x: 840.0, ..at });
+        assert!((camera.position - place).length() < 1.0e-6);
     }
 
     #[test]

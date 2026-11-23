@@ -63,6 +63,8 @@ A drag on the held graph chooses a time interval. The readout then shows the pea
 
 Detailed mode appends each completed live frame to `genos-camera.profile`. That write does not sync the file to disk. A reader can recover the ordering time and each stage CPU and GPU time. Basic mode does not write that file. Basic mode does not query GPU timestamps.
 
+A program can show its menu as a top bar. `top_bar` draws a bar across the top of the viewport, 30 pixels tall, with one button for each page. A press on a button fires that button's id. The program then draws the chosen page with `button_panel_blocks`. `State.dock` makes that panel a drawer: its top-right corner is on the viewport's right edge, it reaches 8 pixels short of the bottom, and a drag does not move it. With `State.dockable`, the panel's title bar has a `float` or `dock` button that fires `MENU_DOCK`; the program changes `State.dock`. The drawer is painted over the picture: the picture does not get narrower.
+
 ## Code
 
 The crate is `crates/ui`, package `genos-ui`.

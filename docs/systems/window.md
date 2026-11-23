@@ -79,7 +79,7 @@ The events are:
 
 `Frame` reports `pointer_x` and `pointer_y` in window pixels. The origin is the top-left.
 
-`Frame.wheel_y` is the vertical wheel for this pump, in notches. Positive is wheel up. The horizontal axis is ignored. A continuous axis event wins for that frame. A click wheel's value120 is used when the continuous event did not arrive. A discrete notch is used when neither of those arrived. `pump` clears the wheel after it copies the value out. `FocusGate` passes the wheel only while the window has focus.
+`Frame.wheel_y` is the vertical wheel for this pump, in notches. Positive is wheel up. The horizontal axis is ignored. On Wayland one wheel event arrives as up to three values in one pointer frame, and the window takes one: value120 (120 a notch) when it arrived, else the discrete notch count, else the continuous axis divided by 15 (a touchpad sends that one alone). Until 23 Nov 2026 the continuous value was taken as it came, so a notch of a click wheel read as 15. The Wayland window reports the right and the middle button (`BTN_RIGHT`, `BTN_MIDDLE`); until the same day it reported the left one only. `pump` clears the wheel after it copies the value out. `FocusGate` passes the wheel only while the window has focus.
 
 Call `lock_cursor` when look capture starts. Call `unlock_cursor` when the pause menu opens. Call `set_mode` to ask for fullscreen.
 

@@ -119,16 +119,28 @@ Decisions 1 and 4 reverse what the first commits built: the viewer lives in `deb
 - [x] The menu's Mesh tab was read from a picture of the editor's own window (22 Nov 2026): the folder picker, the readouts, the note, the shading and object dropdowns, the four check boxes, the replay slider, the Objects section with a show box per object, and the Replay section with the session picker and a row per command. A `capture` with `ui: true` does not include the menu; the picture came from the desktop (`grim` on the window's rectangle).
 - [x] A readout (the note, the filter, the counts, the state) draws as words. It drew as a slider with a thumb and its text ran off the panel.
 
+### I. The editor's own layout (23 Nov 2026)
+
+- [x] A top bar with a button for each menu page, in the editor only (`Program::top_bar`; `genos_ui::top_bar`). A click opens the page, a click on the open page's button closes it. Tests: `crates/ui/tests/top_bar.rs`, `the_top_bar_has_a_button_for_each_page_and_the_drawer_holds_one_page`. Read from pictures of the window (docked, floating, closed), and clicked with the real pointer by `mesh_pointer_check.sh`.
+- [x] The page is a drawer docked on the right edge, or a panel that drags: `float` and `dock` in its title bar, `place` on the menu settings and over MCP.
+- [x] The gizmo and the words on the picture stand clear of the bar and of a docked drawer (`MeshView::hud_inset`). The Objects panel opens on the left.
+- [ ] The picture gets narrower for a docked drawer. The renderer has no sub-viewport for the main picture.
+- [ ] `place` kept across runs, as the open page and the folds are.
+- [ ] The asset list on the left, in place of the Objects panel.
+- [ ] The right-click menu on an asset or an object (a right click in place; a right drag stays the box).
+- [ ] Views on the right of the top bar: the scene, and an asset opened on its own (the mesh viewer as a view).
+
 ### H. The editing loop, end to end
 
 - [x] Run over an MCP session on 23 Nov 2026 with the assistant as the agent: a face picked in the viewer and the note "pull this face out by 30 cm"; `mesh.context` gave the note and the face's normal; `mesh.commands` gave `extrude`'s fields; `mesh.preview` showed the result with the workspace still at revision 1; `commit: true` moved it to revision 2; the face's vertices read z 0.8, from 0.5; the edit record held the command with the note.
 - [x] The same loop is a check: `debug/lighting/scripts/mesh_edit_from_selection.rhai` on `genos-editor` (15 checks). It builds its own workspace under the output directory.
 - [x] The loop is also a test that needs no window and no GPU: `a_selection_and_a_note_become_a_previewed_and_committed_edit` in the editor crate drives the mesh viewer and the linked mesh-workbench directly (the selection and the note, `mesh_context`, `mesh_preview`, the commit, the face 0.3 m further out, the edit on record with its note). `cargo test -p genos-editor` runs it.
 - [x] Through Claude Code itself: `.mcp.json` at the repository root names the editor's endpoint (`genos-editor`, port 8765) and the lighting program's (`genos-lighting`, 8766), so a Claude Code session in this repository has the tools. Checked on 23 Nov 2026 with a separate `claude -p` session that was given only that config and the task: it called `mesh_context`, `mesh_commands`, `mesh_preview` and the commit, and the selected face moved 0.25 m (z 0.5 to 0.75, revision 1 to 2). Claude Code shows a tool as `mcp__genos-editor__mesh_context`: it writes the dot of `mesh.context` as an underscore.
-- [ ] For Anthony to run, on purpose: `debug/lighting/scripts/mesh_pointer_check.sh` drives the real pointer (click a face, drag to orbit, click the projection's name) and prints PASS or FAIL for each. It takes the pointer and the focus for about ten seconds, so an agent does not run it.
+- [x] `debug/lighting/scripts/mesh_pointer_check.sh` drives the real pointer and prints PASS or FAIL for each of nine checks: click a face, left drag to orbit, the wheel, middle drag to pan, right drag for a box, Control drag for a box, Alt drag for a lasso, click the projection's name, click the top bar. All nine passed on 23 Nov 2026, run by the agent with Anthony's leave. It takes the pointer and the focus for about twenty seconds, so an agent runs it only when told it may.
 - The one real-pointer run on 23 Nov 2026 is not evidence either way: Anthony was moving the mouse while it ran (it took his pointer, and he stopped it). In it a drag turned the camera, and the clicks did not land. Read from the code, a press and a release with no movement between is a click (`CLICK_PIXELS`), on the picture and on the gizmo.
 - [x] Found by reading that path: the viewer was told the pointer was over the UI on every frame with no left button held (`over_ui: !look_capture`, and the panel reports `look_capture` only while a press that missed it is held). So with a real mouse the wheel did not zoom and a right drag did not pan; the pointer tests set that flag by hand and passed. `pointer_over_ui` now asks where the pointer is: on something a panel paints. A test covers it.
-- [ ] Not yet seen with a real mouse: the wheel zoom and the right-drag pan after that fix, and a click on a face. `mesh_pointer_check.sh` checks the click, the drag and the gizmo; run it with the mouse left alone.
+- [x] Seen with the real pointer on 23 Nov 2026, and two faults found in the Wayland window and fixed: one wheel notch read as 15 (the continuous axis value was taken as notches; `pointer_frame` now takes value120, then the discrete count, then the axis over 15), and the right and middle buttons were not reported at all, so a right drag never panned on Linux.
+- [x] The mouse as Anthony asked for it on 23 Nov 2026: middle drag pans, right drag draws a box that selects only what is in sight, a right click in place does nothing. Control and a left drag still draws the box. Tests: `a_click_selects_a_drag_orbits_about_the_mesh_and_the_wheel_zooms`, `a_box_and_a_lasso_select_what_is_inside_and_in_sight`.
 
 ### G. Compared with mesh-workbench's own renderer
 

@@ -94,9 +94,9 @@ use genos_stress::knobs::{
 };
 use genos_stress::stage::{Scale, Stage};
 use genos_ui::{
-    button_panel_blocks, show_menu_tab, Action, FpsOverlay, InputPolicy, PanelBlock, PanelCheck,
+    button_panel_blocks, show_menu_tab, top_bar, Action, FpsOverlay, InputPolicy, PanelBlock, PanelCheck,
     PanelDropdown, PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, SliderStep,
-    State, MENU_HIDE, MENU_SHOW, PANEL_ID,
+    State, MENU_DOCK, MENU_HIDE, MENU_SHOW, PANEL_ID, TOP_BAR_HEIGHT,
 };
 use genos_window::{extent_changed, FocusGate, Window};
 
@@ -443,6 +443,10 @@ pub struct Program {
     pub default_scene: &'static str,
     /// Whether the program lists mesh scenes (mesh-workbench workspaces).
     pub meshes: bool,
+    /// The menu is a bar across the top with a button for each page, and the
+    /// chosen page opens as a drawer on the right edge (or a panel that
+    /// drags). Without it the menu is one panel with a strip of tabs.
+    pub top_bar: bool,
     /// Opens the mesh-workbench session on a workspace directory, for the
     /// mesh commands that edit. The binary supplies it, so this library does
     /// not link mesh-workbench: `genos-editor` does, `genos-lighting` does not.
@@ -470,6 +474,7 @@ impl Program {
         mcp_port: MCP_PORT,
         default_scene: genos_scene_lib::DEFAULT_SCENE,
         meshes: false,
+        top_bar: false,
         mesh_session: None,
     };
     /// The editor: opens on the mesh scene and lists every scene. It takes
@@ -481,6 +486,7 @@ impl Program {
         mcp_port: genos_mcp::PORT,
         default_scene: "mesh",
         meshes: true,
+        top_bar: true,
         mesh_session: None,
     };
 }
@@ -676,6 +682,9 @@ fn run() -> Result<i32, String> {
     let mut mesh_ui_placed = false;
     let folds = menu_folds(&menu);
     let mut ui = State::default();
+    // The top bar keeps its own pointer state; the drawer is `ui`.
+    let mut bar_ui = State::default();
+    let mut drawer_placed = false;
     let mut tracked_collapsed = app.scene().menu.collapsed.clone();
     let mut tracked_tab = app.scene().menu.tab.clone();
     if let Some(names) = load_menu_folds(&opts.out) {
@@ -792,53 +801,107 @@ fn run() -> Result<i32, String> {
         };
         let mut drew_panel = false;
         let mut menu_blur = false;
+        // How wide the docked drawer is this frame; 0 with none.
+        let mut drawer_width = 0.0f32;
         #[cfg_attr(not(feature = "mesh"), expect(unused_mut, reason = "the mesh viewer's panel adds to these"))]
         let (mut paints, mut look_capture) = if opts.headless {
             (Vec::new(), true)
-        } else if !menu_open {
-            let ui_frame = show_menu_tab(&mut ui, [size.0 as f32, size.1 as f32], pointer);
-            if ui_frame
-                .actions
-                .iter()
-                .any(|action| matches!(action, Action::Press(id) if *id == MENU_SHOW))
-            {
-                menu_open = true;
-            }
-            (ui_frame.paints, ui_frame.look_capture)
         } else {
-            drew_panel = true;
-            let fps_menu = app.scene().fps_counter.effective();
-            let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &menu);
-            let ui_frame = button_panel_blocks(
-                &mut ui,
-                &panel_title(&app),
-                &blocks,
-                [size.0 as f32, size.1 as f32],
-                &camera,
-                pointer,
-            );
-            for action in &ui_frame.actions {
-                match *action {
-                    Action::Slide { id, value } => slide(&mut app, id, value)?,
-                    Action::Select { id, value } => {
-                        select(&mut app, &mut camera, &mut tools, renderer, id, value)?;
+            let viewport = [size.0 as f32, size.1 as f32];
+            let mut paints = Vec::new();
+            let mut capture = true;
+            // The panel to draw this frame: its title and its blocks.
+            let mut page: Option<(String, Vec<PanelBlock>)> = None;
+            if program().top_bar {
+                let fps_menu = app.scene().fps_counter.effective();
+                let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &menu);
+                let (buttons, chosen) = bar_buttons(&blocks, &ui, menu_open);
+                let bar = top_bar(&mut bar_ui, &buttons, viewport, pointer);
+                let mut chosen = chosen;
+                for action in &bar.actions {
+                    let Action::Press(id) = *action else { continue };
+                    let Some(button) = buttons.iter().find(|button| button.id == id) else { continue };
+                    // A press on the open page's button closes the drawer.
+                    if menu_open && chosen == Some(id) {
+                        menu_open = false;
+                    } else {
+                        ui.select_tab(strip_id(0), id);
+                        chosen = Some(id);
+                        menu_open = true;
+                        save_menu_tab(&opts.out, &button.text)?;
                     }
-                    Action::Toggle { id, on } => toggle(&mut app, id, on)?,
-                    Action::Press(id) => {
-                        if id == MENU_HIDE {
-                            menu_open = false;
-                        } else if folds.iter().any(|fold| fold.id == id) {
-                            save_menu_folds(&opts.out, &ui, &folds)?;
-                        } else if let Some(name) = tab_title(&menu, id) {
-                            save_menu_tab(&opts.out, name)?;
-                        }
-                    }
-                    _ => {}
                 }
+                paints.extend(bar.paints);
+                capture = bar.look_capture;
+                ui.dockable = true;
+                let docked = app.scene().menu.docked;
+                ui.dock = docked.then_some(TOP_BAR_HEIGHT);
+                if !docked && !drawer_placed {
+                    drawer_placed = true;
+                    // Left of the gizmo: the panel is at most a third of the picture wide.
+                    ui.panel_offset = [(viewport[0] * (2.0 / 3.0) - 180.0).max(16.0), TOP_BAR_HEIGHT + 16.0];
+                }
+                if menu_open {
+                    page = Some(bar_page(blocks, chosen));
+                }
+            } else if menu_open {
+                let fps_menu = app.scene().fps_counter.effective();
+                page = Some((panel_title(&app), panel_blocks(&app, tools.view_mode(), &fps_menu, &menu)));
+            } else {
+                let ui_frame = show_menu_tab(&mut ui, viewport, pointer);
+                if ui_frame
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, Action::Press(id) if *id == MENU_SHOW))
+                {
+                    menu_open = true;
+                }
+                paints.extend(ui_frame.paints);
+                capture = ui_frame.look_capture;
             }
-            menu_blur = ui_frame.consumed.blur;
-            (ui_frame.paints, ui_frame.look_capture)
+            drawer_width = 0.0;
+            if let Some((title, blocks)) = page {
+                drew_panel = true;
+                let ui_frame = button_panel_blocks(&mut ui, &title, &blocks, viewport, &camera, pointer);
+                for action in &ui_frame.actions {
+                    match *action {
+                        Action::Slide { id, value } => slide(&mut app, id, value)?,
+                        Action::Select { id, value } => {
+                            select(&mut app, &mut camera, &mut tools, renderer, id, value)?;
+                        }
+                        Action::Toggle { id, on } => toggle(&mut app, id, on)?,
+                        Action::Press(id) => {
+                            if id == MENU_HIDE {
+                                menu_open = false;
+                            } else if id == MENU_DOCK {
+                                let docked = !app.scene().menu.docked;
+                                app.scene().menu.docked = docked;
+                            } else if folds.iter().any(|fold| fold.id == id) {
+                                save_menu_folds(&opts.out, &ui, &folds)?;
+                            } else if let Some(name) = tab_title(&menu, id) {
+                                save_menu_tab(&opts.out, name)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if ui.dock.is_some() {
+                    drawer_width = ui_frame.shown.iter().find(|shown| shown.id == PANEL_ID).map_or(0.0, |shown| shown.rect.w);
+                }
+                menu_blur = ui_frame.consumed.blur;
+                paints.extend(ui_frame.paints);
+                capture = capture && ui_frame.look_capture;
+            }
+            (paints, capture)
         };
+        // The words and the gizmo on a mesh picture stand clear of the bar
+        // and of a docked drawer.
+        #[cfg(feature = "mesh")]
+        if let Some(view) = &mut app.mesh {
+            view.hud_inset = if program().top_bar && !opts.headless { [drawer_width, TOP_BAR_HEIGHT] } else { [0.0, 0.0] };
+        }
+        #[cfg(not(feature = "mesh"))]
+        let _ = drawer_width;
         // The Objects and Replay panel of a mesh scene: a second panel, on the
         // right under the gizmo, with its own place and folds. Its HIDE
         // button and the OBJECTS button under the gizmo close it.
@@ -847,7 +910,13 @@ fn run() -> Result<i32, String> {
             let viewport = [size.0 as f32, size.1 as f32];
             if !mesh_ui_placed {
                 mesh_ui_placed = true;
-                mesh_ui.panel_offset = [(viewport[0] * (2.0 / 3.0) - 16.0).max(16.0), MESH_PANEL_TOP];
+                // Under the gizmo on the right; with a top bar, on the left,
+                // where the drawer does not open.
+                mesh_ui.panel_offset = if program().top_bar {
+                    [16.0, TOP_BAR_HEIGHT + 16.0]
+                } else {
+                    [(viewport[0] * (2.0 / 3.0) - 16.0).max(16.0), MESH_PANEL_TOP]
+                };
             }
             let fps_menu = app.scene().fps_counter.effective();
             let blocks = panel_blocks(&app, tools.view_mode(), &fps_menu, &mesh_panel);
@@ -922,6 +991,7 @@ fn run() -> Result<i32, String> {
                 y: frame.pointer_y,
                 left: gated.mouse_left,
                 right: input.mouse.down(InputCode::mouse_right),
+                middle: input.mouse.down(InputCode::mouse_middle),
                 wheel: gated.wheel_y,
                 over_ui: pointer_over_ui(gated.mouse_left, look_capture, &paints, [frame.pointer_x, frame.pointer_y]),
                 add: input.keyboard.down(InputCode::key_shift_left)
@@ -999,9 +1069,11 @@ fn run() -> Result<i32, String> {
             };
             let wide = |words: &str| words.chars().count() as f32 * 6.0;
             let [title, counts, hints] = view.hud();
-            write(&mut overlay, &title, ((width - wide(&title)) * 0.5).round(), 10.0, HUD_BRIGHT);
+            let [right, top] = view.hud_inset;
+            let room = width - right;
+            write(&mut overlay, &title, ((room - wide(&title)) * 0.5).round(), top + 10.0, HUD_BRIGHT);
             write(&mut overlay, &counts, 16.0, height - 22.0, HUD_BRIGHT);
-            write(&mut overlay, &hints, (width - wide(&hints) - 16.0).round(), height - 22.0, HUD_DIM);
+            write(&mut overlay, &hints, (room - wide(&hints) - 16.0).round(), height - 22.0, HUD_DIM);
             for end in view.gizmo(&camera, [width, height]) {
                 if let Some(centre) = end.line_from {
                     gizmo_lines.push(genos_render::ScreenLine { a: centre, b: end.at, width: 2.0, color: end.color });
@@ -2929,6 +3001,54 @@ const MESH_EV100: &str = "1.2";
 /// so is not drawn, outside a mesh scene.
 const MESH_TAB: &str = "Mesh";
 
+/// The top bar's buttons, one for each page of the menu's first strip, and
+/// the page in force: the one `ui` has selected, or the first. A button is
+/// drawn held while its page is open.
+fn bar_buttons(blocks: &[PanelBlock], ui: &State, menu_open: bool) -> (Vec<genos_ui::PanelButton>, Option<u32>) {
+    let strip = strip_id(0);
+    let pages: Vec<&genos_ui::PanelTab> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            PanelBlock::Tabs(tabs) if tabs.id == strip => Some(tabs.tabs.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let chosen = ui
+        .selected_tab(strip)
+        .filter(|id| pages.iter().any(|page| page.id == *id))
+        .or_else(|| pages.first().map(|page| page.id));
+    let buttons = pages
+        .iter()
+        .map(|page| genos_ui::PanelButton {
+            id: page.id,
+            text: page.title.clone(),
+            selected: menu_open && chosen == Some(page.id),
+        })
+        .collect();
+    (buttons, chosen)
+}
+
+/// The drawer for the page `chosen`: its title and its blocks, with no strip
+/// of tabs. A block outside the strip stays, under the page.
+fn bar_page(blocks: Vec<PanelBlock>, chosen: Option<u32>) -> (String, Vec<PanelBlock>) {
+    let strip = strip_id(0);
+    let mut title = String::new();
+    let mut page = Vec::new();
+    for block in blocks {
+        match block {
+            PanelBlock::Tabs(tabs) if tabs.id == strip => {
+                if let Some(tab) = tabs.tabs.into_iter().find(|tab| Some(tab.id) == chosen) {
+                    title = tab.title;
+                    page.extend(tab.blocks);
+                }
+            }
+            other => page.push(other),
+        }
+    }
+    (title, page)
+}
+
 /// Whether the pointer belongs to a panel, not to the picture under it.
 ///
 /// While the left button is held, the panel says so: `look_capture` is true
@@ -2936,7 +3056,7 @@ const MESH_TAB: &str = "Mesh";
 /// held `look_capture` is false whatever the pointer is over, so the test is
 /// where the pointer is: on something a panel paints. The mesh viewer took
 /// `!look_capture` alone, which made the wheel and the right button "over the
-/// UI" on every frame: the wheel did not zoom and a right drag did not pan.
+/// UI" on every frame: the wheel did not zoom and a drag did not pan.
 #[cfg(feature = "mesh")]
 fn pointer_over_ui(left_down: bool, look_capture: bool, paints: &[genos_ui::Paint], at: [f32; 2]) -> bool {
     if left_down {
@@ -4763,7 +4883,7 @@ mod tests {
         let narrowed = labels(&app);
         assert!(narrowed.iter().any(|label| label == "2 bracket") && !narrowed.iter().any(|label| label == cube));
         // With no button held the pointer is over the UI only where a panel
-        // paints, so the wheel zooms and a right drag pans on the picture.
+        // paints, so the wheel zooms and a middle drag pans on the picture.
         let panel = [genos_ui::Paint { x: 16.0, y: 16.0, w: 400.0, h: 300.0, color: [0.0; 3], alpha: 1.0 }];
         assert!(!super::pointer_over_ui(false, false, &panel, [800.0, 400.0]), "on the picture");
         assert!(super::pointer_over_ui(false, false, &panel, [100.0, 100.0]), "on the panel");
@@ -4781,6 +4901,34 @@ mod tests {
         app.load_scene("lighting-stress").expect("lighting scene");
         app.follow_mesh();
         assert!(labels(&app).is_empty(), "no Mesh tab outside a mesh scene");
+    }
+
+    #[test]
+    fn the_top_bar_has_a_button_for_each_page_and_the_drawer_holds_one_page() {
+        let root = genos_scene_lib::repo_root();
+        let entries = genos_scene_lib::load_dir(&genos_scene_lib::scenes_dir()).expect("scenes");
+        let log = std::fs::File::create(std::env::temp_dir().join("genos-top-bar.log")).expect("log");
+        let app = super::App::open(entries, root, log).expect("app");
+        let fps = genos_scene::FpsCounterSettings::default();
+        let menu = super::load_menu_layout().expect("layout");
+        let blocks = super::panel_blocks(&app, ViewMode::Full, &fps, &menu);
+        let genos_ui::PanelBlock::Tabs(strip) = &blocks[0] else { panic!("the menu is one tab strip") };
+        let titles: Vec<String> = strip.tabs.iter().map(|tab| tab.title.clone()).collect();
+        let mut ui = genos_ui::State::default();
+        // Closed: a button for each page, none held; the first page is in force.
+        let (buttons, chosen) = super::bar_buttons(&blocks, &ui, false);
+        assert_eq!(buttons.iter().map(|button| button.text.clone()).collect::<Vec<_>>(), titles);
+        assert!(buttons.iter().all(|button| !button.selected));
+        assert_eq!(chosen, Some(strip.tabs[0].id));
+        // Open on the second page: its button is held, and the drawer is
+        // that page under its own title, with no strip of tabs in it.
+        let second = strip.tabs[1].clone();
+        ui.select_tab(super::strip_id(0), second.id);
+        let (buttons, chosen) = super::bar_buttons(&blocks, &ui, true);
+        assert_eq!(buttons.iter().filter(|button| button.selected).map(|button| button.id).collect::<Vec<_>>(), [second.id]);
+        let (title, page) = super::bar_page(blocks.clone(), chosen);
+        assert_eq!(title, second.title);
+        assert_eq!(page, second.blocks);
     }
 
     #[test]

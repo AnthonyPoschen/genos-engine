@@ -1,6 +1,6 @@
 # Editor status
 
-Where the editor stands on 23 Nov 2026 (branch `lighting-v3`), and what is missing. Work is on hold at this point. The design is in [mesh workbench](mesh-workbench.md). The item-by-item record, with the evidence for each, is the [editor checklist](editor-checklist.md).
+Where the editor stands on 23 Nov 2026 (branch `lighting-v3`), and what is missing. The design is in [mesh workbench](mesh-workbench.md). The item-by-item record, with the evidence for each, is the [editor checklist](editor-checklist.md).
 
 ## What it is
 
@@ -20,7 +20,11 @@ Where the editor stands on 23 Nov 2026 (branch `lighting-v3`), and what is missi
 - On the picture: the workspace line, the counts, the pointer hints, an axis gizmo with the projection toggle, and an Objects and Replay panel.
 - A workspace picker. A directory with no `project.json` opens as an empty workspace.
 
-**Selecting.** A click selects a face, an object or a vertex; Shift adds. Control and a drag draws a box, Alt and a drag a lasso. `T` types the note.
+**Selecting.** A click selects a face, an object or a vertex; Shift adds. A right drag draws a box (so does Control and a left drag), Alt and a left drag a lasso. A box and a lasso select only what is in sight. `T` types the note.
+
+**The layout.** A bar across the top has a button for each page of the menu. A click opens the page as a drawer docked on the right edge; `float` in its title bar makes it a panel that drags, and `dock` puts it back (`set_menu_settings place`). The Objects panel stands on the left. The plan for the asset list, the right-click menu and the views is in [mesh workbench](mesh-workbench.md), under "The editor's layout".
+
+**The mouse.** Left drag orbits, middle drag pans, the wheel zooms, right drag is the box.
 
 **Editing through MCP.** The tools are in six sections (scene, lighting, render, capture, editor, mesh); 16 are mesh tools. A Claude Code session sees 90 tools in all.
 
@@ -38,18 +42,17 @@ Where the editor stands on 23 Nov 2026 (branch `lighting-v3`), and what is missi
 
 ## Missing or not confirmed
 
-**Not confirmed with a real mouse.** These are covered by tests that feed the pointer by hand, and by nothing else:
+**Confirmed with the real pointer on 23 Nov 2026.** `debug/lighting/scripts/mesh_pointer_check.sh` drives the desktop's own pointer and passes all nine checks: a click selects a face, a left drag orbits, the wheel zooms, a middle drag pans, a right drag and a Control drag draw a box, an Alt drag a lasso, a click on the projection's name changes the projection, and a click on the top bar opens and closes a page. It takes the pointer and the focus for about twenty seconds; a moving mouse spoils the run.
 
-- A click on a face selects it.
-- The wheel zooms and a right drag pans. Both were broken until the last pointer fix (`pointer_over_ui`), and the fix has not been seen in the window.
-- Box and lasso drags, and clicks on the gizmo.
+That run found two faults in the Wayland window, both fixed: a wheel notch read as 15 notches, and the right and middle buttons were never reported (so the old right-drag pan could not work on Linux).
 
-`debug/lighting/scripts/mesh_pointer_check.sh` checks the click, the drag and the gizmo with the desktop's own pointer. It takes the pointer and the focus for about ten seconds, so a person runs it on purpose.
+**Not confirmed.** The pointer-lock test in `crates/window` (`the_first_click_locks_the_pointer_and_escape_releases_it`) failed twice on 23 Nov 2026 while the desktop was in use ("Escape did not release the pointer"). It was not rerun on a quiet desktop, so it is not known whether that is the desktop or a fault.
 
 **Not done.**
 
 - The editing loop has not been run from a person's own Claude chat, only from a scripted session and the tests.
 - 72 of 518 command field names have no type in `mesh_commands`. Many are not fields: the table parser also picks up a blend mode's values and the names of reply fields. A complete list needs a machine-readable command list from mesh-workbench.
+- The asset list, the right-click menu and the views of the new layout. The picture does not get narrower for a docked drawer.
 - "Select connected" and "select loop" (`mesh_selection grow`) have no key in the window.
 - The Objects panel lists at most 200 lines.
 - The typed note reads a US keyboard layout only.
@@ -58,7 +61,7 @@ Where the editor stands on 23 Nov 2026 (branch `lighting-v3`), and what is missi
 
 **Different from the web viewer, by decision.**
 
-- Its toolbar is the Mesh tab of the engine's menu.
+- Its toolbar is the Mesh page of the editor's top bar.
 - The wireframe shade has ID labels, as mesh-workbench's `capture` has. The browser viewer has none.
 
 **Limits of what is built.**
@@ -87,6 +90,5 @@ The list is in the checklist, under "For Nathan". The ones that matter most here
 
 ## To pick the work up
 
-1. Run `make editor`. Click a face, scroll, right-drag. Fix what fails from the code.
-2. Start a Claude Code session in this repository with the editor running, select a face, type a note, and ask for the edit.
-3. Then the "Not done" list above, in the order that matters to the game.
+1. Start a Claude Code session in this repository with the editor running, select a face, type a note, and ask for the edit.
+2. Then the "Not done" list above, in the order that matters to the game.
