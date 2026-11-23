@@ -149,3 +149,7 @@ The cone tracer against the leak into the room no lamp lights, then on Sponza. P
 - `--voxel-check`: the finest voxels' stored light over the exact direct light of the pixels in them, by orientation.
 
 The cone tracer also voxelises `kind gltf` scenes: points on every triangle's front (both sides for a `doubleSided` material), each point's albedo read by a short ray into the surface.
+
+## Phase 2 (in progress), 24 Nov 2026
+
+`--mode full`: every light an emitter and every bounce each frame; see the plan's section 12 for how and for the numbers. Arguments added: `--mode full`, `--gather-cones N` (default 16), `--patch-check` (the solved light of 40 patches in view against a path-traced reference there), `--sky on|off`. In full mode the per-frame error is printed after each frame, and the noise is over the frames after the first.

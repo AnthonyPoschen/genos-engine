@@ -1,6 +1,6 @@
 # Cone-traced cascades: implementation plan
 
-Status: phases 0 and 1 passed, 24 Nov 2026 (section 11). Phase 2 is next. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
+Status: phases 0 and 1 passed, 24 Nov 2026 (section 11). Phase 2 in progress (section 12): the full loop works, the gate is not met yet. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
 
 ## 1. What Anthony asked for
 
@@ -182,3 +182,28 @@ The march that passes, in the order the fixes were found (each measured on the r
 Tried and taken out: count by centroid ahead of the start (62.0%); count in the step whose slab holds the centroid (327%); count once by plane depth at every level (186% to 590%: a coarse voxel's centroid averages every surface facing one way in it); cap all levels at 12.5 cm (51.3%); leave the floors under walls out instead of dark (50.1%: they also block); multiply transmittance across crossed planes (no change); refine at 25 cm (worse); box entry in place of plane crossing (worse in the room).
 
 Costs for phase 3: the march reads 257 to 369 voxels a cone against 215 before, and the voxel needs the six centroids and six boxes (15 more numbers a direction set). The glTF voxels are 51 million surface points in about 6 million voxels for Sponza. Neither is on the GPU yet.
+
+## 12. Phase 2 progress, 24 Nov 2026
+
+Not passed yet. `--mode full`: point lamps are 10 cm glowing spheres in the voxels, surfaces keep their albedo (the engine's 0.8 paint on the analytic building), the sun is left out (phase 2b), and the reference is a path trace to 64 bounces with the lamps sampled at every hit.
+
+How the light is built, a departure from section 3 step 2:
+
+- **Gather patches.** The surface points are grouped into 25 cm patches that face one way. A floor or ceiling point inside a solid is buried: it is relit, but does not place its patch's gather point.
+- **Light transfer, baked.** Every patch casts 128 cones once while nothing moves. Each cone records, for every surface patch it met, the share it filled times that patch's albedo over pi: a row of a sparse matrix T (94,000 patches and 3.8 million entries in the stress building; 257,000 and 23 million in Sponza). T is geometry; a mover would re-bake the rows it reaches.
+- **Each frame:** every patch casts 16 cones (`--gather-cones`) through the voxels as they are for the lamps' and sky's light D; `E = D + T E` is iterated 256 times; the surfaces send out albedo times E over pi. So every bounce is in the frame after a lamp changes, with no temporal mean. Section 3's "the cascade's irradiance from last frame" gave one bounce a frame and took 13 frames to settle in the hall.
+
+What it took, in order: the engine's paint reflectance (the analytic mesh's albedo is the colour; at 1.0 the white rooms never lost light); leaving out the ground's underside; steps that tile the axis (a cascade's first step at a smaller level left a stretch unread, and the room no lamp lights read the next room's lamp-lit ceiling through the corridor wall: +105% → +13%); each patch its own cone rotation (the frames swung ±5% together); lamps read once per voxel, at their centroid's depth, with a tent across the axis only (the lamps' light at the patches went from 46% to 104% of exact); a buried test per point.
+
+Gate numbers, 8 frames, 16,384 reference rays a block, `--gather-cones 32` (16 in brackets):
+
+| View | Limit | Error, frames 1 to 7 | Bias | Noise, median (limit 3%) |
+|---|---|---|---|---|
+| Hall | 10% after 8; 15% at frame 1 | 9.5 to 10.5% | −7 to −8% | 3.6% (4.3%) |
+| Room no lamp lights | same | 9.8 to 13.7% | +6 to +12% | 2.4% (4.1%) |
+| Sponza atrium | same | 18.2 to 21.0% | −6 to −10% | 10.7% (12.8%) |
+| Sponza dark corner | same | 26.9 to 28.2% | −12 to −15% | 6.1% (6.5%) |
+
+The weak part is the lamps' own light at the pixels (E3). Lamp light alone (`--mode emissive`, 10 cm lamps): Sponza atrium 21.7% error and 20% noise, dark corner 36% and −18% bias; the hall 10.3% and −3%. Rays are 78 to 83% with over 100% noise, so the cones are the better tracer, but three small lamps in a large space are still found by too few cones a frame. Next: the lamp term (E3's candidates: more cascade-0 directions for lamps, the cone footprint aimed at the lamp's voxels), then the shadow checks and the fixture lamp.
+
+Cost, CPU: the bake 11 to 30 s for the stress building and 82 to 88 s for Sponza; each frame's gather and solve 4.6 s (stress) and 21 to 37 s (Sponza) at 16 to 32 cones on 16 threads. Phase 3 has to time the GPU version.

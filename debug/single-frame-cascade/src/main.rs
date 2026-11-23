@@ -54,7 +54,19 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
   --mode MODE          nee: a ray hit is shaded by every lamp with a shadow
                        ray, the cascade carries one bounce (the paper).
                        emissive: lamps are glowing spheres, surfaces are black,
-                       the cascade carries the lamps' own light (default nee)
+                       the cascade carries the lamps' own light.
+                       full: lamps are glowing spheres, surfaces keep their
+                       albedo, and after each frame every 25 cm patch gathers
+                       its light through the voxels with 16 cones, so bounce
+                       gains one bounce a frame; the sun is left out; the
+                       reference is a multi-bounce path trace (default nee)
+  --gather-cones N     with --mode full: cones each 25 cm patch gathers its lamp
+                       and sky light with each frame (default 16)
+  --patch-check        with --mode full: after the frames, the solved light of
+                       40 patches in view against a path-traced reference
+                       there, and their D against the exact lamp light
+  --sky on|off         the scene's sky light, in the cascade and the reference
+                       (default on)
   --lamp-radius M      sphere radius in emissive mode (default 0.1)
   --tracer T           ray: each cascade ray is traced against the scene.
                        cone: each cascade ray is a cone marched through a
@@ -123,6 +135,11 @@ const REACH: f32 = 200.0;
 const LIFT: f32 = 0.02;
 /// The engine's diffuse scale: 0.8 / pi (genos-debug `reference.rs`).
 const LAMBERT: f32 = 0.254_647_9;
+/// The engine's default reflectance (white paint): the share of arriving light
+/// an analytic surface sends back. The analytic mesh's albedo is the colour
+/// alone; `--mode full` multiplies it in. A glTF albedo is already the
+/// surface's.
+const PAINT: f32 = 0.8;
 const LAMP_UNIT: f32 = 72.0;
 const FOV_Y: f32 = 60.0;
 /// Finest probe spacing, metres. A level of detail doubles it.
@@ -159,6 +176,10 @@ fn luma(c: V3) -> f32 {
 enum Mode {
     Nee,
     Emissive,
+    /// Lamps are glowing spheres in the voxels, surfaces keep their albedo and
+    /// send out what they gathered the frame before: every light is an emitter
+    /// and bounce gains one bounce a frame. The sun is left out (phase 2b).
+    Full,
 }
 
 struct Options {
@@ -171,6 +192,9 @@ struct Options {
     height: usize,
     lamps: Option<usize>,
     mode: Mode,
+    sky: bool,
+    gather_cones: u64,
+    patch_check: bool,
     lamp_radius: f32,
     cone: bool,
     world_voxels: bool,
@@ -212,6 +236,9 @@ fn parse_args() -> Result<Option<Options>, String> {
         height: 720,
         lamps: None,
         mode: Mode::Nee,
+        sky: true,
+        gather_cones: GATHER_CONES,
+        patch_check: false,
         lamp_radius: 0.1,
         cone: false,
         world_voxels: true,
@@ -273,7 +300,17 @@ fn parse_args() -> Result<Option<Options>, String> {
                 o.mode = match value()?.as_str() {
                     "nee" => Mode::Nee,
                     "emissive" => Mode::Emissive,
-                    other => return Err(format!("--mode is nee or emissive, not {other}")),
+                    "full" => Mode::Full,
+                    other => return Err(format!("--mode is nee, emissive or full, not {other}")),
+                }
+            }
+            "--gather-cones" => o.gather_cones = num::<u64>(&arg, &value()?)?.max(1),
+            "--patch-check" => o.patch_check = true,
+            "--sky" => {
+                o.sky = match value()?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => return Err(format!("bad --sky: {other}")),
                 }
             }
             "--lamp-radius" => o.lamp_radius = num(&arg, &value()?)?,
@@ -516,6 +553,10 @@ struct Voxel {
     /// The box of the points that face each way.
     lo: [V3; 6],
     hi: [V3; 6],
+    /// `--mode full`: the gather patch the area facing each way came from
+    /// (the first one written; `u32::MAX` none), and that area's albedo sum.
+    patch: [u32; 6],
+    albedo: [V3; 6],
     lamp_area: f32,
     lamp_light: V3,
     /// Area-weighted sum of the lamp points' positions.
@@ -530,6 +571,8 @@ impl Default for Voxel {
             at: [[0.0; 3]; 6],
             lo: [[f32::INFINITY; 3]; 6],
             hi: [[f32::NEG_INFINITY; 3]; 6],
+            patch: [NO_PATCH; 6],
+            albedo: [[0.0; 3]; 6],
             lamp_area: 0.0,
             lamp_light: [0.0; 3],
             lamp_at: [0.0; 3],
@@ -581,6 +624,50 @@ impl Voxels {
         }
     }
 
+    /// Record, in the voxels a crossing reads (12.5 cm and finer), the
+    /// gather patch each point's area belongs to and its albedo.
+    fn assign_patches(&mut self, points: &[Point], patch: &[u32]) {
+        for ((at, normal, area, albedo), index) in points.iter().zip(patch) {
+            for level in VOXEL_FINEST..=GATHER_LEVEL {
+                let size = voxel_size(level);
+                let inside = sub(*at, scale(*normal, 0.25 * size.min(0.25)));
+                let Some(voxel) = self.cells.get_mut(&(level, nearest_cell(inside, size))) else { continue };
+                for (d, axis) in AXES.iter().enumerate() {
+                    let facing = dot(*normal, *axis).max(0.0) * area;
+                    if facing <= 0.0 {
+                        continue;
+                    }
+                    if voxel.patch[d] == NO_PATCH {
+                        voxel.patch[d] = *index;
+                    }
+                    voxel.albedo[d] = add(voxel.albedo[d], scale(*albedo, facing));
+                }
+            }
+        }
+    }
+
+    /// Replace every surface's sent light: `radiance[i]` for `points[i]`. The
+    /// areas, centroids, boxes and lamps stay.
+    fn relight(&mut self, points: &[Point], radiance: &[V3]) {
+        for voxel in self.cells.values_mut() {
+            voxel.light = [[0.0; 3]; 6];
+        }
+        for ((at, normal, area, _), light) in points.iter().zip(radiance) {
+            if luma(*light) <= 0.0 {
+                continue;
+            }
+            for level in VOXEL_FINEST..=VOXEL_COARSEST {
+                let size = voxel_size(level);
+                let inside = sub(*at, scale(*normal, 0.25 * size.min(0.25)));
+                let Some(voxel) = self.cells.get_mut(&(level, nearest_cell(inside, size))) else { continue };
+                for (d, axis) in AXES.iter().enumerate() {
+                    let facing = dot(*normal, *axis).max(0.0) * area;
+                    voxel.light[d] = add(voxel.light[d], scale(*light, facing));
+                }
+            }
+        }
+    }
+
     /// A lamp: a sphere of `radius` that sends out `glow` every way. Its disc
     /// is shared over points of the sphere, so a lamp wider than a voxel is
     /// spread over the voxels it fills and none of them is over-full.
@@ -604,7 +691,7 @@ impl Voxels {
     /// voxel that holds the crossing point that the plane fills) and its
     /// radiance. At a fine level a voxel holds about one plane for each way it
     /// faces, so its centroid places that plane.
-    fn crossed(&self, level: u8, from: V3, to: V3, dir: V3, (full, margin): (f32, f32), out: &mut Vec<(f32, f32, V3)>) {
+    fn crossed(&self, level: u8, from: V3, to: V3, dir: V3, (full, margin): (f32, f32), out: &mut Vec<Met>) {
         out.clear();
         let size = voxel_size(level);
         let mut cells: Vec<[i32; 3]> = Vec::with_capacity(16);
@@ -649,10 +736,93 @@ impl Voxels {
                 // of it: a voxel filled to `full` or more is a whole plane,
                 // one less filled (an edge, a thin rail) the part it fills.
                 let fill = voxel.area[d] / (size * size);
-                out.push((depth, if fill >= full { 1.0 } else { fill }, scale(voxel.light[d], 1.0 / voxel.area[d])));
+                out.push(Met {
+                    depth,
+                    cover: if fill >= full { 1.0 } else { fill },
+                    radiance: scale(voxel.light[d], 1.0 / voxel.area[d]),
+                    patch: voxel.patch[d],
+                    albedo: scale(voxel.albedo[d], 1.0 / voxel.area[d]),
+                });
             }
         }
-        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.sort_by(|a, b| a.depth.total_cmp(&b.depth));
+    }
+
+    /// The lamp voxels whose centroid lies at a depth along the cone between
+    /// `from` and `to`, each once: its cover is its disc area over the
+    /// cross-section, times the tent of its voxel at the point on the axis
+    /// level with its centroid. Steps tile the axis, so each lamp voxel falls
+    /// in one step at that step's level; read at a step's centre instead, a
+    /// lamp at a level change lost the weight between the two levels.
+    fn lamps_between(&self, level: u8, start: V3, dir: V3, from: f32, to: f32, out: &mut Vec<Met>) {
+        out.clear();
+        let size = voxel_size(level);
+        let mut cells: Vec<[i32; 3]> = Vec::with_capacity(16);
+        for depth in [from, to] {
+            let p = add(start, scale(dir, depth));
+            let base = p.map(|c| floor_i32(c / size - 0.5));
+            for corner in 0..8i32 {
+                let cell = [base[0] + (corner & 1), base[1] + ((corner >> 1) & 1), base[2] + ((corner >> 2) & 1)];
+                if !cells.contains(&cell) {
+                    cells.push(cell);
+                }
+            }
+        }
+        for cell in cells {
+            let Some(voxel) = self.cells.get(&(level, cell)) else { continue };
+            if voxel.lamp_area <= 0.0 {
+                continue;
+            }
+            let centre = scale(voxel.lamp_at, 1.0 / voxel.lamp_area);
+            let depth = dot(sub(centre, start), dir);
+            if depth <= from || depth > to {
+                continue;
+            }
+            // A tent across the axis only, about the centroid's distance from
+            // it: over the plane it adds to one voxel's area, so the lamp's
+            // light, summed over the cones that pass it, is its own.
+            let off = sub(centre, add(start, scale(dir, depth)));
+            let side = normalize(cross(dir, if dir[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
+            let up = cross(dir, side);
+            let w = (1.0 - dot(off, side).abs() / size).max(0.0) * (1.0 - dot(off, up).abs() / size).max(0.0);
+            if w > 0.0 {
+                out.push(Met {
+                    depth,
+                    cover: w * voxel.lamp_area / (size * size),
+                    radiance: scale(voxel.lamp_light, 1.0 / voxel.lamp_area),
+                    patch: u32::MAX,
+                    // A lamp has no albedo: the slot holds its centroid, for
+                    // the visibility walk.
+                    albedo: centre,
+                });
+            }
+        }
+    }
+
+    /// The share of light that passes from `from` to `to`: the planes the
+    /// segment crosses at `level`, read as a cone's fine walk reads them.
+    fn passing(&self, level: u8, from: V3, to: V3, rules: (f32, f32)) -> f32 {
+        let way = sub(to, from);
+        let length = dot(way, way).sqrt();
+        if length <= 1.0e-6 {
+            return 1.0;
+        }
+        let dir = scale(way, 1.0 / length);
+        let step = voxel_size(level);
+        let mut found = Vec::new();
+        let mut blocked = 0.0f32;
+        let mut u = 0.0f32;
+        // Stop short of the lamp: its fixture is not a wall between.
+        let end = (length - step).max(0.0);
+        while u < end && blocked < 1.0 {
+            let next = (u + step).min(end);
+            self.crossed(level, add(from, scale(dir, u)), add(from, scale(dir, next)), dir, rules, &mut found);
+            for m in &found {
+                blocked += m.cover;
+            }
+            u = next;
+        }
+        (1.0 - blocked).max(0.0)
     }
 
     /// What a cone of one voxel's width meets at `at`, travelling along `dir`:
@@ -1209,12 +1379,65 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
 /// spacing. Cover adds up: a surface that crosses several voxels is one
 /// surface. Returns, for each cascade the cone reached, the radiance it met in
 /// that interval over the light that entered it, and the share that passed.
+static LAST_E: std::sync::Mutex<Vec<V3>> = std::sync::Mutex::new(Vec::new());
+static LAST_D: std::sync::Mutex<Vec<V3>> = std::sync::Mutex::new(Vec::new());
+
+
+/// A surface bucket no gather patch was assigned to.
+const NO_PATCH: u32 = u32::MAX - 1;
+
+/// One surface or lamp a fine step meets.
+#[derive(Clone, Copy)]
+struct Met {
+    depth: f32,
+    cover: f32,
+    radiance: V3,
+    /// The gather patch a surface belongs to; `u32::MAX` for a lamp.
+    patch: u32,
+    albedo: V3,
+}
+
+/// What passes to a lamp the cone's read found: the last stretch of the line
+/// from the cone's start to the lamp, two of this step's lengths, walked as a
+/// fine step reads planes. The march already holds what lies along its axis;
+/// this finds a wall beside the axis between the cone and a lamp it read.
+fn lamp_passing(voxels: &Voxels, o: &Options, start: V3, lamp: V3, step: f32) -> f32 {
+    let to_lamp = sub(lamp, start);
+    let distance = dot(to_lamp, to_lamp).sqrt();
+    if distance <= 1.0e-6 {
+        return 1.0;
+    }
+    let from = sub(lamp, scale(to_lamp, (2.0 * step).min(distance) / distance));
+    voxels.passing(o.refine_level, from, lamp, (o.cross_full, o.box_margin))
+}
+
+/// What a gather cone met, split for `--mode full`'s transfer: the light that
+/// is not a surface's (lamps and sky), and for each surface patch met, the
+/// share of the cone it filled times its albedo over pi.
+#[derive(Default)]
+struct Sink {
+    direct: V3,
+    records: Vec<(u32, V3)>,
+    /// Share of the cones' cover from surfaces with no patch.
+    unassigned: f32,
+    /// The sky's part of `direct`.
+    sky: V3,
+}
+
 fn march_cone(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: f32, sky: V3) -> Vec<(usize, V3, f32)> {
+    march_cone_into(voxels, o, point, normal, dir, t0, sky, None)
+}
+
+#[expect(clippy::too_many_arguments, reason = "the march's inputs, plus the transfer sink")]
+fn march_cone_into(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: f32, sky: V3, mut sink: Option<&mut Sink>) -> Vec<(usize, V3, f32)> {
     let n = o.cascades;
     let finest = voxel_size(VOXEL_FINEST);
     let width0 = o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt();
     let start = add(point, scale(normal, 0.75 * finest));
-    let mut t = 0.75 * finest;
+    // Steps tile the axis: each covers from where the last ended, so a level
+    // that changes between steps (or between cascades) leaves no stretch
+    // unread. The first step's centre is 0.75 of the finest voxel out.
+    let mut done = 0.25 * finest;
     let mut covered = 0.0f32;
     let mut reach = t0;
     let mut out = Vec::with_capacity(n);
@@ -1223,26 +1446,55 @@ fn march_cone(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: 
         let width = width0 / (1u32 << c) as f32;
         let open = 1.0 - covered;
         let mut met = [0.0; 3];
-        while t < end && covered < 0.98 {
-            let wide = (width * t).max(finest);
+        while done < end && covered < 0.98 {
+            let wide = (width * done).max(finest);
             let level = ((wide / BASE_SPACING).log2().ceil() as i32)
                 .clamp(i32::from(VOXEL_FINEST), i32::from(o.max_level)) as u8;
             let step = voxel_size(level);
+            let t = done + 0.5 * step;
             let front = o.front_order.then_some(start);
             if o.fine_cross && level <= o.refine_level {
                 // A fine step: the planes the axis crosses in it, each once.
                 let mut found = Vec::new();
                 let (from, to) = ((t - 0.5 * step).max(0.0), t + 0.5 * step);
                 voxels.crossed(level, add(start, scale(dir, from)), add(start, scale(dir, to)), dir, (o.cross_full, o.box_margin), &mut found);
-                for (_, cover, radiance) in &found {
+                // Lamps as wide as the cone, trilinear at this step: a step a
+                // voxel long takes each lamp's share along the axis, so the
+                // steps over a lamp add up to it once.
+                let mut lamp_found = Vec::new();
+                voxels.lamps_between(level, start, dir, done, done + step, &mut lamp_found);
+                for mut lamp in lamp_found {
+                    // A wide cone's read can take a lamp beside a wall: only
+                    // what passes from the axis to the lamp counts.
+                    lamp.cover *= lamp_passing(voxels, o, start, lamp.albedo, step);
+                    lamp.depth -= from;
+                    if lamp.cover > 0.0 {
+                        found.push(lamp);
+                    }
+                }
+                found.sort_by(|a, b| a.depth.total_cmp(&b.depth));
+                for m in &found {
+                    let (cover, radiance) = (&m.cover, &m.radiance);
                     let seen = if o.multiply_cover { cover * (1.0 - covered) } else { cover.min(1.0 - covered) };
+                    // A lamp read wider than the voxel (cover over 1) sends all
+                    // of it; what it blocks stops at the open share.
+                    let lit = if m.patch == u32::MAX { seen * cover.max(1.0) } else { seen };
                     if seen <= 0.0 {
                         break;
                     }
-                    met = add(met, scale(*radiance, seen));
+                    met = add(met, scale(*radiance, lit));
+                    if let Some(sink) = sink.as_deref_mut() {
+                        if m.patch == u32::MAX {
+                            sink.direct = add(sink.direct, scale(*radiance, lit));
+                        } else if m.patch == NO_PATCH {
+                            sink.unassigned += seen;
+                        } else {
+                            sink.records.push((m.patch, scale(m.albedo, seen / PI)));
+                        }
+                    }
                     covered += seen;
                 }
-                t += step;
+                done += step;
                 continue;
             }
             let (cover, light) = voxels.sample(level, add(start, scale(dir, t)), dir, front);
@@ -1252,23 +1504,50 @@ fn march_cone(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: 
                 let fine = voxel_size(o.refine_level);
                 if o.fine_cross {
                     // The planes the axis crosses in this step, each once,
-                    // nearest first.
+                    // nearest first. The lamps stay at this step's level, as
+                    // wide as the cone, and are met at their centroid's depth.
                     let mut found = Vec::new();
+                    // This step's lamp share, at the cone's width, met half way.
+                    // The lamps in this step, at the cone's level, each met at its
+                    // own depth.
+                    let mut lamps = Vec::new();
+                    voxels.lamps_between(level, start, dir, done, done + step, &mut lamps);
+                    for lamp in &mut lamps {
+                        lamp.cover *= lamp_passing(voxels, o, start, lamp.albedo, step);
+                    }
+                    lamps.retain(|l| l.cover > 0.0);
                     let mut u = (t - 0.5 * step).max(0.0);
                     while u < t + 0.5 * step && covered < 0.98 {
                         let next = (u + fine).min(t + 0.5 * step);
                         voxels.crossed(o.refine_level, add(start, scale(dir, u)), add(start, scale(dir, next)), dir, (o.cross_full, o.box_margin), &mut found);
-                        for (_, cover, radiance) in &found {
+                        for l in lamps.iter().filter(|l| l.depth > u && l.depth <= next) {
+                            found.push(Met { depth: l.depth - u, ..*l });
+                        }
+                        found.sort_by(|a, b| a.depth.total_cmp(&b.depth));
+                        for m in &found {
+                    let (cover, radiance) = (&m.cover, &m.radiance);
                             let seen = if o.multiply_cover { cover * (1.0 - covered) } else { cover.min(1.0 - covered) };
+                    // A lamp read wider than the voxel (cover over 1) sends all
+                    // of it; what it blocks stops at the open share.
+                    let lit = if m.patch == u32::MAX { seen * cover.max(1.0) } else { seen };
                             if seen <= 0.0 {
                                 break;
                             }
-                            met = add(met, scale(*radiance, seen));
+                            met = add(met, scale(*radiance, lit));
+                    if let Some(sink) = sink.as_deref_mut() {
+                        if m.patch == u32::MAX {
+                            sink.direct = add(sink.direct, scale(*radiance, lit));
+                        } else if m.patch == NO_PATCH {
+                            sink.unassigned += seen;
+                        } else {
+                            sink.records.push((m.patch, scale(m.albedo, seen / PI)));
+                        }
+                    }
                             covered += seen;
                         }
                         u = next;
                     }
-                    t += step;
+                    done += step;
                     continue;
                 }
                 let mut u = t - 0.5 * step + 0.5 * fine;
@@ -1286,11 +1565,15 @@ fn march_cone(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: 
                 met = add(met, scale(light, seen / cover));
                 covered += seen;
             }
-            t += step;
+            done += step;
         }
         let mut through = (1.0 - covered) / open;
         if c + 1 == n {
             met = add(met, scale(sky, 1.0 - covered));
+            if let Some(sink) = sink.as_deref_mut() {
+                sink.direct = add(sink.direct, scale(sky, 1.0 - covered));
+                sink.sky = add(sink.sky, scale(sky, 1.0 - covered));
+            }
             through = 0.0;
         }
         out.push((c, scale(met, 1.0 / open), through));
@@ -1396,7 +1679,221 @@ fn sphere_light(scene: &dyn Surfaces, lamps: &[(V3, V3)], radius: f32, point: V3
 
 /// The cone tracer's voxels: surface points of the whole building, or of the
 /// picture alone, each with the light it sends out, and the lamps.
-fn build_voxels(scene: &Scene, mesh: &SceneMesh, gltf: Option<&GltfWalls>, walls: &dyn Surfaces, pixels: &[Option<Pixel>], glow: &[(V3, V3)], o: &Options) -> Voxels {
+/// A surface point: position, normal, area, albedo.
+type Point = (V3, V3, f32, V3);
+
+/// The level a surface patch gathers its light at in `--mode full`: 25 cm.
+const GATHER_LEVEL: u8 = 4;
+/// Cones a patch gathers with each frame.
+const GATHER_CONES: u64 = 16;
+
+/// The patch a surface point gathers with: its 25 cm cell and the axis it
+/// faces most.
+fn gather_patch(at: V3, normal: V3) -> ([i32; 3], usize) {
+    let axis = (0..6).max_by(|a, b| dot(normal, AXES[*a]).total_cmp(&dot(normal, AXES[*b]))).unwrap_or(0);
+    (nearest_cell(sub(at, scale(normal, 0.01)), voxel_size(GATHER_LEVEL)), axis)
+}
+
+/// The gather patches of `points`: each point's patch index, and each
+/// patch's gather point and normal. A floor or ceiling point inside a solid
+/// (under a wall or a box) is buried: it belongs to its patch but does not
+/// place the gather point, so a patch across the foot of a box gathers from
+/// its open part. A patch with only buried points gets `None` and stays dark.
+fn gather_patches(points: &[Point], scene: &Scene) -> (Vec<u32>, Vec<Option<(V3, V3)>>) {
+    let mut index: HashMap<([i32; 3], usize), u32> = HashMap::new();
+    let mut sums: Vec<(V3, V3, f32)> = Vec::new();
+    let of_point = points
+        .iter()
+        .map(|(at, normal, _, _)| {
+            let next = u32::try_from(sums.len()).unwrap_or(u32::MAX);
+            let i = *index.entry(gather_patch(*at, *normal)).or_insert(next);
+            if i == next {
+                sums.push(([0.0; 3], [0.0; 3], 0.0));
+            }
+            let buried = normal[1].abs() > 0.9 && scene.inside(add(*at, scale(*normal, LIFT)));
+            if !buried {
+                let s = &mut sums[i as usize];
+                s.0 = add(s.0, *at);
+                s.1 = add(s.1, *normal);
+                s.2 += 1.0;
+            }
+            i
+        })
+        .collect();
+    let patches = sums.into_iter().map(|(at, n, count)| (count > 0.0).then(|| (scale(at, 1.0 / count), normalize(n)))).collect();
+    (of_point, patches)
+}
+
+/// Iterations of `E = D + T E` a frame.
+const TRANSFER_ITERATIONS: usize = 256;
+
+/// Patches whose cones met a surface with no patch (a probe).
+static UNASSIGNED: AtomicU64 = AtomicU64::new(0);
+
+/// Cones a patch's transfer row is baked with, once while the geometry
+/// stands still.
+const TRANSFER_CONES: u64 = 128;
+
+/// For every patch, `cones` cosine cones through the voxels (new directions
+/// with `seed`), each split into what it met that is not a surface's (lamps and
+/// sky: D) and, for each surface patch it met, the share it filled times that
+/// patch's albedo over pi (a row of T). A floor or ceiling patch inside a solid
+/// gathers nothing.
+fn gather_rows(voxels: &Voxels, patches: &[Option<(V3, V3)>], o: &Options, cones: u64, seed: u64, sky: V3) -> Vec<(V3, Vec<(u32, V3)>)> {
+    let chunk = patches.len().div_ceil(o.threads).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = patches
+            .chunks(chunk)
+            .enumerate()
+            .map(|(c, part)| {
+                scope.spawn(move || {
+                    let mut out = Vec::with_capacity(part.len());
+                    for (n, patch) in part.iter().enumerate() {
+                        // Each patch its own rotation of the directions: patches
+                        // that face one way do not all err the same way.
+                        let id = (c * chunk + n) as u64;
+                        let (ju, jv) = (hashed(seed.wrapping_mul(0x2545_f491) ^ id), hashed(seed.wrapping_add(id.wrapping_mul(0x9e37_79b9))));
+                        let Some((at, normal)) = *patch else {
+                            out.push(([0.0; 3], Vec::new()));
+                            continue;
+                        };
+                        let side = normalize(cross(normal, if normal[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
+                        let up = cross(normal, side);
+                        let mut sink = Sink::default();
+                        for k in 0..cones {
+                            let (u, v) = r2(k);
+                            let (u, v) = ((u + ju).fract(), (v + jv).fract());
+                            let (r, phi) = (u.sqrt(), 2.0 * PI * v);
+                            let dir = normalize(add(add(scale(side, r * phi.cos()), scale(up, r * phi.sin())), scale(normal, (1.0 - u).max(0.0).sqrt())));
+                            let _ = march_cone_into(voxels, o, at, normal, dir, voxel_size(GATHER_LEVEL), sky, Some(&mut sink));
+                        }
+                        let k = PI / cones as f32;
+                        let mut row: HashMap<u32, V3> = HashMap::new();
+                        for (j, w) in sink.records {
+                            let e = row.entry(j).or_insert([0.0; 3]);
+                            *e = add(*e, scale(w, k));
+                        }
+                        if sink.unassigned > 0.0 {
+                            UNASSIGNED.fetch_add(1, Ordering::Relaxed);
+                        }
+                        out.push((scale(sink.direct, k), row.into_iter().collect()));
+                    }
+                    out
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    })
+}
+
+/// `--mode full`'s light for one frame: D from [`GATHER_CONES`] cones a patch
+/// through the voxels as they are (the lamps where they are now, the sky),
+/// and the baked transfer `t`; `E = D + T E` is iterated so the frame's surface
+/// light holds every bounce. Returns each point's radiance.
+#[expect(clippy::too_many_arguments, reason = "the field, its patches, the baked transfer and the frame")]
+fn gather(voxels: &Voxels, points: &[Point], patch_of: &[u32], patches: &[Option<(V3, V3)>], t: &[Vec<(u32, V3)>], o: &Options, frame: u32, sky: V3) -> Vec<V3> {
+    let d: Vec<V3> = gather_rows(voxels, patches, o, o.gather_cones, u64::from(frame), sky).into_iter().map(|r| r.0).collect();
+    let mut e = d.clone();
+    for _ in 0..TRANSFER_ITERATIONS {
+        e = t.iter().zip(&d).map(|(row, d)| row.iter().fold(*d, |acc, (j, w)| add(acc, mul(*w, e[*j as usize])))).collect();
+    }
+    if let Ok(mut last) = LAST_E.lock() {
+        last.clone_from(&e);
+    }
+    if let Ok(mut last) = LAST_D.lock() {
+        last.clone_from(&d);
+    }
+    points
+        .iter()
+        .zip(patch_of)
+        .map(|((_, _, _, albedo), i)| scale(mul(*albedo, e[*i as usize]), 1.0 / PI))
+        .collect()
+}
+
+/// A small hash-based random number in [0, 1).
+fn hashed(seed: u64) -> f32 {
+    let mut x = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    x ^= x >> 31;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 29;
+    ((x >> 40) as f32) / (1u64 << 24) as f32
+}
+
+/// One sample of the lamps' light at a point: one point on each lamp's disc,
+/// seen or not.
+fn sphere_light_once(scene: &dyn Surfaces, lamps: &[(V3, V3)], radius: f32, point: V3, normal: V3, seed: u64) -> V3 {
+    let origin = add(point, scale(normal, LIFT));
+    let mut sum = [0.0; 3];
+    for (k, (centre, glow)) in lamps.iter().enumerate() {
+        let to = sub(*centre, origin);
+        let d2 = dot(to, to);
+        let toward = normalize(to);
+        let cosine = dot(toward, normal);
+        if cosine <= 0.0 || d2 <= radius * radius {
+            continue;
+        }
+        let side = normalize(cross(toward, if toward[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
+        let up = cross(toward, side);
+        let (a, b) = (hashed(seed ^ (k as u64 * 977)), hashed(seed.wrapping_add(k as u64 * 1_000_003)));
+        let (r, phi) = (radius * a.sqrt(), 2.0 * PI * b);
+        let target = add(*centre, add(scale(side, r * phi.cos()), scale(up, r * phi.sin())));
+        if !scene.blocked(origin, target) {
+            sum = add(sum, scale(*glow, PI * radius * radius / d2 * cosine));
+        }
+    }
+    sum
+}
+
+/// `--mode full`'s reference: the irradiance at a point from the lamps and
+/// every bounce, by path tracing. The lamps' light at the point is the exact
+/// visible share of each disc; each path from it adds the lamps' light at
+/// every hit (one disc point each) and goes on in a cosine direction, up to 64
+/// bounces with Russian roulette after 2.
+#[expect(clippy::too_many_arguments, reason = "the scene, its lamps and the point")]
+fn full_reference(walls: &dyn Surfaces, paint: f32, lamps: &[(V3, V3)], radius: f32, sky: V3, point: V3, normal: V3, samples: u32, seed: u64) -> V3 {
+    let direct = sphere_light(walls, lamps, radius, point, normal);
+    let cosine_dir = |normal: V3, u: f32, v: f32| {
+        let side = normalize(cross(normal, if normal[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
+        let up = cross(normal, side);
+        let (r, phi) = (u.sqrt(), 2.0 * PI * v);
+        normalize(add(add(scale(side, r * phi.cos()), scale(up, r * phi.sin())), scale(normal, (1.0 - u).max(0.0).sqrt())))
+    };
+    let (ju, jv) = r2(seed.wrapping_mul(2_654_435_761) % 100_003);
+    let mut sum = [0.0; 3];
+    for k in 0..samples.max(1) {
+        let (u, v) = r2(u64::from(k));
+        let mut dir = cosine_dir(normal, (u + ju).fract(), (v + jv).fract());
+        let mut origin = add(point, scale(normal, LIFT));
+        let mut weight = [1.0f32; 3];
+        let mut radiance = [0.0f32; 3];
+        let path_seed = seed.wrapping_mul(1_000_003).wrapping_add(u64::from(k));
+        for bounce in 0..64u64 {
+            let Some(hit) = walls.first_hit(origin, dir, REACH) else {
+                radiance = add(radiance, mul(weight, sky));
+                break;
+            };
+            // Outgoing radiance of a diffuse hit: albedo over pi times its
+            // irradiance, the lamps' share of which is sampled here.
+            let s = path_seed.wrapping_mul(31).wrapping_add(bounce * 7);
+            let lamp = sphere_light_once(walls, lamps, radius, hit.point, hit.normal, s);
+            weight = mul(weight, scale(hit.albedo, paint));
+            radiance = add(radiance, mul(weight, scale(lamp, 1.0 / PI)));
+            if bounce >= 2 {
+                let keep = weight[0].max(weight[1]).max(weight[2]).min(0.95);
+                if hashed(s ^ 0x5555) >= keep {
+                    break;
+                }
+                weight = scale(weight, 1.0 / keep);
+            }
+            origin = add(hit.point, scale(hit.normal, LIFT));
+            dir = cosine_dir(hit.normal, hashed(s ^ 0x1111), hashed(s ^ 0x2222));
+        }
+        sum = add(sum, radiance);
+    }
+    add(direct, scale(sum, PI / samples.max(1) as f32))
+}
+
+fn build_voxels(scene: &Scene, mesh: &SceneMesh, gltf: Option<&GltfWalls>, walls: &dyn Surfaces, pixels: &[Option<Pixel>], glow: &[(V3, V3)], o: &Options) -> (Voxels, Vec<Point>) {
     // Point, normal, area, albedo.
     let mut points: Vec<(V3, V3, f32, V3)> = Vec::new();
     if let (true, Some(model)) = (o.world_voxels, gltf) {
@@ -1471,6 +1968,7 @@ fn build_voxels(scene: &Scene, mesh: &SceneMesh, gltf: Option<&GltfWalls>, walls
             }
             let normal = normalize(tri.normals[0]);
             let albedo = mesh.materials.get(tri.material as usize).map_or([0.0; 3], |m| m.albedo);
+            let albedo = if o.mode == Mode::Full { scale(albedo, PAINT) } else { albedo };
             let n1 = (dot(e1, e1).sqrt() / step).ceil().max(1.0) as u32;
             let n2 = (dot(e2, e2).sqrt() / step).ceil().max(1.0) as u32;
             let first = points.len();
@@ -1498,15 +1996,20 @@ fn build_voxels(scene: &Scene, mesh: &SceneMesh, gltf: Option<&GltfWalls>, walls
     } else {
         points.extend(pixels.iter().flatten().map(|p| (p.point, p.normal, p.area, p.albedo)));
     }
+    // The underside of the ground: the analytic floor is a plane both sides
+    // of which are surfaces, and the side under the ground faces empty space.
+    // No ray from above reaches it, but it gathers the whole sky and would
+    // glow. It is left out.
+    points.retain(|(at, normal, _, _)| !(normal[1] < -0.9 && at[1].abs() < 0.01));
     let mut voxels = Voxels::new();
-    if o.mode == Mode::Emissive {
+    if o.mode != Mode::Nee {
         for (at, normal, area, _) in &points {
             voxels.add_surface(*at, *normal, *area, [0.0; 3]);
         }
         for (centre, glow) in glow {
             voxels.add_lamp(*centre, o.lamp_radius, *glow);
         }
-        return voxels;
+        return (voxels, points);
     }
     // One direct-light sample for each patch of LIGHT_LEVEL that faces one way.
     let size = voxel_size(LIGHT_LEVEL);
@@ -1541,7 +2044,7 @@ fn build_voxels(scene: &Scene, mesh: &SceneMesh, gltf: Option<&GltfWalls>, walls
         let direct = lit.get(&patch_of(*at, *normal)).copied().unwrap_or([0.0; 3]);
         voxels.add_surface(*at, *normal, *area, scale(mul(*albedo, direct), LAMBERT));
     }
-    voxels
+    (voxels, points)
 }
 
 /// An f32 as an IEEE half float; too small is 0, too large is the largest half.
@@ -1695,7 +2198,10 @@ fn run(o: &Options) -> Result<(), String> {
         .iter()
         .find(|e| e.name == name)
         .ok_or_else(|| format!("no scene {name} under {}", root.display()))?;
-    let (scene, gltf) = load_scene(&root, entry, o)?;
+    let (mut scene, gltf) = load_scene(&root, entry, o)?;
+    if !o.sky {
+        scene.sky = None;
+    }
     if gltf.is_some() && o.gpu_bench {
         return Err(format!("{name}: --gpu-bench takes the analytic building only"));
     }
@@ -1754,8 +2260,12 @@ fn run(o: &Options) -> Result<(), String> {
         })
         .collect();
     let glowing = Glowing { scene: walls, lamps: glow.clone(), radius: o.lamp_radius };
-    let surfaces: &dyn Surfaces = if o.mode == Mode::Emissive { &glowing } else { walls };
-    let voxels = (o.cone || o.gpu_bench).then(|| build_voxels(scene, &mesh, gltf.as_ref(), walls, &pixels, &glow, o));
+    let surfaces: &dyn Surfaces = if o.mode == Mode::Nee { walls } else { &glowing };
+    let built = (o.cone || o.gpu_bench).then(|| build_voxels(scene, &mesh, gltf.as_ref(), walls, &pixels, &glow, o));
+    let (mut voxels, points) = match built {
+        Some((v, p)) => (Some(v), p),
+        None => (None, Vec::new()),
+    };
     if let (true, Some(voxels)) = (o.gpu_bench, &voxels) {
         return gpu_bench(o, scene, &mesh, &pixels, voxels, eye, [forward, right, up]);
     }
@@ -1784,6 +2294,11 @@ fn run(o: &Options) -> Result<(), String> {
             rows.push((luma(cone) - luma(ray), dir, at, luma(ray), luma(cone)));
         }
         println!("probe pixel {px},{py} at {:?} facing {:?}: ray mean {:.5}, cone mean {:.5}", pixel.point, pixel.normal, ray_sum / 1024.0, cone_sum / 1024.0);
+        if o.mode == Mode::Full {
+            let rows = gather_rows(voxels, &[Some((pixel.point, pixel.normal))], o, 128, 7, sky);
+            let row: f32 = rows[0].1.iter().map(|(_, w)| luma(*w)).sum();
+            println!("gather at this point: D {:.5} (pi times the cones' lamp and sky light), T row sum {row:.4}", luma(rows[0].0));
+        }
         rows.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (d, dir, at, ray, cone) in rows.iter().take(8).chain(rows.iter().rev().take(8)) {
             println!("  dir [{:.2},{:.2},{:.2}] ray hit [{:.2},{:.2},{:.2}] ray {ray:.4} cone {cone:.4} ({d:+.4})", dir[0], dir[1], dir[2], at[0], at[1], at[2]);
@@ -1817,17 +2332,68 @@ fn run(o: &Options) -> Result<(), String> {
             println!("voxel check axis {axis}: {n} pixels, stored {:.4}, exact {:.4}, ratio {:.3}", stored / f64::from(n), exact / f64::from(n), stored / exact.max(1.0e-9));
         }
     }
-    let setup = Setup { scene, walls, surfaces, voxels: voxels.as_ref(), pixels: &pixels, options: o };
-
+    let (patch_of, patches) = if o.mode == Mode::Full { gather_patches(&points, scene) } else { (Vec::new(), Vec::new()) };
+    if let (Mode::Full, Some(field)) = (o.mode, voxels.as_mut()) {
+        field.assign_patches(&points, &patch_of);
+    }
+    // The transfer between patches is geometry: baked once with many cones
+    // while nothing moves (a mover would re-bake the rows it reaches).
+    let baked = std::time::Instant::now();
+    let transfer: Vec<Vec<(u32, V3)>> = match (o.mode, voxels.as_ref()) {
+        (Mode::Full, Some(field)) => {
+            let sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
+            gather_rows(field, &patches, o, TRANSFER_CONES, 1_000_003, sky).into_iter().map(|r| r.1).collect()
+        }
+        _ => Vec::new(),
+    };
+    if o.mode == Mode::Full {
+        let entries: usize = transfer.iter().map(Vec::len).sum();
+        println!("transfer: {} patches, {entries} entries, baked with {TRANSFER_CONES} cones a patch in {:.1} s; patches that met a surface with no patch: {}", patches.len(), baked.elapsed().as_secs_f32(), UNASSIGNED.load(Ordering::Relaxed));
+    }
+    // The reference's diffuse share: the engine's paint on the analytic
+    // building, the file's own albedo on a glTF model.
+    let paint = if gltf.is_some() { 1.0 } else { PAINT };
     let started = std::time::Instant::now();
-    let frames: Vec<Frame> = (0..o.frames)
-        .map(|f| {
-            let (u, v) = r2(u64::from(f) * 7919 + 1);
-            run_frame(&setup, if f == 0 { (0.0, 0.0) } else { (u, v) })
-        })
-        .collect();
-    let cascade_seconds = started.elapsed().as_secs_f32();
+    let full_sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut gather_seconds = 0.0f32;
+    for f in 0..o.frames {
+        let (u, v) = r2(u64::from(f) * 7919 + 1);
+        let setup = Setup { scene, walls, surfaces, voxels: voxels.as_ref(), pixels: &pixels, options: o };
+        frames.push(run_frame(&setup, if f == 0 { (0.0, 0.0) } else { (u, v) }));
+        if let (Mode::Full, Some(field)) = (o.mode, voxels.as_mut()) {
+            // Feedback: what the surfaces gathered this frame is what they
+            // send out the next.
+            let gathered = std::time::Instant::now();
+            let radiance = gather(field, &points, &patch_of, &patches, &transfer, o, f, full_sky);
+            field.relight(&points, &radiance);
+            gather_seconds += gathered.elapsed().as_secs_f32();
+        }
+    }
+    let cascade_seconds = started.elapsed().as_secs_f32() - gather_seconds;
 
+    if o.mode == Mode::Full && o.patch_check {
+        let e = LAST_E.lock().map(|v| v.clone()).unwrap_or_default();
+        let in_view = |p: V3| dot(sub(p, eye), forward) > 1.0 && dot(sub(p, eye), sub(p, eye)) < 400.0;
+        let chosen: Vec<usize> = (0..patches.len()).filter(|&i| patches[i].is_some_and(|p| in_view(p.0))).step_by(97).take(40).collect();
+        let dd = LAST_D.lock().map(|v| v.clone()).unwrap_or_default();
+        let (mut got, mut want, mut dgot, mut dwant) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+        for &i in &chosen {
+            let r = full_reference(walls, paint, &glow, o.lamp_radius, full_sky, patches[i].map_or([0.0; 3], |p| p.0), patches[i].map_or([0.0; 3], |p| p.1), 8192, i as u64);
+            let direct = sphere_light(walls, &glow, o.lamp_radius, patches[i].map_or([0.0; 3], |p| p.0), patches[i].map_or([0.0; 3], |p| p.1));
+            got += f64::from(luma(e[i]));
+            want += f64::from(luma(r));
+            dgot += f64::from(luma(dd[i]));
+            dwant += f64::from(luma(direct));
+        }
+        eprintln!("patch check: {} patches, solved light over reference {:.3}; D over exact lamp light {:.3} (D includes sky)", chosen.len(), got / want.max(1.0e-9), dgot / dwant.max(1.0e-9));
+        let mut rows: Vec<(f32, f32, usize)> = chosen.iter().map(|&i| (luma(sphere_light(walls, &glow, o.lamp_radius, patches[i].map_or([0.0; 3], |p| p.0), patches[i].map_or([0.0; 3], |p| p.1))), luma(dd[i]), i)).collect();
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (exact, d, i) in rows.iter().take(8) {
+            let near = glow.iter().map(|(c, _)| dot(sub(*c, patches[*i].map_or([0.0; 3], |p| p.0)), sub(*c, patches[*i].map_or([0.0; 3], |p| p.0))).sqrt()).fold(f32::MAX, f32::min);
+            eprintln!("   patch at {:?} n {:?}: exact {exact:.3}, D {d:.3}, nearest lamp {near:.2} m", patches[*i].map_or([0.0; 3], |p| p.0), patches[*i].map_or([0.0; 3], |p| p.1));
+        }
+    }
     // The reference at a grid of pixels.
     // A block of `--block` pixels each way around each grid point. A block
     // is compared when at least half its pixels show a surface, as
@@ -1867,10 +2433,10 @@ fn run(o: &Options) -> Result<(), String> {
                             let mut sum = [0.0; 3];
                             for &j in block {
                                 let Some(pixel) = &pixels[j] else { continue };
-                                let v = if o.mode == Mode::Emissive {
-                                    sphere_light(walls, glow, o.lamp_radius, pixel.point, pixel.normal)
-                                } else {
-                                    bounce_reference(scene, walls, pixel.point, pixel.normal, each, j as u64)
+                                let v = match o.mode {
+                                    Mode::Emissive => sphere_light(walls, glow, o.lamp_radius, pixel.point, pixel.normal),
+                                    Mode::Full => full_reference(walls, paint, glow, o.lamp_radius, full_sky, pixel.point, pixel.normal, each, j as u64),
+                                    Mode::Nee => bounce_reference(scene, walls, pixel.point, pixel.normal, each, j as u64),
                                 };
                                 sum = add(sum, v);
                             }
@@ -1903,9 +2469,12 @@ fn run(o: &Options) -> Result<(), String> {
         let n = samples.len().max(1) as f64;
         (abs / n / ref_mean.max(1.0e-9), signed / n / ref_mean.max(1.0e-9))
     };
+    // In `--mode full` frame 0 has no bounce yet: noise is over the frames
+    // after the first feedback.
+    let settled = if o.mode == Mode::Full { &frames[1.min(frames.len() - 1)..] } else { &frames[..] };
     let mut noise: Vec<f64> = (0..samples.len())
         .filter_map(|k| {
-            let values: Vec<f64> = frames.iter().map(|f| got_at(f, k)).collect();
+            let values: Vec<f64> = settled.iter().map(|f| got_at(f, k)).collect();
             let mean = values.iter().sum::<f64>() / values.len() as f64;
             if mean <= 1.0e-6 || values.len() < 2 {
                 return None;
@@ -1936,13 +2505,28 @@ fn run(o: &Options) -> Result<(), String> {
     }
     println!("cascade-0 directions with no data {:.4}", first.holes);
     println!("compared blocks {} of {}x{} pixels  reference mean irradiance {ref_mean:.4}", samples.len(), o.block, o.block);
+    if o.mode == Mode::Full {
+        // Bounce gains one bounce a frame: the error after each frame alone.
+        for (f, frame) in frames.iter().enumerate() {
+            let (mut abs, mut signed) = (0.0, 0.0);
+            for k in 0..samples.len() {
+                let got = got_at(frame, k);
+                let want = f64::from(luma(reference[k]));
+                abs += (got - want).abs();
+                signed += got - want;
+            }
+            let n = samples.len().max(1) as f64 * ref_mean.max(1.0e-9);
+            println!("after frame {f:2}: error {:.4} of the reference mean, bias {:+.4}", abs / n, signed / n);
+        }
+        println!("gather and relight: {gather_seconds:.1} cpu seconds for {} frames", frames.len());
+    }
     for take in [1usize, 4, 8, 16] {
         if take <= frames.len() {
             let (abs, signed) = error_of(take);
             println!("mean of {take:2} frame(s): error {abs:.4} of the reference mean, bias {signed:+.4}");
         }
     }
-    println!("single-frame noise (std over mean across {} frames): median {:.4}  p90 {:.4}", frames.len(), pick(0.5), pick(0.9));
+    println!("single-frame noise (std over mean across {} frames): median {:.4}  p90 {:.4}", settled.len(), pick(0.5), pick(0.9));
     println!("cpu seconds: cascade {cascade_seconds:.1} for {} frames, reference {reference_seconds:.1}", frames.len());
 
     // Pictures: one frame, the mean of all frames, and the compared grid.
@@ -1992,7 +2576,7 @@ fn run(o: &Options) -> Result<(), String> {
                 pixel.lod,
                 dot(away, away).sqrt(),
                 luma(reference[k]),
-                got_at(first, k),
+                got_at(frames.last().unwrap_or(first), k),
             );
         }
         std::fs::write(o.out.join("samples.csv"), csv).map_err(|e| format!("samples.csv: {e}"))?;

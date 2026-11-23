@@ -171,6 +171,12 @@ Role: RAYS · Literature: voxel cone tracing (Crassin et al. 2011); ray splittin
 **Direction moment** (prototype, `--bin-cosine mean`): for each cascade direction, the sum of each deposit's luma times its direction, merged as the cone is. The shade weighs the direction's light by the cosine of that mean direction, blended toward the direction centre's cosine as the light spreads out, so a bright patch in a small part of a direction lands where it is. Not in the renderer.
 Role: STORE · Literature: a first moment per bin, as in the dominant-direction terms of directional lightmaps and SG/SH-L1 irradiance; a departure from Freeman, Sannikov and Pitt-Francis, arXiv 2607.20384, section 4 · More detail: [prototype README](../../debug/single-frame-cascade/README.md) Phase 0
 
+**Gather patch** (prototype, `--mode full`): a 25 cm group of surface points that face one way. It gathers its light through the voxel field with cones, and its points send out their albedo times that light over pi. A floor or ceiling point inside a solid belongs to its patch but does not place the gather point. Not in the renderer.
+Role: STORE · Literature: radiosity patches (Cohen and Wallace); the surfel or surface-cache cell of a world-space GI cache · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md) section 12
+
+**Light transfer** (prototype, `--mode full`): for each gather patch, the share of its view each other patch fills, times that patch's albedo over pi, from 128 cones baked once while nothing moves. Each frame the patches' light is `E = D + T E`, iterated, with D the lamps' and sky's light from a few cones. Not in the renderer.
+Role: STORE · Literature: the radiosity form-factor matrix, solved by Jacobi iteration; precomputed radiance transfer between surfaces · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md) section 12
+
 **Screen-space first interval** (proposal): the cascade-0 interval, the short one next to the surface, marched against the depth buffer in place of the voxel field, along the cascade's own directions. It gives contact shadows and thin casters pixel detail with no per-lamp cost, for casters on the screen only. Not in the renderer.
 Role: RAYS · Literature: screen-space radiance cascades (Sannikov, Path of Exile 2); screen-space contact shadows · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md) step 6
 
