@@ -1,5 +1,4 @@
 #![expect(clippy::expect_used, reason = "the build stops when a host tool or OUT_DIR is missing")]
-#![expect(clippy::panic, reason = "the build stops when a host tool or OUT_DIR is missing")]
 #![allow(clippy::disallowed_methods, reason = "the build reads OUT_DIR from Cargo")]
 
 use std::process::Command;
@@ -13,7 +12,5 @@ fn main() {
         .arg(format!("{out}/cone.spv"))
         .status()
         .expect("glslc");
-    if !status.success() {
-        panic!("glslc failed for {src}");
-    }
+    assert!(status.success(), "glslc failed for {src}");
 }
