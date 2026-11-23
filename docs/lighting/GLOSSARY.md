@@ -59,6 +59,12 @@ Role: OUT · Literature: Reinhard log-average, with a histogram instead of one m
 **Compensation**: stops added to exposure. Positive one stop multiplies exposure by two.
 Role: TOOL · Literature: camera EV compensation · More detail: `HdrSettings.compensation`
 
+**Look**: the HDR settings a scene file stores: exposure mode, EV100, compensation, the camera triple, the two adaptation times, the display transform, bloom, and the look transition. The swapchain output is the machine's and is not part of it.
+Role: TOOL · Literature: a grade or post-process profile · More detail: [hdr-output design](../systems/hdr-output-design.md)
+
+**Look transition**: the seconds a change of EV100, compensation, or bloom intensity takes to reach the picture. `0` applies the change on the next frame. Not the adaptation time, which follows the meter.
+Role: TOOL · Literature: post-process volume blend time · More detail: `HdrSettings.transition`; `step_look` in [`hdr_output.rs`](../../crates/render/src/hdr_output.rs)
+
 **Display transform**: the map from exposed linear colour to the code the swapchain stores. AgX is the default.
 Role: OUT · Literature: AgX; ACES output transform · More detail: [hdr-output design](../systems/hdr-output-design.md)
 

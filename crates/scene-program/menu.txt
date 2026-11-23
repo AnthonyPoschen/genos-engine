@@ -8,6 +8,7 @@
 # stall, gi_passes, gi_work, enabled, water, rough_cutoff, mirror_cutoff,
 # mirror_views, rays, shore_cap, caustics, and tracer.
 # gi_passes and gi_work are numbers.
+# hdr_save is a button. It writes the Output page's look into the scene file.
 # Move a line to another tab or section. No code change is required.
 Scene | - | - | open | scene
 Scene | - | - | open | checkpoint
@@ -106,10 +107,14 @@ Output | - | - | open | hdr_compensation
 Output | - | - | open | hdr_iso
 Output | - | - | open | hdr_aperture
 Output | - | - | open | hdr_shutter
+Output | - | - | open | hdr_adapt_down
+Output | - | - | open | hdr_adapt_up
+Output | - | - | open | hdr_transition
 Output | - | - | open | hdr_display
 Output | - | - | open | hdr_bloom
 Output | - | - | open | hdr_bloom_levels
 Output | - | - | open | hdr_output
+Output | - | - | open | hdr_save
 Fog | - | - | open | lighting_preset
 Fog | - | - | open | enabled
 Fog | - | - | open | density

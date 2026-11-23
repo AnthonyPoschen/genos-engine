@@ -112,6 +112,16 @@ The lighting binary is `debug/lighting`, package `genos-lighting`. It loads
 Arguments choose the run. An environment variable applies only when the matching
 argument was omitted.
 
+A scene file stores its HDR look as `hdr KEY VALUE` lines, one per key of
+`HdrSettings::set_key` (`hdr compensation -1`). They lie over the lighting
+preset's HDR defaults; arguments and `GENOS_HDR_*` mirrors lie over them. A bad
+key or value fails the load with the file and the line. The Output page has
+sliders for adapt down, adapt up and look transition, and a `Save look to scene`
+button. That button and `save_hdr_to_scene` (`render.save_hdr_to_scene`) write
+the scene's HDR value back into the scene file and keep every other line. The
+program reads scene files at startup; a save also updates the running copy. The
+record is [HDR output](hdr-output-design.md), section 5.
+
 ```sh
 cargo run --release -p genos-lighting -- --scene sponza --checkpoint atrium --gpu-times 30
 make lighting SCENE=sponza

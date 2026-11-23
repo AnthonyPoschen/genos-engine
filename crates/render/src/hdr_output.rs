@@ -1524,6 +1524,89 @@ pub fn bloom_modes(levels: u32) -> Vec<u32> {
     modes
 }
 
+/// The three values a look transition blends: the fixed EV100, the
+/// compensation in stops, and the bloom intensity the display pass adds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HdrLook {
+    pub ev100: f64,
+    pub compensation: f64,
+    pub bloom_intensity: f64,
+}
+
+impl HdrLook {
+    /// Where `hdr` asks the look to be. Bloom that is off, or has no level, is intensity 0.
+    #[must_use]
+    pub fn target(hdr: &genos_scene::HdrSettings) -> Self {
+        let bloom_on = hdr.bloom && hdr.bloom_levels > 0;
+        Self {
+            ev100: hdr.ev100,
+            compensation: hdr.compensation,
+            bloom_intensity: if bloom_on { hdr.bloom_intensity.max(0.0) } else { 0.0 },
+        }
+    }
+}
+
+/// A blended value this close to its target lands on it.
+pub const LOOK_SNAP: f64 = 1.0e-4;
+
+/// One value's step toward `target`: an exponential approach that covers 95%
+/// of the distance in `transition` seconds (`1 − e^(−3·dt/transition)` of the
+/// rest each step), and lands on `target` once within [`LOOK_SNAP`].
+/// `transition` of 0 or less is `target`.
+#[must_use]
+pub fn step_look_value(current: f64, target: f64, dt: f64, transition: f64) -> f64 {
+    if !matches!(transition.partial_cmp(&0.0), Some(std::cmp::Ordering::Greater)) || !current.is_finite() {
+        return target;
+    }
+    let next = current + (target - current) * (1.0 - (-3.0 * dt.max(0.0) / transition).exp());
+    if (target - next).abs() <= LOOK_SNAP {
+        target
+    } else {
+        next
+    }
+}
+
+/// The settings this frame draws with, and the look to carry to the next frame.
+///
+/// With `transition` 0, with `legacy_bytes`, or on the first frame (`current`
+/// is `None`), the settings are `target` unchanged. Otherwise `ev100`,
+/// `compensation`, and the bloom intensity are `current` moved one
+/// [`step_look_value`] toward `target`. Bloom that was switched off stays on
+/// while its intensity fades to 0, and bloom that was switched on rises from 0.
+#[must_use]
+pub fn step_look(
+    current: Option<HdrLook>,
+    target: &genos_scene::HdrSettings,
+    dt: f64,
+) -> (genos_scene::HdrSettings, HdrLook) {
+    let goal = HdrLook::target(target);
+    let moving = matches!(target.transition.partial_cmp(&0.0), Some(std::cmp::Ordering::Greater));
+    let Some(current) = current.filter(|_| moving && !target.legacy_bytes) else {
+        return (target.clone(), goal);
+    };
+    let step = |from: f64, to: f64| step_look_value(from, to, dt, target.transition);
+    let look = HdrLook {
+        ev100: step(current.ev100, goal.ev100),
+        compensation: step(current.compensation, goal.compensation),
+        bloom_intensity: step(current.bloom_intensity, goal.bloom_intensity),
+    };
+    if look == goal {
+        // The blend has landed: the scene's own words, bit for bit.
+        return (target.clone(), goal);
+    }
+    let mut drawn = target.clone();
+    drawn.ev100 = look.ev100;
+    drawn.compensation = look.compensation;
+    if look.bloom_intensity > 0.0 && target.bloom_levels > 0 {
+        drawn.bloom = true;
+        drawn.bloom_intensity = look.bloom_intensity;
+    } else if goal.bloom_intensity > 0.0 {
+        // Rising from 0 and not above it yet.
+        drawn.bloom_intensity = 0.0;
+    }
+    (drawn, look)
+}
+
 /// Levels the GPU actually builds. Legacy bytes, bloom off, or intensity 0 store nothing.
 #[must_use]
 pub fn bloom_level_count(hdr: &genos_scene::HdrSettings) -> u32 {
@@ -2003,6 +2086,118 @@ mod tests {
         assert!(err_hi < 1.0e-9);
         assert_eq!(agx_lut_words().len(), AGX_LUT_N * AGX_LUT_N * AGX_LUT_N * 4);
         assert!(aces2_rec709([1.0, 1.0, 1.0]).is_none());
+    }
+
+    fn look_settings() -> genos_scene::HdrSettings {
+        let mut hdr = genos_scene::HdrSettings::for_preset(genos_scene::LightingPreset::High);
+        hdr.exposure_mode = genos_scene::ExposureMode::Fixed;
+        hdr
+    }
+
+    /// The settings of each frame at 1/60 s, up to the frame that draws `target`.
+    /// A blend that never lands returns 10 000 frames, and the caller's checks fail.
+    fn run_look(from: &genos_scene::HdrSettings, target: &genos_scene::HdrSettings) -> Vec<genos_scene::HdrSettings> {
+        let mut look = Some(HdrLook::target(from));
+        let mut frames = Vec::new();
+        for _ in 0..10_000 {
+            let (drawn, next) = step_look(look, target, 1.0 / 60.0);
+            look = Some(next);
+            let landed = drawn == *target;
+            frames.push(drawn);
+            if landed {
+                break;
+            }
+        }
+        frames
+    }
+
+    #[test]
+    fn a_look_change_blends_and_lands_on_the_target() {
+        let from = look_settings();
+        let mut target = from.clone();
+        target.transition = 1.0;
+        target.compensation = -2.0;
+        target.ev100 = 4.0;
+        target.bloom_intensity = 0.25;
+        let frames = run_look(&from, &target);
+        // The first frame has left the old look and is nowhere near the new one.
+        assert!(frames[0].compensation < 0.0 && frames[0].compensation > -0.2);
+        assert!(frames[0].ev100 > 0.0 && frames[0].ev100 < 0.4);
+        assert!(frames[0].bloom_intensity > 0.05 && frames[0].bloom_intensity < 0.07);
+        // No frame moves a value away from the target or past it.
+        let mut last = from.clone();
+        for frame in &frames {
+            assert!(frame.compensation <= last.compensation && frame.compensation >= -2.0);
+            assert!(frame.ev100 >= last.ev100 && frame.ev100 <= 4.0);
+            assert!(frame.bloom_intensity >= last.bloom_intensity && frame.bloom_intensity <= 0.25);
+            assert!(frame.bloom);
+            last = frame.clone();
+        }
+        // 95% of the way after `transition` seconds: 60 frames.
+        let at = &frames[59];
+        assert!((at.compensation - -2.0 * (1.0 - (-3.0_f64).exp())).abs() < 1.0e-9);
+        assert!((at.ev100 - 4.0 * (1.0 - (-3.0_f64).exp())).abs() < 1.0e-9);
+        // The last frame is the target, bit for bit, within a few transitions.
+        assert_eq!(frames.last(), Some(&target));
+        assert!(frames.len() > 60 && frames.len() < 60 * 5, "{}", frames.len());
+        // A step is the same fraction of what is left, whatever the distance.
+        let half = step_look_value(0.0, 8.0, 0.5, 1.0);
+        assert!((half - 8.0 * (1.0 - (-1.5_f64).exp())).abs() < 1.0e-12);
+        assert_eq!(step_look_value(7.999_95, 8.0, 1.0 / 60.0, 1.0).to_bits(), 8.0_f64.to_bits());
+    }
+
+    #[test]
+    fn zero_transition_steps_at_once() {
+        let from = look_settings();
+        let mut target = from.clone();
+        target.compensation = -2.0;
+        target.ev100 = 4.0;
+        target.bloom = false;
+        let (drawn, look) = step_look(Some(HdrLook::target(&from)), &target, 1.0 / 60.0);
+        assert_eq!(drawn, target);
+        assert_eq!(look, HdrLook::target(&target));
+        // The first frame has nothing to blend from.
+        target.transition = 3.0;
+        let (drawn, look) = step_look(None, &target, 1.0 / 60.0);
+        assert_eq!(drawn, target);
+        assert_eq!(look.bloom_intensity.to_bits(), 0.0_f64.to_bits());
+        // Legacy bytes never blend.
+        let mut legacy = genos_scene::HdrSettings::legacy_bytes();
+        legacy.transition = 3.0;
+        legacy.compensation = 1.0;
+        let (drawn, _) = step_look(Some(HdrLook::target(&from)), &legacy, 1.0 / 60.0);
+        assert_eq!(drawn, legacy);
+        assert_eq!(step_look_value(1.0, 5.0, 1.0 / 60.0, 0.0).to_bits(), 5.0_f64.to_bits());
+        assert_eq!(step_look_value(1.0, 5.0, 1.0 / 60.0, -1.0).to_bits(), 5.0_f64.to_bits());
+        assert_eq!(step_look_value(1.0, 5.0, 1.0 / 60.0, f64::NAN).to_bits(), 5.0_f64.to_bits());
+    }
+
+    #[test]
+    fn bloom_fades_out_before_the_pass_stops_and_fades_in_from_zero() {
+        let mut on = look_settings();
+        on.transition = 0.5;
+        let mut off = on.clone();
+        off.bloom = false;
+
+        let frames = run_look(&on, &off);
+        assert!(frames.len() > 30);
+        let mut last = on.bloom_intensity;
+        for frame in &frames[..frames.len() - 1] {
+            // The pass still runs, at a falling intensity.
+            assert!(frame.bloom);
+            assert_eq!(bloom_level_count(frame), on.bloom_levels);
+            assert!(frame.bloom_intensity < last && frame.bloom_intensity > 0.0);
+            last = frame.bloom_intensity;
+        }
+        assert!(last <= LOOK_SNAP * 1.2, "{last}");
+        assert_eq!(frames.last(), Some(&off));
+        assert_eq!(frames.last().map(bloom_level_count), Some(0));
+
+        let frames = run_look(&off, &on);
+        assert!(frames[0].bloom && frames[0].bloom_intensity > 0.0);
+        assert!(frames[0].bloom_intensity < on.bloom_intensity * 0.2);
+        assert!(frames.windows(2).all(|pair| pair[0].bloom_intensity < pair[1].bloom_intensity));
+        assert_eq!(frames.last(), Some(&on));
     }
 
     #[test]

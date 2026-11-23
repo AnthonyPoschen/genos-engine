@@ -299,6 +299,8 @@ pub(crate) struct Lighting {
     /// EV100 from the last GPU histogram. Empty until a frame had samples.
     meter_ev: Option<f64>,
     hdr: genos_scene::HdrSettings,
+    /// The blended look the last frame drew with. `None` before the first frame.
+    hdr_look: Option<crate::hdr_output::HdrLook>,
     /// Last scale written. Legacy bytes stay at 1.
     exposure_scale: f32,
     /// EV100 the last scale was built from.
@@ -780,6 +782,7 @@ impl Default for Lighting {
             bloom_probe: false,
             meter_ev: None,
             hdr: genos_scene::HdrSettings::legacy_bytes(),
+            hdr_look: None,
             exposure_scale: 1.0,
             last_ev100: 0.0,
             exposure_log: Vec::new(),
@@ -3496,7 +3499,12 @@ impl Gpu {
         }
         self.lighting.async_on = async_on;
         self.lighting.settings = desired;
-        self.lighting.hdr = scene.hdr.effective()?;
+        // A look transition blends ev100, compensation and the bloom intensity
+        // toward the scene's values. With transition 0 this is the scene's value.
+        let (hdr, look) =
+            crate::hdr_output::step_look(self.lighting.hdr_look, &scene.hdr.effective()?, 1.0 / 60.0);
+        self.lighting.hdr = hdr;
+        self.lighting.hdr_look = Some(look);
         self.lighting.sun_height = sun_height(scene);
         // The first swapchain is built before a scene exists. A listed HDR pair
         // replaces it once the settings ask for that pair.

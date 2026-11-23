@@ -1698,6 +1698,14 @@ impl Tools {
                 let settings = ctx.host.scene().hdr.effective()?;
                 reply(hdr_value(&settings, ctx.renderer))
             }
+            "save_hdr_to_scene" => {
+                let saved = ctx.host.save_hdr_to_scene()?;
+                reply(obj(vec![
+                    ("scene", text(saved.scene)),
+                    ("path", text(saved.path)),
+                    ("lines", list(saved.lines.into_iter().map(text).collect())),
+                ]))
+            }
             "get_hdr" => {
                 let settings = ctx.host.scene().hdr.effective()?;
                 reply(hdr_value(&settings, ctx.renderer))

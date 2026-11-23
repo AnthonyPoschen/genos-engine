@@ -34,7 +34,7 @@ pub use fps_counter::{parse_enabled, parse_rate, FpsCli, FpsCounterSettings};
 pub use genos_math::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use hdr::{
     hdr_flag_needs_value, DisplayTransform, ExposureMode, HdrCli, HdrEnv, HdrSettings, OutputMode,
-    HDR_ENV_MIRRORS,
+    HDR_ENV_MIRRORS, HDR_LOOK_KEYS,
 };
 pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day,

@@ -104,6 +104,17 @@ pub struct CheckpointPose {
     pub pitch: f32,
 }
 
+/// What [`Host::save_hdr_to_scene`] wrote.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedLook {
+    /// The scene's name.
+    pub scene: String,
+    /// The scene file that was rewritten.
+    pub path: String,
+    /// The `hdr KEY VALUE` lines now in that file.
+    pub lines: Vec<String>,
+}
+
 /// Whether a scene load has installed its world yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoadPace {
@@ -155,6 +166,14 @@ pub trait Host {
     /// the scene.
     fn poll_load(&mut self) -> Result<LoadPace, String> {
         Ok(LoadPace::Ready)
+    }
+
+    /// Write the scene's HDR look (`scene().hdr`, without the arguments and
+    /// the `GENOS_HDR_*` mirrors) into the file the loaded scene was read
+    /// from, as its `hdr KEY VALUE` lines. The next start of that scene opens
+    /// with this look. A host whose scene has no file refuses.
+    fn save_hdr_to_scene(&mut self) -> Result<SavedLook, String> {
+        Err("this host has no scene file to save the HDR look to".into())
     }
 
     /// Checkpoint names for the scene that is loaded.

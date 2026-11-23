@@ -255,11 +255,15 @@ fn hdr_specs() -> Vec<CommandSpec> {
     vec![
         spec(
             "get_hdr_settings",
-            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --adapt-down, --adapt-up, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, and --output win over GENOS_HDR_*. --out wins over GENOS_HDR_OUT. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
+            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --adapt-down, --adapt-up, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, --output, and --hdr-transition win over GENOS_HDR_*. --out wins over GENOS_HDR_OUT. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
         ),
         spec(
             "set_hdr_settings",
-            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, legacy_bytes). A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
+            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, transition, legacy_bytes). transition is the seconds a change of ev100, compensation, or the bloom intensity takes to reach the picture; 0 applies it on the next frame. A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
+        ),
+        spec(
+            "save_hdr_to_scene",
+            "Write the scene's HDR look into the scene file the loaded scene was read from, so the next start of that scene opens with it. Takes no fields. The file's hdr lines are replaced by one `hdr KEY VALUE` line for each of exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, display, bloom, bloom_intensity, bloom_levels, and transition. output, histogram_bins and legacy_bytes are not written. Every other line of the file is kept. The value written is the scene's (set_hdr_settings or the Output page), without the arguments and the GENOS_HDR_* mirrors. Replies scene, path, and lines (the lines written). A scene with no file is refused.",
         ),
         spec(
             "get_hdr",
@@ -469,6 +473,7 @@ mod tests {
             ("lights", "lighting.lights"),
             ("mesh_view", "mesh.view"),
             ("set_fog_settings", "render.set_fog_settings"),
+            ("save_hdr_to_scene", "render.save_hdr_to_scene"),
             ("fx.spawn", "fx.spawn"),
             ("capture", "capture.capture"),
             ("load_scene", "scene.load"),

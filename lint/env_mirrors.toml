@@ -1361,6 +1361,11 @@ kind = "mirror"
 detail = "--output"
 
 [[var]]
+name = "GENOS_HDR_TRANSITION"
+kind = "mirror"
+detail = "--hdr-transition"
+
+[[var]]
 name = "GENOS_HDR_OUT"
 kind = "mirror"
 detail = "--out"

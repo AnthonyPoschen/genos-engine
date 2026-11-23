@@ -144,6 +144,9 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          only when this is omitted
   --output auto|sdr|hdr10|scrgb
                          swapchain choice. GENOS_HDR_OUTPUT applies only when this is omitted
+  --hdr-transition F     seconds a change of EV100, compensation, or bloom intensity
+                         takes to reach the picture. 0 applies it on the next frame.
+                         GENOS_HDR_TRANSITION applies only when this is omitted
   --fog on|off           height fog and local volumes (GENOS_FOG)
   --fog-density N        extinction at the fog height (GENOS_FOG_DENSITY)
   --fog-height N         world height of that extinction, metres (GENOS_FOG_HEIGHT)
@@ -317,7 +320,12 @@ const ID_HDR_APERTURE: u32 = 5103;
 const ID_HDR_SHUTTER: u32 = 5104;
 const ID_HDR_LEVELS: u32 = 5105;
 const ID_HDR_BLOOM_I: u32 = 5106;
+const ID_HDR_ADAPT_DOWN: u32 = 5107;
+const ID_HDR_ADAPT_UP: u32 = 5108;
+const ID_HDR_TRANSITION: u32 = 5109;
 const ID_HDR_BLOOM: u32 = 5200;
+/// The "Save look to scene" button of the Output page.
+const ID_HDR_SAVE: u32 = 5300;
 
 mod menu_layout;
 #[cfg(feature = "mesh")]
@@ -876,6 +884,8 @@ fn run() -> Result<i32, String> {
                             } else if id == MENU_DOCK {
                                 let docked = !app.scene().menu.docked;
                                 app.scene().menu.docked = docked;
+                            } else if id == ID_HDR_SAVE {
+                                app.save_look_from_menu();
                             } else if folds.iter().any(|fold| fold.id == id) {
                                 save_menu_folds(&opts.out, &ui, &folds)?;
                             } else if let Some(name) = tab_title(&menu, id) {
@@ -1353,6 +1363,8 @@ struct App {
     root: PathBuf,
     log: std::fs::File,
     load: Option<LoadJob>,
+    /// What the last "Save look to scene" did. The Output page shows it.
+    look_note: String,
     /// Set while a mesh scene is open: the workspace file being followed.
     #[cfg(feature = "mesh")]
     mesh: Option<mesh_view::MeshView>,
@@ -1542,7 +1554,7 @@ fn mesh_world(dir: &Path, sun: Option<&Sun>, sky: Option<[f32; 3]>, lamps: &[Lam
 impl App {
     fn open(entries: Vec<Entry>, root: PathBuf, log: std::fs::File) -> Result<Self, String> {
         let mut show = build_entry(&root, &entries[0])?;
-        adopt_show(&mut show);
+        adopt_show(&mut show, &entries[0]);
         Ok(Self {
             entries,
             index: 0,
@@ -1551,6 +1563,7 @@ impl App {
             root,
             log,
             load: None,
+            look_note: String::new(),
             #[cfg(feature = "mesh")]
             mesh: None,
             #[cfg(feature = "mesh")]
@@ -1667,6 +1680,9 @@ impl App {
                 let _ = hdr.set_key("bloom", "off");
                 let _ = hdr.set_key("exposure_mode", "fixed");
                 let _ = hdr.set_key("ev100", MESH_EV100);
+                // The scene file's own look wins over those.
+                let entry = self.entry().clone();
+                apply_entry_hdr(&mut self.scene().hdr, &entry);
                 false
             }
         };
@@ -1681,7 +1697,7 @@ impl App {
         match build_entry(&self.root, &self.entries[index]) {
             Ok(mut show) => {
                 let from = self.scene().clone();
-                adopt_show(&mut show);
+                adopt_show(&mut show, &self.entries[index]);
                 self.show = show;
                 let scene = self.scene();
                 scene.menu = from.menu;
@@ -1840,6 +1856,43 @@ impl App {
         let _ = writeln!(self.log, "{line}");
     }
 
+    /// Write the scene's HDR look into the scene file it was read from, and
+    /// keep the same lines on the entry, so a later load of this scene in
+    /// this run opens with the saved look too.
+    fn save_look(&mut self) -> Result<genos_debug::SavedLook, String> {
+        let scene = self.entry().name.clone();
+        let Some(path) = self.entry().path.clone() else {
+            return Err(format!("scene {scene} was not read from a file; there is no file to save its HDR look to"));
+        };
+        let hdr = self.scene_ref().hdr.clone();
+        let lines = genos_scene_lib::save_hdr_look(&path, &hdr)?;
+        let index = self.index;
+        self.entries[index].hdr = hdr.look_pairs();
+        Ok(genos_debug::SavedLook {
+            scene,
+            path: path.display().to_string(),
+            lines,
+        })
+    }
+
+    /// The menu's button: save, and say what happened on the Output page and in the log.
+    fn save_look_from_menu(&mut self) {
+        let line = match self.save_look() {
+            Ok(saved) => {
+                let file = Path::new(&saved.path)
+                    .file_name()
+                    .map_or_else(|| saved.path.clone(), |name| name.to_string_lossy().into_owned());
+                self.note(&format!("saved the HDR look of {} to {}", saved.scene, saved.path));
+                format!("Saved to {file}")
+            }
+            Err(err) => {
+                self.note(&format!("the HDR look was not saved: {err}"));
+                format!("Not saved: {err}")
+            }
+        };
+        self.look_note = line;
+    }
+
     fn scene_ref(&self) -> &Scene {
         match &self.show {
             Show::Stress(stage) => &stage.world.scene,
@@ -1909,7 +1962,7 @@ impl App {
         self.scene().debug = debug;
         self.scene().event_loop = event_loop;
         genos_window::retire(old);
-        adopt_show(&mut self.show);
+        adopt_show(&mut self.show, &self.entries[self.index]);
         self.overlay_fog();
         self.overlay_particles();
         self.note(&format!("loaded {name}"));
@@ -1927,11 +1980,26 @@ fn adopt_hdr_preset(scene: &mut genos_scene::Scene) {
     scene.hdr = genos_scene::HdrSettings::for_preset(preset);
 }
 
-fn adopt_show(show: &mut Show) {
-    match show {
-        Show::Stress(stage) => adopt_hdr_preset(&mut stage.world.scene),
-        Show::Still(world) => adopt_hdr_preset(&mut world.scene),
+/// Lay the scene file's `hdr KEY VALUE` lines over `hdr`. A key the file does
+/// not name keeps its value. scene-lib refused a bad pair when it read the file.
+fn apply_entry_hdr(hdr: &mut genos_scene::HdrSettings, entry: &Entry) {
+    for (key, value) in &entry.hdr {
+        if let Err(err) = hdr.set_key(key, value) {
+            eprintln!("{}: scene {} hdr {key}: {err}", program().name, entry.name);
+        }
     }
+}
+
+/// The HDR value a scene opens with: the lighting preset's defaults, then the
+/// scene file's `hdr` lines. The arguments and the `GENOS_HDR_*` mirrors are
+/// laid over it where it is read (`HdrSettings::effective`).
+fn adopt_show(show: &mut Show, entry: &Entry) {
+    let scene = match show {
+        Show::Stress(stage) => &mut stage.world.scene,
+        Show::Still(world) => &mut world.scene,
+    };
+    adopt_hdr_preset(scene);
+    apply_entry_hdr(&mut scene.hdr, entry);
 }
 
 impl Host for App {
@@ -2403,7 +2471,7 @@ impl Host for App {
         self.scene().fps_counter = fps;
         self.scene().debug = debug;
         self.scene().event_loop = event_loop;
-        adopt_show(&mut self.show);
+        adopt_show(&mut self.show, &self.entries[self.index]);
         self.overlay_fog();
         self.overlay_particles();
         self.note(&format!("loaded {name}"));
@@ -2412,6 +2480,13 @@ impl Host for App {
 
     fn begin_load(&mut self, name: &str) -> Result<LoadPace, String> {
         self.start_load(name)
+    }
+
+    fn save_hdr_to_scene(&mut self) -> Result<genos_debug::SavedLook, String> {
+        let saved = self.save_look()?;
+        self.note(&format!("saved the HDR look of {} to {}", saved.scene, saved.path));
+        self.look_note = "Saved by command".into();
+        Ok(saved)
     }
 
     fn poll_load(&mut self) -> Result<LoadPace, String> {
@@ -3473,6 +3548,54 @@ fn setting_piece(
                 1.0,
             )))
         }
+        "hdr_adapt_down" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt down (s)",
+                ID_HDR_ADAPT_DOWN,
+                hdr.adapt_down,
+                0.05,
+                5.0,
+                0.05,
+            )))
+        }
+        "hdr_adapt_up" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt up (s)",
+                ID_HDR_ADAPT_UP,
+                hdr.adapt_up,
+                0.05,
+                5.0,
+                0.05,
+            )))
+        }
+        "hdr_transition" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Look transition (s)",
+                ID_HDR_TRANSITION,
+                hdr.transition,
+                0.0,
+                5.0,
+                0.05,
+            )))
+        }
+        "hdr_save" => Some(Piece::Row(PanelRow {
+            label: if app.look_note.is_empty() {
+                "Scene look".into()
+            } else {
+                app.look_note.clone()
+            },
+            buttons: vec![genos_ui::PanelButton {
+                id: ID_HDR_SAVE,
+                text: SAVE_LOOK_BUTTON.into(),
+                selected: false,
+            }],
+            slider: None,
+            dropdown: None,
+            checks: Vec::new(),
+        })),
         "hdr_output" => {
             let hdr = hdr_of(app);
             drop_row(
@@ -3806,6 +3929,9 @@ fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
     }
 }
 
+/// The words on the Output page's save button.
+const SAVE_LOOK_BUTTON: &str = "Save look to scene";
+
 fn hdr_of(app: &App) -> genos_scene::HdrSettings {
     let stored = app.scene_ref().hdr.clone();
     match stored.effective() {
@@ -3879,6 +4005,14 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
         app.scene()
             .hdr
             .set_key("bloom_intensity", &format!("{value}"))?;
+    } else if id == ID_HDR_ADAPT_DOWN {
+        app.scene().hdr.set_key("adapt_down", &format!("{value}"))?;
+    } else if id == ID_HDR_ADAPT_UP {
+        app.scene().hdr.set_key("adapt_up", &format!("{value}"))?;
+    } else if id == ID_HDR_TRANSITION {
+        app.scene()
+            .hdr
+            .set_key("transition", &format!("{}", value.max(0.0)))?;
     } else if id == ID_HDR_LEVELS {
         let levels = value.round().clamp(0.0, 6.0);
         app.scene()
@@ -4536,6 +4670,8 @@ mod tests {
                 checkpoint: "atrium".into(),
                 min_mean: 8.0,
             },
+            hdr: Vec::new(),
+            path: None,
         }];
         assert!(gltf_scene(&entries, "sponza"));
         assert!(!gltf_scene(&entries, "room"));
@@ -4607,6 +4743,63 @@ mod tests {
     }
 
     #[test]
+    fn a_scene_file_look_lies_over_the_preset_and_a_save_writes_it_back() {
+        use genos_debug::Host;
+
+        let root = genos_scene_lib::repo_root();
+        let dir = std::env::temp_dir().join(format!("genos-scene-program-look-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("camera.scene");
+        std::fs::copy(genos_scene_lib::scenes_dir().join("camera.scene"), &path).expect("copy");
+        let plain = genos_scene_lib::parse_path(&path).expect("scene");
+        let log = || std::fs::File::create(dir.join("run.log")).expect("log");
+
+        // No hdr line: the preset's value.
+        let preset = super::App::open(vec![plain.clone()], root.clone(), log()).expect("app").scene_ref().hdr.clone();
+        assert!(!preset.legacy_bytes);
+
+        // Two keys in the file: those two change, the rest stays the preset's.
+        let mut entry = plain.clone();
+        entry.hdr = vec![("compensation".into(), "-1".into()), ("bloom_intensity".into(), "0.02".into())];
+        let mut app = super::App::open(vec![entry], root.clone(), log()).expect("app");
+        let mut expected = preset.clone();
+        expected.compensation = -1.0;
+        expected.bloom_intensity = 0.02;
+        assert_eq!(app.scene_ref().hdr, expected);
+
+        // Tune, save: the file holds the look, and reads back to the same value.
+        app.scene().hdr.set_key("transition", "1.5").expect("key");
+        app.scene().hdr.set_key("ev100", "3").expect("key");
+        let tuned = app.scene_ref().hdr.clone();
+        let saved = app.save_hdr_to_scene().expect("save");
+        assert_eq!(saved.scene, plain.name);
+        assert_eq!(saved.path, path.display().to_string());
+        assert!(saved.lines.contains(&"hdr transition 1.5".to_string()), "{:?}", saved.lines);
+        let text = std::fs::read_to_string(&path).expect("read");
+        let original = std::fs::read_to_string(genos_scene_lib::scenes_dir().join("camera.scene")).expect("read");
+        assert_eq!(text, format!("{original}{}\n", saved.lines.join("\n")));
+        let reread = genos_scene_lib::parse_path(&path).expect("scene");
+        assert_eq!(reread.hdr, app.entry().hdr);
+        let reopened = super::App::open(vec![reread], root.clone(), log()).expect("app");
+        assert_eq!(reopened.scene_ref().hdr, tuned);
+
+        // The Output page's button does the same and says so on its row.
+        app.save_look_from_menu();
+        assert_eq!(app.look_note, "Saved to camera.scene");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+
+        // A scene that was never a file has nowhere to save to.
+        let mut loose = plain;
+        loose.path = None;
+        let mut app = super::App::open(vec![loose], root, log()).expect("app");
+        let err = app.save_hdr_to_scene().expect_err("no file");
+        assert!(err.contains("was not read from a file"), "{err}");
+        app.save_look_from_menu();
+        assert!(app.look_note.starts_with("Not saved: "), "{}", app.look_note);
+        std::fs::remove_dir_all(&dir).expect("clean");
+    }
+
+    #[test]
     fn each_setting_uses_a_dropdown_a_slider_or_a_toggle() {
         use genos_debug::Host;
         use genos_scene::Camera;
@@ -4619,7 +4812,15 @@ mod tests {
         let app = super::App::open(entries, root, log).expect("app");
         let fps = genos_scene::FpsCounterSettings::default();
         let rows = super::panel_rows(&app, ViewMode::Full, &fps);
-        assert!(rows.iter().all(|row| row.buttons.is_empty()));
+        // The one button is an action, not a setting: it saves the look.
+        for row in &rows {
+            let texts: Vec<&str> = row.buttons.iter().map(|button| button.text.as_str()).collect();
+            assert!(texts.is_empty() || texts == [super::SAVE_LOOK_BUTTON], "{}: {texts:?}", row.label);
+        }
+        assert_eq!(rows.iter().filter(|row| !row.buttons.is_empty()).count(), 1);
+        for label in ["Adapt down (s)", "Adapt up (s)", "Look transition (s)"] {
+            assert!(rows.iter().any(|row| row.label == label && row.slider.is_some()), "missing slider {label}");
+        }
         let dropdowns: Vec<&str> = rows
             .iter()
             .filter(|row| row.dropdown.is_some())
@@ -5069,6 +5270,7 @@ mod tests {
         assert!(super::USAGE.contains("GENOS_HDR_OUT"));
         assert!(super::USAGE.contains("--adapt-down"));
         assert!(super::USAGE.contains("--adapt-up"));
+        assert!(super::USAGE.contains("--hdr-transition"));
         for name in genos_scene::HDR_ENV_MIRRORS {
             assert!(super::USAGE.contains(name), "{name}");
         }
