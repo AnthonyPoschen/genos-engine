@@ -179,6 +179,18 @@ impl GltfSurface {
         }
     }
 
+    /// Whether the material a triangle names is `doubleSided` in the file.
+    /// Every triangle stops a ray from both sides either way.
+    #[must_use]
+    pub fn double_sided(&self, material: u32) -> bool {
+        usize::try_from(material).ok().and_then(|i| self.materials.get(i)).is_some_and(|m| m.pbr.double_sided)
+    }
+
+    /// Every triangle in world space, solid ones first.
+    pub fn triangles(&self) -> impl Iterator<Item = &MeshTriangle> {
+        self.solid.triangles.iter().chain(&self.holed.triangles)
+    }
+
     #[must_use]
     pub fn triangle_count(&self) -> usize {
         self.solid.triangles.len() + self.holed.triangles.len()

@@ -517,6 +517,7 @@ dependencies = [
  "genos-debug",
  "genos-gpuref",
  "genos-load",
+ "genos-mesh",
  "genos-render",
  "genos-scene",
  "genos-scene-lib",

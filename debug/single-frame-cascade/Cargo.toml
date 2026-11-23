@@ -15,6 +15,7 @@ path = "src/main.rs"
 ash = "0.38"
 genos-gpuref = { path = "../../crates/gpuref" }
 genos-load = { path = "../../crates/load" }
+genos-mesh = { path = "../../crates/mesh" }
 genos-debug = { path = "../../crates/debug" }
 genos-render = { path = "../../crates/render" }
 genos-scene = { path = "../../crates/scene" }

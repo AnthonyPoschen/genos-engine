@@ -139,10 +139,13 @@ Not measured: Sponza or any glTF scene (the prototype takes a `kind stress` scen
 
 ## Phase 1, 24 Nov 2026
 
-The cone tracer against the leak into the room no lamp lights. The gate (room within 7.95%, bias under 10%) missed; the plan's section 11 has the table and what was tried. Arguments added for it:
+The cone tracer against the leak into the room no lamp lights, then on Sponza. Passed: room 7.45%, hall 5.64%, Sponza atrium 6.74%, dark corner 6.47% (the plan's section 11 has the table, the six fixes in order, and what was tried and taken out). Arguments added for it:
 
-- `--voxel-order none|front` (default `front`): a voxel also keeps, for each of its six directions, the centroid of the area that faces that way; with `front` that area shows to a cone only when the cone starts on the side it faces. The sunlit top of a roof no longer lights the ceiling under it.
-- `--refine-level L` (default 3): a step at a coarser level that meets cover is walked again at level L (12.5 cm), whose read cannot reach across a 30 cm wall. 9 is off.
+- `--voxel-order none|front` (default `front`): an area shows to a cone only when the cone starts on the side it faces.
+- `--refine-level L` (default 3): a coarser step that meets cover is walked again at level L.
+- `--fine-walk sample|cross` (default `cross`), `--cross-full F` (default 0.5), `--box-margin M` (default 0.031), `--cover-mix add|multiply` (default `add`): how a fine step counts the planes it crosses.
 - `--max-level L`: the coarsest level a cone reads.
-- `--probe-pixel X,Y`: one pixel's ray and cone in 1024 cosine directions, and the directions where they differ most.
+- `--probe-pixel X,Y`: one pixel's ray and cone in 1024 cosine directions, and the directions where they differ most, both ways.
 - `--voxel-check`: the finest voxels' stored light over the exact direct light of the pixels in them, by orientation.
+
+The cone tracer also voxelises `kind gltf` scenes: points on every triangle's front (both sides for a `doubleSided` material), each point's albedo read by a short ray into the surface.
