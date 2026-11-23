@@ -532,6 +532,13 @@ impl Renderer {
         }
     }
 
+    /// The auto-exposure meter's last reading: the clipped mean's EV100, the
+    /// highlight percentile's EV100, and the EV100 exposure keys. None until a
+    /// histogram had samples, or when exposure is not auto.
+    pub fn hdr_meter(&self) -> Option<crate::hdr_output::Metered> {
+        self.gpu.lighting.meter_parts
+    }
+
     /// Share of subsampled scene luma that moved by more than 0.01 since the previous copy.
     pub fn hdr_still_pop(&self) -> f64 {
         self.gpu.lighting.still_pop

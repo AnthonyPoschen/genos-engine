@@ -298,6 +298,8 @@ pub(crate) struct Lighting {
     bloom_probe: bool,
     /// EV100 from the last GPU histogram. Empty until a frame had samples.
     meter_ev: Option<f64>,
+    /// The last histogram's clipped mean and highlight EV100, for the probe.
+    pub(crate) meter_parts: Option<crate::hdr_output::Metered>,
     /// The camera position auto exposure last saw, to find a cut.
     pub(crate) exposure_eye: Option<[f32; 3]>,
     /// Frames auto exposure still waits after a camera cut, and the scale
@@ -787,6 +789,7 @@ impl Default for Lighting {
             budget_hdr10_listed: false,
             bloom_probe: false,
             meter_ev: None,
+            meter_parts: None,
             exposure_eye: None,
             exposure_cut: 0,
             exposure_cut_from: 0.0,
@@ -1756,6 +1759,7 @@ impl Gpu {
         self.lighting.meter_has_prev = [false, false];
         self.lighting.meter_ping = [0, 0];
         self.lighting.meter_ev = None;
+        self.lighting.meter_parts = None;
         self.lighting.still_pop = 0.0;
         self.lighting.histogram_counts.clear();
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
@@ -3631,7 +3635,13 @@ impl Gpu {
         if occupied == 0 {
             return;
         }
-        self.lighting.meter_ev = Some(crate::hdr_output::histogram_ev100_from_counts(&counts));
+        let metered = crate::hdr_output::metered_ev100(
+            &counts,
+            self.lighting.hdr.highlight_percentile,
+            self.lighting.hdr.highlight_headroom,
+        );
+        self.lighting.meter_ev = Some(metered.ev100);
+        self.lighting.meter_parts = Some(metered);
         self.write_histogram_dump(&counts);
         self.lighting.histogram_counts = counts;
     }

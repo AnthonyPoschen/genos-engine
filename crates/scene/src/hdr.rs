@@ -47,6 +47,11 @@ pub struct HdrSettings {
     pub shutter: f64,
     pub adapt_down: f64,
     pub adapt_up: f64,
+    /// Share of the metered pixels under the highlight the meter reads, 0 to 1.
+    pub highlight_percentile: f64,
+    /// Stops over middle grey the highlight may sit at most. The meter lowers
+    /// the exposure until the highlight is no brighter than this. 0 is off.
+    pub highlight_headroom: f64,
     /// Histogram bins. High 256, Medium 128, Low 64, Fallback unused.
     pub histogram_bins: u32,
     pub display: DisplayTransform,
@@ -72,6 +77,8 @@ pub struct HdrCli {
     pub shutter: Option<f64>,
     pub adapt_down: Option<f64>,
     pub adapt_up: Option<f64>,
+    pub highlight_percentile: Option<f64>,
+    pub highlight_headroom: Option<f64>,
     pub display: Option<DisplayTransform>,
     pub bloom: Option<bool>,
     pub bloom_intensity: Option<f64>,
@@ -82,7 +89,7 @@ pub struct HdrCli {
 
 /// Environment mirrors of the design-table keys, then `GENOS_HDR_OUT` for `--out`.
 /// The argument wins. The variable applies only when that argument was omitted.
-pub const HDR_ENV_MIRRORS: [&str; 15] = [
+pub const HDR_ENV_MIRRORS: [&str; 17] = [
     "GENOS_HDR_EXPOSURE_MODE",
     "GENOS_HDR_EV100",
     "GENOS_HDR_COMPENSATION",
@@ -91,6 +98,8 @@ pub const HDR_ENV_MIRRORS: [&str; 15] = [
     "GENOS_HDR_SHUTTER",
     "GENOS_HDR_ADAPT_DOWN",
     "GENOS_HDR_ADAPT_UP",
+    "GENOS_HDR_HIGHLIGHT_PERCENTILE",
+    "GENOS_HDR_HIGHLIGHT_HEADROOM",
     "GENOS_HDR_DISPLAY",
     "GENOS_HDR_BLOOM",
     "GENOS_HDR_BLOOM_INTENSITY",
@@ -118,6 +127,8 @@ impl HdrSettings {
             shutter: 1.0 / 60.0,
             adapt_down: 0.40,
             adapt_up: 0.80,
+            highlight_percentile: 0.98,
+            highlight_headroom: 4.0,
             histogram_bins: 256,
             display: DisplayTransform::Legacy,
             bloom: false,
@@ -217,6 +228,12 @@ impl HdrSettings {
                     cli.adapt_down = Some(parse_f64("adapt_down", &take(&mut index)?)?);
                 }
                 "--adapt-up" => cli.adapt_up = Some(parse_f64("adapt_up", &take(&mut index)?)?),
+                "--highlight-percentile" => {
+                    cli.highlight_percentile = Some(parse_f64("highlight_percentile", &take(&mut index)?)?);
+                }
+                "--highlight-headroom" => {
+                    cli.highlight_headroom = Some(parse_f64("highlight_headroom", &take(&mut index)?)?);
+                }
                 "--hdr-display" => cli.display = Some(parse_display(&take(&mut index)?)?),
                 "--display" => {
                     let value = take(&mut index)?;
@@ -260,6 +277,8 @@ impl HdrSettings {
             shutter: env("GENOS_HDR_SHUTTER"),
             adapt_down: env("GENOS_HDR_ADAPT_DOWN"),
             adapt_up: env("GENOS_HDR_ADAPT_UP"),
+            highlight_percentile: env("GENOS_HDR_HIGHLIGHT_PERCENTILE"),
+            highlight_headroom: env("GENOS_HDR_HIGHLIGHT_HEADROOM"),
             display: env("GENOS_HDR_DISPLAY"),
             bloom: env("GENOS_HDR_BLOOM"),
             bloom_intensity: env("GENOS_HDR_BLOOM_INTENSITY"),
@@ -321,6 +340,18 @@ impl HdrSettings {
             out.adapt_up = value;
         }
         if let Some(value) = cli
+            .highlight_percentile
+            .or_else(|| parse_opt_f64(env.highlight_percentile.as_deref()))
+        {
+            out.highlight_percentile = value.clamp(0.0, 1.0);
+        }
+        if let Some(value) = cli
+            .highlight_headroom
+            .or_else(|| parse_opt_f64(env.highlight_headroom.as_deref()))
+        {
+            out.highlight_headroom = value.max(0.0);
+        }
+        if let Some(value) = cli
             .display
             .or_else(|| env.display.as_deref().and_then(|v| parse_display(v).ok()))
         {
@@ -362,7 +393,7 @@ impl HdrSettings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "exposure_mode={}\nev100={}\ncompensation={}\niso={}\naperture={}\nshutter={}\nadapt_down={}\nadapt_up={}\nhistogram_bins={}\ndisplay={}\nbloom={}\nbloom_intensity={}\nbloom_levels={}\noutput={}\ntransition={}\nlegacy_bytes={}\n",
+            "exposure_mode={}\nev100={}\ncompensation={}\niso={}\naperture={}\nshutter={}\nadapt_down={}\nadapt_up={}\nhighlight_percentile={}\nhighlight_headroom={}\nhistogram_bins={}\ndisplay={}\nbloom={}\nbloom_intensity={}\nbloom_levels={}\noutput={}\ntransition={}\nlegacy_bytes={}\n",
             exposure_name(self.exposure_mode),
             self.ev100,
             self.compensation,
@@ -371,6 +402,8 @@ impl HdrSettings {
             self.shutter,
             self.adapt_down,
             self.adapt_up,
+            self.highlight_percentile,
+            self.highlight_headroom,
             self.histogram_bins,
             display_name(self.display),
             if self.bloom { "on" } else { "off" },
@@ -413,6 +446,12 @@ impl HdrSettings {
             "shutter" => self.shutter = parse_f64("shutter", value)?,
             "adapt_down" => self.adapt_down = parse_f64("adapt_down", value)?,
             "adapt_up" => self.adapt_up = parse_f64("adapt_up", value)?,
+            "highlight_percentile" => {
+                self.highlight_percentile = parse_f64("highlight_percentile", value)?.clamp(0.0, 1.0);
+            }
+            "highlight_headroom" => {
+                self.highlight_headroom = parse_f64("highlight_headroom", value)?.max(0.0);
+            }
             "histogram_bins" => self.histogram_bins = parse_u32("histogram_bins", value)?,
             "display" => self.display = parse_display(value)?,
             "bloom" => self.bloom = parse_on(value)?,
@@ -430,7 +469,7 @@ impl HdrSettings {
 /// The keys a scene file stores as its look, in the order they are written.
 /// `output` is the machine's choice. `histogram_bins` follows the preset.
 /// `legacy_bytes` is internal.
-pub const HDR_LOOK_KEYS: [&str; 13] = [
+pub const HDR_LOOK_KEYS: [&str; 15] = [
     "exposure_mode",
     "ev100",
     "compensation",
@@ -439,6 +478,8 @@ pub const HDR_LOOK_KEYS: [&str; 13] = [
     "shutter",
     "adapt_down",
     "adapt_up",
+    "highlight_percentile",
+    "highlight_headroom",
     "display",
     "bloom",
     "bloom_intensity",
@@ -475,6 +516,8 @@ pub struct HdrEnv {
     pub shutter: Option<String>,
     pub adapt_down: Option<String>,
     pub adapt_up: Option<String>,
+    pub highlight_percentile: Option<String>,
+    pub highlight_headroom: Option<String>,
     pub display: Option<String>,
     pub bloom: Option<String>,
     pub bloom_intensity: Option<String>,
@@ -698,7 +741,7 @@ mod tests {
         );
         assert_eq!(from_cli.adapt_down.to_bits(), 0.90_f64.to_bits());
         assert_eq!(from_cli.adapt_up.to_bits(), 1.25_f64.to_bits());
-        assert_eq!(HDR_ENV_MIRRORS.len(), 15);
+        assert_eq!(HDR_ENV_MIRRORS.len(), 17);
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_DOWN"));
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_UP"));
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_OUT"));

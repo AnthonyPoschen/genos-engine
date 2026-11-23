@@ -117,6 +117,8 @@ EV100    = log2(N² / t × 100 / S)        camera
 
 **Departure from Reinhard 2002:** the meter is a histogram with a 10% clip on each tail, not one log-average. A sun that covers one pixel must not move EV100 by more than 0.10 on the firefly fixture in §8. Reinhard's key is the idea we keep. His single mean is not.
 
+**Highlight limit (24 Nov 2026).** The clipped mean keys middle grey. In shade beside a sunlit or lamp-lit area that mean is the dim bounce light, so the lit area went to white and bloom spread it as haze. The meter now also reads the histogram's `highlight_percentile` (0.98) and keys the larger of the mean's EV100 and that highlight's EV100 minus `highlight_headroom` (4 stops). The lit area then sits at most 4 stops over middle grey; the shade goes darker, as it does to a camera or an eye. A lamp's own few pixels sit above the 98th percentile and do not drive it. `headroom` 0 is the mean alone. Measured on Sponza (High, 1280x720), EV100 mean → keyed: the shaded north gallery facing the colonnade lamp −1.96 → −0.69; the curtains in shade before the sunlit courtyard −6.20 → −3.31; the colonnade, atrium and dark corner unchanged (their p98 is within 4 stops of the mean). Probe: `get_hdr` replies `meter_mean_ev100`, `meter_highlight_ev100` and `meter_ev100`. **Departure:** the Lagarde and Frostbite meters average one histogram window; this adds a ceiling from the top of the histogram, as Unreal's histogram meter does with its high percent, but as a limit on the stops above grey, not a second average.
+
 Auto and camera meet at EV100. Compensation adds stops after that: `exposure ×= 2^compensation`. Positive compensation brightens. One meaning.
 
 ### 4.3 Swapchain
@@ -199,6 +201,8 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 | `shutter` | seconds | 1/60 |
 | `adapt_down` | seconds, exposure falling (scene got brighter) | 0.40 |
 | `adapt_up` | seconds, exposure rising (scene got darker) | 0.80 |
+| `highlight_percentile` | 0..1, the histogram share under the highlight the meter reads | 0.98 |
+| `highlight_headroom` | stops over middle grey the highlight may sit at most; 0 is off | 4 |
 | `display` | `agx`, `aces`, `legacy` | `agx`. `aces` presents the legacy shoulder until `aces2_rec709` is the Academy CTL |
 | `bloom` | `off`, `on` | `on` from phase 4; `off` on Fallback |
 | `bloom_intensity` | float, scales the pyramid add | 0.05 (0 on Fallback) |
@@ -240,7 +244,7 @@ hdr KEY VALUE
 
 The order is: the lighting preset's defaults (`HdrSettings::for_preset`), then the scene file's `hdr` lines, then the arguments, then the `GENOS_HDR_*` mirrors of omitted arguments. A key the file does not name keeps the preset's value. A mesh scene's own defaults (bloom off, fixed EV 1.2) come before the file's lines.
 
-`save_hdr_to_scene` (public name `render.save_hdr_to_scene`) and the Output page's `Save look to scene` button write the scene's value back. The file's `hdr` lines are removed. One line is appended for each of `exposure_mode`, `ev100`, `compensation`, `iso`, `aperture`, `shutter`, `adapt_down`, `adapt_up`, `display`, `bloom`, `bloom_intensity`, `bloom_levels`, and `transition`. `output` is the machine's choice, `histogram_bins` follows the preset, and `legacy_bytes` is internal, so those three are not written. Every other line and comment is kept byte for byte. The new text is written to a temporary file beside the scene file and renamed over it.
+`save_hdr_to_scene` (public name `render.save_hdr_to_scene`) and the Output page's `Save look to scene` button write the scene's value back. The file's `hdr` lines are removed. One line is appended for each of `exposure_mode`, `ev100`, `compensation`, `iso`, `aperture`, `shutter`, `adapt_down`, `adapt_up`, `highlight_percentile`, `highlight_headroom`, `display`, `bloom`, `bloom_intensity`, `bloom_levels`, and `transition`. `output` is the machine's choice, `histogram_bins` follows the preset, and `legacy_bytes` is internal, so those three are not written. Every other line and comment is kept byte for byte. The new text is written to a temporary file beside the scene file and renamed over it.
 
 The value saved is `Scene.hdr`: what `set_hdr_settings` and the Output page wrote. An argument or a `GENOS_HDR_*` mirror is not saved, and it still wins on the next start. The command replies `scene`, `path`, and `lines` (the lines written). A scene that was not read from a file is refused. Every scene in `debug/scenes/` and in a `--scenes` directory has a file.
 
@@ -378,7 +382,7 @@ The §7 ceilings are not rows. They are not measured, and comparing them to them
 
 HDR output is a renderer pass, not a new system. It does not add `debug/hdr/`. The lighting binary (`debug/lighting`) gains an Output page when phase 1 lands. The page is the shared scaffolding: the scene picker, checkpoints, reset, replay, screenshots, sliders, the guided-review panel, and the headless CLI. No new binary.
 
-The menu draws glossary terms. Exposure mode, display, and output are dropdowns. EV100, compensation, ISO, aperture, shutter, adapt down (0.05 to 5 s), adapt up (0.05 to 5 s), look transition (0 to 5 s), bloom intensity, and bloom levels are sliders. `Save look to scene` is the page's one button. Its row then reads `Saved to <file>` or `Not saved: <reason>`. The menu layout names are `hdr_adapt_down`, `hdr_adapt_up`, `hdr_transition`, and `hdr_save`. There is no description string and no tooltip. The exposure phase draws this page and serves `get_hdr`. The surface list is the swapchain pair in use. Swapchain selection fills that list. The output row is labeled `SDR output` because that is the glossary headword for the swapchain image; the choices are `auto`, `sdr`, `hdr10`, and `scrgb`.
+The menu draws glossary terms. Exposure mode, display, and output are dropdowns. EV100, compensation, ISO, aperture, shutter, adapt down (0.05 to 5 s), adapt up (0.05 to 5 s), highlight percentile (0.5 to 1), highlight headroom (0 to 8 stops), look transition (0 to 5 s), bloom intensity, and bloom levels are sliders. `Save look to scene` is the page's one button. Its row then reads `Saved to <file>` or `Not saved: <reason>`. The menu layout names are `hdr_adapt_down`, `hdr_adapt_up`, `hdr_highlight_percentile`, `hdr_highlight_headroom`, `hdr_transition`, and `hdr_save`. There is no description string and no tooltip. The exposure phase draws this page and serves `get_hdr`. The surface list is the swapchain pair in use. Swapchain selection fills that list. The output row is labeled `SDR output` because that is the glossary headword for the swapchain image; the choices are `auto`, `sdr`, `hdr10`, and `scrgb`.
 
 Probes, one per failure mode. They land with the phase that can fail that way. Names are the MCP catalogue in `crates/debug/src/commands.rs`, so MCP, `POST /cmd`, and Rhai share the JSON.
 
@@ -525,7 +529,7 @@ Causes:
 
 1. **The step was a constant 1/60 s.** Fixed on 23 Nov 2026: the step is the wall time between frames (§5). The session ran at 40 to 53 fps, so the effective `adapt_down` was about 0.8 s.
 2. **The adaptation is exponential on the linear scale, not in stops.** The time to cross a jump is `τ × ln(ratio)`. A fall of 12 stops is 8.4 time constants, and each stop costs the same time. A rise is the opposite: the scale covers most of the linear distance in the first fraction of `adapt_up`, so 0.1 s in the gap is already about 9 stops over the room's exposure and 0.5 s is within about one stop of the gap's. An eye is slow to adapt to the dark and quick to recover from the light. The engine does the reverse.
-3. **Auto exposure has no limit.** An unlit view drives the meter to EV100 −11 and the scale to about 2,000.
+3. **Auto exposure has no limit.** An unlit view drives the meter to EV100 −11 and the scale to about 2,000. (A view with a lit area in it is now limited by the highlight headroom; a view with nothing lit is not.)
 4. **The camera-cut rule does not see a walk.** It applies only when the camera moves more than `EXPOSURE_CUT_DISTANCE` (2 m) in one frame.
 
 The settings today are `adapt_down` and `adapt_up` only. They set the speed. Nothing sets the shape or the range.

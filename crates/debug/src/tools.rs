@@ -2866,6 +2866,9 @@ fn hdr_value(settings: &HdrSettings, renderer: &Renderer) -> Value {
         ),
         ("grade", text("scene")),
         ("frame_dt", num(f64::from(renderer.frame_dt()))),
+        ("meter_mean_ev100", renderer.hdr_meter().map_or(Value::Null, |m| num(m.mean))),
+        ("meter_highlight_ev100", renderer.hdr_meter().map_or(Value::Null, |m| num(m.highlight))),
+        ("meter_ev100", renderer.hdr_meter().map_or(Value::Null, |m| num(m.ev100))),
         ("still_pop", num(renderer.hdr_still_pop())),
         (
             "histogram",

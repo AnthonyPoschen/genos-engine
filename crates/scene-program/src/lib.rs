@@ -134,6 +134,14 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          only when this is omitted
   --adapt-up F           seconds for exposure to rise. GENOS_HDR_ADAPT_UP applies
                          only when this is omitted
+  --highlight-percentile F
+                         share of pixels under the highlight auto exposure reads
+                         (default 0.98). GENOS_HDR_HIGHLIGHT_PERCENTILE applies
+                         only when this is omitted
+  --highlight-headroom F stops over middle grey that highlight may sit at most;
+                         auto exposure darkens until it does (default 4, 0 off).
+                         GENOS_HDR_HIGHLIGHT_HEADROOM applies only when this is
+                         omitted
   --hdr-display agx|aces|legacy
                          display transform. GENOS_HDR_DISPLAY applies only when this
                          is omitted. --display is the Wayland name; a value of
@@ -323,6 +331,8 @@ const ID_HDR_BLOOM_I: u32 = 5106;
 const ID_HDR_ADAPT_DOWN: u32 = 5107;
 const ID_HDR_ADAPT_UP: u32 = 5108;
 const ID_HDR_TRANSITION: u32 = 5109;
+const ID_HDR_HIGHLIGHT_PERCENTILE: u32 = 5110;
+const ID_HDR_HIGHLIGHT_HEADROOM: u32 = 5111;
 const ID_HDR_BLOOM: u32 = 5200;
 /// The "Save look to scene" button of the Output page.
 const ID_HDR_SAVE: u32 = 5300;
@@ -3581,6 +3591,28 @@ fn setting_piece(
                 0.05,
             )))
         }
+        "hdr_highlight_percentile" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Highlight percentile",
+                ID_HDR_HIGHLIGHT_PERCENTILE,
+                hdr.highlight_percentile,
+                0.5,
+                1.0,
+                0.005,
+            )))
+        }
+        "hdr_highlight_headroom" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Highlight headroom (stops, 0 off)",
+                ID_HDR_HIGHLIGHT_HEADROOM,
+                hdr.highlight_headroom,
+                0.0,
+                8.0,
+                0.25,
+            )))
+        }
         "hdr_transition" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(number_row(
@@ -4020,6 +4052,14 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
         app.scene().hdr.set_key("adapt_down", &format!("{value}"))?;
     } else if id == ID_HDR_ADAPT_UP {
         app.scene().hdr.set_key("adapt_up", &format!("{value}"))?;
+    } else if id == ID_HDR_HIGHLIGHT_PERCENTILE {
+        app.scene()
+            .hdr
+            .set_key("highlight_percentile", &format!("{value}"))?;
+    } else if id == ID_HDR_HIGHLIGHT_HEADROOM {
+        app.scene()
+            .hdr
+            .set_key("highlight_headroom", &format!("{value}"))?;
     } else if id == ID_HDR_TRANSITION {
         app.scene()
             .hdr

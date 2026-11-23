@@ -527,6 +527,48 @@ pub fn histogram_ev100_from_counts(counts: &[u32]) -> f64 {
     acc / f64::from(seen) + 8.0_f64.log2()
 }
 
+/// EV100 of the histogram's `percentile` (0 to 1): the luminance under which
+/// that share of the counted pixels lies. An empty histogram is EV100 0.
+#[must_use]
+pub fn histogram_percentile_ev100(counts: &[u32], percentile: f64) -> f64 {
+    let total = counts.iter().fold(0_u64, |acc, count| acc + u64::from(*count));
+    if total == 0 {
+        return 0.0;
+    }
+    let want = percentile.clamp(0.0, 1.0) * u64_to_f64(total);
+    let mut seen = 0_u64;
+    for (index, count) in counts.iter().enumerate() {
+        seen += u64::from(*count);
+        if u64_to_f64(seen) >= want {
+            return bin_center(index, counts.len()) + 8.0_f64.log2();
+        }
+    }
+    bin_center(counts.len().saturating_sub(1), counts.len()) + 8.0_f64.log2()
+}
+
+/// What auto exposure meters: the clipped mean ([`histogram_ev100_from_counts`])
+/// keys middle grey, and the highlight may sit at most `headroom` stops over it.
+/// In shade beside a sunlit or lamp-lit area the mean alone sends the lit area
+/// to white; the highlight raises the metered EV100 until that area keeps its
+/// detail. `headroom` 0 is the clipped mean alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Metered {
+    /// The clipped mean's EV100.
+    pub mean: f64,
+    /// The highlight percentile's EV100.
+    pub highlight: f64,
+    /// The EV100 exposure keys: the larger of `mean` and `highlight - headroom`.
+    pub ev100: f64,
+}
+
+#[must_use]
+pub fn metered_ev100(counts: &[u32], percentile: f64, headroom: f64) -> Metered {
+    let mean = histogram_ev100_from_counts(counts);
+    let highlight = histogram_percentile_ev100(counts, percentile);
+    let ev100 = if headroom > 0.0 { mean.max(highlight - headroom) } else { mean };
+    Metered { mean, highlight, ev100 }
+}
+
 /// Max relative change over 8 identical frames, starting on the target.
 #[must_use]
 pub fn exposure_still_change() -> f64 {
@@ -2263,6 +2305,36 @@ mod tests {
         assert_eq!(pack_f32(1.0 / 60.0).to_bits(), 0x3c88_8889);
         assert!(pack_f32(f64::NAN).is_nan());
         assert_eq!(pack_f32(f64::INFINITY).to_bits(), 0x7f80_0000);
+    }
+
+    /// A view in shade beside a lit area: 95% of pixels at EV100 -2, 5% at +4.
+    fn shade_beside_light() -> Vec<u32> {
+        let mut samples = vec![luminance_of(-2.0); 950];
+        samples.extend(vec![luminance_of(4.0); 50]);
+        histogram_counts(&samples, 256)
+    }
+
+    fn luminance_of(ev100: f64) -> f64 {
+        (ev100 - 8.0_f64.log2()).exp2()
+    }
+
+    #[test]
+    fn a_lit_area_in_view_holds_the_exposure_to_its_headroom() {
+        let counts = shade_beside_light();
+        let off = metered_ev100(&counts, 0.98, 0.0);
+        assert!((off.ev100 - -2.0).abs() < 0.2, "the clipped mean keys the shade: {off:?}");
+        let on = metered_ev100(&counts, 0.98, 4.0);
+        assert!((on.highlight - 4.0).abs() < 0.2, "{on:?}");
+        assert!((on.ev100 - 0.0).abs() < 0.2, "the lit area sits 4 stops over grey: {on:?}");
+    }
+
+    #[test]
+    fn a_view_whose_highlight_is_inside_the_headroom_keeps_the_mean() {
+        let mut samples = vec![luminance_of(1.0); 950];
+        samples.extend(vec![luminance_of(3.0); 50]);
+        let counts = histogram_counts(&samples, 256);
+        let metered = metered_ev100(&counts, 0.98, 4.0);
+        assert_eq!(metered.ev100.to_bits(), histogram_ev100_from_counts(&counts).to_bits());
     }
 
     #[test]
