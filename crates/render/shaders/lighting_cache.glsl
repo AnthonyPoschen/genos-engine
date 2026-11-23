@@ -410,6 +410,14 @@ const float LIGHTING_CHANGES_DROPPED = 0.5;
 bool lighting_scene_changed() {
     return fract(work.v[lighting_change_at()].x) >= LIGHTING_SCENE_CHANGED_MARK;
 }
+// What lights the scene changed this frame (lamps, occluders, fire, smoke,
+// floor, roof, sky), not only the camera. The scene mark above is set on
+// every frame of a camera move: the host scene hash has the camera in it.
+const float LIGHTING_LIT_CHANGED_MARK = 0.125;
+bool lighting_lit_changed() {
+    return fract(work.v[lighting_change_at()].x)
+        >= LIGHTING_SCENE_CHANGED_MARK + 0.5 * LIGHTING_LIT_CHANGED_MARK;
+}
 // A pixel showed this texel within `window` frames, or the camera has not moved
 // since a pixel showed it. Compose skips redraws while the camera is held, so
 // the shown-frame stamp stops advancing; the texel is still the one on screen.

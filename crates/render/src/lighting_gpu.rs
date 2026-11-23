@@ -97,6 +97,12 @@ const LIGHTING_FILL_WALK: u32 = 8;
 /// Shader `LIGHTING_SCENE_CHANGED_MARK`. Added to the change count's fraction
 /// when the host scene hash changed this frame.
 const LIGHTING_SCENE_CHANGED_MARK: f32 = 0.25;
+/// Shader `LIGHTING_LIT_CHANGED_MARK`. Added on top of the scene mark when
+/// what lights the scene changed (`lighting_scene_key`: lamps, occluders,
+/// fire, smoke, floor, roof and sky), not only the camera. The scene hash
+/// has the camera in it, so the scene mark is set on every frame of a pan.
+/// The two marks together stay under 0.5, the count's own threshold.
+const LIGHTING_LIT_CHANGED_MARK: f32 = 0.125;
 
 /// First key-buffer word of the quiet-compose list. Matches LIGHTING_COMPOSE_AT.
 fn lighting_compose_at() -> u64 {
@@ -402,6 +408,8 @@ pub(crate) struct Lighting {
     /// floor, roof, sky; set with the scene upload), and with the traced and drawn
     /// meshes: what the light cache's light depends on.
     pub(crate) light_scene: u64,
+    /// `light_scene` on the last frame that marked the change block.
+    light_scene_seen: u64,
     light_hash: u64,
     /// Rounds in a row, since that last changed, whose mature patches all stayed
     /// within LIGHTING_SETTLE_CHANGE: past a full sweep, rounds relight young patches only.
@@ -824,6 +832,7 @@ impl Default for Lighting {
             world_round: 0,
             world_hold: 0,
             light_scene: 0,
+            light_scene_seen: 0,
             light_hash: 0,
             light_quiet: 0,
             draining: false,
@@ -4393,6 +4402,9 @@ impl Gpu {
         }
         if self.lighting.still == 0 && (!mover_local || wide) {
             block[0] += LIGHTING_SCENE_CHANGED_MARK;
+            if self.lighting.light_scene != self.lighting.light_scene_seen {
+                block[0] += LIGHTING_LIT_CHANGED_MARK;
+            }
             // The first frames are the fill. Arming the catch there keeps the
             // wavelet off through the frames a still-hall gate scores.
             // The test probe marks this frame only. It does not arm the catch,
@@ -4401,6 +4413,7 @@ impl Gpu {
                 self.lighting.scene_catch = self.lighting.frame;
             }
         }
+        self.lighting.light_scene_seen = self.lighting.light_scene;
         sent += used;
         // Movers: KEEP timers still run. Head w / 200000 is the live count
         // the picture uses to unhold. The texel pool is gone.

@@ -193,10 +193,13 @@ void main() {
         // (lighting_cascade_bin_seed), so taking them whole does not shimmer.
         bool warm = had.w > CASCADE_UPPER_WARM - 0.5;
         // The scene changed under this cell since its last refresh.
-        uint last = floatBitsToUint(cache.v[3u * slot].w);
-        bool changed = lighting_lamp_keep(pos, last) < LIGHTING_KEEP_ALL
+        // A lamp that reaches the cell changed within the window. One fast
+        // refresh is not enough: it is one noisy estimate, and the light the
+        // cell's rays read from other cells is still arriving.
+        uint lamp_at = lighting_lamp_move_stamp(pos);
+        bool changed = (lamp_at != 0u && int(lighting_frame() - lamp_at) <= int(CASCADE_CHANGE_FRAMES))
             || lighting_reach_noting()
-            || lighting_scene_changed();
+            || lighting_lit_changed();
         bool big = abs(l_new - l_old) > CASCADE_UPPER_JUMP * max(max(l_new, l_old), CASCADE_EPS);
         float rate = !warm ? 1.0
             : !changed ? min(CASCADE_UPPER_RATE, 1.0 / max(had.w, 1.0))

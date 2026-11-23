@@ -49,6 +49,9 @@ const float CASCADE_OWNER_SPAN = 1.25;
 const float CASCADE_SEAT_NEAR = 1.0e-3;
 const float CASCADE_SEAT_PROBE = 0.02;
 const float CASCADE_SEAT_FACING = 0.9;
+// A kept seat stays while its normal is within 60 degrees of the owner pixel's
+// and of the surface under it (lighting_cascade_seat).
+const float CASCADE_SEAT_KEEP = 0.5;
 const float CASCADE_SEAT_PLANE = 0.1;
 const float CASCADE_SEAT_PLANE_MIN = 0.01;
 const uint CASCADE_TABLES = 2u;
@@ -297,8 +300,8 @@ const float CASCADE_EXTENT_FACTOR = 16.0;
 // new directions.
 const float CASCADE_UPPER_RATE = 0.05;
 // A cell the scene has just changed under (a lamp that reaches it moved,
-// changed colour or went out since its last refresh; a mover; a host scene
-// change) takes half of each refresh, and all of one that differs by more
+// changed colour or went out since its last refresh; a mover; a change in
+// what lights the scene, lighting_lit_changed, which a camera move is not) takes half of each refresh, and all of one that differs by more
 // than CASCADE_UPPER_JUMP of its irradiance. Until 23 Nov 2026 the jump was
 // taken on the size of the difference alone. In a dim cell one refresh of a
 // few rays differs by more than that from the next by chance, so a still
@@ -311,6 +314,8 @@ const float CASCADE_UPPER_RATE = 0.05;
 // cell's irradiance word. A change puts it back to the warm count.
 const float CASCADE_UPPER_LONG = 128.0;
 const float CASCADE_UPPER_CHANGE_RATE = 0.5;
+// Frames after a lamp change that a cell it reaches stays at that rate.
+const uint CASCADE_CHANGE_FRAMES = 32u;
 const float CASCADE_UPPER_JUMP = 0.9;
 // Refreshes an upper cell takes whole, with fixed directions, before it is
 // damped and its directions change each refresh.
@@ -749,7 +754,7 @@ uint lighting_cascade_insert_level(uint pixel, vec3 pos, vec3 n, uint level) {
 // front of it, back along the normal, meets one. A centre the picture does
 // not show (behind a wall, behind a box) is still a real point of a floor
 // that carries on there, and keeps the seat it always had.
-bool lighting_cascade_seat_real(vec3 p, vec3 n) {
+bool lighting_cascade_seat_real(vec3 p, vec3 n, float facing) {
     vec3 origin = p + n * CASCADE_SEAT_PROBE;
     if (scene_inside(origin)) {
         return false;
@@ -758,7 +763,33 @@ bool lighting_cascade_seat_real(vec3 p, vec3 n) {
     if (!trace_ray(origin, -n, CASCADE_SEAT_NEAR, 2.0 * CASCADE_SEAT_PROBE, hit)) {
         return false;
     }
-    return abs(dot(hit.normal, n)) > CASCADE_SEAT_FACING;
+    return abs(dot(hit.normal, n)) > facing;
+}
+
+// True when the picture shows, at the pixel `p` projects to, a surface that
+// faces `n` and passes through `p`.
+bool lighting_cascade_seat_shown(vec3 p, vec3 n, float size, float facing) {
+    vec3 rel = p - scene.eye.xyz;
+    float z = dot(rel, scene.view_forward.xyz);
+    float t = scene.view_right.w;
+    float aspect = scene.view_forward.w;
+    if (!(z > CASCADE_SEAT_NEAR && t > 0.0)) {
+        return false;
+    }
+    // Half the picture's height at that depth; a parallel view has one height.
+    float span = scene.view_up.w > 0.0 ? scene.view_up.w : z * t;
+    vec2 ndc = vec2(dot(rel, scene.view_right.xyz) / (span * aspect), dot(rel, scene.view_up.xyz) / span);
+    vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
+    if (!(px.x >= 0.0 && px.y >= 0.0 && px.x < float(pc.dims.x) && px.y < float(pc.dims.y))) {
+        return false;
+    }
+    vec3 spos;
+    vec3 sn;
+    vec3 albedo;
+    bool two_sided;
+    bool shown = lighting_surface(uvec2(px), spos, sn, albedo, two_sided);
+    return shown && dot(sn, n) > facing
+        && abs(dot(spos - p, n)) <= CASCADE_SEAT_PLANE * size + CASCADE_SEAT_PLANE_MIN;
 }
 
 void lighting_cascade_seat(uint word) {
@@ -782,25 +813,43 @@ void lighting_cascade_seat(uint word) {
     vec3 centre = lighting_cascade_l0_centre(cell, size);
     float along = dot(pos - centre, n) / max(dot(n_axis, n), CASCADE_EPS);
     vec3 stored = centre + n_axis * clamp(along, -size, size);
-    vec3 rel = stored - scene.eye.xyz;
-    float z = dot(rel, scene.view_forward.xyz);
-    float t = scene.view_right.w;
-    float aspect = scene.view_forward.w;
-    bool same = false;
-    if (z > CASCADE_SEAT_NEAR && t > 0.0) {
-        // Half the picture's height at that depth; a parallel view has one height.
-        float span = scene.view_up.w > 0.0 ? scene.view_up.w : z * t;
-        vec2 ndc = vec2(dot(rel, scene.view_right.xyz) / (span * aspect), dot(rel, scene.view_up.xyz) / span);
-        vec2 px = vec2((ndc.x + 1.0) * 0.5 * float(pc.dims.x), (1.0 - ndc.y) * 0.5 * float(pc.dims.y));
-        if (px.x >= 0.0 && px.y >= 0.0 && px.x < float(pc.dims.x) && px.y < float(pc.dims.y)) {
-            vec3 spos;
-            vec3 sn;
-            bool shown = lighting_surface(uvec2(px), spos, sn, albedo, two_sided);
-            same = shown && dot(sn, n) > CASCADE_SEAT_FACING
-                && abs(dot(spos - stored, n)) <= CASCADE_SEAT_PLANE * size + CASCADE_SEAT_PLANE_MIN;
+    // A voxel that was live last frame keeps that seat and that normal while
+    // the seat is still on a surface that faces the same way. Until 23 Nov
+    // 2026 every frame took both from the owner pixel. The owner changes with
+    // each small turn of the camera, and its point and its normal-mapped
+    // normal with it: on a pan about one voxel in ten kept its seat from one
+    // step to the next (the vault in Sponza, 0.006 rad a step), the fixed ray
+    // set turned and moved with the seat, and 15% of the voxels changed their
+    // light by more than a tenth each step. That is the patches of bounce
+    // light that crawl while the camera pans and stop when it stops.
+    uint was = lighting_cascade_find_in((lighting_frame() + 1u) & 1u, lighting_frame(), cell,
+        lighting_cascade_unpack_level(packed), axis);
+    if (was != ~0u) {
+        vec3 was_p = vec3(
+            uintBitsToFloat(ckeys.key[was + 6u]),
+            uintBitsToFloat(ckeys.key[was + 7u]),
+            uintBitsToFloat(ckeys.key[was + 8u]));
+        vec3 was_n = lighting_unpack_normal(ckeys.key[was + 9u]);
+        // The kept normal is one pixel's normal-mapped normal, so the test
+        // that it still fits is looser than the test that seats a voxel.
+        // On the owner pixel's own plane and within a cell of it is the
+        // same patch of surface: an edge voxel, whose seat is an owner's
+        // point, passes here when the picture and the ray tests do not.
+        bool beside = abs(dot(was_p - pos, n)) <= CASCADE_SEAT_PLANE * size + CASCADE_SEAT_PLANE_MIN
+            && distance(was_p, pos) <= size;
+        if (dot(was_n, n) > CASCADE_SEAT_KEEP
+            && (beside
+                || lighting_cascade_seat_shown(was_p, was_n, size, CASCADE_SEAT_KEEP)
+                || lighting_cascade_seat_real(was_p, was_n, CASCADE_SEAT_KEEP))) {
+            ckeys.key[word + 6u] = floatBitsToUint(was_p.x);
+            ckeys.key[word + 7u] = floatBitsToUint(was_p.y);
+            ckeys.key[word + 8u] = floatBitsToUint(was_p.z);
+            ckeys.key[word + 9u] = ckeys.key[was + 9u];
+            return;
         }
     }
-    if (!same && !lighting_cascade_seat_real(stored, n)) {
+    bool same = lighting_cascade_seat_shown(stored, n, size, CASCADE_SEAT_FACING);
+    if (!same && !lighting_cascade_seat_real(stored, n, CASCADE_SEAT_FACING)) {
         stored = pos;
     }
     ckeys.key[word + 6u] = floatBitsToUint(stored.x);
