@@ -97,6 +97,19 @@ pub use outline::{
 };
 pub use snapshot::paint_snapshot;
 pub use text::TextFace;
+
+/// Small text as rectangles to paint, its top left at `(x, y)` in pixels,
+/// and the width it takes. For a label on the picture (the mesh viewer's
+/// vertex and face IDs).
+pub fn small_text(label: &str, x: f32, y: f32, color: [f32; 3]) -> (Vec<Paint>, f32) {
+    let paints = text::blots_small(label, x, y)
+        .into_iter()
+        .map(|blot| Paint { x: blot.x, y: blot.y, w: blot.w, h: blot.h, color, alpha: 1.0 })
+        .collect();
+    #[expect(clippy::cast_precision_loss, reason = "a label's length")]
+    let width = label.chars().count() as f32 * text::SMALL_ADVANCE;
+    (paints, width)
+}
 pub use theme::{
     apply_looks, looks, theme_dark, theme_from_palette, theme_light, Looks, Theme,
 };
@@ -104,7 +117,7 @@ pub use panel::{
     apply_frame_action, apply_lamp, button_panel, button_panel_blocks, button_panel_sections,
     lighting_frame, show_menu_tab, Frame, Paint, PanelBlock, PanelButton, PanelCheck,
     PanelDropdown, PanelRow, PanelSection, PanelSlider, PanelTab, PanelTabs, Pointer, Shown, State,
-    MENU_HIDE, MENU_SHOW, PANEL_ID,
+    MENU_DOCK, MENU_HIDE, MENU_SHOW, PANEL_ID, TOP_BAR_HEIGHT, top_bar,
 };
 pub use profile::{
     inspect_region, profile_overlay, remember_frame, FrameSample, OpenFrame, PlotScale,

@@ -11,7 +11,7 @@
 // numbers measure a different scene.
 time(#{ fixed_dt: 0.0166667 });
 knob("time_of_day", 12.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 
 let poses = [
     ["hall", #{ position: [14.5, 1.7, 23.5], yaw: -0.3554, pitch: 0.08 }],

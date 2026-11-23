@@ -118,6 +118,7 @@ fn silhouette_world() -> World {
             normals: Vec::new(),
             texcoords: Vec::new(),
             color: [1.0, 1.0, 1.0],
+            colors: Vec::new(),
             pose: identity_pose(),
             emission: [0.0; 3],
             surface: None,

@@ -208,11 +208,17 @@ pub struct Pack {
     pub(crate) view_up: [f32; 3],
     pub(crate) view_forward: [f32; 3],
     pub(crate) view_tan: f32,
+    /// Half the picture's height in metres in a parallel view; 0 otherwise.
+    pub(crate) view_parallel: f32,
     pub(crate) view_aspect: f32,
     /// Debug word the shader reads from `grid_at.w` (gpu debug_view); 0 is the picture.
     pub(crate) debug_view: u32,
     /// Shapes and particle spans in draw order.
     pub draws: Vec<PackedDraw>,
+    /// Parallel to `draws`: `world.objects` index for that draw (`usize::MAX` if none).
+    pub draw_object: Vec<usize>,
+    /// Parallel to `draws`: occluder index in `occs` when the object affects light.
+    pub draw_occluder: Vec<Option<u32>>,
     /// Cells over the occluders and the lamps the light passes walk.
     pub grid: SceneGrid,
 }
@@ -370,6 +376,8 @@ pub enum ShapeSource {
         positions: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
         uvs: Vec<[f32; 2]>,
+        /// Albedo of each vertex. Empty means white, tinted by the draw's colour.
+        colors: Vec<[f32; 3]>,
         /// 1 lights the face. Above 1.15 marks it two-sided in the G-buffer.
         shade: f32,
     },
@@ -396,10 +404,11 @@ pub(crate) fn build_shape(source: &ShapeSource) -> Vec<GpuVertex> {
             positions,
             normals,
             uvs,
+            colors,
             shade,
         } => {
             let pose = crate::world::identity_pose();
-            push_mesh(&mut verts, positions, normals, uvs, *shade, white, &pose);
+            push_mesh(&mut verts, positions, normals, uvs, *shade, white, colors, &pose);
         }
         ShapeSource::Baked(verts_in) => verts = verts_in.clone(),
     }
@@ -474,12 +483,14 @@ pub fn pack_frame(
     let mut staged: Vec<StagedDraw> = Vec::new();
     let mut shape_bytes = Vec::new();
     let mut occs = Vec::new();
+    let mut object_occluder: Vec<Option<u32>> = vec![None; world.objects.len()];
     let (fire, puffs) = particles::medium(world, eye);
     let mut reserved = 0usize;
     for (index, object) in world.objects.iter().enumerate() {
         if object.affects_light {
             if let Some(occ) = occluder(world, object) {
                 if occs.len() < MAX_OCCLUDERS {
+                    object_occluder[index] = Some(u32::try_from(occs.len()).unwrap_or(u32::MAX));
                     occs.push(occ);
                 }
             }
@@ -510,22 +521,34 @@ pub fn pack_frame(
                 .unwrap_or_else(|| shape_vertex_bytes(source));
             shape_bytes.push((*key, bytes));
         }
-        staged.push(StagedDraw::Ready { draw, color });
+        staged.push(StagedDraw::Ready {
+            draw,
+            color,
+            object_index: index,
+        });
         reserved += 1;
     }
     memory.admit_shapes(&shape_bytes);
     let places = resident_atlas(memory, world, view_proj);
     let mut draws = Vec::new();
+    let mut draw_object = Vec::new();
+    let mut draw_occluder = Vec::new();
     let mut objects = Vec::new();
     for item in staged {
         match item {
-            StagedDraw::Ready { draw, color } => {
+            StagedDraw::Ready {
+                draw,
+                color,
+                object_index,
+            } => {
                 if let PackedDraw::Shape { key, .. } = &draw {
                     if !memory.contains_shape(*key) {
                         continue;
                     }
                 }
                 draws.push(draw);
+                draw_object.push(object_index);
+                draw_occluder.push(object_occluder.get(object_index).copied().flatten());
                 objects.push(gpu_object(color));
             }
             StagedDraw::Particle { index, color } => {
@@ -545,6 +568,8 @@ pub fn pack_frame(
                     continue;
                 };
                 draws.push(draw);
+                draw_object.push(index);
+                draw_occluder.push(object_occluder.get(index).copied().flatten());
                 objects.push(gpu_object(color));
             }
         }
@@ -569,14 +594,21 @@ pub fn pack_frame(
         view_up: [0.0, 1.0, 0.0],
         view_forward: [0.0, 0.0, -1.0],
         view_tan: (30.0_f32.to_radians()).tan(),
+        view_parallel: 0.0,
         view_aspect: 1.0,
         debug_view: 0,
         draws,
+        draw_object,
+        draw_occluder,
     }
 }
 
 enum StagedDraw {
-    Ready { draw: PackedDraw, color: [f32; 3] },
+    Ready {
+        draw: PackedDraw,
+        color: [f32; 3],
+        object_index: usize,
+    },
     Particle { index: usize, color: [f32; 3] },
 }
 
@@ -744,6 +776,7 @@ fn pack_draw(
             vertices,
             normals,
             texcoords,
+            colors,
             pose,
             emission,
             surface,
@@ -755,7 +788,9 @@ fn pack_draw(
                 .is_some_and(|s| s.two_sided)
                 .then_some(1.2)
                 .unwrap_or(1.0);
-            let key = shape_key_mesh(4, vertices, texcoords, shade);
+            let key = shape_key_mesh(4, vertices, texcoords, colors, shade);
+            // The shape's vertices carry the colours, so the draw does not tint them.
+            let color = if colors.is_empty() { color } else { [1.0; 3] };
             let (color_rect, normal_rect, cutoff, roughness, metallic, material_flags) = world
                 .surfaces
                 .get(surface.unwrap_or(usize::MAX))
@@ -785,6 +820,7 @@ fn pack_draw(
                     positions: vertices.clone(),
                     normals: normals.clone(),
                     uvs: texcoords.clone(),
+                    colors: colors.clone(),
                     shade,
                 },
             })
@@ -838,7 +874,7 @@ fn shape_key(tag: u64, values: &[f32]) -> u64 {
     hasher.finish()
 }
 
-fn shape_key_mesh(tag: u64, positions: &[[f32; 3]], uvs: &[[f32; 2]], shade: f32) -> u64 {
+fn shape_key_mesh(tag: u64, positions: &[[f32; 3]], uvs: &[[f32; 2]], colors: &[[f32; 3]], shade: f32) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
@@ -851,6 +887,11 @@ fn shape_key_mesh(tag: u64, positions: &[[f32; 3]], uvs: &[[f32; 2]], shade: f32
     }
     for uv in uvs {
         for value in uv {
+            value.to_bits().hash(&mut hasher);
+        }
+    }
+    for color in colors {
+        for value in color {
             value.to_bits().hash(&mut hasher);
         }
     }
@@ -1006,7 +1047,7 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     push_f32(&mut bytes, pack.view_up[0]);
     push_f32(&mut bytes, pack.view_up[1]);
     push_f32(&mut bytes, pack.view_up[2]);
-    push_f32(&mut bytes, 0.0);
+    push_f32(&mut bytes, pack.view_parallel);
     push_f32(&mut bytes, pack.view_forward[0]);
     push_f32(&mut bytes, pack.view_forward[1]);
     push_f32(&mut bytes, pack.view_forward[2]);
@@ -1066,7 +1107,7 @@ pub fn scene_bytes(pack: &Pack) -> Vec<u8> {
     for word in &grid.words {
         push_u32(&mut bytes, *word);
     }
-    while bytes.len() % 16 != 0 {
+    while !bytes.len().is_multiple_of(16) {
         push_u32(&mut bytes, 0);
     }
     debug_assert!(
@@ -1086,7 +1127,8 @@ pub(crate) fn apply_view(pack: &mut Pack, camera: &genos_scene::Camera, aspect: 
     pack.view_right = [right.x, right.y, right.z];
     pack.view_up = [up.x, up.y, up.z];
     pack.view_forward = [forward.x, forward.y, forward.z];
-    pack.view_tan = (30.0_f32.to_radians()).tan();
+    pack.view_tan = camera.view_tan;
+    pack.view_parallel = camera.parallel_half.max(0.0);
     pack.view_aspect = aspect.max(0.01);
 }
 
@@ -1383,6 +1425,7 @@ fn push_object(
             normals,
             texcoords,
             color,
+            colors,
             pose,
             surface,
             ..
@@ -1393,7 +1436,7 @@ fn push_object(
                 .is_some_and(|s| s.two_sided)
                 .then_some(1.2)
                 .unwrap_or(1.0);
-            push_mesh(out, vertices, normals, texcoords, shade, *color, pose);
+            push_mesh(out, vertices, normals, texcoords, shade, *color, colors, pose);
         }
         DrawKind::Particles {
             density,
@@ -1573,6 +1616,7 @@ fn push_mesh(
     uvs: &[[f32; 2]],
     shade: f32,
     color: [f32; 3],
+    colors: &[[f32; 3]],
     pose: &[f32; 16],
 ) {
     for (index, tri) in vertices.chunks(3).enumerate() {
@@ -1603,7 +1647,7 @@ fn push_mesh(
         for (pos, k) in [(a, 0), (b, 1), (c, 2)] {
             out.push(GpuVertex {
                 pos,
-                albedo: color,
+                albedo: colors.get(index * 3 + k).copied().unwrap_or(color),
                 normal: corner(k),
                 shade,
                 uv: uv(k),

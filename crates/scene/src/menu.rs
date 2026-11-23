@@ -72,6 +72,10 @@ pub struct MenuSettings {
     pub wheel: FocusPolicy,
     /// How keys reach the menu. The debug menu default is click-to-focus.
     pub keys: FocusPolicy,
+    /// A program with a top bar (the editor) opens a category as a drawer on
+    /// the right edge when this is true, and as a panel that drags when it is
+    /// false. A program with the tabbed menu does not read it.
+    pub docked: bool,
 }
 
 /// `--menu` from one argument list. Other arguments are ignored.
@@ -88,6 +92,7 @@ impl Default for MenuSettings {
             collapsed: Vec::new(),
             wheel: FocusPolicy::Hover,
             keys: FocusPolicy::ClickToFocus,
+            docked: true,
         }
     }
 }
@@ -165,16 +170,17 @@ impl MenuSettings {
         settings
     }
 
-    /// Text form: `visible`, `tab`, `collapsed`, `wheel`, and `keys`.
+    /// Text form: `visible`, `tab`, `collapsed`, `wheel`, `keys`, and `place`.
     #[must_use]
     pub fn to_text(&self) -> String {
         format!(
-            "visible={}\ntab={}\ncollapsed={}\nwheel={}\nkeys={}\n",
+            "visible={}\ntab={}\ncollapsed={}\nwheel={}\nkeys={}\nplace={}\n",
             if self.visible { "shown" } else { "hidden" },
             self.tab,
             self.collapsed.join(","),
             self.wheel.as_str(),
-            self.keys.as_str()
+            self.keys.as_str(),
+            if self.docked { "docked" } else { "floating" }
         )
     }
 
@@ -237,6 +243,14 @@ impl MenuSettings {
                 self.keys = parse_focus_policy(value)?;
                 Ok(())
             }
+            "place" => {
+                self.docked = match value {
+                    "docked" => true,
+                    "floating" => false,
+                    _ => return Err(format!("place is docked or floating, got {value}")),
+                };
+                Ok(())
+            }
             _ => Err(format!("unknown menu setting {key}")),
         }
     }
@@ -296,7 +310,7 @@ mod tests {
         let text = EngineSettings::to_text(&settings);
         assert_eq!(
             text,
-            "visible=shown\ntab=\ncollapsed=\nwheel=hover\nkeys=click\n"
+            "visible=shown\ntab=\ncollapsed=\nwheel=hover\nkeys=click\nplace=docked\n"
         );
         assert_eq!(settings.wheel, FocusPolicy::Hover);
         assert_eq!(settings.keys, FocusPolicy::ClickToFocus);

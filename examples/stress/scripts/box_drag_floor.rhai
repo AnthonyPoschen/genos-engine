@@ -2,7 +2,7 @@
 // let it settle and require the floor it left to be calm and not patchy.
 time(#{ fixed_dt: 0.0166667 });
 knob("time_of_day", 12.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "still");
 knob("dynamic", 0.0);
 knob("boxes", "still");

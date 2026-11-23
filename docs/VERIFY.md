@@ -98,7 +98,7 @@ is the noise floor later scripts compare against.
 
 ```sh
 python3 scripts/verdict/noise-floor.py \
-  --base master --repeats 3 --scene stress --checkpoint hall \
+  --base master --repeats 3 --scene lighting-stress --checkpoint hall \
   --display wayland-1
 ```
 
@@ -165,7 +165,7 @@ capture, with no previous picture, is `UNSURE`. The previous picture is not a
 locked golden.
 
 ```sh
-python3 scripts/verdict/pose-diff.py --scene stress --checkpoint hall \
+python3 scripts/verdict/pose-diff.py --scene lighting-stress --checkpoint hall \
   --display wayland-1 --before previous.png --after pose.png
 ```
 

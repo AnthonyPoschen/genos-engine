@@ -379,6 +379,7 @@ fn plane_mesh(plane: ShadePlane) -> Object {
             normals: vec![normal, normal, normal, normal, normal, normal],
             texcoords: Vec::new(),
             color: plane.color,
+            colors: Vec::new(),
             pose: identity_pose(),
             emission: [0.0; 3],
             surface: None,

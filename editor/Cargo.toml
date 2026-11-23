@@ -1,0 +1,21 @@
+[package]
+name = "genos-editor"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "genos-editor"
+path = "src/main.rs"
+
+[dependencies]
+genos-json = { path = "../crates/json" }
+# mesh-workbench is linked here and nowhere else (ADR 0042).
+genos-meshbench = { path = "../crates/meshbench" }
+genos-scene-program = { path = "../crates/scene-program", features = ["mesh"] }
+
+[dev-dependencies]
+genos-scene = { path = "../crates/scene" }

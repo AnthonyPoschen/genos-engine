@@ -4,7 +4,7 @@
 // Pass --gi-metrics. Samples are one frame behind the draw, so wait(2)
 // lands before the summary. CSV: <out>/gi/s1-spin.csv
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "move");
 knob("lamps", "move");
 knob("dynamic", 50);

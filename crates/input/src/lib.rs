@@ -143,6 +143,22 @@ mod tests {
         assert_eq!(name(InputCode::key_right_bracket), "key_right_bracket");
         assert_eq!(device::from_evdev(26), Some(InputCode::key_left_bracket));
         assert_eq!(device::from_evdev(27), Some(InputCode::key_right_bracket));
+        // The rest of the punctuation row: the Windows OEM virtual keys, and
+        // their evdev codes.
+        for (code, value, evdev, text) in [
+            (InputCode::key_semicolon, 186, 39, "key_semicolon"),
+            (InputCode::key_equal, 187, 13, "key_equal"),
+            (InputCode::key_comma, 188, 51, "key_comma"),
+            (InputCode::key_minus, 189, 12, "key_minus"),
+            (InputCode::key_period, 190, 52, "key_period"),
+            (InputCode::key_slash, 191, 53, "key_slash"),
+            (InputCode::key_backslash, 220, 43, "key_backslash"),
+            (InputCode::key_quote, 222, 40, "key_quote"),
+        ] {
+            assert_eq!(code as u16, value);
+            assert_eq!((parse(text), name(code)), (Some(code), text));
+            assert_eq!(device::from_evdev(evdev), Some(code));
+        }
     }
 
     #[test]

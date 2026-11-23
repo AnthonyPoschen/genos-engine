@@ -91,7 +91,12 @@ fn silhouette_world() -> World {
         );
         __scene.ceiling = None;
         __scene.sky = None;
-        __scene.lighting = genos_scene::LightingSettings::default();
+        // Still pictures are compared byte for byte. Production ReSTIR
+        // resamples a quiet frame, so this fixture stays on the exact sum.
+        __scene.lighting = genos_scene::LightingSettings {
+            restir_di: false,
+            ..genos_scene::LightingSettings::default()
+        };
         __scene.debug = genos_scene::DebugSettings::default();
         __scene.fps_counter = genos_scene::FpsCounterSettings::default();
         __scene.event_loop = genos_scene::EventLoopSettings::default();
@@ -114,6 +119,7 @@ fn silhouette_world() -> World {
             normals: Vec::new(),
             texcoords: Vec::new(),
             color: [1.0, 1.0, 1.0],
+            colors: Vec::new(),
             pose: identity_pose(),
             emission: [0.0; 3],
             surface: None,

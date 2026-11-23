@@ -99,9 +99,9 @@ fn call_tool(host: &Host, params: &Value) -> Reply {
             Err(text) => Reply::Result(tool_content(text, true)),
         };
     }
-    if crate::command::known(name) {
+    if let Some(registered) = crate::command::resolve(name) {
         return Reply::Result(
-            match crate::command::call(name, arguments.clone(), command_timeout(arguments)) {
+            match crate::command::call(&registered, arguments.clone(), command_timeout(arguments)) {
                 Ok(value) => tool_content(json::encode(&value), false),
                 Err(text) => tool_content(text, true),
             },
@@ -189,7 +189,7 @@ fn tool_content(text: String, is_error: bool) -> Value {
 
 fn tools() -> Value {
     let mut list = builtin_tools();
-    for spec in crate::command::specs() {
+    for spec in crate::command::published() {
         list.push(tool(&spec.name, &spec.description, spec.schema));
     }
     json::array(list)

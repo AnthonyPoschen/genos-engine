@@ -73,7 +73,7 @@ class QuitGapFilter(unittest.TestCase):
             "crates/mcp/src/lib.rs",
             "crates/input/src/lib.rs",
             "examples/stress/src/main.rs",
-            "debug/lighting/src/main.rs",
+            "crates/scene-program/src/lib.rs",
             "crates/ecs/src/world.rs",
             "crates/jobs/src/pool.rs",
             "Cargo.lock",

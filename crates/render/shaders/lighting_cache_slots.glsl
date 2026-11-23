@@ -1,5 +1,14 @@
 // GI light cache sizes (lighting_cache.glsl); lighting_gpu.rs mirrors them.
+// Compose folds the count. A specialization constant leaves every slot mask
+// and bounds check dynamic, and that module grew by 5540 bytes (252688
+// against 247148). The cache and fill shaders keep constant id 1 so a
+// pipeline can size the table. Compose is the picture pass; it is not
+// specialized, and the host count stays 1048576.
+#ifdef GENOS_COMPOSE_NO_WALK
 const uint LIGHTING_CACHE_SLOTS = 1048576u;
+#else
+layout(constant_id = 1) const uint LIGHTING_CACHE_SLOTS = 1048576u;
+#endif
 const uint LIGHTING_CACHE_SEARCH = 16u;
 // Patches relit per frame, and rays per patch (a square; 16 left each patch a
 // fixed error of its own that probes carried onto the walls they light as
@@ -19,3 +28,10 @@ const bool LIGHTING_KEPT_RELIGHT = true;
 const bool LIGHTING_PROBE_PICKS = false; // S60A: no gain measured (light pass unchanged)
 // Frames a patch lives without a read (30 s at 60 fps).
 const uint LIGHTING_CACHE_LIFE = 1800u;
+// ADR 0039 stage 2 SH-L1 cell storage (lighting_cache.glsl lighting_sh_put),
+// a low-spec knob: true is fp16 (12 halves, 24 B a slot, 1.5 vec4 regions),
+// false is fp32 (12 floats, 48 B a slot, 3 vec4 regions). lighting_gpu.rs
+// LIGHTING_SH_HALF mirrors it and sizes the cache buffer from it. The SH is
+// summed from the relight rays (LIGHTING_CACHE_RAYS a batch entry), no rays of
+// its own, so the ray count knob is LIGHTING_CACHE_RAYS.
+const bool LIGHTING_SH_HALF = true;

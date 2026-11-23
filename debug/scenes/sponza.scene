@@ -10,6 +10,9 @@ checkpoint dark-corner 8 1.5 3.5 yaw 2.356194 pitch -0.1
 check atrium mean 8
 sun 0.25 -1 0.15 2.0 1.9 1.7
 sky 0.12 0.15 0.20
-lamp 0 6 0 6 4.5 3
-lamp -6 3.5 4.2 3 2.5 2
-lamp 0 4 -1 2 1.5 1.2
+# Lamps stand at least 0.7 m clear of every surface. The first set had one 7 cm
+# from the hanging drape in the atrium centre and one inside its folds: the
+# drape blew out, the path reference was all fireflies, and bounce flickered.
+lamp -6 6 -0.4 6 4.5 3
+lamp -6 3.2 4.2 3 2.5 2
+lamp 5 4 -0.4 2 1.5 1.2

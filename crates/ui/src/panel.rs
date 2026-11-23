@@ -90,6 +90,11 @@ pub const MENU_HIDE: u32 = u32::MAX - 5000;
 /// Press on the corner tab while the menu is hidden. The caller shows the menu.
 pub const MENU_SHOW: u32 = u32::MAX - 5001;
 const TITLE_ROW: u32 = u32::MAX - 5002;
+/// The title bar's float or dock button on a panel with [`State::dockable`].
+pub const MENU_DOCK: u32 = u32::MAX - 5003;
+const TOP_BAR: u32 = u32::MAX - 5004;
+/// Height of [`top_bar`], in pixels.
+pub const TOP_BAR_HEIGHT: f32 = 30.0;
 /// The settings panel. A game sets this id's [`InputPolicy`].
 pub const PANEL_ID: u32 = u32::MAX - 4095;
 
@@ -158,6 +163,14 @@ impl Pointer {
 #[derive(Clone, Debug)]
 pub struct State {
     pub panel_offset: [f32; 2],
+    /// `Some(top)`: the block panel is a drawer on the right edge of the
+    /// viewport, `top` pixels down, reaching 8 pixels short of the bottom,
+    /// and a drag does not move it. `None`: it floats at `panel_offset`.
+    pub dock: Option<f32>,
+    /// The block panel's title bar has a button that fires [`Action::Press`]
+    /// with [`MENU_DOCK`]: "float" while docked, "dock" while floating. The
+    /// game changes `dock`.
+    pub dockable: bool,
     pub(crate) pointer_x: f32,
     pub(crate) pointer_y: f32,
     pub(crate) down: bool,
@@ -236,6 +249,8 @@ impl Default for State {
             section_frame: BTreeSet::new(),
             collapsed_sections: BTreeSet::new(),
             selected_tabs: BTreeMap::new(),
+            dock: None,
+            dockable: false,
             panel_hover: false,
             scroll: 0.0,
             input: FocusManager::default(),
@@ -587,8 +602,7 @@ impl PanelDropdown {
     fn selected_name(&self) -> String {
         self.choices
             .get(self.selected_index())
-            .map(|choice| choice.name.clone())
-            .unwrap_or_default()
+            .map_or_default(|choice| choice.name.clone())
     }
 }
 
@@ -639,8 +653,7 @@ impl PanelSlider {
     /// Discrete named steps. `value` selects the nearest step.
     pub fn named(id: u32, value: f64, steps: Vec<SliderStep>) -> Self {
         let text = slider::nearest_index(&steps, value)
-            .map(|index| steps[index].name.clone())
-            .unwrap_or_default();
+            .map_or_default(|index| steps[index].name.clone());
         let min = steps.first().map(|step| step.value).unwrap_or(0.0);
         let max = steps.last().map(|step| step.value).unwrap_or(min);
         Self {
@@ -796,7 +809,7 @@ pub fn button_panel_blocks(
     let mut tab_ids = Vec::new();
     collect_blocks(state, blocks, &mut visible, &mut section_ids, &mut tab_ids);
     let max_width = viewport[0] / 3.0;
-    let panel = block_panel(state, title, blocks, Some(max_width));
+    let panel = block_panel(state, title, blocks, Some(max_width), viewport[1]);
     finish_panel(
         state,
         panel,
@@ -813,7 +826,7 @@ pub fn button_panel_blocks(
 
 fn drag_panel(state: &mut State, pointer: Pointer) {
     let press_edge = pointer.down && !state.down;
-    if state.dragging && pointer.down && !press_edge {
+    if state.dock.is_none() && state.dragging && pointer.down && !press_edge {
         state.panel_offset[0] += pointer.x - state.pointer_x;
         state.panel_offset[1] += pointer.y - state.pointer_y;
     }
@@ -846,7 +859,7 @@ fn panel_tree(
     let inner = max_width.map(|width| (width - 16.0).max(text::CELL_W));
     panel
         .children
-        .push(title_bar(own + 1, title, fill, inner, palette, hide));
+        .push(title_bar(own + 1, title, fill, inner, palette, hide, None));
     if sections.is_empty() {
         for (index, item) in rows.iter().enumerate() {
             panel.children.push(row_node(
@@ -903,7 +916,7 @@ fn panel_tree(
     panel
 }
 
-fn block_panel(state: &State, title: &str, blocks: &[PanelBlock], max_width: Option<f32>) -> Node {
+fn block_panel(state: &State, title: &str, blocks: &[PanelBlock], max_width: Option<f32>, viewport_h: f32) -> Node {
     let palette = state.palette;
     let fill = surface(palette);
     let own = PANEL_ID;
@@ -913,6 +926,20 @@ fn block_panel(state: &State, title: &str, blocks: &[PanelBlock], max_width: Opt
     panel.gap = 6.0;
     panel.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], state.panel_offset));
     panel.draggable = true;
+    if let Some(top) = state.dock {
+        // A drawer: its top-right corner on the viewport's right edge.
+        panel.place = Some(Place::point([1.0, 0.0], [1.0, 0.0], [0.0, top]));
+        panel.draggable = false;
+        panel.height = Sizing::Fit {
+            // The page scrolls from 8 pixels above the bottom edge: the
+            // drawer ends there, so an empty one does not scroll.
+            min: (viewport_h - top - 8.0).max(0.0),
+            max: f32::INFINITY,
+        };
+    }
+    let dock_word = state
+        .dockable
+        .then_some(if state.dock.is_some() { "float" } else { "dock" });
     paint_looks(&mut panel, chrome_looks(palette));
     if let Some(max_width) = max_width {
         panel.width = Sizing::Fit {
@@ -923,7 +950,7 @@ fn block_panel(state: &State, title: &str, blocks: &[PanelBlock], max_width: Opt
     let inner = max_width.map(|width| (width - 16.0).max(text::CELL_W));
     panel
         .children
-        .push(title_bar(own + 1, title, fill, inner, palette, true));
+        .push(title_bar(own + 1, title, fill, inner, palette, true, dock_word));
     let columns = inner.map(check_columns).unwrap_or(CHECK_COLUMNS);
     let cell = inner
         .map(|width| check_cell(width, columns))
@@ -1349,6 +1376,7 @@ fn title_bar(
     inner: Option<f32>,
     palette: Option<Palette>,
     hide: bool,
+    dock: Option<&'static str>,
 ) -> Node {
     if !hide {
         return capped_label(label_id, title, fill, inner);
@@ -1362,9 +1390,18 @@ fn title_bar(
             max: inner,
         };
     }
-    let label_max = inner.map(|width| (width - 64.0).max(text::CELL_W));
+    let buttons = if dock.is_some() { 128.0 } else { 64.0 };
+    let label_max = inner.map(|width| (width - buttons).max(text::CELL_W));
     row.children
         .push(capped_label(label_id, title, fill, label_max));
+    if let Some(word) = dock {
+        row.children.push(control(
+            MENU_DOCK,
+            word,
+            Action::Press(MENU_DOCK),
+            palette,
+        ));
+    }
     row.children.push(control(
         MENU_HIDE,
         "hide",
@@ -1372,6 +1409,87 @@ fn title_bar(
         palette,
     ));
     row
+}
+
+/// A bar across the top of the viewport, [`TOP_BAR_HEIGHT`] tall, with one
+/// button for each of `buttons`, left to right. A press on a button fires
+/// [`Action::Press`] with its id; `selected` draws it held. A press on the
+/// bar is not a press on the picture: `look_capture` is true only for a
+/// press that missed the bar. The bar keeps its own [`State`].
+pub fn top_bar(state: &mut State, buttons: &[PanelButton], viewport: [f32; 2], pointer: Pointer) -> Frame {
+    refresh_palette(state);
+    let palette = state.palette;
+    let mut bar = Node::new(TOP_BAR);
+    bar.direction = Direction::LeftToRight;
+    bar.pad = Pad::all(3.0);
+    bar.gap = 4.0;
+    bar.width = Sizing::Fixed(viewport[0]);
+    bar.height = Sizing::Fixed(TOP_BAR_HEIGHT);
+    bar.place = Some(Place::point([0.0, 0.0], [0.0, 0.0], [0.0, 0.0]));
+    paint_looks(&mut bar, chrome_looks(palette));
+    for button in buttons {
+        let mut node = control(button.id, &button.text, Action::Press(button.id), palette);
+        if button.selected {
+            let looks = control_looks(palette);
+            node.idle = looks.pressed;
+            node.hover = looks.pressed;
+            node.pressed = looks.pressed;
+        }
+        bar.children.push(node);
+    }
+    let items = layout::layout(&bar, Space::Screen, viewport, None);
+    let press_edge = pointer.down && !state.down;
+    let hit = items
+        .iter()
+        .rev()
+        .find(|item| item.rect.contains(pointer.x, pointer.y));
+    let mut actions = Vec::new();
+    let mut look_capture = false;
+    if press_edge {
+        if let Some(item) = hit {
+            state.look_hold = false;
+            if let Some(action) = item.action {
+                actions.push(action);
+            }
+        } else {
+            state.look_hold = true;
+            look_capture = true;
+        }
+    } else if pointer.down && state.look_hold {
+        look_capture = true;
+    }
+    let mut shown = Vec::new();
+    let mut paints = Vec::new();
+    for item in &items {
+        let look = choose(item, pointer.down, hit.map(|hit| hit.id), None);
+        shown.push(Shown {
+            id: item.id,
+            rect: item.rect,
+            look,
+            idle: item.idle,
+            text: item.text.clone(),
+        });
+        push_paints(&mut paints, item, look, palette, None, false);
+    }
+    state.pointer_x = pointer.x;
+    state.pointer_y = pointer.y;
+    state.down = pointer.down;
+    state.panel_hover = hit.is_some();
+    if !pointer.down {
+        state.look_hold = false;
+    }
+    Frame {
+        shown,
+        paints,
+        actions,
+        look_capture,
+        tooltip: None,
+        consumed: Consumed::default(),
+        damage: Vec::new(),
+        events: Vec::new(),
+        segments: Vec::new(),
+        keys_captured: false,
+    }
 }
 
 /// A small tab in the top-left corner. A press fires [`Action::Press`] with [`MENU_SHOW`].

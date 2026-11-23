@@ -38,10 +38,6 @@
     )
 )]
 #![expect(
-    clippy::ignored_unit_patterns,
-    reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
-)]
-#![expect(
     clippy::many_single_char_names,
     reason = "TODO(lint-2026-10-14): pedantic backlog. docs/LINT_RULES.md"
 )]
@@ -82,7 +78,15 @@
 //! scene dispatches it. Surface bounces do not march the medium. Not traced:
 //! particle cards.
 //! A hit's albedo is the shared shade's diffuse albedo (`genos_load::ShadeSample`).
-//! Analytic paint is that shade with metallic 0. A glTF hit passes the textured shade.
+//! Analytic paint is that shade with metallic 0.
+//!
+//! glTF: when [`RefSetup::meshes`] holds a model's triangles
+//! (`genos_render::GltfSurface`), the trace sees them together with the analytic
+//! scene: the nearest hit of the two, and a shadow when either blocks. A glTF hit
+//! carries the textured diffuse albedo and the textured emission, at the primary
+//! hit and at every bounce. A ray continues through a texel under the alpha
+//! cutoff. Lamps, sky and fog still come from the scene. The scene has no hidden
+//! flag, so a hidden analytic part is traced too.
 //!
 //! Specular: a solid with a [`SolidMaterial`] override (the `object` command's
 //! roughness and metallic) adds a GGX lobe at the primary hit only: each lamp
@@ -93,11 +97,12 @@
 //! kept on its own ([`Reference::specular`], the `aov: "specular"` image).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use genos_load::ShadeSample;
 use genos_render::{
-    direct_light_in, lamps_in, linear_from_display, pack_f32, rec709_y, scene_luma,
-    solid_contains_at, SceneMesh, SceneRead, Surfaces, TraceHit,
+    direct_light_in, lamps_in, linear_from_display, solid_contains_at, pack_f32, rec709_y, scene_luma, GltfSurface, SceneMesh,
+    SceneRead, Surfaces, TraceHit,
 };
 use genos_scene::{look_direction, Camera, Scene};
 
@@ -142,6 +147,40 @@ pub struct RefSetup {
     pub materials: Vec<Option<SolidMaterial>>,
     /// Keep the primary specular lobe on its own as well ([`Reference::specular`]).
     pub specular: bool,
+    /// glTF triangles traced together with the scene's own surfaces. None traces
+    /// the scene alone.
+    pub meshes: Option<Arc<GltfSurface>>,
+}
+
+/// The scene's own surfaces and a glTF model, as one set of surfaces.
+struct WithMeshes<'a> {
+    shapes: &'a dyn Surfaces,
+    meshes: &'a GltfSurface,
+}
+
+impl Surfaces for WithMeshes<'_> {
+    fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<TraceHit> {
+        let shape = self.shapes.first_hit(origin, dir, reach);
+        let nearer = shape.map_or(reach, |hit| {
+            let d = add(hit.point, scale(origin, -1.0));
+            dot(d, d).sqrt()
+        });
+        self.meshes.first_hit(origin, dir, nearer).or(shape)
+    }
+    fn blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        self.shapes.blocked(from, to) || self.meshes.blocked(from, to)
+    }
+    fn inside(&self, p: [f32; 3]) -> bool {
+        self.shapes.inside(p)
+    }
+}
+
+/// The shade of a hit: its diffuse albedo as paint, and its emission.
+fn hit_shade(hit: &TraceHit) -> ShadeSample {
+    ShadeSample {
+        emissive: hit.emissive,
+        ..ShadeSample::paint(hit.albedo)
+    }
 }
 
 impl RefSetup {
@@ -161,6 +200,17 @@ impl RefSetup {
             triangles: false,
             materials: Vec::new(),
             specular: false,
+            meshes: None,
+        }
+    }
+
+    /// What [`render`] traces: `shapes`, `triangles`, or either with `+gltf`.
+    pub fn geometry(&self) -> &'static str {
+        match (self.triangles, self.meshes.is_some()) {
+            (false, false) => "shapes",
+            (true, false) => "triangles",
+            (false, true) => "shapes+gltf",
+            (true, true) => "triangles+gltf",
         }
     }
 }
@@ -293,11 +343,11 @@ fn path_from(
 ) -> [f32; 3] {
     let sky = scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
     let mut at = *first;
-    // Analytic hits are paint. A caller that already shaded a glTF material stores
-    // the diffuse albedo here, which is the same product with metallic applied.
+    // Analytic hits are paint. A glTF hit stores its diffuse albedo, which is the
+    // same product with metallic applied, and its emission.
     let primary = ShadeSample {
         metallic,
-        ..ShadeSample::paint(first.albedo)
+        ..hit_shade(first)
     };
     let mut weight = scale(primary.diffuse_albedo(), LAMBERT);
     let mut sum = primary.outgoing(
@@ -319,7 +369,7 @@ fn path_from(
             sum = add(sum, mul(weight, sky));
             break;
         };
-        let next_shade = ShadeSample::paint(next.albedo);
+        let next_shade = hit_shade(&next);
         sum = add(sum, mul(weight, next_shade.emissive));
         weight = mul(weight, scale(next_shade.diffuse_albedo(), LAMBERT));
         sum = add(
@@ -378,18 +428,8 @@ pub fn bounce_irradiance(
             None => sky,
             Some(hit) => {
                 let rest = (rng.next(), rng.next());
-                let emitted = ShadeSample::paint(hit.albedo).emissive;
-                add(
-                    emitted,
-                    path_from(
-                        scene,
-                        scene,
-                        &hit,
-                        0.0,
-                        max_bounces.saturating_sub(1),
-                        rest,
-                        &mut rng,
-                    ),
+                // The path's first vertex adds the hit's own emission.
+                path_from(scene, scene, &hit, 0.0, max_bounces.saturating_sub(1), rest, &mut rng,
                 )
             }
         };
@@ -525,11 +565,19 @@ pub fn render(setup: &RefSetup) -> Reference {
     let aspect = w as f32 / h as f32;
     let sky = setup.scene.sky.as_ref().map_or([0.0; 3], |s| s.color);
     let mesh;
-    let surfaces: &dyn Surfaces = if setup.triangles {
+    let shapes: &dyn Surfaces = if setup.triangles {
         mesh = SceneMesh::from_scene(&setup.scene);
         &mesh
     } else {
         &setup.scene
+    };
+    let joined;
+    let surfaces: &dyn Surfaces = match &setup.meshes {
+        Some(meshes) => {
+            joined = WithMeshes { shapes, meshes };
+            &joined
+        }
+        None => shapes,
     };
     let firsts: Vec<Option<TraceHit>> = (0..w * h)
         .map(|i| {
@@ -792,10 +840,15 @@ pub fn render_gpu(setup: &RefSetup) -> Result<Reference, String> {
     })
 }
 
-/// `render`, reusing a trace saved under `dir` for the same scene, pose, size and
-/// bounce limit when it is at least as converged as asked; a new trace is saved there.
-/// The key hashes the scene's Debug text, so it holds within one build of the engine.
-pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
+/// File stem for [`render_cached`].
+///
+/// The hash is the scene's `Debug` text, the eye, yaw, pitch, width, height and
+/// bounce count. Seconds are not included. Analytic traces keep that stem.
+/// Triangle traces add `triangles`, and a GPU trace adds `gpuref-v2`. A specular
+/// lobe or a material override is not cached. An integrator revision is not in
+/// the hash: another commit can collide with a file that already meets the noise
+/// target. Callers that promote a file record the commit beside it.
+pub fn cache_key(setup: &RefSetup) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     format!(
@@ -809,21 +862,47 @@ pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
         setup.max_bounces
     )
     .hash(&mut hasher);
+    if setup.triangles {
+        "triangles".hash(&mut hasher);
+    }
+    // A glTF trace has its own key: the scene text does not name the model.
+    if let Some(meshes) = &setup.meshes {
+        "gltf".hash(&mut hasher);
+        meshes.key().hash(&mut hasher);
+    }
+    if gpu_wanted() && setup.meshes.is_none() {
+        "gpuref-v2".hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Read one cached reference. `None` when the file is missing, short, or the wrong size.
+pub fn read_cached(path: &std::path::Path, width: u32, height: u32) -> Option<Reference> {
+    load(path, width, height)
+}
+
+/// Write one cached reference in the format [`render_cached`] reads back.
+pub fn write_cached(path: &std::path::Path, reference: &Reference) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(path, save(reference))
+}
+
+/// `render`, reusing a trace saved under `dir` for the same scene, pose, size and
+/// bounce limit when it is at least as converged as asked; a new trace is saved there.
+/// The key hashes the scene's Debug text, so it holds within one build of the engine.
+pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
     // The specular layer is not stored and gpuref has no materials: trace here.
     if setup.specular || !setup.materials.is_empty() {
         return render(setup);
     }
-    // Analytic traces keep their old keys, so existing caches stay valid.
-    if setup.triangles {
-        "triangles".hash(&mut hasher);
-    }
-    // GPU traces (triangles, their own tracer) keep their own keys.
-    let gpu = gpu_wanted();
-    if gpu {
-        "gpuref-v2".hash(&mut hasher);
-    }
-    let path = dir.join(format!("{:016x}.ref", hasher.finish()));
-    if let Some(r) = load(&path, setup.width, setup.height) {
+    // gpuref takes the scene's triangles only, so a glTF trace stays on the CPU.
+    let gpu = gpu_wanted() && setup.meshes.is_none();
+    let path = dir.join(format!("{:016x}.ref", cache_key(setup)));
+    if let Some(r) = read_cached(&path, setup.width, setup.height) {
         if r.noise <= setup.noise_target || r.spp >= setup.max_spp {
             return r;
         }
@@ -839,7 +918,7 @@ pub fn render_cached(setup: &RefSetup, dir: &std::path::Path) -> Reference {
     } else {
         render(setup)
     };
-    let _ = std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&path, save(&r)));
+    let _ = write_cached(&path, &r);
     r
 }
 
@@ -1414,6 +1493,7 @@ mod tests {
                     triangles: false,
                     materials: Vec::new(),
                     specular: false,
+                    meshes: None,
                 });
                 r.image
                     .save(&dir.join(format!("{name}-b{bounces}.png")))
@@ -1458,6 +1538,7 @@ mod tests {
             triangles,
             materials: Vec::new(),
             specular: false,
+            meshes: None,
         };
         let a = render(&setup(false));
         let b = render(&setup(true));
@@ -1483,6 +1564,75 @@ mod tests {
         let mean = |r: &Reference| r.linear.iter().map(|c| luma(*c) as f64).sum::<f64>();
         let bias = (mean(&b) / mean(&a) - 1.0).abs() as f32;
         assert!(bias < 0.01, "picture mean differs by {bias}");
+    }
+
+    /// A 2 m glTF panel 1.5 m above the origin, facing down and up, that glows green.
+    fn glowing_panel() -> GltfSurface {
+        let mut model = genos_load::GltfScene::default();
+        model.materials.push(genos_load::PbrMaterial {
+            metallic: 0.0,
+            emissive: [0.0, 2.0, 0.0],
+            ..genos_load::PbrMaterial::default()
+        });
+        model.meshes.push(genos_load::GltfMesh {
+            name: None,
+            primitives: vec![genos_load::Primitive {
+                positions: vec![
+                    [-1.0, 1.5, -1.0],
+                    [1.0, 1.5, -1.0],
+                    [1.0, 1.5, 1.0],
+                    [-1.0, 1.5, 1.0],
+                ],
+                indices: vec![0, 1, 2, 0, 2, 3],
+                material: Some(0),
+                ..genos_load::Primitive::default()
+            }],
+        });
+        model.instances.push(genos_load::MeshInstance {
+            mesh: 0,
+            node_name: None,
+            transform: genos_render::identity_pose(),
+            skin: None,
+        });
+        GltfSurface::from_gltf(&model, &genos_render::identity_pose())
+    }
+
+    /// The glTF triangles join the analytic scene: the panel shadows the floor
+    /// under it, its emission lights that floor, and a ray meets the nearer of
+    /// the two kinds of surface.
+    #[test]
+    fn a_gltf_panel_shadows_the_floor_and_its_emission_lights_it() {
+        let scene = open(vec![lamp(0.0, 3.0, 0.0)], Vec::new(), None);
+        let panel = glowing_panel();
+        let both = WithMeshes {
+            shapes: &scene,
+            meshes: &panel,
+        };
+        let down = [0.0, -1.0, 0.0];
+        let top = both.first_hit([0.0, 2.5, 0.0], down, REACH).expect("panel");
+        assert!((top.point[1] - 1.5).abs() < 1.0e-4, "{top:?}");
+        assert_eq!(top.emissive, [0.0, 2.0, 0.0]);
+        let beside = both.first_hit([3.0, 2.5, 0.0], down, REACH).expect("floor");
+        assert!(beside.point[1].abs() < 1.0e-4, "{beside:?}");
+        let mean = |at: &TraceHit, bounces: u32| {
+            let mut sum = [0.0; 3];
+            for k in 0..256u64 {
+                let mut rng = Rng::new(k * 7919 + 1);
+                let u = (rng.next(), rng.next());
+                sum = add(sum, path_from(&scene, &both, at, 0.0, bounces, u, &mut rng));
+            }
+            scale(sum, 1.0 / 256.0)
+        };
+        let under = hit_at(&scene, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        // The lamp is behind the panel: no direct light here.
+        assert_eq!(mean(&under, 0), [0.0; 3]);
+        // One bounce reaches the panel's underside: green emission and nothing else.
+        let lit = mean(&under, 1);
+        assert!(lit[1] > 0.1 && lit[0] == 0.0 && lit[2] == 0.0, "{lit:?}");
+        // The primary hit on the panel shows its emission.
+        assert!(mean(&top, 0)[1] >= 2.0);
+        // Beside the panel the lamp still lands.
+        assert!(y(mean(&beside, 0)) > 0.0);
     }
 
     /// `aov: specular` keeps a specular layer: a polished metal solid has one,
@@ -1516,6 +1666,7 @@ mod tests {
             triangles: false,
             materials,
             specular: true,
+            meshes: None,
         };
         let total = |r: &Reference| -> f32 { r.specular.iter().flatten().map(|c| luma(*c)).sum() };
         let metal = render(&setup(vec![Some(SolidMaterial {

@@ -35,8 +35,10 @@
 //!
 //! Direct light uses the same lamp unit as the picture: cosine over inverse square,
 //! a sun as a lamp 7 m away, and a ray that stops on the first wall, solid, floor or
-//! roof. Bounce is a cosine-weighted hemisphere. A hit returns that surface's direct
-//! light. A miss returns the sky.
+//! roof. An exact light is a disc. A point lamp has radius [`LAMP_RADIUS`]. The sun
+//! has angular radius [`SUN_DISC`] at the 80 m target. The irradiance is the centre
+//! formula times the visible fraction of that disc. Bounce is a cosine-weighted
+//! hemisphere. A hit returns that surface's direct light. A miss returns the sky.
 
 use genos_scene::{Scene, Shape, Solid, Wall};
 
@@ -44,6 +46,10 @@ const LAMBERT: f32 = 0.254647909;
 const LAMP_UNIT: f32 = 72.0;
 const LAMP_RADIUS: f32 = 0.1;
 const PI: f32 = std::f32::consts::PI;
+/// Mean solar semi-diameter, radians (IAU). The sun's shadow samples lie on this disc.
+pub const SUN_DISC: f32 = 0.00465047;
+/// Stratified samples on the disc for [`direct_light`]. The penumbra test asks for more.
+const DISC_SAMPLES: u32 = 16;
 
 /// Rec.709 luminance.
 pub fn luminance(rgb: [f32; 3]) -> f32 {
@@ -104,8 +110,9 @@ pub fn direct_light(scene: &Scene, origin: [f32; 3], normal: [f32; 3]) -> [f32; 
     direct_light_in(scene, scene, origin, normal)
 }
 
-/// What a tracer sees: the analytic shapes of a [`Scene`] or its triangles
-/// ([`crate::SceneMesh`]). Lamps and the sky always come from the scene.
+/// What a tracer sees: the analytic shapes of a [`Scene`], its triangles
+/// ([`crate::SceneMesh`]) or a glTF model's ([`crate::GltfSurface`]). Lamps and
+/// the sky always come from the scene.
 pub trait Surfaces: Sync {
     /// The first surface along `dir` within `reach`; the normal faces the ray.
     fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit>;
@@ -130,6 +137,15 @@ impl Surfaces for Scene {
     }
 }
 
+impl Surfaces for crate::gltf_surface::GltfSurface {
+    fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit> {
+        self.trace(origin, dir, reach)
+    }
+    fn blocked(&self, from: [f32; 3], to: [f32; 3]) -> bool {
+        self.occluded(from, to)
+    }
+}
+
 impl Surfaces for crate::scene_mesh::SceneMesh {
     fn first_hit(&self, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Option<Hit> {
         self.trace(origin, dir, reach)
@@ -140,11 +156,38 @@ impl Surfaces for crate::scene_mesh::SceneMesh {
 }
 
 /// [`direct_light`] from `scene`'s lamps, with shadows from `surfaces`.
+///
+/// Each light is a disc. The irradiance is the centre point formula times the
+/// fraction of the disc that is not blocked. A fully lit point matches the
+/// old point lamp. A fully covered disc adds nothing.
 pub fn direct_light_in(
     scene: &Scene,
     surfaces: &dyn Surfaces,
     origin: [f32; 3],
     normal: [f32; 3],
+) -> [f32; 3] {
+    direct_light_disc(scene, surfaces, origin, normal, DISC_SAMPLES)
+}
+
+/// [`direct_light_in`] with `samples` stratified points on each disc.
+///
+/// `samples` is rounded up to a square. The picture's shader draws one point
+/// per frame and keeps the mean. This is the integral that mean converges to.
+pub fn direct_light_samples(
+    scene: &Scene,
+    origin: [f32; 3],
+    normal: [f32; 3],
+    samples: u32,
+) -> [f32; 3] {
+    direct_light_disc(scene, scene, origin, normal, samples.max(1))
+}
+
+fn direct_light_disc(
+    scene: &Scene,
+    surfaces: &dyn Surfaces,
+    origin: [f32; 3],
+    normal: [f32; 3],
+    samples: u32,
 ) -> [f32; 3] {
     if surfaces.inside(origin) {
         return [0.0; 3];
@@ -157,19 +200,27 @@ pub fn direct_light_in(
         if nd <= 0.0 {
             continue;
         }
-        if surfaces.blocked(origin, target) {
+        let vis = disc_fraction(
+            surfaces,
+            origin,
+            target,
+            disc_radius(scene.light(index), origin, target),
+            samples,
+        );
+        if vis <= 0.0 {
             continue;
         }
-        let scale_l = nd * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS);
+        let scale_l = nd * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS) * vis;
         sum = add(sum, scale(color, scale_l));
     }
     sum
 }
 
-/// Each lamp that reaches `origin` unshadowed: the unit direction toward it and
-/// the irradiance it lands with (cosine included, the picture's lamp unit). The
-/// sum of the irradiances is [`direct_light_in`]. The reference tracer weights
-/// each lamp by a specular lobe with these.
+/// Each lamp that reaches `origin`: the unit direction toward its centre and
+/// the irradiance it lands with (cosine included, the picture's lamp unit,
+/// times the visible fraction of its disc). The sum of the irradiances is
+/// [`direct_light_in`]. The reference tracer weights each lamp by a specular
+/// lobe with these. The direction stays the centre.
 pub fn lamps_in(
     scene: &Scene,
     surfaces: &dyn Surfaces,
@@ -184,10 +235,20 @@ pub fn lamps_in(
         let color = scene.light(index).color;
         let (toward, dist2, target) = lamp_toward(scene, index, origin);
         let nd = dot(toward, normal);
-        if nd <= 0.0 || surfaces.blocked(origin, target) {
+        if nd <= 0.0 {
             continue;
         }
-        let scale_l = nd * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS);
+        let vis = disc_fraction(
+            surfaces,
+            origin,
+            target,
+            disc_radius(scene.light(index), origin, target),
+            DISC_SAMPLES,
+        );
+        if vis <= 0.0 {
+            continue;
+        }
+        let scale_l = nd * LAMP_UNIT / dist2.max(LAMP_RADIUS * LAMP_RADIUS) * vis;
         out.push((toward, scale(color, scale_l)));
     }
     out
@@ -196,6 +257,68 @@ pub fn lamps_in(
 /// True when `p` is strictly inside `solid` (the test [`Surfaces::inside`] uses).
 pub fn solid_contains(solid: &Solid, p: [f32; 3]) -> bool {
     inside_solid_local(p, solid)
+}
+
+fn disc_radius(light: &genos_scene::Light, origin: [f32; 3], target: [f32; 3]) -> f32 {
+    if light.direction.length_squared() > 1.0e-8 {
+        return length(sub(target, origin)) * SUN_DISC.tan();
+    }
+    LAMP_RADIUS
+}
+
+/// One uniform point on the disc of `radius` about `centre`, perpendicular to
+/// the ray from `origin`. `u` and `v` are in [0, 1). Area measure is `u` under
+/// the square root (PBRT, uniform disc, pdf 1/(π R²)).
+fn disc_aim(origin: [f32; 3], centre: [f32; 3], radius: f32, u: f32, v: f32) -> [f32; 3] {
+    let axis = sub(centre, origin);
+    let dist = length(axis);
+    if dist < 1.0e-4 {
+        return centre;
+    }
+    let axis = scale(axis, 1.0 / dist);
+    let r = radius * u.sqrt();
+    let (s, c) = (v * std::f32::consts::TAU).sin_cos();
+    let helper = if axis[1].abs() > 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let tx = normalize(cross(helper, axis));
+    let ty = cross(axis, tx);
+    add(centre, scale(add(scale(tx, c), scale(ty, s)), r))
+}
+
+/// Side of the stratified grid. `round(sqrt(samples))`, in integers, so a
+/// perfect square stays that root and a half step rounds away from zero.
+fn disc_side(samples: u32) -> u32 {
+    let floor = samples.isqrt().max(1);
+    let next = floor.saturating_add(1);
+    let under = samples.saturating_sub(floor.saturating_mul(floor));
+    let over = next.saturating_mul(next).saturating_sub(samples);
+    if over < under { next } else { floor }
+}
+
+fn disc_fraction(
+    surfaces: &dyn Surfaces,
+    origin: [f32; 3],
+    centre: [f32; 3],
+    radius: f32,
+    samples: u32,
+) -> f32 {
+    let side = disc_side(samples);
+    let total = side.saturating_mul(side).max(1);
+    let mut lit = 0u32;
+    for j in 0..side {
+        for i in 0..side {
+            let u = (i as f32 + 0.5) / side as f32;
+            let v = (j as f32 + 0.5) / side as f32;
+            let aim = disc_aim(origin, centre, radius, u, v);
+            if !surfaces.blocked(origin, aim) {
+                lit += 1;
+            }
+        }
+    }
+    lit as f32 / total as f32
 }
 
 /// `solid_contains` after moving `p` into solid `index`'s world frame.
@@ -353,7 +476,10 @@ fn path_in(scene: &Scene, origin: [f32; 3], dir: [f32; 3], hits: u32, seed: u32)
 pub struct Hit {
     pub point: [f32; 3],
     pub normal: [f32; 3],
+    /// Diffuse albedo: paint, or a glTF base colour × (1 − metallic).
     pub albedo: [f32; 3],
+    /// Emitted radiance. Zero on analytic shapes.
+    pub emissive: [f32; 3],
 }
 
 /// The first floor, roof, wall or solid face along `dir` from `origin`, within `reach`.
@@ -368,6 +494,7 @@ pub fn trace(scene: &Scene, origin: [f32; 3], dir: [f32; 3], reach: f32) -> Opti
                     point: add(origin, scale(dir, t)),
                     normal,
                     albedo,
+                    emissive: [0.0; 3],
                 });
             }
         };
@@ -946,5 +1073,122 @@ mod tests {
     #[test]
     fn the_tone_curve_undoes_below_the_bend() {
         assert!((linear_from_display(0.25) - 0.25).abs() < 1.0e-5);
+    }
+
+    fn penumbra_scene(wall: bool) -> Scene {
+        let lamp = Light {
+            position: Vec3::new(0.0, 3.0, 0.0),
+            color: [1.0, 1.0, 1.0],
+            direction: Vec3::ZERO,
+        };
+        let walls = if wall {
+            vec![Wall {
+                position: Vec3::new(0.0, 0.0, 1.0),
+                half_x: 2.0,
+                half_z: 0.05,
+                height: 1.5,
+                base: 0.0,
+                color: [1.0, 1.0, 1.0],
+                absorption: 0.0,
+                reflectance: -1.0,
+                color_mix: -1.0,
+            }]
+        } else {
+            Vec::new()
+        };
+        room(vec![lamp], walls, Vec::new())
+    }
+
+    #[test]
+    fn an_open_disc_matches_the_centre_and_a_covered_disc_is_dark() {
+        let open = penumbra_scene(false);
+        let origin = [0.0, 0.02, 0.4];
+        let normal = [0.0, 1.0, 0.0];
+        let lit = direct_light(&open, origin, normal);
+        let toward = [0.0, 3.0 - origin[1], -origin[2]];
+        let dist = (toward[0] * toward[0] + toward[1] * toward[1] + toward[2] * toward[2]).sqrt();
+        let nd = toward[1] / dist;
+        let dist2 = dist * dist;
+        let centre = nd * 72.0 / dist2.max(0.1 * 0.1);
+        assert!(
+            (lit[0] - centre).abs() < 1.0e-3,
+            "open disc {lit:?} centre {centre}"
+        );
+        let blocked = penumbra_scene(true);
+        let shadow = direct_light_samples(&blocked, [0.0, 0.02, 1.4], normal, 64);
+        assert!(
+            luminance(shadow) < 1.0e-4,
+            "the wall does not cover the disc {shadow:?}"
+        );
+        let clear = direct_light_samples(&blocked, [0.0, 0.02, 3.2], normal, 64);
+        let open_far = direct_light_samples(&open, [0.0, 0.02, 3.2], normal, 64);
+        assert!(
+            (clear[0] - open_far[0]).abs() < 1.0e-3,
+            "a point past the graze is not fully lit: blocked {clear:?} open {open_far:?}"
+        );
+    }
+
+    #[test]
+    fn a_wall_opens_a_disc_penumbra() {
+        let scene = penumbra_scene(true);
+        let normal = [0.0, 1.0, 0.0];
+        let mut lo = None;
+        let mut hi = None;
+        let mut mid = 0u32;
+        let mut prev = 0.0;
+        for step in 0..40 {
+            let z = 1.6 + step as f32 * 0.03;
+            let y = luminance(direct_light_samples(
+                &scene,
+                [0.0, 0.02, z],
+                normal,
+                64,
+            ));
+            let open = luminance(direct_light_samples(
+                &penumbra_scene(false),
+                [0.0, 0.02, z],
+                normal,
+                16,
+            ));
+            let vis = if open > 1.0e-6 { y / open } else { 0.0 };
+            if vis > 0.2 && vis < 0.8 {
+                mid += 1;
+            }
+            if lo.is_none() && vis >= 0.2 {
+                lo = Some(z);
+            }
+            if hi.is_none() && vis >= 0.8 {
+                hi = Some(z);
+            }
+            if step > 0 {
+                assert!(
+                    vis + 0.08 >= prev,
+                    "the penumbra steps backward at z {z}: {vis} after {prev}"
+                );
+            }
+            prev = vis;
+        }
+        assert!(
+            lo.is_some() && hi.is_some(),
+            "the profile never crosses 0.2 and 0.8: lo {lo:?} hi {hi:?}"
+        );
+        let lo = lo.unwrap();
+        let hi = hi.unwrap();
+        let width = hi - lo;
+        assert!(
+            width > 0.06 && width < 0.40,
+            "penumbra width {width} m (z {lo}..{hi}), expected the 0.1 m disc"
+        );
+        assert!(mid >= 2, "the profile has no partial samples ({mid})");
+        let direct = include_str!("../shaders/lighting_direct.comp");
+        let rays = include_str!("../shaders/scene_rays.glsl");
+        assert!(
+            direct.contains("const float SUN_DISC = 0.00465047;"),
+            "the shader sun disc drifted from {SUN_DISC}"
+        );
+        assert!(
+            rays.contains("const float LAMP_RADIUS = 0.1;"),
+            "the shader lamp radius drifted"
+        );
     }
 }

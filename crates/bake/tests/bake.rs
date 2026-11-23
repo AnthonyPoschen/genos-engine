@@ -35,7 +35,10 @@
 
 use std::path::Path;
 
-use genos_bake::{bake, load_or_bake, read, BakeError, BakeMesh, BakeMode, BakeSettings};
+use genos_bake::{
+    bake, load_or_bake, load_or_bake_level, read, BakeError, BakeMesh, BakeMode, BakeSettings,
+    LEVEL_VOXEL,
+};
 use genos_load::{load_gltf_file, Image, PbrMaterial, TextureSlot};
 use genos_mesh::MeshTriangle;
 
@@ -235,4 +238,54 @@ fn cache_modes_and_keys() {
     std::fs::write(&path, bytes).unwrap();
     assert!(read(&path).is_none(), "a cut file is ignored");
     let _ = std::fs::remove_dir_all(&s.cache_dir);
+}
+
+/// Two 4 m square sheets 3 m apart, the left red and the right blue.
+fn two_sheets() -> BakeMesh<'static> {
+    let sheet = |x: f32, material: u32| {
+        let c = [[x, 0.0, 0.0], [x, 4.0, 0.0], [x, 4.0, 4.0], [x, 0.0, 4.0]];
+        [
+            MeshTriangle::flat([c[0], c[1], c[2]], material, true),
+            MeshTriangle::flat([c[0], c[2], c[3]], material, true),
+        ]
+    };
+    let mut triangles = Vec::new();
+    triangles.extend(sheet(0.0, 0));
+    triangles.extend(sheet(3.0, 1));
+    BakeMesh::plain("sheets", triangles, &[[0.8, 0.1, 0.1], [0.1, 0.1, 0.8]])
+}
+
+#[test]
+fn a_level_field_keeps_the_level_voxel_and_a_colour_per_brick() {
+    let mesh = two_sheets();
+    let s = settings("level");
+    let baked = load_or_bake_level(&mesh, &s).unwrap();
+    let sdf = &baked.sdf;
+    // The per-mesh rule would give 4 m / 64 = 6.25 cm here and 25 cm for a building.
+    assert!((sdf.voxel - LEVEL_VOXEL).abs() < 1.0e-6, "voxel {}", sdf.voxel);
+    assert!(sdf.thin, "two open sheets are an open mesh");
+    assert_eq!(sdf.brick_albedo.len(), sdf.bricks.len());
+    assert!(baked.cards.cards.is_empty());
+    let brick = sdf.voxel * 8.0;
+    let (mut red, mut blue) = (0, 0);
+    for (b, albedo) in sdf.bricks.iter().zip(&sdf.brick_albedo) {
+        let x = sdf.origin[0] + (b.at[0] as f32 + 0.5) * brick;
+        // A brick within one brick of a sheet takes that sheet's colour.
+        if x.abs() < brick {
+            assert!(albedo[0] > 150 && albedo[2] < 80, "near the red sheet: {albedo:?}");
+            red += 1;
+        } else if (x - 3.0).abs() < brick {
+            assert!(albedo[2] > 150 && albedo[0] < 80, "near the blue sheet: {albedo:?}");
+            blue += 1;
+        }
+    }
+    assert!(red > 0 && blue > 0, "red {red} blue {blue}");
+    // The cache file keeps the colours.
+    let again = load_or_bake_level(&mesh, &s).unwrap();
+    assert_eq!(again.sdf, baked.sdf);
+    // The per-mesh bake of the same triangles is another file and has no colours.
+    let plain = load_or_bake(&mesh, &s).unwrap();
+    assert_ne!(plain.key, baked.key);
+    assert!(plain.sdf.brick_albedo.is_empty());
+    std::fs::remove_dir_all(&s.cache_dir).ok();
 }

@@ -23,16 +23,17 @@
 //!
 //! ```text
 //! [0]  instance count   [1] max march steps   [2] emission table word (0: none)
-//! [3] reserved
+//! [3] thin skin, world metres (f32)
 //! per instance, 32 words from word 4:
 //!   0..12  world -> object rows (3 x vec4: m0 m1 m2 t)
 //!   12..15 world bounds low, 15 distance scale (object metres -> world metres)
 //!   16..19 world bounds high, 19 albedo (unpackUnorm4x8; a = 1 when two-sided)
 //!   20..23 grid origin (object), 23 voxel
 //!   24..27 grid size in bricks (x y z), 27 brick table word
-//!   28 band, 29 coarse band, 30 coarse word, 31 thin (1) or closed (0)
+//!   28 band, 29 coarse band, 30 coarse word, 31 bit 0 thin, bit 1 bricks carry albedo
 //! brick table: one word per brick cell, 0 for none, else 1 + the brick's first word
-//! brick: 128 words, 512 distances as bytes, x fastest
+//! brick: 128 words, 512 distances as bytes, x fastest; a level field adds a 129th
+//!   word, the brick's mean albedo (unpackUnorm4x8)
 //! coarse: one byte per brick cell, four per word
 //! emission table (GI): one word per instance, shared-exponent RGB (9e5)
 //! ```
@@ -214,8 +215,10 @@ pub fn field_parts(instances: &[&FieldInstance], with_data: bool) -> FieldParts 
                     }
                 }
                 data_len += coarse_words;
-                for brick in &s.bricks {
-                    let words = brick.distances.len().div_ceil(4);
+                for (index, brick) in s.bricks.iter().enumerate() {
+                    // A level field's brick ends with one albedo word.
+                    let tail = usize::from(!s.brick_albedo.is_empty());
+                    let words = brick.distances.len().div_ceil(4) + tail;
                     if with_data {
                         let d = s.bricks_dims;
                         let cell =
@@ -225,6 +228,9 @@ pub fn field_parts(instances: &[&FieldInstance], with_data: bool) -> FieldParts 
                             let mut b = [0u8; 4];
                             b[..chunk.len()].copy_from_slice(chunk);
                             data.push(u32::from_le_bytes(b));
+                        }
+                        if let Some(a) = s.brick_albedo.get(index) {
+                            data.push(u32::from_le_bytes([a[0], a[1], a[2], 0]));
                         }
                     }
                     data_len += words;
@@ -256,12 +262,20 @@ pub fn field_parts(instances: &[&FieldInstance], with_data: bool) -> FieldParts 
         r[28] = f(s.band);
         r[29] = f(s.coarse_band);
         r[30] = coarse;
-        r[31] = u32::from(s.thin);
+        r[31] = u32::from(s.thin) | if s.brick_albedo.is_empty() { 0 } else { 2 };
         head.extend_from_slice(&r);
     }
     debug_assert!(!with_data || data.len() == data_len);
     head[0] = kept.len() as u32;
     head[1] = FIELD_STEPS;
+    // Word 3: half the thickness of the thickest thin shell, world metres
+    // (mesh_field.glsl mf_skin, half a voxel as mf_eps has it).
+    let skin = kept
+        .iter()
+        .filter(|(inst, _)| inst.sdf.thin)
+        .map(|(inst, rows)| 0.5 * inst.sdf.voxel * distance_scale(rows))
+        .fold(0.0f32, f32::max);
+    head[3] = skin.to_bits();
     let mut emission = Vec::new();
     if kept
         .iter()
@@ -447,6 +461,54 @@ mod tests {
         }
         let (lo, hi) = inst.world_bounds();
         assert!(lo[0] < 9.0 && hi[0] > 11.0 && lo[1] < 0.0 && hi[1] > 2.0);
+    }
+
+    #[test]
+    fn a_level_field_packs_its_shell_and_a_colour_word_in_each_brick() {
+        // Two open sheets, red and blue, as one level field.
+        let sheet = |x: f32, material: u32| {
+            let c = [[x, 0.0, 0.0], [x, 2.0, 0.0], [x, 2.0, 2.0], [x, 0.0, 2.0]];
+            [
+                MeshTriangle::flat([c[0], c[1], c[2]], material, true),
+                MeshTriangle::flat([c[0], c[2], c[3]], material, true),
+            ]
+        };
+        let mut triangles = Vec::new();
+        triangles.extend(sheet(0.0, 0));
+        triangles.extend(sheet(1.5, 1));
+        let mesh = BakeMesh::plain("sheets", triangles, &[[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]);
+        let settings = BakeSettings {
+            mode: BakeMode::OnLoad,
+            cache_dir: std::env::temp_dir()
+                .join(format!("genos-mesh-field-level-{}", std::process::id())),
+            ..BakeSettings::default()
+        };
+        let sdf = genos_bake::load_or_bake_level(&mesh, &settings).unwrap().sdf;
+        std::fs::remove_dir_all(&settings.cache_dir).ok();
+        assert!(sdf.thin && !sdf.brick_albedo.is_empty());
+        let inst = FieldInstance {
+            sdf: Arc::new(sdf),
+            pose: crate::world::identity_pose(),
+            albedo: [0.5; 3],
+            emission: [0.0; 3],
+            object: None,
+        };
+        let words = field_words(&[&inst]);
+        // Header word 3: half the shell, half a voxel (mesh_field.glsl mf_skin).
+        let skin = f32::from_bits(words[3]);
+        assert!((skin - 0.5 * inst.sdf.voxel).abs() < 1.0e-6, "skin {skin}");
+        // Record word 31: thin, and bricks carry a colour.
+        assert_eq!(words[FIELD_HEADER + 31], 3);
+        // Every stored brick is 128 distance words and then its colour.
+        let table = words[FIELD_HEADER + 27] as usize;
+        let dims = inst.sdf.bricks_dims;
+        for (brick, colour) in inst.sdf.bricks.iter().zip(&inst.sdf.brick_albedo) {
+            let cell = ((brick.at[2] * dims[1] + brick.at[1]) * dims[0] + brick.at[0]) as usize;
+            let at = words[table + cell] as usize;
+            assert!(at != 0, "a stored brick has a table word");
+            let word = words[at - 1 + 128].to_le_bytes();
+            assert_eq!([word[0], word[1], word[2]], *colour);
+        }
     }
 
     #[test]

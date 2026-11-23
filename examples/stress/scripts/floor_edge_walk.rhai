@@ -3,7 +3,7 @@
 // bricks the picture uses, and so which update first, but never the light they settle
 // on: no frame may step the indirect light in the view of the entrance.
 time(#{ fixed_dt: 1.0 / 60.0 });
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("time_of_day", 12.0);
 knob("boxes", 1.0);
 knob("lights", 5.0);

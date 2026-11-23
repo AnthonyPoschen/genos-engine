@@ -197,7 +197,7 @@ impl Gpu {
         unsafe {
             let result = (self.fns.create_compute)(
                 self.device,
-                std::ptr::null_mut(),
+                self.pipeline_cache,
                 1,
                 &pipe as *const Pipe as *const u8,
                 std::ptr::null(),
@@ -219,7 +219,11 @@ impl Gpu {
             self.aa_dst[slot] = self.make_buffer(presented, 0x20 | 0x1 | 0x2, crate::gpu::Memory::Device)?;
             self.color_layout[slot] = 0;
         }
-        self.write_aa_sets()?;
+        // Descriptor sets come from make_aa_pipes, which now runs after the first
+        // clear present. Bind them once those sets exist.
+        if !self.aa_sets[0].is_null() {
+            self.write_aa_sets()?;
+        }
         Ok(())
     }
 

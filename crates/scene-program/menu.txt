@@ -1,0 +1,133 @@
+# Lighting debug menu. One setting per line. Restart to pick up edits.
+# tab | section key | title | open or closed | setting
+# A tab of "-" sits outside the tab strip.
+# A section key of "-" puts the setting on the tab with no fold header.
+# The same section key stays one fold. The first line sets the title and open or closed.
+# GENOS_MENU_LAYOUT points at another file of this shape.
+# Setting names are the config keys, plus review, scene, checkpoint, view, fps,
+# stall, gi_passes, gi_work, enabled, water, rough_cutoff, mirror_cutoff,
+# mirror_views, rays, shore_cap, caustics, and tracer.
+# gi_passes and gi_work are numbers.
+# hdr_save is a button. It writes the Output page's look into the scene file.
+# Move a line to another tab or section. No code change is required.
+Scene | - | - | open | scene
+Scene | - | - | open | checkpoint
+Scene | - | - | open | view
+Scene | - | - | open | lighting_preset
+Scene | - | - | open | sky
+Mesh | - | - | open | mesh_workspace
+Mesh | - | - | open | mesh_statistics
+Mesh | - | - | open | mesh_state
+Mesh | - | - | open | mesh_pick
+Mesh | - | - | open | mesh_note
+Mesh | - | - | open | mesh_shade
+Mesh | - | - | open | mesh_solo
+Mesh | - | - | open | mesh_turntable
+Mesh | - | - | open | mesh_orthographic
+Mesh | - | - | open | mesh_grid
+Mesh | - | - | open | mesh_shadow
+Mesh | - | - | open | mesh_replay
+Mesh | - | - | open | mesh_replay_play
+Mesh | - | - | open | mesh_clip
+Mesh | - | - | open | mesh_time
+Mesh | - | - | open | mesh_play
+Mesh | - | - | open | mesh_bones
+Mesh | - | - | open | mesh_surfaces
+Mesh | mesh_objects | Objects | open | mesh_filter
+Mesh | mesh_objects | Objects | open | mesh_objects
+Mesh | mesh_replay | Replay | closed | mesh_session
+Mesh | mesh_replay | Replay | closed | mesh_command_filter
+Mesh | mesh_replay | Replay | closed | mesh_events
+Pipeline | - | - | open | lighting_direct
+Pipeline | - | - | open | lighting_shadows
+Pipeline | - | - | open | lighting_gi
+Pipeline | - | - | open | lighting_world_cache
+Pipeline | - | - | open | lighting_sky
+Pipeline | - | - | open | lighting_emissive
+Pipeline | - | - | open | lighting_prefill
+Pipeline | - | - | open | lighting_denoise
+Pipeline | - | - | open | lighting_denoise_adaptive
+Pipeline | - | - | open | lighting_compose_reuse
+Pipeline | - | - | open | lighting_lamp_pick_reuse
+Pipeline | - | - | open | lighting_lamp_pick_unbiased
+Pipeline | - | - | open | lighting_restir_di
+Pipeline | - | - | open | lighting_restir_spatial_neighbors
+Pipeline | - | - | open | lighting_restir_spatial_radius
+Pipeline | - | - | open | lighting_restir_resolution_scale
+Pipeline | - | - | open | lighting_restir_candidates
+Pipeline | - | - | open | lighting_restir_spatial_checkerboard
+Pipeline | - | - | open | lighting_restir_split_passes
+Lamps | direct | Lamps | open | lighting_direct_lights
+Lamps | direct | Lamps | open | lighting_direct_refresh
+Lamps | direct | Lamps | open | lighting_direct_scale
+Lamps | direct | Lamps | open | lighting_lamp_pick
+Lamps | direct | Lamps | open | lighting_lamp_pick_samples
+Lamps | direct | Lamps | open | lighting_lamp_pick_candidates
+Lamps | direct | Lamps | open | lighting_lamp_pick_radius
+Lamps | direct | Lamps | open | lighting_lamp_pick_history
+GI | gi | Indirect | open | lighting_bounces
+GI | gi | Indirect | open | lighting_gi_refresh
+GI | gi | Indirect | open | lighting_budget_shift
+GI | world | World cache | closed | lighting_world_stale
+GI | world | World cache | closed | lighting_surface_cache_attach_movers
+GI | world | World cache | closed | lighting_surface_cache_sh_cells
+GI | world | World cache | closed | lighting_surface_cache_sh_texel_detail
+GI | world | World cache | closed | lighting_surface_cache_sh_texel_ray_cut
+GI | world | World cache | closed | lighting_surface_cache_blend
+GI | world | World cache | closed | lighting_surface_cache_firefly_sigma
+GI | world | World cache | closed | lighting_surface_cache_ray_budget
+GI | world | World cache | closed | lighting_surface_cache_dormant_rays
+GI | world | World cache | closed | lighting_screen_verify
+GI | world | World cache | closed | lighting_world_verify
+Denoise | - | - | open | lighting_denoise_iters
+Denoise | - | - | open | lighting_denoise_variance
+Shadows | - | - | open | lighting_shadow_filter
+Shadows | - | - | open | lighting_ambient
+Perf | - | - | open | lighting_full_effort
+Perf | - | - | open | unfilled
+Perf | - | - | open | unfilled_tint
+Reflections | - | - | open | enabled
+Reflections | - | - | open | water
+Reflections | - | - | open | rough_cutoff
+Reflections | - | - | open | mirror_cutoff
+Reflections | - | - | open | mirror_views
+Reflections | - | - | open | rays
+Reflections | - | - | open | shore_cap
+Reflections | - | - | open | caustics
+Reflections | - | - | open | tracer
+Perf | - | - | open | fps
+Perf | - | - | open | stall
+Perf | - | - | open | gi_passes
+Perf | - | - | open | gi_work
+Perf | - | - | open | menu_wheel
+Perf | - | - | open | menu_keys
+Output | - | - | open | hdr_exposure_mode
+Output | - | - | open | hdr_ev100
+Output | - | - | open | hdr_compensation
+Output | - | - | open | hdr_iso
+Output | - | - | open | hdr_aperture
+Output | - | - | open | hdr_shutter
+Output | - | - | open | hdr_adapt_down
+Output | - | - | open | hdr_adapt_up
+Output | - | - | open | hdr_transition
+Output | - | - | open | hdr_display
+Output | - | - | open | hdr_bloom
+Output | - | - | open | hdr_bloom_levels
+Output | - | - | open | hdr_output
+Output | - | - | open | hdr_save
+Fog | - | - | open | lighting_preset
+Fog | - | - | open | enabled
+Fog | - | - | open | density
+Fog | - | - | open | height
+Fog | - | - | open | thickness
+Fog | - | - | open | albedo
+Fog | - | - | open | phase_g
+Fog | - | - | open | gi
+Fog | - | - | open | history
+Fog | - | - | open | fog_view
+Fog | - | - | open | fog_dispatches
+Fog | - | - | open | fog_samples
+Fog | - | - | open | fog_vram
+Fog | - | - | open | fog_ms
+Fog | - | - | open | fog_history_accepts
+Info | - | - | open | review

@@ -60,7 +60,7 @@ fn cover(dir, p) {
 // A box spinning among the lamps at night, lamps moving.
 fn spin(pass, hist, every) {
     knob("time_of_day", 22.0);
-    knob("sun", "freeze");
+    knob("sun_speed", 0.0);
     for l in points() { light(#{ index: l.index, on: true }); }
     let boxes = objects().filter(|o| o.height <= 1.2 && o.size <= 1.5);
     require(boxes.len() > 0, "the scene has a box");
@@ -98,7 +98,7 @@ fn spin(pass, hist, every) {
 // Half the lamps lit, then the other half switches on in one frame, lamps moving.
 fn light_switch(pass) {
     knob("time_of_day", 0.0);
-    knob("sun", "freeze");
+    knob("sun_speed", 0.0);
     camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
     let i = 0;
     for l in points() { light(#{ index: l.index, on: i % 2 == 0 }); i += 1; }

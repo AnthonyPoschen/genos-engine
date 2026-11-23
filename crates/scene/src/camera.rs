@@ -68,6 +68,18 @@ pub struct Actions {
 
 #[derive(Clone, Debug)]
 pub struct Camera {
+    /// Tangent of half the vertical field of view. [`DEFAULT_VIEW_TAN`] is the
+    /// 60 degree lens every scene uses. A smaller value is a longer lens: the
+    /// mesh viewer's orthographic view stands far back with a narrow one.
+    /// The picture, the lighting's position rebuild and the frame fog follow
+    /// it; reflections and the reference tracer assume the default.
+    pub view_tan: f32,
+    /// Above 0 the view is a parallel (orthographic) projection and this is
+    /// half the picture's height in metres. 0 is a perspective view. The
+    /// eye still has a place: the picture is what lies in front of the plane
+    /// through it. The mesh viewer sets it; reflections, the fog and the
+    /// reference tracer do not know it.
+    pub parallel_half: f32,
     pub position: Vec3,
     pub yaw: f32,
     pub pitch: f32,
@@ -104,6 +116,8 @@ impl Camera {
         let mut physics = World::new(GRAVITY);
         physics.insert(view_capsule(position));
         Self {
+            view_tan: DEFAULT_VIEW_TAN,
+            parallel_half: 0.0,
             position,
             yaw,
             pitch: 0.0,
@@ -517,12 +531,11 @@ pub fn update(camera: &mut Camera, scene: &mut Scene, actions: &Actions, dt: f32
 /// Column-major view-projection for a Vulkan clip space with Y flipped.
 pub fn view_proj(camera: &Camera, aspect: f32) -> [f32; 16] {
     let view = view_matrix(camera);
-    let proj = perspective(
-        60.0_f32.to_radians(),
-        aspect.max(0.01),
-        CAMERA_NEAR,
-        CAMERA_FAR,
-    );
+    let proj = if camera.parallel_half > 0.0 {
+        parallel(camera.parallel_half, aspect.max(0.01), CAMERA_NEAR, CAMERA_FAR)
+    } else {
+        perspective(camera.view_tan.max(1.0e-4), aspect.max(0.01), CAMERA_NEAR, CAMERA_FAR)
+    };
     (proj * view).cols
 }
 
@@ -557,8 +570,11 @@ fn view_matrix(camera: &Camera) -> Mat4 {
 pub const CAMERA_NEAR: f32 = 0.05;
 pub const CAMERA_FAR: f32 = 200.0;
 
-fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
-    let h = 1.0 / (fovy * 0.5).tan();
+/// Tangent of half of 60 degrees: the field of view of [`Camera::new`].
+pub const DEFAULT_VIEW_TAN: f32 = 0.577_350_26;
+
+fn perspective(view_tan: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    let h = 1.0 / view_tan;
     let w = h / aspect;
     let mut cols = [0.0; 16];
     cols[0] = w;
@@ -566,6 +582,18 @@ fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
     cols[10] = far / (near - far);
     cols[11] = -1.0;
     cols[14] = (far * near) / (near - far);
+    Mat4::from_cols(cols)
+}
+
+/// A parallel projection for the same clip space as [`perspective`]: Y
+/// flipped, depth 0 at `near` and 1 at `far`. `half_height` is in metres.
+fn parallel(half_height: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    let mut cols = [0.0; 16];
+    cols[0] = 1.0 / (half_height * aspect);
+    cols[5] = -1.0 / half_height;
+    cols[10] = 1.0 / (near - far);
+    cols[14] = near / (near - far);
+    cols[15] = 1.0;
     Mat4::from_cols(cols)
 }
 

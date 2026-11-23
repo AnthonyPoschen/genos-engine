@@ -1,0 +1,31 @@
+[package]
+name = "genos-scene-program"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lints]
+workspace = true
+
+# The frame loop genos-lighting and genos-editor both run: scenes from
+# debug/scenes, the menu, the debug tools, and the mesh viewer.
+[dependencies]
+genos-debug = { path = "../debug" }
+genos-input = { path = "../input" }
+genos-load = { path = "../load" }
+genos-mcp = { path = "../mcp" }
+genos-render = { path = "../render" }
+genos-scene = { path = "../scene" }
+genos-scene-lib = { path = "../../debug/scene-lib" }
+genos-stress = { path = "../../examples/stress" }
+genos-ui = { path = "../ui" }
+genos-window = { path = "../window" }
+genos-workbench = { path = "../workbench", optional = true }
+
+[features]
+# The mesh viewer (mesh-workbench workspaces): the mesh scene, its tools and
+# its menu. `genos-editor` turns it on. `genos-lighting` does not, so a build
+# of that program alone (`cargo build -p genos-lighting`, `make stress`) has
+# no mesh viewer in it. A build of the whole workspace has it in both: Cargo
+# gives one set of features to a crate that two programs share.
+mesh = ["dep:genos-workbench"]

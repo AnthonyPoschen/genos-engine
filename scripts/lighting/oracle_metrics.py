@@ -8,6 +8,11 @@ lamps-switch from the lamps profile):
   sum(w |live - ref|) / sum(w ref) in linear luminance over 2x2 blocks, with
   w = 1 / max(distance, 0.5 m) from the depth view. Worst frame and mean.
 * ref_err: the same without the weight, for comparison.
+  Luminance undoes the legacy shoulder. A channel at or above the asymptote
+  is held at the last code of dither.glsl's noise (under one code) before
+  the inverse, so the 0.999 clamp does not enter the score. A pixel leaves
+  the sum only when both pictures are in that band. over_ceiling_frac is
+  the share of live pixels in the band.
 * grid_worst / grid_longest_run: the PR #94 checkerboard metric (grid_metric.py)
   over every saved frame of the uninterrupted pass.
 * grid_excess_worst / grid_excess_frame / grid_excess_longest_run: for every
@@ -38,6 +43,17 @@ lamps-switch from the lamps profile):
   gi_metrics CSV (lavapipe numbers only compare run against run). Without the
   specular AOV the mask is reported as missing and the spec metrics are left out.
 
+* blotch_mean / blotch_worst (every scenario with references): the gi-check
+  still-frame blotch (examples/stress/src/gi_check/metrics.rs `blotch`): the
+  error band blurred s px minus blurred 6 s px, over the reference blurred s px
+  plus 5% of its mean, averaged over the picture. s = 4 px at 320 wide, scaled
+  to the run's width (2 px at the oracle's 160 x 90). Only arm against arm at
+  the same size compares; the gi-check room numbers (ADR 0039: 0.021 at 25 cm,
+  0.014 at 12.5 cm) are 320 x 180 of a 640 x 360 run.
+* slant* scenarios (ADR 0039 stage 2): slant_mid_err_worst / _mean, the
+  unweighted error over the middle half of the picture (where the turned box
+  is), per reference frame.
+
 `--self-test` checks the error, weight and counter on synthetic pictures.
 """
 import csv, glob, json, os, re, sys
@@ -51,8 +67,69 @@ LUM = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 DEPTH_RANGE = 50.0  # lighting_compose.comp: depth view = 1 - distance / 50
 
 
-def srgb_to_linear(c):
-    return np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
+def linear_from_display(c):
+    """Undo the shoulder tone the engine and reference PNGs store (mesh::tone,
+    hdr_shoulder.glsl, trace.rs linear_from_display): linear to 0.64, then
+    0.64 + 0.14 e / (e + 1.1). Not sRGB."""
+    k = np.clip((c - 0.64) / 0.14, 0.0, 0.999)
+    return np.where(c <= 0.64, np.maximum(c, 0.0), 0.64 + 1.1 * k / (1.0 - k))
+
+
+# Legacy shoulder asymptote (hdr_shoulder.glsl): 0.64 + 0.14, never reached.
+SHOULDER_CEILING = 0.64 + 0.14
+# dither.glsl: dither_tpdf is in [-1, 1) codes and dither8's room is at most 1,
+# so the noise added before pack_rgb's round is under one code. The asymptote
+# is code 198.9; one code down is 197.9, which rounds to 198. Codes 196 and
+# 197 are below that band and stay measured.
+DITHER_CODES = 1.0
+CEILING_CODE = int(np.floor(SHOULDER_CEILING * 255.0 - DITHER_CODES + 0.5))
+
+
+def channel_code(rgb):
+    return np.floor(np.asarray(rgb, np.float64) * 255.0 + 0.5)
+
+
+def over_ceiling(rgb):
+    """Per-pixel: any channel in the dither band of the shoulder asymptote."""
+    return (channel_code(rgb) >= CEILING_CODE).any(axis=-1)
+
+
+def picture_luma(rgb):
+    """Rec.709 luma after the shoulder inverse. A channel at or above the
+    asymptote has no inverse: linear_from_display clamps k at 0.999 and reads
+    ~1099. Hold that channel at the last code the dither band names. The
+    inverse itself is unchanged."""
+    rgb = np.asarray(rgb, np.float32)
+    top = np.float32(CEILING_CODE / 255.0)
+    held = np.where(rgb >= np.float32(SHOULDER_CEILING), top, rgb)
+    return linear_from_display(held) @ LUM
+
+
+def _resize_mask(mask, shape):
+    if mask.shape == shape:
+        return mask
+    from PIL import Image
+    img = Image.fromarray((mask.astype(np.uint8) * 255)).resize(shape[::-1], Image.NEAREST)
+    return np.asarray(img) > 127
+
+
+def both_over_ceiling(live_rgb, ref_rgb):
+    """Pixels left out of a ratio: both sides sit in the dither band.
+    A one-sided clip stays, so a saturated live pixel against a flat
+    reference cannot score as a match."""
+    live, ref = over_ceiling(live_rgb), over_ceiling(ref_rgb)
+    if live.shape != ref.shape:
+        live = _resize_mask(live, ref.shape)
+    return live & ref
+
+
+def energy_ratio(live, ref, drop):
+    """Summed live luma over summed reference luma. Pixels in `drop` (both
+    sides at the ceiling) are not measurable and do not dilute the ratio."""
+    keep = ~drop
+    if not np.any(keep):
+        return 1.0
+    return float(live[keep].sum()) / max(float(ref[keep].sum()), 1e-9)
 
 
 def load_rgb(path):
@@ -61,7 +138,7 @@ def load_rgb(path):
 
 
 def lin_luma(path):
-    return srgb_to_linear(load_rgb(path)) @ LUM
+    return picture_luma(load_rgb(path))
 
 
 def distance(path):
@@ -74,11 +151,15 @@ def block(a, b=2):
     return a[:h, :w].reshape(h // b, b, w // b, b).mean(axis=(1, 3))
 
 
-def ref_error(live, ref, dist=None):
-    """(near-weighted, unweighted) share of the light that is wrong."""
+def ref_error(live, ref, dist=None, mask=None):
+    """(near-weighted, unweighted) share of the light that is wrong.
+    mask: pixels at the reference resolution left out of both sums. score()
+    passes it only where both pictures are in the shoulder dither band."""
     if live.shape != ref.shape:
         from PIL import Image
         live = np.asarray(Image.fromarray(live).resize(ref.shape[::-1], Image.BILINEAR))
+    if mask is not None:
+        live, ref = np.where(mask, 0.0, live), np.where(mask, 0.0, ref)
     l, r = block(live), block(ref)
     d = np.abs(l - r)
     plain = float(d.sum() / (r.sum() + 1e-6))
@@ -90,6 +171,41 @@ def ref_error(live, ref, dist=None):
     w = 1.0 / np.maximum(block(dist), 0.5)
     near = float((w * d).sum() / ((w * r).sum() + 1e-6))
     return near, plain
+
+
+def _kernel(s):
+    r = int(3.0 * s + 0.5)
+    x = np.arange(-r, r + 1, dtype=np.float64)
+    k = np.exp(-(x * x) / (2.0 * s * s))
+    return k / k.sum()
+
+
+def gblur(a, s):
+    """Separable Gaussian, edges repeated (gi_check/metrics.rs `blur`)."""
+    k = _kernel(s)
+    r = len(k) // 2
+    a = np.asarray(a, np.float64)
+    p = np.pad(a, ((0, 0), (r, r)), mode="edge")
+    t = sum(kv * p[:, i:i + a.shape[1]] for i, kv in enumerate(k))
+    p = np.pad(t, ((r, r), (0, 0)), mode="edge")
+    return sum(kv * p[i:i + a.shape[0], :] for i, kv in enumerate(k))
+
+
+def blotch(live, ref, s=None):
+    """gi_check/metrics.rs `blotch`; s defaults to 4 px per 320 px of width."""
+    if s is None:
+        s = 4.0 * ref.shape[1] / 320.0
+    e = np.asarray(live, np.float64) - np.asarray(ref, np.float64)
+    base = gblur(ref, s) + 0.05 * float(np.mean(ref))
+    return float(np.mean(np.abs(gblur(e, s) - gblur(e, 6.0 * s)) / base))
+
+
+def mid_err(live, ref, mask=None):
+    """Unweighted error over the middle half of the picture (each axis)."""
+    h, w = ref.shape
+    sl = (slice(h // 4, h - h // 4), slice(w // 4, w - w // 4))
+    m = None if mask is None else mask[sl]
+    return ref_error(live[sl], ref[sl], mask=m)[1]
 
 
 def unchanged(frames, tile=8, eps=1.0 / 255.0):
@@ -189,10 +305,15 @@ def score_spec(out, n, s):
         ref, sp = stem + "-reference.png", stem + "-reference-spec.png"
         if not (os.path.exists(ref) and os.path.exists(sp)):
             continue
-        l, r = lin_luma(lv), lin_luma(ref)
+        lrgb, rrgb = load_rgb(lv), load_rgb(ref)
+        l, r = picture_luma(lrgb), picture_luma(rrgb)
         if l.shape != r.shape:
             continue
-        m = spec_mask(lin_luma(sp), r)
+        spec = picture_luma(load_rgb(sp))
+        if spec.shape != r.shape:
+            continue
+        # Both-ceiling pixels are unmeasurable. A one-sided clip stays in the mask.
+        m = spec_mask(spec, r) & ~both_over_ceiling(lrgb, rrgb)
         dp = stem + "-depth.png"
         dist = distance(dp) if os.path.exists(dp) else None
         f = int(re.search(r"f(\d+)$", stem).group(1))
@@ -241,14 +362,33 @@ def score(out):
                 s["lighting_ms_p50_lavapipe"] = round(gi[1], 1)
             s["unchanged"] = u
         per = []
+        blots = []
+        mids = []
+        energy = []
         for lv in sorted(glob.glob(os.path.join(out, "oracle", n, "f*-live.png"))):
             stem = lv[:-len("-live.png")]
             ref = stem + "-reference.png"
             if not os.path.exists(ref):
                 continue
             dp = stem + "-depth.png"
-            near, plain = ref_error(lin_luma(lv), lin_luma(ref), distance(dp) if os.path.exists(dp) else None)
-            per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain))
+            lrgb, rrgb = load_rgb(lv), load_rgb(ref)
+            oc_live = over_ceiling(lrgb)
+            drop = both_over_ceiling(lrgb, rrgb)
+            ll, rl = picture_luma(lrgb), picture_luma(rrgb)
+            near, plain = ref_error(ll, rl, distance(dp) if os.path.exists(dp) else None, mask=drop)
+            per.append((int(re.search(r"f(\d+)$", stem).group(1)), near, plain,
+                        int(oc_live.sum()), int(oc_live.size)))
+            if ll.shape == rl.shape:
+                blots.append(blotch(ll, rl))
+                energy.append(energy_ratio(ll, rl, drop))
+                if n.startswith("slant"):
+                    mids.append(mid_err(ll, rl, drop))
+        if blots:
+            s.update(blotch_mean=round(float(np.mean(blots)), 4), blotch_worst=round(max(blots), 4))
+        if energy:
+            s.update(energy_mean=round(float(np.mean(energy)), 4), energy_min=round(min(energy), 4))
+        if mids:
+            s.update(slant_mid_err_mean=round(float(np.mean(mids)), 4), slant_mid_err_worst=round(max(mids), 4))
         refs = {int(re.search(r"f(\d+)-reference", p).group(1)): grid_metric.load(p)
                 for p in glob.glob(os.path.join(out, "oracle", n, "f*-reference.png"))}
         if len(tfiles) >= 2 and refs:
@@ -261,11 +401,16 @@ def score(out):
             worst = max(per, key=lambda p: p[1])
             s.update(ref_frames=len(per), ref_err_near_worst=round(worst[1], 4), ref_err_near_worst_frame=worst[0],
                      ref_err_near_mean=round(float(np.mean(near)), 4),
-                     ref_err_mean=round(float(np.mean([p[2] for p in per])), 4))
+                     ref_err_mean=round(float(np.mean([p[2] for p in per])), 4),
+                     over_ceiling_px=max(p[3] for p in per),
+                     over_ceiling_frac=round(max(p[3] / p[4] for p in per), 4))
+            # Share of live pixels in the dither band. A one-sided clip still
+            # moves ref_err; this flag does not stand in for that error.
+            s["over_ceiling_ok"] = s["over_ceiling_px"] == 0
             if n == "switch" or n == "lamps-switch":
                 settled = per[-1][1]
-                s["frames_to_ref"] = next((f for f, e, _ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
-                s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, _ in per}
+                s["frames_to_ref"] = next((f for f, e, *_ in per if e <= 1.1 * settled + 1e-4), per[-1][0])
+                s["ref_err_near_by_frame"] = {str(f): round(e, 4) for f, e, *_ in per}
         if n.startswith("gloss-"):
             score_spec(out, n, s)
             ms = spec_ms(os.path.join(out, "gi", f"{n}-frames.csv"))
@@ -301,6 +446,68 @@ def spec_self_test():
     return 0 if ok else 1
 
 
+def _png(path, code, size, hot=None):
+    from PIL import Image
+    im = Image.new("RGB", size, (code, code, code))
+    if hot is not None:
+        x, y, hcode = hot
+        im.putpixel((x, y), (hcode, hcode, hcode))
+    im.save(path)
+
+
+def ceiling_self_test():
+    """score() on the review's pictures. A live code 199 against flat code 40
+    must move ref_err, and blotch, energy, slant mid_err and score_spec must
+    not see the inverse's ~1099 clamp. Codes 196 and 197 are under the dither
+    band, so they stay in the error and are not over_ceiling."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        def scene(name, live_code, size=(8, 8), ref_size=None, hot=None, spec=False):
+            ref_size = size if ref_size is None else ref_size
+            folder = os.path.join(d, "oracle", name)
+            os.makedirs(folder)
+            _png(os.path.join(folder, "f0001-live.png"), live_code, size, hot)
+            _png(os.path.join(folder, "f0001-reference.png"), 40 if hot else live_code, ref_size)
+            if spec:
+                _png(os.path.join(folder, "f0001-reference-spec.png"), 40, ref_size)
+        scene("clip199", 40, hot=(0, 0, 199))
+        scene("clip196", 40, hot=(0, 0, 196))
+        scene("clip197", 40, hot=(0, 0, 197))
+        scene("slant-clip", 40, hot=(4, 4, 199))
+        scene("gloss-clip", 40, hot=(0, 0, 199), spec=True)
+        scene("clip-big", 40, size=(16, 16), ref_size=(8, 8), hot=(0, 0, 199))
+        scene("clip-both", 199)
+        got = score(d)
+    raw199 = float(linear_from_display(np.float32(199 / 255)))
+    rows = {}
+    for name, s in got.items():
+        rows[name] = {k: s.get(k) for k in (
+            "ref_err_mean", "blotch_worst", "energy_mean", "over_ceiling_px",
+            "over_ceiling_frac", "slant_mid_err_mean", "spec_err_near_mean")}
+    print(json.dumps({"ceiling_score": rows, "linear_from_display_199": round(raw199, 2)}))
+    c199, c196, c197 = got["clip199"], got["clip196"], got["clip197"]
+    slant, gloss, big, both = got["slant-clip"], got["gloss-clip"], got["clip-big"], got["clip-both"]
+    # The inverse clamp stays. The score must not use it.
+    inverse_ok = abs(raw199 - 1099.54) < 1.0
+    one_sided = (1.0 < c199["ref_err_mean"] < 20.0 and c199["blotch_worst"] < 10.0
+                 and c199["energy_mean"] < 20.0 and c199["over_ceiling_px"] == 1
+                 and c199.get("over_ceiling_frac") is not None
+                 and abs(c199["over_ceiling_frac"] - 1.0 / 64.0) < 1e-3)
+    kept = (c196["over_ceiling_px"] == 0 and c196["ref_err_mean"] > 0.5
+            and c196.get("over_ceiling_frac") == 0
+            and c197["over_ceiling_px"] == 0 and c197["ref_err_mean"] > 0.5)
+    others = (1.0 < slant["slant_mid_err_mean"] < 40.0
+              and 1.0 < gloss["spec_err_near_mean"] < 30.0
+              and 0.1 < big["ref_err_mean"] < 10.0)
+    # Both sides at the ceiling are unmeasurable. The fraction says so.
+    paired = (both["ref_err_mean"] < 1e-6 and both["over_ceiling_px"] == 64
+              and both.get("over_ceiling_frac") == 1.0 and both["blotch_worst"] < 1.0
+              and both["energy_mean"] < 2.0)
+    ok = inverse_ok and one_sided and kept and others and paired
+    print("ceiling score", "ok" if ok else "FAIL")
+    return ok
+
+
 def self_test():
     rng = np.random.default_rng(3)
     ref = rng.uniform(0.1, 0.5, (32, 32)).astype(np.float32)
@@ -313,6 +520,34 @@ def self_test():
     same, _ = ref_error(ref, ref, dist)
     still = [ref, ref, ref]
     moving = [ref, ref * 1.2, ref * 1.44]
+    # Engine and reference PNGs store the shoulder tone (mesh::tone,
+    # hdr_shoulder.glsl), not sRGB: linear below 0.64, so 128/255 reads back
+    # as 128/255 and the shoulder undoes to the light that made it.
+    import tempfile
+    from PIL import Image
+    with tempfile.TemporaryDirectory() as d:
+        Image.new("RGB", (2, 2), (128, 128, 128)).save(d + "/a.png")
+        Image.new("RGB", (2, 2), (180, 180, 180)).save(d + "/b.png")
+        la, lb = float(lin_luma(d + "/a.png").mean()), float(lin_luma(d + "/b.png").mean())
+    x = 180 / 255 - 0.64
+    tone_ok = abs(la - 128 / 255) < 1e-3 and abs(lb - (0.64 + 1.1 * x / (0.14 - x))) < 1e-2
+    print(json.dumps({"lin_luma_128": round(la, 4), "lin_luma_180": round(lb, 4)}))
+    # dither.glsl's noise is under one code, so the asymptote (code 198.9)
+    # rounds to 198 and above. 196 and 197 are measured. 190 is below the band.
+    sat = np.full((4, 4, 3), 0.3, np.float32)
+    sat[0, 0] = 198 / 255
+    sat[0, 1] = 199 / 255
+    sat[1, 0] = 196 / 255
+    sat[1, 1] = 197 / 255
+    sat[2, 2] = 190 / 255
+    oc = over_ceiling(sat)
+    flat = np.full((4, 4), 0.3, np.float32)
+    hot = flat.copy(); hot[0, 0] = 1100.0
+    masked, _ = ref_error(hot, flat, None, mask=np.zeros((4, 4), bool) | (np.arange(16).reshape(4, 4) == 0))
+    band_ok = bool(oc[0, 0] and oc[0, 1] and not oc[1, 0] and not oc[1, 1] and not oc[2, 2])
+    mask_ok = masked < 1e-6
+    print(json.dumps({"over_ceiling": [bool(oc[0, 0]), bool(oc[0, 1]), bool(oc[1, 0]), bool(oc[1, 1]), bool(oc[2, 2])],
+                      "masked_err": round(masked, 6)}))
     # A sliding edge in both live and reference cancels; a checkerboard only
     # in live does not.
     edge = [np.zeros((48, 48), np.float32) for _ in range(3)]
@@ -324,10 +559,21 @@ def self_test():
     ex_board = grid_excess(dict(enumerate(board)), dict(enumerate(edge)))
     ok_ex = ex_same["grid_excess_worst"] == 0.0 and ex_board["grid_excess_worst"] > 0.15 \
         and grid_excess({0: ref}, {5: ref}) is None
-    ok = (ok_ex and same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
-          and unchanged(still) == 1.0 and unchanged(moving) == 0.0)
+    # Blotch: an even bias over the picture does not count, a 16 px blob does;
+    # a blob twice as strong scores about twice as much.
+    flat = np.full((90, 160), 0.3, np.float32)
+    blob = flat.copy(); blob[37:53, 72:88] += 0.06
+    blob2 = flat.copy(); blob2[37:53, 72:88] += 0.12
+    b_bias, b_blob, b_blob2 = blotch(flat * 1.2, flat), blotch(blob, flat), blotch(blob2, flat)
+    ok_blotch = b_bias < 1e-9 and b_blob > 1e-3 and abs(b_blob2 / b_blob - 2.0) < 0.05
+    ok_mid = mid_err(blob, flat) > 3 * ref_error(blob, flat)[1] and mid_err(flat, flat) < 1e-9
+    scored_ok = ceiling_self_test()
+    ok = (ok_ex and ok_blotch and ok_mid and same < 1e-6 and abs(p1 - p2) < 0.05 and n1 > 3 * n2
+          and unchanged(still) == 1.0 and unchanged(moving) == 0.0 and tone_ok and band_ok
+          and mask_ok and scored_ok)
     print(json.dumps({"near_err_near_bad": round(n1, 4), "near_err_far_bad": round(n2, 4),
-                      "plain": [round(p1, 4), round(p2, 4)]}))
+                      "plain": [round(p1, 4), round(p2, 4)],
+                      "blotch": [b_bias, round(b_blob, 4), round(b_blob2, 4)], "mid": ok_mid}))
     print("self-test", "ok" if ok else "FAIL")
     return 0 if ok and grid_metric.self_test() == 0 and spec_self_test() == 0 else 1
 

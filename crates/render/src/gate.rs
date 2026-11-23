@@ -1,15 +1,38 @@
 //! Named production guards for lighting and render picture gates.
 //!
 //! A shipping build never enables the `knockout` feature, so [`guard`] is
-//! always true. Tests that prove a gate actually grades the production
-//! behaviour run with `--features knockout` and `GENOS_KNOCKOUT` set to the
-//! guard they are removing. The gate must then go red.
+//! always true. Tests that prove a gate grades the production behaviour run
+//! with `--features knockout` and `GENOS_KNOCKOUT` set to the guard they are
+//! removing. The gate must then go red.
+
+/// The surface-cache value writes.
+///
+/// Stage F0 knocks this out so a presented-frame test can prove it reads the
+/// picture. The passes still run: dropping the cache dispatches faults
+/// lavapipe. The freeze bit stops the value write, so the probe mix stays.
+/// There is no tile-fill pass yet.
+pub const CACHE_FILL: &str = "cache_fill";
 
 /// Include direct lamp and sun light in the presented compose.
 pub const DIRECT_IN_COMPOSE: &str = "direct_in_compose";
 
 /// Include bounce (indirect) light in the presented compose.
 pub const BOUNCE_IN_COMPOSE: &str = "bounce_in_compose";
+
+/// A moving point lamp keeps a smooth wall.
+///
+/// Shipping pipelines specialize constant 0 to 4. Nonzero turns on the
+/// importance cutoff (the value is not a lamp count) and constant 2 to 1
+/// (a changed ball keeps history and reweights it). Constant 1 is the cache
+/// slot count. Knocking this out sets 0 and 2 to 0: the pixel takes the
+/// reservoir, and a changed ball drops that history. The presented wall grains.
+pub const MOVING_LAMP_WALL: &str = "moving_lamp_wall";
+
+/// A pixel shadow of a lamp or the sun aims at the disc.
+///
+/// Knocking this out aims that ray at the centre, so the presented penumbra
+/// collapses to a hard edge.
+pub const LAMP_DISC: &str = "lamp_disc";
 
 /// True when the named production guard is in force.
 #[must_use]
@@ -49,12 +72,15 @@ fn knockout_list() -> Vec<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "knockout")))]
 mod tests {
     #[test]
     fn a_named_guard_stays_on_in_the_shipping_build() {
+        assert!(super::guard(super::CACHE_FILL));
         assert!(super::guard(super::DIRECT_IN_COMPOSE));
         assert!(super::guard(super::BOUNCE_IN_COMPOSE));
+        assert!(super::guard(super::MOVING_LAMP_WALL));
+        assert!(super::guard(super::LAMP_DISC));
         assert!(super::guard("unknown_guard"));
     }
 }

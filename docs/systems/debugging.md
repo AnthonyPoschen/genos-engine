@@ -65,7 +65,7 @@ that system's features. The agent rubric scores this.
   - `knobs.rs`: named knobs (`Knob`).
   - `script.rs`: the Rhai runner and its report.
 - `crates/render/src/debug_view.rs`: view modes (full, direct, bounce, albedo,
-  normal, depth, light, texels) and `lamp_report`.
+  normal, depth, light, texels, variance, path, voxels) and `lamp_report`.
 - `crates/render/src/trace.rs`: the CPU surfaces and direct light the reference uses.
 - `examples/stress/src/knobs.rs`: the stress knobs (time of day, sun, lights, ...).
 - `examples/stress/scripts/*.rhai`: regression scripts. `reference.rhai` holds noon
@@ -85,6 +85,12 @@ curl -s -X POST localhost:8801/cmd/view -d '{"mode":"texels"}'
 curl -s -X POST localhost:8801/cmd/capture -d '{"mode":"direct","path":"/tmp/direct.png"}'
 curl -s -X POST localhost:8801/cmd/compare -d '{"width":160,"noise":0.03,"prefix":"/tmp/noon"}'
 ```
+
+`--scenes DIR` (mirror `GENOS_SCENES`, used only when the argument is omitted) adds the `.scene` files of `DIR` to the scene list of `genos-lighting` and `genos-editor`, after those of `debug/scenes`; a name already listed keeps its first file. Paths inside a scene file are under the repository.
+
+The catalogue is in six sections: `scene`, `lighting`, `render`, `capture`, `editor` and `mesh`. Every command's description starts with its section in brackets, so a flat MCP tool list reads in groups. `list_commands` returns the catalogue grouped by section, and `section` gives one section.
+
+A client sees each command under its section: `lighting.get_settings`, `scene.load`, `capture.capture`, `mesh.view` (`public_name` in `crates/debug/src/commands.rs`: the section, a dot, and the name without the section's own word; a name that already has a dot, such as `fx.spawn`, is kept). MCP `tools/list`, `GET /cmd` and `list_commands` give those names. The name without the section (`get_lighting_settings`, `mesh_view`) is a deprecated alias for one release: it still runs, and its first use over MCP or `POST /cmd/<name>` logs `genos-mcp: the command name ... is deprecated; use ...`. A Rhai script keeps the name without the section, because a Rhai name has no dot; `list_commands` gives it as `script_name`.
 
 `capture` and `captures` take `ui` (default false). The same default is `DebugSettings.ui`, read and written by `get_debug_settings` and `set_debug_settings`. A false value leaves the debug menu, the menu tab, the frame-rate plate, and tool overlays out of the PNG. `ui: true` on the command keeps them for that shot. `--ui` forces the setting on for `genos-lighting --frames` and `genos-stress --shot`.
 
@@ -106,14 +112,31 @@ The lighting binary is `debug/lighting`, package `genos-lighting`. It loads
 Arguments choose the run. An environment variable applies only when the matching
 argument was omitted.
 
+A scene file stores its HDR look as `hdr KEY VALUE` lines, one per key of
+`HdrSettings::set_key` (`hdr compensation -1`). They lie over the lighting
+preset's HDR defaults; arguments and `GENOS_HDR_*` mirrors lie over them. A bad
+key or value fails the load with the file and the line. The Output page has
+sliders for adapt down, adapt up and look transition, and a `Save look to scene`
+button. That button and `save_hdr_to_scene` (`render.save_hdr_to_scene`) write
+the scene's HDR value back into the scene file and keep every other line. The
+program reads scene files at startup; a save also updates the running copy. The
+record is [HDR output](hdr-output-design.md), section 5.
+
 ```sh
 cargo run --release -p genos-lighting -- --scene sponza --checkpoint atrium --gpu-times 30
 make lighting SCENE=sponza
 ```
 
 `make lighting` is the benchmark: release, `--scene` from `SCENE` (default
-`stress`), and `--gpu-times 30`. `--preset`, `--lighting-debug`, `--unfilled`
-(the existing texels view: slots with fewer than four sets stay dim),
+`lighting-stress`), and `--gpu-times 30`. `make stress` opens the same program on
+the lighting stress scene. `make editor` runs `genos-editor`, the same frame loop opened on the `mesh` scene
+with MCP port 8765; `genos-lighting` does not list mesh scenes. `make mesh` opens
+the editor on a
+mesh-workbench workspace ([mesh workbench](mesh-workbench.md)); `WORKSPACE=DIR`
+names another workspace. `stress` is the old name of that scene: it still opens
+it and logs a warning once. `make stress-solo` runs `genos-stress`, the
+single-scene program the regression scripts and tests use. `--preset`, `--lighting-debug`, `--unfilled`
+(the existing texels view: own-mean luma, seed luma, and set count),
 `--full-effort`, `--headless`, `--frames N`, `--size WxH`, `--fps-counter`,
 `--fps-hz`, `--menu shown|hidden`, and `--out DIR` are in `--help`. The default output directory is
 `./genos-debug/` in the current working directory (`shots/`, `logs/`, `dumps/`).
@@ -124,7 +147,7 @@ the camera to the active checkpoint. Grave hides the settings menu and grave sho
 it again. F1 is the same key. `--menu hidden` starts it hidden. `GENOS_MENU`
 applies only when that argument was omitted. `]` and `[` change the menu page. Tab and shift-Tab
 do that while the pointer is over the menu. The pages and folds are
-`debug/lighting/menu.txt`. F toggles the frame-rate overlay. F3 is the same key.
+`crates/scene-program/menu.txt`. F toggles the frame-rate overlay. F3 is the same key.
 U toggles the unfilled count in the stress and camera programs. Shift-U toggles
 the tint. F8 and shift-F8 are the same keys. `GENOS_DEBUG_KEYS` is a text file
 that replaces any of those chords (`menu key_grave key_f1`).
@@ -191,9 +214,12 @@ cannot hide a blocked phase.
 
 ### Debug menu
 
-`MenuSettings` on the scene (`visible`, `tab`, `collapsed`, `wheel`, `keys`)
-is the public setting. It implements `EngineSettings`. The default is shown,
-on the first page, with no stored folds, `wheel=hover`, and `keys=click`.
+`MenuSettings` on the scene (`visible`, `tab`, `collapsed`, `wheel`, `keys`,
+`place`) is the public setting. It implements `EngineSettings`. The default is
+shown, on the first page, with no stored folds, `wheel=hover`, `keys=click`,
+and `place=docked`. `place` is read by a program with a top bar (the editor):
+`docked` opens a page as a drawer on the right edge, `floating` as a panel
+that drags. The drawer's title bar has the button that changes it.
 Grave, F1, the title-bar hide button, and the corner tab write `visible`.
 The first grave while click-to-focus is held releases the keys and leaves the
 menu up. The next grave hides it. F1 hides it either way. `--menu shown|hidden`
@@ -228,7 +254,10 @@ a saved setup are not in this binary yet.
 
 On a box without a GPU this runs on lavapipe under a headless Weston
 (`XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`). The first run after a shader change spends
-minutes compiling pipelines.
+minutes compiling pipelines. The window presents a dark frame as soon as the
+swapchain exists, then those pipelines compile. A `VkPipelineCache` is stored at
+`./genos-debug/pipeline-cache/vk-pipeline-cache.bin`. Startup steps print
+`genos-startup` lines to stderr.
 
 Scripted verdicts (`docs/VERIFY.md`) judge a repeat of the same picture or
 frame time. They print one PASS, FAIL, UNSURE, or ERROR line and leave the evidence
@@ -251,7 +280,7 @@ on lavapipe. The cap is one hour.
 ```rhai
 time(#{ pause: true });
 knob("time_of_day", 12.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 camera(#{ position: [12.5, 1.7, 20.0], look_at: [12.5, 1.0, 8.0] });
 wait_settled(#{ timeout_frames: 900 });
 shot("noon-direct", "direct");
@@ -274,11 +303,26 @@ the picture still blended toward it; frame counts from before that commit
 (light_settle, room_switch, reference_views settle frames) read lower and are not
 comparable with later ones. `temporal_flicker` measured that blend tail as flicker.
 
+`status` and `wait` do not share a present. The frame thread takes the queue
+once, at the start of a present. A command that replies then returns to the
+script while that present is still open, and the next command is taken on a
+later present. `wait`'s `accepted` is the count when it was taken. `frame` is
+`accepted` plus the requested count. A `status` from the previous command reads
+one present lower than `accepted`. `wait_settled` with `then_frames` keeps the
+tail inside that job, so the saved present is the settle present plus
+`then_frames`, and the pixels written on that present carry that same id. A
+`capture` with `frame` saves that present or rejects it. A present already
+drawn is rejected. The targeted present with no pixels is rejected and is not
+replaced by a later one.
+
 ## Views
 
 `full`, `direct` (lamps and sun, shadowed), `bounce` (indirect only), `nobounce`
 (the same as `direct`), `albedo`, `normal`, `depth`, `light:I` (one lamp and its
-shadow), `texels` (the surface cache texel each pixel reads, dim under 4 sets). The
+shadow), `texels` (the surface cache texel each pixel reads, dim under 4 sets),
+`variance`, `path` (cascade codes, not light: red where a pixel has no level-0 sample, green the blend towards the coarser level, blue the level), `voxels` (level-0 surface voxel projection: each pixel is a
+hash of the cell insert claims at its footprint level, with a bright line where
+that level starts). The
 v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
 
 ## Ground truth
@@ -300,6 +344,16 @@ v1 views (`bounce:N`, `near`, `far`, `probes:*`) went with GI v1.
   instead of the analytic shapes (`"shapes"`, the default). Both agree within the
   trace's noise (`triangles_match_the_analytic_reference`); GI traces meshes only.
   Triangle traces are cached under a separate key.
+- A glTF scene (Sponza in `genos-lighting`) is traced as its own triangles
+  (`genos_render::GltfSurface`, world space, CPU BVH), together with the scene's
+  analytic shapes. The host gives the triangles through `Host::gltf_surface`.
+  A hit reads the shared shade at its UV: textured diffuse albedo and textured
+  emission. A ray continues through a texel under the alpha cutoff (MASK uses
+  `alphaCutoff`, BLEND uses 0.5, OPAQUE has no holes, as in the G-buffer). The
+  raster does not cull, so every triangle stops a ray from both sides. The reply
+  has `geometry: "shapes+gltf"`. These traces have their own cache key and stay
+  on the CPU. `cargo test -p genos-debug --release --test gltf_reference` checks
+  Sponza with no window.
 - Passes of `spp` paths per pixel run on every core until the mean relative
   standard error of a pixel is at most `noise` (default 0.03), `max_spp` or
   `seconds` (default 300). The reply carries `spp` done, `noise`, `trace_seconds`.
@@ -348,7 +402,9 @@ under their own key. The CPU proof runs at nice and half the cores
 It runs this build of the stress test four times (one window at a time) and prints a
 table of PASS or FAIL against fixed limits; exit status 1 on any FAIL. A few rows
 are targets GI is working towards (the room's 48 px swim and light structure):
-a miss prints MISS and fails nothing.
+a miss prints MISS and fails nothing. The room row's blotch PASS stays 0.023.
+The ADR 0039 cache-only mean of 0.014 is a separate command, `genos-stress room-blotch`
+([room blotch](lighting/room-blotch.md)). A PASS from gi-check is not that gate.
 
 - `settled`: the five diagnosis views (room-a, corner, contact, lamp-wall, hall) at
   640x360, clock paused, each compared with a 320x180 reference
@@ -610,6 +666,9 @@ Hand-checked on 2026-10-10 by looking at the pictures behind every row:
   binary yet.
 - The command catalogue already answers status, knobs, lights, objects, camera,
   time, view, capture, diff, flicker, compare (with a heatmap), and timing.
+  `level0_voxels` (around [x,y,z], radius) replies with the level-0 cascade
+  voxels near a point and their four parent cells: position, radiance, filled
+  ring slots, and whether each parent was found and filled. It writes no file.
   `Tools::overlay`, `profile_overlay`, and `inspect_region` draw for a person.
   Lighting's dump, counters, isolate toggles, and pop checks are the reference
   set in [the lighting debug standard](lighting/debug-standard.md). A dump and

@@ -1,0 +1,97 @@
+#version 450
+// Level-0 GI rays. Every live voxel traces 32 stratified hemisphere rays
+// and 4 lamp-cone rays each frame, clipped to [ε, 8s]. A ray that carries
+// no weight (a uniform ray inside the cone, a cone ray with no lamp or below
+// the surface) is stored as a miss without a trace. Hits are stored for the
+// shade pass.
+// This compile's only trace site is trace_ray.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 36) in;
+#include "lighting_common.glsl"
+#include "lighting_cascade.glsl"
+
+// Emitted light at a hit point: the emissive instance whose surface is nearest,
+// when the point is on it. Only instances in the emission table are sampled.
+uint lighting_hit_glow(vec3 p) {
+    uint table = mesh_field.words[2];
+    if (table == 0u) {
+        return 0u;
+    }
+    uint best = 0u;
+    float nearest = 1.0e30;
+    [[dont_unroll]] for (uint i = 0u; i < mf_count(); i++) {
+        uint glow = mesh_field.words[table + i];
+        MfInst m = mf_inst(i);
+        float near = 4.0 * m.voxel * m.dscale;
+        if (glow == 0u || any(lessThan(p, m.lo - near)) || any(greaterThan(p, m.hi + near))) {
+            continue;
+        }
+        float d = abs(mf_sample(m, mf_to_object(m, p)).x) * m.dscale;
+        if (d < near && d < nearest) {
+            nearest = d;
+            best = glow;
+        }
+    }
+    return best;
+}
+
+void main() {
+    if (!lighting_gi_on()) {
+        return;
+    }
+    uint slot = lighting_cascade_l0_list_slot(gl_WorkGroupID.x);
+    if (slot >= CASCADE_LEVEL0_CAP) {
+        return;
+    }
+    uint k = gl_LocalInvocationID.x;
+    if (k >= CASCADE_L0_TRACED) {
+        return;
+    }
+    uint word = lighting_cascade_table_base(lighting_frame() & 1u)
+        + slot * CASCADE_LEVEL0_STRIDE;
+    uint frame = lighting_frame() + 1u;
+    if (ckeys.key[word] == 0u || ckeys.key[word + 1u] != frame) {
+        return;
+    }
+    if (k == 0u) {
+        atomicAdd(ckeys.key[lighting_cascade_counts_at()], 1u);
+    }
+    vec3 pos = vec3(
+        uintBitsToFloat(ckeys.key[word + 6u]),
+        uintBitsToFloat(ckeys.key[word + 7u]),
+        uintBitsToFloat(ckeys.key[word + 8u]));
+    vec3 n = lighting_unpack_normal(ckeys.key[word + 9u]);
+    float size = lighting_cascade_l0_size(lighting_cascade_unpack_level(ckeys.key[word + 5u]));
+    uint key = ckeys.key[word];
+    vec3 axis;
+    float cos_a;
+    bool has_cone = lighting_cascade_cone(pos, n, axis, cos_a);
+    bool is_cone = k >= CASCADE_L0_RAYS;
+    vec3 dir = lighting_cascade_l0_ray(key, n, k, has_cone, axis, cos_a);
+    float nd = dot(dir, n);
+    if (!is_cone && nd <= 0.0) {
+        dir = normalize(dir - n * nd + n * CASCADE_EPS);
+        nd = dot(dir, n);
+    }
+    float w = lighting_cascade_ray_weight(is_cone, has_cone, dir, axis, cos_a,
+        CASCADE_L0_RAYS, CASCADE_CONE_L0);
+    vec3 origin = pos + n * lighting_cascade_l0_lift();
+    float t0;
+    float t1;
+    lighting_cascade_l0_interval(size, t0, t1);
+    uint at = lighting_cascade_hit_at(slot, k);
+    SceneHit hit;
+    if (!(w > 0.0) || !(nd > 0.0) || !trace_ray(origin, dir, t0, t1, hit)) {
+        ckeys.key[at] = floatBitsToUint(-1.0);
+        ckeys.key[at + 1u] = 0u;
+        ckeys.key[at + 2u] = 0u;
+        ckeys.key[at + 3u] = 0u;
+        return;
+    }
+    vec3 hn = dot(hit.normal, dir) > 0.0 ? -hit.normal : hit.normal;
+    vec3 tint = mix(vec3(1.0), hit.albedo, hit.color_mix);
+    ckeys.key[at] = floatBitsToUint(hit.t);
+    ckeys.key[at + 1u] = lighting_pack_normal(hn);
+    ckeys.key[at + 2u] = packUnorm4x8(vec4(tint * hit.reflect * LIGHTING_PI, 0.0));
+    ckeys.key[at + 3u] = lighting_hit_glow(origin + dir * hit.t);
+}

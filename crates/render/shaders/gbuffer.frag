@@ -3,9 +3,9 @@
 // GI compute passes. Same vertices (gbuffer.vert) and depth prepass as the picture; early
 // depth tests so only the surface the pixel shows writes its record.
 //
-// Record (5 uints, gbuffer_layout.glsl): distance, octahedral normal, albedo plus
+// Record (6 uints, gbuffer_layout.glsl): distance, octahedral normal, albedo plus
 // a two-sided flag, emission (the light pass overwrites it with direct light),
-// then roughness, metallic, and material flags.
+// roughness/metallic/material flags, then object / bone id.
 //
 // Particle cards, fog cards and unlit quads are not in GI yet: they discard.
 #extension GL_GOOGLE_include_directive : require
@@ -23,6 +23,7 @@ layout(location = 8) flat in float v_cutoff;
 layout(location = 9) flat in float v_rough;
 layout(location = 10) flat in float v_metal;
 layout(location = 11) flat in uint v_mat;
+layout(location = 12) flat in uint v_object_id;
 layout(location = 0) out vec4 out_color;
 
 #include "scene_data.glsl"
@@ -61,6 +62,29 @@ void main() {
     // by (1 − metallic) so the Lambert term stays the diffuse albedo.
     vec3 albedo = v_albedo;
     vec3 n = normalize(v_normal);
+    // A one-sided surface seen from behind is the inside of a solid: it is
+    // drawn black, and its normal is the back's. With the vertex normal, the
+    // front's, the back of a wall showed the sun and the lamps that light the
+    // other side, and from inside a wall's void (Sponza, behind the gallery
+    // vaults) the void was lit. The back's normal alone is not enough: a
+    // level field is an unsigned shell, and a ray that starts 2 cm behind a
+    // lit wall steps through it to the light. The test is the vertex normal
+    // against the face's own normal turned towards the eye, not against the
+    // view ray: a smooth normal near a silhouette can point away from the
+    // eye on a face that is seen from the front. A two-sided material keeps
+    // its normal and its colour; its shade takes the light on either side.
+    bool inside_out = false;
+    if (!(v_shade > 1.15)) {
+        vec3 face = cross(dFdx(v_pos), dFdy(v_pos));
+        vec3 to_eye = scene.view_up.w > 0.0 ? -scene.view_forward.xyz : scene.eye.xyz - v_pos;
+        if (dot(face, to_eye) < 0.0) {
+            face = -face;
+        }
+        if (dot(n, face) < 0.0) {
+            n = -n;
+            inside_out = true;
+        }
+    }
     float rough = v_rough;
     float metal = v_metal;
     bool textured = v_uv.x >= 0.0 && v_atlas.z > 0.5;
@@ -102,15 +126,39 @@ void main() {
     // minimum over those fragments instead (records are all ones when empty, and
     // positive floats order as uints), the same answer every frame.
     uint i = p.y * gbuf.header.x + p.x;
-    float dist = max(length(v_pos - scene.eye.xyz), 1.0e-6);
-    atomicMin(gbuf.words[i * 5u], floatBitsToUint(dist));
-    atomicMin(gbuf.words[i * 5u + 1u], lighting_pack_normal(n));
-    atomicMin(gbuf.words[i * 5u + 2u], packUnorm4x8(vec4(clamp(albedo, 0.0, 1.0), two_sided ? 1.0 / 255.0 : 0.0)));
+    // Along the pixel's ray: from the eye, or in a parallel view
+    // (scene.view_up.w > 0) from the plane through the eye.
+    float dist = scene.view_up.w > 0.0
+        ? max(dot(v_pos - scene.eye.xyz, scene.view_forward.xyz), 1.0e-6)
+        : max(length(v_pos - scene.eye.xyz), 1.0e-6);
+    uint dist_bits = floatBitsToUint(dist);
+    // Elect the nearest fragment (positive floats order as uints). Object 0 and the
+    // shading fields take atomicMin; object id must follow the same winner so a
+    // farther mover fragment cannot leave its oid on a nearer static surface.
+    uint prev_dist = atomicMin(gbuf.words[i * GBUF_STRIDE], dist_bits);
+    atomicMin(gbuf.words[i * GBUF_STRIDE + 1u], lighting_pack_normal(n));
+    // The base colour is kept in 8 linear bits, so a dark gradient had a few
+    // visible steps (a base colour of 0.03 is byte 8). An ordered dither of
+    // under half a step, fixed to the pixel, turns the steps into a fine
+    // pattern. A colour that is exactly a byte stays that byte.
+    const float GBUF_BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0, 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+    ivec2 cell = ivec2(gl_FragCoord.xy) & 3;
+    float dither = ((GBUF_BAYER[cell.y * 4 + cell.x] + 0.5) / 16.0 - 0.5) / 255.0;
+    vec3 stored_albedo = clamp(albedo + dither, 0.0, 1.0);
+    if (inside_out) {
+        stored_albedo = vec3(0.0);
+    }
+    atomicMin(gbuf.words[i * GBUF_STRIDE + 2u], packUnorm4x8(vec4(stored_albedo, two_sided ? 1.0 / 255.0 : 0.0)));
     uint flags = (v_mat & 1u) != 0u ? 1u : 0u;
     const float gbuf_flag_byte = 255.0;
-    atomicMin(gbuf.words[i * 5u + 4u], packUnorm4x8(vec4(clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 0.0, float(flags) / gbuf_flag_byte)));
-    if (v_emit != 0u) {
-        atomicMin(gbuf.words[i * 5u + 3u], v_emit);
+    atomicMin(gbuf.words[i * GBUF_STRIDE + 4u], packUnorm4x8(vec4(clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 0.0, float(flags) / gbuf_flag_byte)));
+    if (v_emit != 0u && !inside_out) {
+        atomicMin(gbuf.words[i * GBUF_STRIDE + 3u], v_emit);
+    }
+    // Depth-consistent oid: only a fragment that is at least as near as the
+    // elected distance may publish. Ties keep one of the front-most ids.
+    if (dist_bits <= prev_dist) {
+        gbuf.words[i * GBUF_STRIDE + 5u] = v_object_id;
     }
     out_color = vec4(albedo, 1.0);
 }

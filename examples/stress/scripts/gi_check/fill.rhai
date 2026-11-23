@@ -7,7 +7,7 @@
 // Filled in: __DIR__.
 time(#{ fixed_dt: 0.0166667 });
 knob("time_of_day", 12.0);
-knob("sun", "freeze");
+knob("sun_speed", 0.0);
 knob("boxes", "still");
 knob("dynamic", 0.0);
 let P = [11.59, 1.7, 23.52];

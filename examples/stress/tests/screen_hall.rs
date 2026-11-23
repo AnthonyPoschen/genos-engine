@@ -66,7 +66,7 @@ fn hall_stage(still: bool) -> Stage {
     stage
 }
 
-/// debug/scenes/stress.scene checkpoint `hall`.
+/// debug/scenes/lighting-stress.scene checkpoint `hall`.
 fn hall_camera() -> Camera {
     let mut camera = Camera::opening();
     camera.set_pose(Vec3::new(14.5, 1.7, 23.5), -0.3554, 0.08);

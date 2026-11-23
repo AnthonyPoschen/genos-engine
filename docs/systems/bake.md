@@ -17,6 +17,7 @@ The crate is `crates/bake`, package `genos-bake`.
 
 - `BakeMesh` (`src/mesh.rs`): object-space `MeshTriangle`s, materials and images. `BakeMesh::from_gltf(scene, mesh)` takes a glTF mesh; `BakeMesh::plain` takes triangles with flat albedo (analytic shapes). A `MASK` material is subdivided (depth 3) and children whose alpha samples fall under the cutoff are dropped, so foliage holes exist in the SDF. Blend and opaque materials are not clipped. `surface` gives the diffuse albedo and emission of the shared shade (`genos_load::shade_uv`): base colour × (1 − metallic), and emissive texture × factor × strength, at a caller-supplied UV. `shade_hit` reads each slot at that triangle's `TEXCOORD_<texCoord>`. Cards call `shade_hit`. Promoted-emitter accounting is `genos_load::settled_wall`: the cache skips a promoted strip and the light tree adds it once. Toggling that choice does not rebuild the SDF or the cards.
 - `sdf.rs`: voxel = largest side / 64, clamped to 2-25 cm and to at most 512 voxels per side. 8^3 bricks are stored only where the surface is within the band (4 voxels), as 8-bit distances, plus a coarse grid with one value per brick. A closed mesh is signed by ray parity (majority of three skew rays); an open mesh is unsigned and flagged `thin` (two-sided), so thin sheets cannot leak.
+- Level field (`sdf::build_level`, `load_or_bake_level`, `BakeMesh::from_gltf_scene`): every mesh instance of a static glTF level as one field in the level's space. The voxel is `LEVEL_VOXEL` (6 cm), not the mesh-size rule, and grows only when the level is longer than 1024 voxels (61 m). Each brick stores the mean diffuse albedo of the nearest materials (`MeshSdf::brick_albedo`, one 129th word per brick on the GPU), and a traced hit takes that colour. A level field has no cards. `World::add_gltf_level` loads it; `genos-lighting` uses it for a `kind gltf` scene. `World::add_gltf_traced` stays the per-mesh path for a placed prop.
 - `cards.rs`: six axis-aligned cards over the bounds at a fixed texel size (`card_texel`, default 6 cm, at most 512 texels per edge). Each texel takes four rays into the mesh: albedo, normal and depth average over the hits, coverage is the hit share, and emission is the mean over all four, so a card keeps the emitted power of texture-driven emission.
 - `format.rs`: the `.gbake` file.
 - `src/bin/genos-bake.rs`: `genos-bake [--out DIR] [--texel M] [--voxels-per-side N] [--force] file.gltf|file.glb ...` bakes every mesh of each file and skips up-to-date ones.
@@ -31,6 +32,9 @@ Build a `BakeMesh` per mesh and call `load_or_bake(&mesh, &BakeSettings::default
 - Analytic shapes bake through their triangles; exact shape SDFs come later.
 - No LODs yet. No GPU upload yet: the renderer does not read bakes until phase 2 (SDF) and phase 4 (cards).
 - `MeshSdf::distance` is a nearest-voxel lookup for tests and tools, not the GPU sampler.
+- A level field is static: it follows the first part's object and does not rebuild when one part moves or hides.
+- A level field of open meshes is unsigned (`thin`), so a wall is one voxel thick to a ray (6 cm).
+- Sponza as a level field (23 Nov 2026, 16 threads): 40 MB cache file, a few seconds to bake. As 26 per-mesh fields at the old 22 to 25 cm voxels the lighting passes took 72 to 86 ms a frame at 720p on the RTX 4070 while the cache filled; the level field takes about 17 ms.
 - Measured on the box (8 cores, release): Khronos DamagedHelmet 0.3 s; Sponza as one 262k-triangle mesh 10 s (it is authored in centimetres, so its voxels hit the 512-per-side cap).
 
 ## Decisions
