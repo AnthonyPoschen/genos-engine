@@ -62,6 +62,29 @@ void main() {
     // by (1 − metallic) so the Lambert term stays the diffuse albedo.
     vec3 albedo = v_albedo;
     vec3 n = normalize(v_normal);
+    // A one-sided surface seen from behind is the inside of a solid: it is
+    // drawn black, and its normal is the back's. With the vertex normal, the
+    // front's, the back of a wall showed the sun and the lamps that light the
+    // other side, and from inside a wall's void (Sponza, behind the gallery
+    // vaults) the void was lit. The back's normal alone is not enough: a
+    // level field is an unsigned shell, and a ray that starts 2 cm behind a
+    // lit wall steps through it to the light. The test is the vertex normal
+    // against the face's own normal turned towards the eye, not against the
+    // view ray: a smooth normal near a silhouette can point away from the
+    // eye on a face that is seen from the front. A two-sided material keeps
+    // its normal and its colour; its shade takes the light on either side.
+    bool inside_out = false;
+    if (!(v_shade > 1.15)) {
+        vec3 face = cross(dFdx(v_pos), dFdy(v_pos));
+        vec3 to_eye = scene.view_up.w > 0.0 ? -scene.view_forward.xyz : scene.eye.xyz - v_pos;
+        if (dot(face, to_eye) < 0.0) {
+            face = -face;
+        }
+        if (dot(n, face) < 0.0) {
+            n = -n;
+            inside_out = true;
+        }
+    }
     float rough = v_rough;
     float metal = v_metal;
     bool textured = v_uv.x >= 0.0 && v_atlas.z > 0.5;
@@ -122,11 +145,14 @@ void main() {
     ivec2 cell = ivec2(gl_FragCoord.xy) & 3;
     float dither = ((GBUF_BAYER[cell.y * 4 + cell.x] + 0.5) / 16.0 - 0.5) / 255.0;
     vec3 stored_albedo = clamp(albedo + dither, 0.0, 1.0);
+    if (inside_out) {
+        stored_albedo = vec3(0.0);
+    }
     atomicMin(gbuf.words[i * GBUF_STRIDE + 2u], packUnorm4x8(vec4(stored_albedo, two_sided ? 1.0 / 255.0 : 0.0)));
     uint flags = (v_mat & 1u) != 0u ? 1u : 0u;
     const float gbuf_flag_byte = 255.0;
     atomicMin(gbuf.words[i * GBUF_STRIDE + 4u], packUnorm4x8(vec4(clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 0.0, float(flags) / gbuf_flag_byte)));
-    if (v_emit != 0u) {
+    if (v_emit != 0u && !inside_out) {
         atomicMin(gbuf.words[i * GBUF_STRIDE + 3u], v_emit);
     }
     // Depth-consistent oid: only a fragment that is at least as near as the
