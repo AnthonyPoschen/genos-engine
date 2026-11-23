@@ -551,6 +551,11 @@ impl Tools {
         self.fixed_dt = dt;
     }
 
+    /// The fixed step, when scene time runs on one.
+    pub fn fixed_step(&self) -> Option<f32> {
+        self.fixed_dt
+    }
+
     /// Hold the scene clock. MCP `step`, or [`Self::request_steps`], advances it.
     pub fn pause(&mut self) {
         self.paused = true;
@@ -2860,6 +2865,7 @@ fn hdr_value(settings: &HdrSettings, renderer: &Renderer) -> Value {
             list(renderer.hdr_scales().into_iter().map(num).collect()),
         ),
         ("grade", text("scene")),
+        ("frame_dt", num(f64::from(renderer.frame_dt()))),
         ("still_pop", num(renderer.hdr_still_pop())),
         (
             "histogram",

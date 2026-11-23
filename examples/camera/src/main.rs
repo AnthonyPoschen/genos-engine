@@ -748,6 +748,7 @@ fn run() -> Result<i32, String> {
             overlay.clear();
         }
         renderer.set_particle_dt(if paused { 0.0 } else { dt });
+        renderer.set_frame_dt(dt);
         let draw_at = Instant::now();
         let (pixels, timing) = if detailed {
             let (pixels, timing) =

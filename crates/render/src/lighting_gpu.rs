@@ -3511,7 +3511,7 @@ impl Gpu {
         // A look transition blends ev100, compensation and the bloom intensity
         // toward the scene's values. With transition 0 this is the scene's value.
         let (hdr, look) =
-            crate::hdr_output::step_look(self.lighting.hdr_look, &scene.hdr.effective()?, 1.0 / 60.0);
+            crate::hdr_output::step_look(self.lighting.hdr_look, &scene.hdr.effective()?, f64::from(self.frame_dt));
         self.lighting.hdr = hdr;
         self.lighting.hdr_look = Some(look);
         self.lighting.sun_height = sun_height(scene);
@@ -3567,7 +3567,7 @@ impl Gpu {
         let next = crate::hdr_output::step_exposure(
             f64::from(self.lighting.exposure_scale),
             target,
-            1.0 / 60.0,
+            f64::from(self.frame_dt),
             settings.adapt_down,
             settings.adapt_up,
         );
