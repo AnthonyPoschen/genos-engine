@@ -175,7 +175,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: lavapipe and a headless Weston
         run: |
-          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev pkg-config glslc glslang-tools spirv-tools
+          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev libx11-dev libxi-dev libxfixes-dev pkg-config glslc glslang-tools spirv-tools
       - name: presented-frame fill gate, passes and goes red with cache_fill knocked out
         run: ./scripts/ci-fill-knockout.sh
 
@@ -188,7 +188,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: lavapipe, Weston, validation layers
         run: |
-          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev vulkan-validationlayers pkg-config glslc glslang-tools spirv-tools build-essential python3
+          bash scripts/ci-apt.sh mesa-vulkan-drivers weston libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev libx11-dev libxi-dev libxfixes-dev vulkan-validationlayers pkg-config glslc glslang-tools spirv-tools build-essential python3
       - name: instance stride, geometry coverage (poison), vk validation
         # Caps (LP_NUM_THREADS=1, CARGO_BUILD_JOBS=1, potato, --release) live
         # in scripts/ci-gpu-integrity.sh so a 16 GiB house pod is not OOMKilled.

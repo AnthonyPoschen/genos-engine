@@ -51,6 +51,9 @@ for entry in "${tests[@]}"; do
   status=${PIPESTATUS[0]}
   set -e
   if [[ "$status" -eq 0 ]]; then
+    # A passing test hides its output. Run it once more for the numbers it grades.
+    GENOS_KNOCKOUT="$guard" cargo test -p genos-render --features knockout --test "$binary" \
+      "$name" -- --test-threads=1 --exact --nocapture 2>&1 | grep -E "gate|presented|^test " || true
     echo "FAIL: ${name} still passed with GENOS_KNOCKOUT=${guard}" >&2
     exit 1
   fi
