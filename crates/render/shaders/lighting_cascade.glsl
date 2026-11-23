@@ -1011,6 +1011,28 @@ void lighting_cascade_parent_bins(vec3 pos, vec3 n, float child_size, bool seat,
     }
 }
 
+// lighting_cascade_parent_bins, or the nearest coarser ancestor's bins when
+// the exact parents are missing, unshaded, or all behind the leak gates.
+// Until 23 Nov 2026 a probe with no exact parent read the sky colour for
+// every ray that left its interval, indoors too. A level-0 voxel on a wall
+// in Sponza whose 25 cm parents were gated out read (0.33, 0.41, 0.54), the
+// sky times pi, beside neighbours at 0.10: a cool patch one voxel across. A
+// coarser ancestor's interval starts farther out, so the light between the
+// two intervals is missed; that is less wrong than the sky. `ok` is false
+// only when no ancestor up to 32 m has light, and then the caller's sky is
+// the open air.
+void lighting_cascade_ancestor_bins(vec3 pos, vec3 n, float child_size, bool seat, out vec3 bins[16], out bool ok) {
+    float size = child_size;
+    ok = false;
+    [[dont_unroll]] for (uint i = 0u; i < 9u; i++) {
+        lighting_cascade_parent_bins(pos, n, size, seat, bins, ok);
+        if (ok || size * CASCADE_PARENT_SCALE > 32.0 + CASCADE_EPS) {
+            return;
+        }
+        size *= CASCADE_PARENT_SCALE;
+    }
+}
+
 // Visible surfaces whose published sample is empty. Stats word 35 (diag[11]).
 const uint LIGHTING_DIAG_CASCADE_GAP = 11u;
 
