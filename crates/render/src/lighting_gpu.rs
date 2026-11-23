@@ -3951,7 +3951,8 @@ impl Gpu {
             )
         } else {
             self.present_locks_sdr(self.hdr_output == crate::hdr_output::HdrSwapchain::Hdr10)
-        };        if force_sdr {
+        };
+        if force_sdr {
             return 0.0;
         }
         match self.hdr_output {
