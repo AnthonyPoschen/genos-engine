@@ -65,9 +65,20 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        the building (default world)
   --cone-width F       cone width over the cascade's direction spacing
                        (default 1.0)
-  --gpu-bench          time both tracers on the GPU and stop: the cone march
-                       as a compute shader over voxel textures, and one path
-                       a pixel on the hardware ray tracer (genos-gpuref)
+  --probe-pixel X,Y    with --tracer cone: at that pixel, compare a ray and a
+                       cone in 1024 cosine directions and print the directions
+                       where they differ most
+  --voxel-check        print, by surface orientation, the finest voxels' stored
+                       light over the exact direct light of the pixels in them
+  --refine-level L     when a cone step at a coarser level meets cover, redo that
+                       step at level L (finest 2 = 6.25 cm), so the read near a
+                       surface cannot reach past a wall; 9 is off (default 3)
+  --max-level L        coarsest voxel level a cone reads, 2 (6.25 cm) to 9 (8 m)
+                       (default 9)
+  --voxel-order O      none: a voxel's surfaces count wherever they lie in it.
+                       front: a voxel keeps the centroid of the area that
+                       faces each way, and that area counts only when the
+                       cone's start is on the side it faces (default front)
   --probe-px P         cascade-0 probe spacing in pixels (default 4)
   --theta T            cascade-0 angular resolution; 2*T*T directions
                        (default 4: 32 directions)
@@ -149,6 +160,12 @@ struct Options {
     cone: bool,
     world_voxels: bool,
     cone_width: f32,
+    /// Count a voxel's area only when the cone starts on the side it faces.
+    front_order: bool,
+    max_level: u8,
+    refine_level: u8,
+    voxel_check: bool,
+    probe_pixel: Option<(usize, usize)>,
     gpu_bench: bool,
     probe_px: f32,
     theta: u32,
@@ -180,6 +197,11 @@ fn parse_args() -> Result<Option<Options>, String> {
         cone: false,
         world_voxels: true,
         cone_width: 1.0,
+        front_order: true,
+        max_level: VOXEL_COARSEST,
+        refine_level: 3,
+        voxel_check: false,
+        probe_pixel: None,
         gpu_bench: false,
         probe_px: 4.0,
         theta: 4,
@@ -247,6 +269,21 @@ fn parse_args() -> Result<Option<Options>, String> {
                 }
             }
             "--cone-width" => o.cone_width = num(&arg, &value()?)?,
+            "--voxel-check" => o.voxel_check = true,
+            "--refine-level" => o.refine_level = num::<u8>(&arg, &value()?)?.clamp(VOXEL_FINEST, VOXEL_COARSEST),
+            "--probe-pixel" => {
+                let text = value()?;
+                let (x, y) = text.split_once(',').ok_or_else(|| format!("bad --probe-pixel: {text}"))?;
+                o.probe_pixel = Some((num(&arg, x)?, num(&arg, y)?));
+            }
+            "--max-level" => o.max_level = num::<u8>(&arg, &value()?)?.clamp(VOXEL_FINEST, VOXEL_COARSEST),
+            "--voxel-order" => {
+                o.front_order = match value()?.as_str() {
+                    "none" => false,
+                    "front" => true,
+                    other => return Err(format!("bad --voxel-order: {other}")),
+                }
+            }
             "--gpu-bench" => o.gpu_bench = true,
             "--probe-px" => o.probe_px = num(&arg, &value()?)?,
             "--theta" => o.theta = num(&arg, &value()?)?,
@@ -281,7 +318,6 @@ fn parse_args() -> Result<Option<Options>, String> {
     Ok(Some(o))
 }
 
-/// The tracer interface with a ray count: every ray the cascade asks for.
 /// A glTF model's triangles as the scene's surfaces.
 struct GltfWalls(GltfSurface);
 
@@ -350,6 +386,7 @@ fn load_scene(root: &std::path::Path, entry: &genos_scene_lib::Entry, o: &Option
     }
 }
 
+/// The tracer interface with a ray count: every ray the cascade asks for.
 struct Counted<'a> {
     inner: &'a dyn Surfaces,
     rays: AtomicU64,
@@ -435,8 +472,12 @@ const LIGHT_LEVEL: u8 = 2;
 struct Voxel {
     area: [f32; 6],
     light: [V3; 6],
+    /// Area-weighted sum of the positions of the area that faces each way.
+    at: [V3; 6],
     lamp_area: f32,
     lamp_light: V3,
+    /// Area-weighted sum of the lamp points' positions.
+    lamp_at: V3,
 }
 
 /// The cone tracer's scene: a sparse voxel hierarchy of surface points.
@@ -472,6 +513,7 @@ impl Voxels {
                 let facing = dot(normal, *axis).max(0.0) * area;
                 voxel.area[d] += facing;
                 voxel.light[d] = add(voxel.light[d], scale(radiance, facing));
+                voxel.at[d] = add(voxel.at[d], scale(point, facing));
             }
         }
     }
@@ -489,6 +531,7 @@ impl Voxels {
                 let voxel = self.cells.entry((level, nearest_cell(at, voxel_size(level)))).or_default();
                 voxel.lamp_area += share;
                 voxel.lamp_light = add(voxel.lamp_light, scale(glow, share));
+                voxel.lamp_at = add(voxel.lamp_at, scale(at, share));
             }
         }
     }
@@ -496,8 +539,11 @@ impl Voxels {
     /// What a cone of one voxel's width meets at `at`, travelling along `dir`:
     /// the share of its cross-section that surfaces facing it cover, and the
     /// light of those surfaces over the whole cross-section. Trilinear over
-    /// the eight voxels around the point.
-    fn sample(&self, level: u8, at: V3, dir: V3) -> (f32, V3) {
+    /// the eight voxels around the point. With `start`, an area counts only
+    /// when the cone's start is on the side it faces, so a surface behind
+    /// another one's plane (the sunlit top of the roof over a ceiling) never
+    /// shows.
+    fn sample(&self, level: u8, at: V3, dir: V3, start: Option<V3>) -> (f32, V3) {
         let size = voxel_size(level);
         let g = [at[0] / size - 0.5, at[1] / size - 0.5, at[2] / size - 0.5];
         let base = [g[0].floor(), g[1].floor(), g[2].floor()];
@@ -513,11 +559,27 @@ impl Voxels {
             }
             let cell = [base[0] as i32 + o[0] as i32, base[1] as i32 + o[1] as i32, base[2] as i32 + o[2] as i32];
             let Some(voxel) = self.cells.get(&(level, cell)) else { continue };
-            let mut facing = voxel.lamp_area;
-            let mut sent = voxel.lamp_light;
+            // In this step, and ahead of the cone's start.
+            // Area facing `facing` counts when the start is on that side.
+            let here = |sum: V3, area: f32, facing: Option<V3>| -> bool {
+                let Some(start) = start else { return true };
+                if area <= 0.0 {
+                    return false;
+                }
+                facing.is_none_or(|n| dot(sub(start, scale(sum, 1.0 / area)), n) > 0.0)
+            };
+            let mut facing = 0.0;
+            let mut sent = [0.0; 3];
+            if here(voxel.lamp_at, voxel.lamp_area, None) {
+                facing += voxel.lamp_area;
+                sent = voxel.lamp_light;
+            }
             for (d, axis) in AXES.iter().enumerate() {
                 // A surface shows itself to a cone that travels against its normal.
                 let toward = (-dot(dir, *axis)).max(0.0);
+                if toward <= 0.0 || !here(voxel.at[d], voxel.area[d], Some(*axis)) {
+                    continue;
+                }
                 facing += voxel.area[d] * toward;
                 sent = add(sent, scale(voxel.light[d], toward));
             }
@@ -864,50 +926,14 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                                 dir = scale(dir, -1.0);
                             }
                             if let Some(voxels) = setup.voxels {
-                                // A cone marched through the voxels. Its width
-                                // in each interval is that cascade's direction
-                                // spacing, so its footprint grows with the
-                                // probe spacing. Cover adds up: a surface that
-                                // crosses several voxels is one surface.
-                                let finest = voxel_size(VOXEL_FINEST);
-                                let width0 = o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt();
-                                let start = add(pixel.point, scale(pixel.normal, 0.75 * finest));
-                                let mut t = 0.75 * finest;
-                                let mut covered = 0.0f32;
-                                let mut reach = t0;
-                                for c in 0..n {
-                                    let end = if c + 1 == n { REACH } else { reach };
-                                    let width = width0 / (1u32 << c) as f32;
-                                    let open = 1.0 - covered;
-                                    let mut met = [0.0; 3];
-                                    while t < end && covered < 0.98 {
-                                        let wide = (width * t).max(finest);
-                                        let level = ((wide / BASE_SPACING).log2().ceil() as i32)
-                                            .clamp(i32::from(VOXEL_FINEST), i32::from(VOXEL_COARSEST)) as u8;
-                                        let (cover, light) = voxels.sample(level, add(start, scale(dir, t)), dir);
-                                        if cover > 0.0 {
-                                            let seen = cover.min(1.0 - covered);
-                                            met = add(met, scale(light, seen / cover));
-                                            covered += seen;
-                                        }
-                                        t += voxel_size(level);
-                                    }
-                                    let mut through = (1.0 - covered) / open;
-                                    if c + 1 == n {
-                                        met = add(met, scale(sky, 1.0 - covered));
-                                        through = 0.0;
-                                    }
+                                for (c, radiance, through) in march_cone(voxels, o, pixel.point, pixel.normal, dir, t0, sky) {
                                     out.push(Deposit {
                                         pixel: u32::try_from(p).unwrap_or(u32::MAX),
                                         dir,
                                         cascade: u8::try_from(c).unwrap_or(u8::MAX),
-                                        radiance: scale(met, 1.0 / open),
+                                        radiance,
                                         through,
                                     });
-                                    if covered >= 0.98 {
-                                        break;
-                                    }
-                                    reach *= 4.0;
                                 }
                                 continue;
                             }
@@ -1056,6 +1082,79 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
         probes: cascades.iter().map(|c| c.keys.len()).collect(),
         holes: if wanted > 0.0 { (missing / wanted) as f32 } else { 0.0 },
     }
+}
+
+/// A cone marched through the voxels from `point`. Its width in each interval
+/// is that cascade's direction spacing, so its footprint grows with the probe
+/// spacing. Cover adds up: a surface that crosses several voxels is one
+/// surface. Returns, for each cascade the cone reached, the radiance it met in
+/// that interval over the light that entered it, and the share that passed.
+fn march_cone(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: f32, sky: V3) -> Vec<(usize, V3, f32)> {
+    let n = o.cascades;
+    let finest = voxel_size(VOXEL_FINEST);
+    let width0 = o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt();
+    let start = add(point, scale(normal, 0.75 * finest));
+    let mut t = 0.75 * finest;
+    let mut covered = 0.0f32;
+    let mut reach = t0;
+    let mut out = Vec::with_capacity(n);
+    for c in 0..n {
+        let end = if c + 1 == n { REACH } else { reach };
+        let width = width0 / (1u32 << c) as f32;
+        let open = 1.0 - covered;
+        let mut met = [0.0; 3];
+        while t < end && covered < 0.98 {
+            let wide = (width * t).max(finest);
+            let level = ((wide / BASE_SPACING).log2().ceil() as i32)
+                .clamp(i32::from(VOXEL_FINEST), i32::from(o.max_level)) as u8;
+            let step = voxel_size(level);
+            let front = o.front_order.then_some(start);
+            let (cover, light) = voxels.sample(level, add(start, scale(dir, t)), dir, front);
+            if cover > 0.0 && level > o.refine_level {
+                // Something is here: walk this step again at the finer level,
+                // whose read cannot reach the far side of a wall.
+                let fine = voxel_size(o.refine_level);
+                let mut u = t - 0.5 * step + 0.5 * fine;
+                while u < t + 0.5 * step && covered < 0.98 {
+                    let (cover, light) = voxels.sample(o.refine_level, add(start, scale(dir, u)), dir, front);
+                    if cover > 0.0 {
+                        let seen = cover.min(1.0 - covered);
+                        met = add(met, scale(light, seen / cover));
+                        covered += seen;
+                    }
+                    u += fine;
+                }
+            } else if cover > 0.0 {
+                let seen = cover.min(1.0 - covered);
+                met = add(met, scale(light, seen / cover));
+                covered += seen;
+            }
+            t += step;
+        }
+        let mut through = (1.0 - covered) / open;
+        if c + 1 == n {
+            met = add(met, scale(sky, 1.0 - covered));
+            through = 0.0;
+        }
+        out.push((c, scale(met, 1.0 / open), through));
+        if covered >= 0.98 {
+            break;
+        }
+        reach *= 4.0;
+    }
+    out
+}
+
+/// One cone's whole radiance: each interval's light times the share that
+/// reached it.
+fn cone_total(intervals: &[(usize, V3, f32)]) -> V3 {
+    let mut open = 1.0;
+    let mut sum = [0.0; 3];
+    for (_, radiance, through) in intervals {
+        sum = add(sum, scale(*radiance, open));
+        open *= through;
+    }
+    sum
 }
 
 /// Sparse trilinear read of one direction's cone: the probes that exist and
@@ -1432,6 +1531,64 @@ fn run(o: &Options) -> Result<(), String> {
     let voxels = (o.cone || o.gpu_bench).then(|| build_voxels(scene, &mesh, &pixels, &glow, o));
     if let (true, Some(voxels)) = (o.gpu_bench, &voxels) {
         return gpu_bench(o, scene, &mesh, &pixels, voxels, eye, [forward, right, up]);
+    }
+    if let (Some((px, py)), Some(voxels)) = (o.probe_pixel, &voxels) {
+        let Some(pixel) = &pixels[py * o.width + px] else { return Err(format!("pixel {px},{py} shows nothing")) };
+        let sky = if o.mode == Mode::Emissive { [0.0; 3] } else { scene.sky.as_ref().map_or([0.0; 3], |s| s.color) };
+        let t0 = o.t0 * spacing(pixel.lod, 0);
+        let side = normalize(cross(pixel.normal, if pixel.normal[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
+        let up = cross(pixel.normal, side);
+        let origin = add(pixel.point, scale(pixel.normal, LIFT));
+        let shadow = AtomicU64::new(0);
+        let probe_setup = Setup { scene, walls, surfaces, voxels: None, pixels: &pixels, options: o };
+        let mut rows = Vec::new();
+        let (mut ray_sum, mut cone_sum) = (0.0f64, 0.0f64);
+        for k in 0..1024u64 {
+            let (u, v) = r2(k);
+            let (r, phi) = (u.sqrt(), 2.0 * PI * v);
+            let dir = normalize(add(add(scale(side, r * phi.cos()), scale(up, r * phi.sin())), scale(pixel.normal, (1.0 - u).max(0.0).sqrt())));
+            let (ray, at) = match surfaces.first_hit(origin, dir, REACH) {
+                Some(hit) => (hit_radiance(&probe_setup, &hit, &shadow), hit.point),
+                None => (sky, add(origin, scale(dir, REACH))),
+            };
+            let cone = cone_total(&march_cone(voxels, o, pixel.point, pixel.normal, dir, t0, sky));
+            ray_sum += f64::from(luma(ray));
+            cone_sum += f64::from(luma(cone));
+            rows.push((luma(cone) - luma(ray), dir, at, luma(ray), luma(cone)));
+        }
+        println!("probe pixel {px},{py} at {:?} facing {:?}: ray mean {:.5}, cone mean {:.5}", pixel.point, pixel.normal, ray_sum / 1024.0, cone_sum / 1024.0);
+        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (d, dir, at, ray, cone) in rows.iter().take(12) {
+            println!("  dir [{:.2},{:.2},{:.2}] ray hit [{:.2},{:.2},{:.2}] ray {ray:.4} cone {cone:.4} (+{d:.4})", dir[0], dir[1], dir[2], at[0], at[1], at[2]);
+        }
+        return Ok(());
+    }
+    if let (true, Some(voxels)) = (o.voxel_check, &voxels) {
+        // Stored light per unit area of the finest voxel a pixel's surface is
+        // in, against the exact direct radiance at the pixel.
+        let mut by: HashMap<usize, (f64, f64, u32)> = HashMap::new();
+        for pixel in pixels.iter().step_by(97).flatten() {
+            let axis = (0..6).max_by(|a, b| dot(pixel.normal, AXES[*a]).total_cmp(&dot(pixel.normal, AXES[*b]))).unwrap_or(0);
+            let size = voxel_size(VOXEL_FINEST);
+            let inside = sub(pixel.point, scale(pixel.normal, 0.25 * size));
+            let Some(voxel) = voxels.cells.get(&(VOXEL_FINEST, nearest_cell(inside, size))) else { continue };
+            if voxel.area[axis] <= 0.0 {
+                continue;
+            }
+            let stored = luma(voxel.light[axis]) / voxel.area[axis];
+            let (direct, _) = direct_light(scene, walls, pixel.point, pixel.normal);
+            let exact = luma(scale(mul(pixel.albedo, direct), LAMBERT));
+            let e = by.entry(axis).or_insert((0.0, 0.0, 0));
+            e.0 += f64::from(stored);
+            e.1 += f64::from(exact);
+            e.2 += 1;
+        }
+        let mut keys: Vec<_> = by.keys().copied().collect();
+        keys.sort_unstable();
+        for axis in keys {
+            let (stored, exact, n) = by[&axis];
+            println!("voxel check axis {axis}: {n} pixels, stored {:.4}, exact {:.4}, ratio {:.3}", stored / f64::from(n), exact / f64::from(n), stored / exact.max(1.0e-9));
+        }
     }
     let setup = Setup { scene, walls, surfaces, voxels: voxels.as_ref(), pixels: &pixels, options: o };
 

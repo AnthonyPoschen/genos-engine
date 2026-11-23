@@ -136,3 +136,13 @@ What the numbers say:
 - The software tracer is not timed.
 
 Not measured: Sponza or any glTF scene (the prototype takes a `kind stress` scene only), the cost of the deposit, merge and shade steps on a GPU, and the software tracer's rays per millisecond. The offline hardware path tracer (`crates/gpuref`) traced at least 400,000 rays per millisecond in this building on an RTX 4070, a lower bound.
+
+## Phase 1, 24 Nov 2026
+
+The cone tracer against the leak into the room no lamp lights. The gate (room within 7.95%, bias under 10%) missed; the plan's section 11 has the table and what was tried. Arguments added for it:
+
+- `--voxel-order none|front` (default `front`): a voxel also keeps, for each of its six directions, the centroid of the area that faces that way; with `front` that area shows to a cone only when the cone starts on the side it faces. The sunlit top of a roof no longer lights the ceiling under it.
+- `--refine-level L` (default 3): a step at a coarser level that meets cover is walked again at level L (12.5 cm), whose read cannot reach across a 30 cm wall. 9 is off.
+- `--max-level L`: the coarsest level a cone reads.
+- `--probe-pixel X,Y`: one pixel's ray and cone in 1024 cosine directions, and the directions where they differ most.
+- `--voxel-check`: the finest voxels' stored light over the exact direct light of the pixels in them, by orientation.

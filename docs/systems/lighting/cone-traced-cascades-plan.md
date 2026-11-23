@@ -1,6 +1,6 @@
 # Cone-traced cascades: implementation plan
 
-Status: proposal, 24 Nov 2026. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
+Status: **stopped at phase 1, 24 Nov 2026.** Phase 0 passed; phase 1 missed its gate (section 11), so by this plan's own rule the work stops here and the renderer is left as it is. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
 
 ## 1. What Anthony asked for
 
@@ -69,7 +69,7 @@ Each row is a fault the prototype shows or a risk it has not tested. "Probe" is 
 
 | # | Fault | Measured | Cause | Candidates | Probe |
 |---|---|---|---|---|---|
-| E1 | Light leaks through walls into a room no lamp lights | +65% bias, 76% error (rays: +11%, 30%) | A voxel wider than a wall holds the lit surfaces behind it. The trilinear read reaches them before the wall has covered the cone. Narrower cones did not help (+85% and +91% at half and quarter width, before E8 was fixed) | Read only voxels on the near side of a surface that faces the cone. Cap the voxel level near thin walls. Keep occlusion at a finer level than light. Store a wall's two sides in separate voxels (an inset by the normal at every level) | `--eye 4.75393,1.7,7.51477 --yaw 0.0466 --pitch -0.079`: bias against the reference |
+| E1 | Light leaks through walls into a room no lamp lights | +65% bias, 76% error (rays: +11%, 30%) | A voxel wider than a wall holds the lit surfaces behind it. The trilinear read reaches them before the wall has covered the cone. Narrower cones did not help (+85% and +91% at half and quarter width, before E8 was fixed) | Read only voxels on the near side of a surface that faces the cone. Cap the voxel level near thin walls. Keep occlusion at a finer level than light. Store a wall's two sides in separate voxels (an inset by the normal at every level). **All tried in phase 1; best 46%, bias +46% (section 11)** | `--eye 4.75393,1.7,7.51477 --yaw 0.0466 --pitch -0.079`: bias against the reference; `--probe-pixel X,Y` for one pixel's ray and cone per direction |
 | E2 | The cascade itself is 30% off in that room, with exact rays | 30% error, +11% bias; does not fall with more frames. **Fixed in phase 0: 5.3%** | The shade weighed each of the 32 cascade-0 directions by its centre's cosine; the room's light comes from a few bright patches, so the floor and ceiling took too much and the walls too little. Not the seam or the trilinear weights | The **direction moment** (glossary): shade with the cosine of the light's mean direction in each direction | Same pose, `--tracer ray --bin-cosine centre` against `mean` |
 | E3 | Lamp light through cones is blurred and still noisy at the tail | 16 to 21% error, 7.6 to 9.7% median noise, 46% at the 90th percentile | A lamp's light lands in one direction of 16 at cascade 0, so the cosine and the shadow edge are as coarse as that direction. A cone whose axis misses the lamp's voxels reads less of it | More directions at cascade 0 for the lamp term. Aim the lamp's voxel footprint at the cone width. The screen-space first interval (step 6) for the shadow edge near the surface. Not exact shadow rays: every lamp is an emitter | `--mode emissive --lamp-radius 0.05`, hall |
 | E4 | A slanted surface shows too much area | Not measured apart; up to 1.73 times for a diagonal | Area is kept by six axis directions, and the sum over them is the L1 norm of the direction | Keep a mean normal and one area, or renormalise by the L1 norm | A test wall turned 45 degrees |
@@ -104,7 +104,7 @@ Each phase is its own change, with the gate it names. A phase that misses its ga
 | Phase | Work | Gate |
 |---|---|---|
 | 0. A baseline to trust | E2 in the prototype. glTF scenes (E13). The same error measure as `capture.compare` (block means), so the prototype and the renderer are graded alike | Ray tracer, one frame: the room no lamp lights within 10% of the reference, the hall within 7%, Sponza atrium and dark corner within 10%. **Passed 24 Nov 2026:** 5.3%, 5.5%, 5.5%, 6.1% (prototype README, Phase 0) |
-| 1. The leak | E1, E4, E7, E8 with cones | Cone tracer: the room no lamp lights within 1.5 times the ray tracer's error from phase 0, and bias under 10%. The hall and Sponza no worse than 1.5 times |
+| 1. The leak | E1, E4, E7, E8 with cones | Cone tracer: the room no lamp lights within 1.5 times the ray tracer's error from phase 0, and bias under 10%. The hall and Sponza no worse than 1.5 times. **Missed 24 Nov 2026:** room 46.1% (limit 7.95%), bias +45.8% (limit 10%); hall 6.3% (limit 8.3%, passes). Sponza not run: the cone tracer does not voxelise glTF |
 | 2. Lamps and the full loop | E3, E9, E15, E16: every point lamp an emitter, and bounce through feedback, together. No exact lamps. If the contact or thin-caster gate misses, try the screen-space first interval (step 6) before anything else | The full picture (lamp light and all bounces) within 10% of the path-traced reference in the hall, the room and Sponza after 8 frames, and within 15% in the frame after a lamp goes on. Noise under 3% median. Shadows against the reference: penumbra width at contact and at 1, 3 and 10 m from the caster; the thinnest caster that blocks half the light; a mover's shadow lags 0 frames; a lamp in a shade lights the room and not the shade's far side |
 | 2b. The sun as an emitter | E17. The sun's exact ray timed first. Then step 5 A, and B if A misses | Sponza courtyard, sun only: within 10% of the reference, and the same penumbra checks as phase 2. The room next to the courtyard, sun on: bias under phase 1's limit. If A and B both miss, the sun keeps its exact ray and the plan goes on |
 | 3. Cost, and the decision | The GPU march tuned (section 5). The voxel write for a mover, a skinned character and the surface light, timed. Camera motion and moving lamps on the GPU prototype (E10, E11, E18). Then the ADR | Trace step, voxel upkeep and the shared steps together under today's `lighting_ms` at 6 lamps, and flat to 48 lamps, on the RTX 4070 at 720p. Memory inside the preset's budget, or the preset has GI off. Anthony accepts the ADR, or the plan stops |
@@ -158,3 +158,25 @@ Still open: what specular and reflections read for a sharp lamp highlight once t
 ## 10. What stays from the session of 23 Nov
 
 Committed on `lighting/stopgap-and-cone-prototype`: the frame-time step for auto exposure, the lamp share and drift rate in the upper cells, the two corner-leak fixes (`CASCADE_RECORD_PLANE`, `CASCADE_SEAT_INSET`), and `make moving-lamp-gate`. They are the stopgap until phase 6. The gate stays: phase 5 and phase 6 are graded by it.
+
+## 11. Phase 1 result, 24 Nov 2026
+
+The gate missed, so the plan stops here. Cone tracer, one frame, 8 px probe, 4x4 blocks, 16,384 reference rays a block, the phase 0 baseline (mean cosine) underneath:
+
+| Cone march | Room no lamp lights (limit 7.95%, bias 10%) | Hall (limit 8.3%) | Voxel reads a cone, hall |
+|---|---|---|---|
+| As in the prototype before phase 1 (`--voxel-order none --refine-level 9`) | 63.9%, bias +51.5% | 11.9% | 215 |
+| Area counts only when the cone starts on the side it faces (`front`) | 58.3%, +57.9% | 7.1% | 238 |
+| `front`, and a step that meets cover is walked again at 12.5 cm (`--refine-level 3`, the default) | **46.1%, +45.8%** | **6.3%** | 388 |
+
+Tried and taken out, because each was no better or worse:
+
+- **Ahead of the start**: count an area only when its centroid lies ahead of the cone's start along the axis. 62.0%.
+- **Slab**: count an area only in the step whose slab along the axis holds its centroid. 327%: a wall whose centroid lies to the side of the axis was never counted, and the cone passed through it.
+- **Plane depth**: count each area once, in the step where the axis meets its plane, front to back. 186% to 590%: a coarse voxel's centroid averages every surface that faces one way in it, so a wall's depth moves between levels and falls between steps.
+- **Level cap**: no voxel coarser than 12.5 cm. 51.3%, and two to four times the reads.
+- **Floors under walls left out** (a floor point inside a solid is lit by shadow rays that start inside the wall): 50.1%. The test also misfired on a third of the building's x-facing wall points.
+
+What the per-pixel probe (`--probe-pixel 640,40`, a ceiling pixel) shows: with every variant, the cones that reach the floor at the foot of a wall, and the cones that leave through the opening behind the camera, carry light the rays do not see. With 12.5 cm voxels the floor they end on is dark in the voxels and exactly; the light comes from lit edges within one voxel of the axis on the way. At 0.5 to 1 m voxels the read near the foot of a 30 cm wall also takes the lit floor on its far side, in the same plane as the dark floor. Neither a side test nor an order along the cone can tell those two floors apart from what a voxel stores (area, light and one centroid for each of six directions).
+
+What would have to change to go on, none of it tried: a voxel that keeps more than one plane for each direction (two centroids and areas, or a depth range), so a coarse voxel can hold a wall and the floor behind it apart; a visibility term between a cone's step and the voxel it reads (a few fine steps toward the voxel's centroid); or exact rays for the first metres and cones only past them, which brings back a per-pixel ray cost. Each is a research step, not a tuning step, and phases 2 to 6 wait on it. The phase 0 fix (the direction moment) does not depend on cones: it would cut the renderer's own cascade error and can be taken on its own.
