@@ -305,3 +305,17 @@ GPU, hall, theta 4 with the chain: 165 ms for 2.4 million cones (16 steps and 95
 **The shader's local arrays.** The crossing search kept 16 cells and 24 crossings in per-thread arrays, and they spilled from the registers. Each cell is now handled as it is found, a cell already in the first end's block is skipped, the crossings array holds 8 and is a per-invocation global, not an `inout` copy: 102 → 16.2 ms (least 12.0) for the same 2.4 million cones, the same steps, reads and mean cover. A workgroup of 32 or 128 in place of 64 made no difference.
 
 The cascade's cones in the hall are now 16 ms on the RTX 4070 at 720p, against phase 2's 7.4 s. Still to time on the GPU: the bounce gather (patches times 32 cones over every interval, and the transfer sweeps), the merge and the shade. The budget for all of lighting is 8 ms at 1080p.
+
+**The bounce gather on the GPU.** `--gpu-bench` now also times the per-frame gather cones (each patch's cones over every interval, the lamps' and the sky's light D). Hall at the settings above: 127 ms for 2.1 million cones (65,820 patches of 25 cm, 32 cones each; 80 steps a cone).
+
+- `--transfer-sweeps` (default now 32, was 256): the room reads 12.7% at 8 sweeps, 8.2% at 16 (fewer bounces, so less of its +10% bias), and 10.7% at 32, 64 and 256.
+- `--gather-level 5` (50 cm patches) with `--gather-cones 16`: 290,608 gather cones (18,163 patches), 16.4 ms.
+
+| View | 25 cm, 32 cones | 50 cm, 32 cones | 50 cm, 16 cones | 25 cm, 16 cones |
+|---|---|---|---|---|
+| Hall | 8.6% | | 9.2%, −4.3% | |
+| Room no lamp lights | 10.7%, +10.0% | 7.4%, −6.4% | 4.8%, −1.4% | 11.8%, +11.2% |
+| Sponza atrium | 15.4%, −10.7% | 16.6%, −13.4% | 16.5%, −13.1% | 16.8%, −10.8% |
+| Sponza dark corner | 20.5%, −8.8% | | 21.4%, −11.2% | |
+
+GPU total so far, hall, 720p: 15.9 ms for the cascade's cones and 16.4 ms for the gather's. Not timed: the transfer sweeps, the merge and the shade.

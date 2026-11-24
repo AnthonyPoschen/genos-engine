@@ -159,6 +159,11 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        are traced finest first, and the share open is the
                        product of the chain's finer probes' passed shares
                        in the bins holding the direction (default off)
+  --transfer-sweeps N  with --mode full: sweeps of E = D + T E a frame, each one
+                       bounce more, from E = D (default 32; the room no lamp
+                       lights reads the same as at 256)
+  --gather-level L     with --mode full: gather patches are voxels of this
+                       level, 2^L/64 m (default 4: 25 cm)
   --descend            a covered coarse step is walked front to back from its
                        coarsest half down: a piece with no surface in or next
                        to its cells is passed whole, and only the rest goes
@@ -268,6 +273,8 @@ struct Options {
     seat_at_start: bool,
     near_check: NearCheck,
     descend: bool,
+    transfer_sweeps: usize,
+    gather_level: u8,
     refine_cascades: usize,
     probe_px: f32,
     theta: u32,
@@ -323,6 +330,8 @@ fn parse_args() -> Result<Option<Options>, String> {
         seat_at_start: false,
         near_check: NearCheck::Off,
         descend: false,
+        transfer_sweeps: 32,
+        gather_level: GATHER_LEVEL,
         refine_cascades: usize::MAX,
         probe_px: 4.0,
         theta: 4,
@@ -474,6 +483,8 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--own-interval" => o.own_interval = true,
             "--seat-at-start" => o.seat_at_start = true,
             "--descend" => o.descend = true,
+            "--transfer-sweeps" => o.transfer_sweeps = num(&arg, &value()?)?,
+            "--gather-level" => o.gather_level = num::<u8>(&arg, &value()?)?.clamp(VOXEL_FINEST + 1, VOXEL_COARSEST),
             "--near-check" => {
                 o.near_check = match value()?.as_str() {
                     "off" => NearCheck::Off,
@@ -1266,6 +1277,11 @@ fn bounce_reference(scene: &Scene, walls: &dyn Surfaces, point: V3, normal: V3, 
 /// A cone from a voxel probe: the probe, its direction, and per interval
 /// reached (cascade, light over what entered, share passed).
 type VoxelCone = (u32, V3, Vec<(usize, V3, f32)>);
+
+/// `--gpu-bench`: when armed, the bounce gather copies its cones here (start,
+/// first reach; direction), every interval of each to be marched.
+static GATHER_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GATHER_JOBS: std::sync::Mutex<Vec<[f32; 8]>> = std::sync::Mutex::new(Vec::new());
 
 /// `--gpu-bench`: when armed, the voxel-layer tracer copies its cones here
 /// (start, first reach; direction) for the GPU to march.
@@ -2338,9 +2354,9 @@ const GATHER_CONES: u64 = 16;
 
 /// The patch a surface point gathers with: its 25 cm cell and the axis it
 /// faces most.
-fn gather_patch(at: V3, normal: V3) -> ([i32; 3], usize) {
+fn gather_patch(at: V3, normal: V3, level: u8) -> ([i32; 3], usize) {
     let axis = (0..6).max_by(|a, b| dot(normal, AXES[*a]).total_cmp(&dot(normal, AXES[*b]))).unwrap_or(0);
-    (nearest_cell(sub(at, scale(normal, 0.01)), voxel_size(GATHER_LEVEL)), axis)
+    (nearest_cell(sub(at, scale(normal, 0.01)), voxel_size(level)), axis)
 }
 
 /// The gather patches of `points`: each point's patch index, and each
@@ -2348,14 +2364,14 @@ fn gather_patch(at: V3, normal: V3) -> ([i32; 3], usize) {
 /// (under a wall or a box) is buried: it belongs to its patch but does not
 /// place the gather point, so a patch across the foot of a box gathers from
 /// its open part. A patch with only buried points gets `None` and stays dark.
-fn gather_patches(points: &[Point], scene: &Scene) -> (Vec<u32>, Vec<Option<(V3, V3)>>) {
+fn gather_patches(points: &[Point], scene: &Scene, level: u8) -> (Vec<u32>, Vec<Option<(V3, V3)>>) {
     let mut index: HashMap<([i32; 3], usize), u32> = HashMap::new();
     let mut sums: Vec<(V3, V3, f32)> = Vec::new();
     let of_point = points
         .iter()
         .map(|(at, normal, _, _)| {
             let next = u32::try_from(sums.len()).unwrap_or(u32::MAX);
-            let i = *index.entry(gather_patch(*at, *normal)).or_insert(next);
+            let i = *index.entry(gather_patch(*at, *normal, level)).or_insert(next);
             if i == next {
                 sums.push(([0.0; 3], [0.0; 3], 0.0));
             }
@@ -2373,9 +2389,6 @@ fn gather_patches(points: &[Point], scene: &Scene) -> (Vec<u32>, Vec<Option<(V3,
     (of_point, patches)
 }
 
-
-/// Iterations of `E = D + T E` a frame.
-const TRANSFER_ITERATIONS: usize = 256;
 
 /// Patches whose cones met a surface with no patch (a probe).
 static UNASSIGNED: AtomicU64 = AtomicU64::new(0);
@@ -2410,12 +2423,22 @@ fn gather_rows(voxels: &Voxels, patches: &[Option<(V3, V3)>], o: &Options, cones
                         let side = normalize(cross(normal, if normal[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
                         let up = cross(normal, side);
                         let mut sink = Sink::default();
+                        let mut captured = Vec::new();
                         for k in 0..cones {
                             let (u, v) = r2(k);
                             let (u, v) = ((u + ju).fract(), (v + jv).fract());
                             let (r, phi) = (u.sqrt(), 2.0 * PI * v);
                             let dir = normalize(add(add(scale(side, r * phi.cos()), scale(up, r * phi.sin())), scale(normal, (1.0 - u).max(0.0).sqrt())));
-                            let _ = march_cone_into(voxels, o, at, normal, dir, voxel_size(GATHER_LEVEL), sky, Some(&mut sink));
+                            let _ = march_cone_into(voxels, o, at, normal, dir, voxel_size(o.gather_level), sky, Some(&mut sink));
+                            if GATHER_ARMED.load(Ordering::Relaxed) {
+                                let start = add(at, scale(normal, 0.75 * voxel_size(VOXEL_FINEST)));
+                                captured.push([start[0], start[1], start[2], voxel_size(o.gather_level), dir[0], dir[1], dir[2], 0.0]);
+                            }
+                        }
+                        if !captured.is_empty() {
+                            if let Ok(mut list) = GATHER_JOBS.lock() {
+                                list.extend(captured);
+                            }
                         }
                         // The sun (phase 2b, option B): one narrow cone toward
                         // it, its irradiance times what passes.
@@ -2460,7 +2483,7 @@ fn gather(voxels: &Voxels, points: &[Point], patch_of: &[u32], patches: &[Option
     let _ = frame;
     let d: Vec<V3> = gather_rows(voxels, patches, o, o.gather_cones, 7, sky).into_iter().map(|r| r.0).collect();
     let mut e = d.clone();
-    for _ in 0..TRANSFER_ITERATIONS {
+    for _ in 0..o.transfer_sweeps {
         e = t.iter().zip(&d).map(|(row, d)| row.iter().fold(*d, |acc, (j, w)| add(acc, mul(*w, e[*j as usize])))).collect();
     }
     if let Ok(mut last) = LAST_E.lock() {
@@ -2754,6 +2777,7 @@ fn gpu_bench(
     mesh: &SceneMesh,
     pixels: &[Option<Pixel>],
     voxels: &Voxels,
+    points: &[Point],
     [walls, surfaces]: [&dyn Surfaces; 2],
     eye: V3,
     [forward, right, up]: [V3; 3],
@@ -2889,6 +2913,38 @@ fn gpu_bench(
         (jobs.len() * 32) as f64 / (1024.0 * 1024.0),
         voxels.cells.len(),
     );
+    if o.mode == Mode::Full {
+        let (_, patches) = gather_patches(points, scene, o.gather_level);
+        GATHER_ARMED.store(true, Ordering::Relaxed);
+        let _ = gather_rows(voxels, &patches, o, o.gather_cones, 7, sky);
+        GATHER_ARMED.store(false, Ordering::Relaxed);
+        let gather_jobs = std::mem::take(&mut *GATHER_JOBS.lock().map_err(|_| "gpu bench: gather lock")?);
+        let gather = gpu::time_cascade(
+            &gpu::CascadeInput {
+                jobs: &gather_jobs,
+                faces: &volumes,
+                planes: &planes,
+                plane_levels,
+                occupancy: &occupancy,
+                descend: o.descend,
+                clip,
+                width0: o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt(),
+                cascades: u32::try_from(o.cascades).unwrap_or(u32::MAX),
+                refine_level: u32::from(refine),
+                cross_full: o.cross_full,
+                box_margin: o.box_margin,
+                sky,
+                own_interval: false,
+                refine_cascades: u32::MAX,
+            },
+            20,
+        )?;
+        let live = patches.iter().filter(|p| p.is_some()).count();
+        println!(
+            "bounce gather: {:.3} ms median, {:.3} ms least for {} cones ({live} patches x {}), every interval; {:.1} steps and {:.1} texture reads a cone",
+            gather.ms_median, gather.ms_min, gather.cones, o.gather_cones, gather.steps_per_cone, gather.reads_per_cone
+        );
+    }
     let tris: Vec<genos_gpuref::Tri> = mesh
         .triangles
         .iter()
@@ -3028,7 +3084,7 @@ fn run(o: &Options) -> Result<(), String> {
         None => (None, Vec::new()),
     };
     if let (true, Some(voxels)) = (o.gpu_bench, &voxels) {
-        return gpu_bench(o, scene, &mesh, &pixels, voxels, [walls, surfaces], eye, [forward, right, up]);
+        return gpu_bench(o, scene, &mesh, &pixels, voxels, &points, [walls, surfaces], eye, [forward, right, up]);
     }
     if let (Some((px, py)), Some(voxels)) = (o.probe_pixel, &voxels) {
         let Some(pixel) = &pixels[py * o.width + px] else { return Err(format!("pixel {px},{py} shows nothing")) };
@@ -3093,7 +3149,7 @@ fn run(o: &Options) -> Result<(), String> {
             println!("voxel check axis {axis}: {n} pixels, stored {:.4}, exact {:.4}, ratio {:.3}", stored / f64::from(n), exact / f64::from(n), stored / exact.max(1.0e-9));
         }
     }
-    let (patch_of, patches) = if o.mode == Mode::Full { gather_patches(&points, scene) } else { (Vec::new(), Vec::new()) };
+    let (patch_of, patches) = if o.mode == Mode::Full { gather_patches(&points, scene, o.gather_level) } else { (Vec::new(), Vec::new()) };
     if let (Mode::Full, Some(field)) = (o.mode, voxels.as_mut()) {
         field.assign_patches(&points, &patch_of);
     }
