@@ -233,3 +233,18 @@ Phase 2 with this tracer (`--mode full`, 32 gather cones a patch, fixed directio
 | Sponza dark corner | 17.8% | −6.0% | 0 |
 
 Left for phase 2: the room's bounce (+11%), and in Sponza the lamps' own light (16.8% alone in the atrium): a lamp's shadow edge is as soft as the cone that finds it.
+
+### Converged references and the cascade knobs, 24 Nov 2026
+
+The phase 2 numbers above were measured against 16,384 path-traced samples a block; in the dim room that reference was itself noisy (23.5% error at 4,096 samples, 11.1% at 32,768). Against 131,072 samples a block (`--stride 64`), phase 2 with 4 cascades, t0 1.6: hall 4.0%, room 11.6% (+11.5% bias; +6.9% with the sky off), Sponza atrium 13.8% (−2.9%), dark corner 17.8% (−6.4%).
+
+The lamps' own light (`--mode emissive`) against cascade count and t0, Sponza: 5 cascades take the dark corner from 22.9% to 16.8% (bias −10% to −2%); t0 2.5 takes the atrium from 16.8% to 15.1%. Phase 2 with `--cascades 5 --t0 2.5`, converged references, after the first frame:
+
+| View | Error | Bias | Cones a frame |
+|---|---|---|---|
+| Hall | 5.3% | −0.5% | 24.2 million |
+| Room no lamp lights | 11.1% | +11.1% | 14.6 million |
+| Sponza atrium | 12.9% | −2.3% | 16.7 million |
+| Sponza dark corner | 15.9% | +0.8% | 9.6 million |
+
+No noise: nothing in the frame is random. Closing a cone that ends at least 90% covered (so its shortfall takes no sky) changed nothing measurable and was taken out. The gate (10%) is not met in three of the four views: in Sponza by the edges of the small lamps' shadows, in the room by bounce (+7%) and sky (+5%) on a very dim picture.
