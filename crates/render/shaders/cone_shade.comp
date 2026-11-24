@@ -23,7 +23,7 @@ void main() {
         return;
     }
     uint pixel = p.y * pc.dims.x + p.x;
-    int lod = cone_pixel_lod(pos);
+    int lod = cone_pixel_lod(pos, n);
     uint probes[8];
     float weights[8];
     int count = cone_weights(0, lod, pos, (pc.lamp.x & 2u) != 0u, pos + n * CONE_SURFACE_LIFT, probes, weights);

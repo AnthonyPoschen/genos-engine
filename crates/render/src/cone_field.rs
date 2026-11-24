@@ -102,8 +102,9 @@ pub const FINE_HEADER: usize = 33;
 /// Words a fine voxel record holds: for each way two words of light and area
 /// (half2 r g, half2 b area), then for each way three words of its plane
 /// (half2 centroid low-u, half2 high-u low-v, half2 high-v 0), in voxels from
-/// the voxel's low corner, then two words of the lamp term.
-pub const FINE_RECORD: usize = 32;
+/// the voxel's low corner, then two words of the lamp term, then the voxel's
+/// seat word ([`seat_word`]).
+pub const FINE_RECORD: usize = 33;
 
 /// The field as the GPU takes it. The fine levels (6.25 and 12.5 cm), which
 /// the march reads one voxel at a time, are compact: a header for each brick
@@ -126,6 +127,8 @@ pub struct ConeField {
     /// One byte a texel: 255 where a surface is in the voxel or one of its 26
     /// neighbours.
     pub occupancy: Vec<u8>,
+    /// One word a texel: the voxel's seat word ([`seat_word`]), 0 where none.
+    pub coarse_seats: Vec<u32>,
     pub voxels: usize,
     pub points: usize,
 }
@@ -454,6 +457,7 @@ impl FieldVoxels {
             atlas,
             faces: std::array::from_fn(|_| vec![0u16; texels * 4]),
             occupancy: vec![0u8; texels],
+            coarse_seats: vec![0u32; texels],
             voxels: self.cells.len(),
             points: self.points,
         };
@@ -475,6 +479,7 @@ impl FieldVoxels {
                         }
                         let Some(voxel) = self.cells.get(&(level, cell)) else { continue };
                         coarse_texel(&mut field, i, voxel);
+                        field.coarse_seats[i] = seat_word(voxel, cell, voxel_size(level));
                     }
                 }
             }
@@ -544,6 +549,54 @@ fn fine_record(out: &mut Vec<u32>, voxel: &Voxel, cell: [i32; 3], size: f32) {
     }
     out.push(pack_half2(voxel.lamp_light[0], voxel.lamp_light[1]));
     out.push(pack_half2(voxel.lamp_light[2], voxel.lamp_area));
+    out.push(seat_word(voxel, cell, size));
+}
+
+/// A voxel's seat: the area-weighted mean of the surface points filed in it,
+/// a fixed place in the world that a probe on this voxel sits on whatever
+/// the camera sees. Bit 31 set when the voxel has surface; bits 0..29 the
+/// point in 10 bits an axis over the voxel's cell from half a voxel below to
+/// half a voxel past (a point is filed a quarter voxel behind its surface, so
+/// it can sit just outside the cell). 0 when the voxel has no surface.
+#[must_use]
+pub fn seat_word_of(mean: V3, cell: [i32; 3], size: f32) -> u32 {
+    let mut word = 0x8000_0000u32;
+    for a in 0..3 {
+        let rel = (mean[a] - cell_low(cell[a], size)) / size;
+        let q = ((rel + 0.5) * 0.5 * 1023.0).round().clamp(0.0, 1023.0);
+        word |= (q as u32) << (10 * a);
+    }
+    word
+}
+
+fn cell_low(c: i32, size: f32) -> f32 {
+    f32::from(i16::try_from(c.clamp(-32_768, 32_767)).unwrap_or(0)) * size
+}
+
+fn seat_word(voxel: &Voxel, cell: [i32; 3], size: f32) -> u32 {
+    let total: f32 = voxel.area.iter().sum();
+    if total <= 0.0 {
+        return 0;
+    }
+    let mut mean = [0.0f32; 3];
+    for d in 0..6 {
+        mean = add(mean, voxel.at[d]);
+    }
+    seat_word_of(scale(mean, 1.0 / total), cell, size)
+}
+
+/// The point a seat word stands for, or `None` for 0.
+#[must_use]
+pub fn seat_point(word: u32, cell: [i32; 3], size: f32) -> Option<V3> {
+    if word & 0x8000_0000 == 0 {
+        return None;
+    }
+    let mut p = [0.0f32; 3];
+    for a in 0..3 {
+        let q = ((word >> (10 * a)) & 1023) as f32;
+        p[a] = cell_low(cell[a], size) + (q / 1023.0 * 2.0 - 0.5) * size;
+    }
+    Some(p)
 }
 
 /// The plastic sequence's `index`th point of the unit square.
@@ -626,6 +679,33 @@ mod tests {
     }
 
     #[test]
+    fn a_wall_voxels_seat_lies_on_the_wall_at_every_level() {
+        let field = wall().brick();
+        for level in FIELD_FINEST..=6 {
+            let size = voxel_size(level);
+            // The voxel the wall's points are filed in: a quarter voxel
+            // behind the surface (the probe's cell is found the same way).
+            let cell = cell_of([1.0 - 0.25 * size.min(0.25), 1.45, 0.55], size);
+            let word = if level <= PLANE_COARSEST {
+                let at = field.record(level, cell).expect("a fine record");
+                field.fine_voxels[at + FINE_RECORD - 1]
+            } else {
+                let t = field.texel(level, cell).expect("a coarse texel");
+                field.coarse_seats[field.flat(t).expect("texel")]
+            };
+            let seat = seat_point(word, cell, size).expect("a seat");
+            // On the wall plane, inside the voxel's square of the wall.
+            assert!((seat[0] - 1.0).abs() < 0.002 * size.max(0.5), "level {level}: x {}", seat[0]);
+            for a in [1, 2] {
+                let low = cell_low(cell[a], size);
+                assert!(seat[a] >= low - 1e-4 && seat[a] <= low + size + 1e-4, "level {level}: axis {a} {}", seat[a]);
+            }
+        }
+        // A voxel with no surface has no seat.
+        assert_eq!(seat_point(0, [0, 0, 0], 1.0), None);
+    }
+
+    #[test]
     fn the_apron_holds_the_next_bricks_voxels() {
         let field = wall().brick();
         let level = PLANE_COARSEST + 1;
@@ -666,6 +746,9 @@ pub struct ConeCascadeStats {
     pub dropped_insert: u32,
     pub cones_traced: u32,
     pub cones_closed: u32,
+    /// Probes whose voxel the field had no surface for, seated at the cell's
+    /// centre (a mover, or a level past the field's coarsest).
+    pub seat_fallbacks: u32,
 }
 
 /// One probe of a cascade as the GPU wrote it last frame (`lighting.cone_probes`).

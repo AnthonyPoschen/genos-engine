@@ -12,12 +12,28 @@ const CONE_T0: f32 = 2.5;
 /// Push flags: the merge and the shade weigh each probe by what passes to it.
 const CONE_SEE_MERGE: u32 = 1;
 const CONE_SEE_SHADE: u32 = 2;
+/// Push flag, knockout only: seat probes on their pixels' mean
+/// ([`crate::gate::CONE_FIELD_SEAT`]).
+const CONE_PIXEL_SEAT: u32 = 4;
+/// Knockout only: the share of the screen's probes the tables are sized for
+/// ([`crate::gate::CONE_TABLE_CAP`]).
+const CONE_KNOCKOUT_SHARE: u64 = 16;
 /// Work-buffer layout, as `cone_common.glsl` has it.
 const CONE_HEADER_WORDS: u64 = 256;
 const CONE_HASH_WORDS: u64 = 9;
 const CONE_PROBE_WORDS: u64 = 32;
 const CONE_CONE_WORDS: u64 = 4;
-const CONE_CONES_CAP: u64 = 1 << 21;
+/// Cascade 0's probes for each `probe_px` square of the screen. The voxel
+/// layer measured 3.0 to 3.5 (floors seen at a grazing angle, voxels split
+/// between levels), so 5 leaves room; gate B fails if it does not.
+const CONE_PROBE_SLACK: u64 = 5;
+/// Each cascade holds this share of the probes of the one below (measured
+/// 1/3.4: probes on a surface, at twice the spacing).
+const CONE_CASCADE_SHARE: u64 = 3;
+const CONE_MIN_CAP: u64 = 64;
+/// Header words cleared each frame; the layout follows them.
+const CONE_CLEARED: u64 = 64;
+const CONE_LAYOUT_AT: u64 = 64;
 const CONE_PIPES: usize = 7;
 const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-insert",
@@ -33,19 +49,52 @@ fn cone_dirs(theta: u32, c: u32) -> u64 {
     let t = u64::from(theta) << c;
     2 * t * t
 }
-fn cone_hash_size(c: u32) -> u64 {
-    65_536 >> c
+/// Cascade sizes and word offsets in the work buffer, from the voxel layer's
+/// cap: so many probes for the screen, each hash at most half full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ConeLayout {
+    hash: [u64; 5],
+    cap: [u64; 5],
+    hash_at: [u64; 5],
+    probes_at: [u64; 5],
+    cones_at: [u64; 5],
+    dirs: [u64; 5],
+    count: u32,
+    words: u64,
 }
-fn cone_cap(theta: u32, c: u32) -> u64 {
-    (cone_hash_size(c) / 2).min(CONE_CONES_CAP / cone_dirs(theta, c))
-}
-/// Word offset of cascade `c`'s hash.
-fn cone_hash_at(theta: u32, c: u32) -> u64 {
+
+fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32) -> ConeLayout {
+    let px = u64::from(probe_px.max(1));
+    let base = pixels.div_ceil(px * px).max(1) * CONE_PROBE_SLACK;
+    let count = count.min(5);
+    let mut l = ConeLayout { count, ..ConeLayout::default() };
     let mut at = CONE_HEADER_WORDS;
-    for k in 0..c {
-        at += cone_hash_size(k) * CONE_HASH_WORDS + cone_cap(theta, k) * CONE_PROBE_WORDS + cone_cap(theta, k) * cone_dirs(theta, k) * CONE_CONE_WORDS;
+    let mut cap = base;
+    for c in 0..count as usize {
+        let k = u32::try_from(c).unwrap_or(0);
+        l.cap[c] = cap.max(CONE_MIN_CAP);
+        l.hash[c] = (2 * l.cap[c]).next_power_of_two();
+        l.dirs[c] = cone_dirs(theta, k);
+        l.hash_at[c] = at;
+        at += l.hash[c] * CONE_HASH_WORDS;
+        l.probes_at[c] = at;
+        at += l.cap[c] * CONE_PROBE_WORDS;
+        l.cones_at[c] = at;
+        at += l.cap[c] * l.dirs[c] * CONE_CONE_WORDS;
+        cap = cap.div_ceil(CONE_CASCADE_SHARE);
     }
-    at
+    l.words = at;
+    l
+}
+
+impl ConeLayout {
+    /// The header words the shaders read it from (`cone_common.glsl`).
+    fn header(&self) -> Vec<u32> {
+        let w = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+        (0..5)
+            .flat_map(|c| [w(self.hash[c]), w(self.cap[c]), w(self.hash_at[c]), w(self.probes_at[c]), w(self.cones_at[c])])
+            .collect()
+    }
 }
 
 /// The renderer's cone-cascade state.
@@ -62,8 +111,9 @@ struct ConeGpu {
     /// Bytes still to upload: (buffer 0..3, bytes, cursor).
     pending: Vec<(usize, Vec<u8>, usize)>,
     ready: bool,
-    /// The work buffer's theta and cascade count.
-    work_shape: (u32, u32),
+    /// The work buffer's shape (theta, cascades, pixels, probe_px) and layout.
+    work_shape: (u32, u32, u64, u32),
+    layout: ConeLayout,
     /// The last build's sizes, for the debug tools.
     report: String,
 }
@@ -81,7 +131,8 @@ impl ConeGpu {
             building: None,
             pending: Vec::new(),
             ready: false,
-            work_shape: (0, 0),
+            work_shape: (0, 0, 0, 0),
+            layout: ConeLayout::default(),
             report: String::new(),
         }
     }
@@ -129,6 +180,7 @@ fn cone_field_bytes(field: &crate::cone_field::ConeField) -> [Vec<u8>; 4] {
             coarse[i * 16 + 2 * d + 1] = u32::from(f[2]) | (u32::from(f[3]) << 16);
         }
         coarse[i * 16 + 14] = u32::from(field.occupancy[i] != 0);
+        coarse[i * 16 + 15] = field.coarse_seats[i];
     }
     [cone_bytes(&table), cone_bytes(&field.fine_bricks), cone_bytes(&field.fine_voxels), cone_bytes(&coarse)]
 }
@@ -194,15 +246,19 @@ impl Gpu {
                 self.cone_take_field(k, &field)?;
             }
         }
-        let shape = (cone.theta, cone.count);
-        if self.cone.work_shape != shape || self.cone.work.buffer.is_null() {
-            let words = cone_hash_at(cone.theta, cone.count);
+        let pixels = u64::from(self.lighting.dims[0]) * u64::from(self.lighting.dims[1]);
+        let shape = (cone.theta, cone.count, pixels, cone.probe_px);
+        if pixels > 0 && (self.cone.work_shape != shape || self.cone.work.buffer.is_null()) {
+            let sized = if crate::gate::guard(crate::gate::CONE_TABLE_CAP) { pixels } else { pixels / CONE_KNOCKOUT_SHARE };
+            let layout = cone_layout(cone.theta, cone.count, sized, cone.probe_px);
+            let words = layout.words;
             self.idle_device();
             let mut old = std::mem::replace(&mut self.cone.work, Buffer::empty());
             self.destroy_buffer(&mut old);
             let share = self.light_families();
             self.cone.work = self.make_buffer_queues(words * 4, 0x20 | 0x2, Memory::Device, &share)?;
             self.cone.work_shape = shape;
+            self.cone.layout = layout;
             if self.lighting.ready {
                 self.write_lighting_sets()?;
             }
@@ -303,17 +359,27 @@ impl Gpu {
     /// merge and shade. Does nothing until the field is resident.
     fn record_cone(&mut self) {
         let cone = self.lighting.settings.cone;
-        if !cone.enabled || !self.cone.ready || self.cone.pipes[0].is_null() || self.cone.work.buffer.is_null() || self.cone.work_shape != (cone.theta, cone.count) {
+        if !cone.enabled || !self.cone.ready || self.cone.pipes[0].is_null() || self.cone.work.buffer.is_null() || self.cone.work_shape.0 != cone.theta || self.cone.work_shape.1 != cone.count || self.cone.work_shape.3 != cone.probe_px {
             return;
         }
         let (w, h) = (self.lighting.dims[0], self.lighting.dims[1]);
         let (theta, count) = (cone.theta, cone.count);
-        let flags = CONE_SEE_MERGE | CONE_SEE_SHADE;
+        let seat = if crate::gate::guard(crate::gate::CONE_FIELD_SEAT) { 0 } else { CONE_PIXEL_SEAT };
+        let flags = CONE_SEE_MERGE | CONE_SEE_SHADE | seat;
         let push = |c: u32| [w, h, 0, 0, c, theta, count, cone.probe_px, flags, CONE_T0.to_bits(), 0, 0];
+        let layout = self.cone.layout;
+        let header = layout.header();
         unsafe {
-            (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, 0, CONE_HEADER_WORDS * 4, 0);
-            for c in 0..count {
-                (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, cone_hash_at(theta, c) * 4, cone_hash_size(c) * CONE_HASH_WORDS * 4, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, 0, CONE_CLEARED * 4, 0);
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.cone.work.buffer,
+                CONE_LAYOUT_AT * 4,
+                (header.len() * 4) as u64,
+                header.as_ptr().cast::<c_void>(),
+            );
+            for c in 0..count as usize {
+                (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, layout.hash_at[c] * 4, layout.hash[c] * CONE_HASH_WORDS * 4, 0);
             }
         }
         let compute = |gpu: &Self| gpu.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
@@ -327,23 +393,23 @@ impl Gpu {
         self.cone_dispatch(0, push(0), pixels);
         compute(self);
         for c in 0..count {
-            self.cone_dispatch(1, push(c), line(cone_hash_size(c)));
+            self.cone_dispatch(1, push(c), line(layout.hash[c as usize]));
             compute(self);
         }
         for c in 1..count {
-            self.cone_dispatch(2, push(c), line(cone_cap(theta, c)));
+            self.cone_dispatch(2, push(c), line(layout.cap[c as usize]));
             compute(self);
         }
         for c in 0..count {
-            self.cone_dispatch(3, push(c), line(cone_cap(theta, c) * cone_dirs(theta, c)));
+            self.cone_dispatch(3, push(c), line(layout.cap[c as usize] * layout.dirs[c as usize]));
             compute(self);
         }
         for c in 0..count.saturating_sub(1) {
-            self.cone_dispatch(4, push(c), line(cone_cap(theta, c)));
+            self.cone_dispatch(4, push(c), line(layout.cap[c as usize]));
         }
         compute(self);
         for c in (0..count.saturating_sub(1)).rev() {
-            self.cone_dispatch(5, push(c), line(cone_cap(theta, c) * cone_dirs(theta, c)));
+            self.cone_dispatch(5, push(c), line(layout.cap[c as usize] * layout.dirs[c as usize]));
             compute(self);
         }
         self.cone_dispatch(6, push(0), pixels);
@@ -353,18 +419,19 @@ impl Gpu {
     /// Last frame's counts for each cascade. Waits for that frame. Empty
     /// when cone mode has not run.
     pub(crate) fn cone_stats(&mut self) -> Result<Vec<crate::ConeCascadeStats>, String> {
-        let (theta, count) = self.cone.work_shape;
+        let layout = self.cone.layout;
+        let count = layout.count;
         if self.cone.work.buffer.is_null() || count == 0 {
             return Ok(Vec::new());
         }
         self.idle_device();
-        let raw = self.copy_device_range(self.cone.work.buffer, 0, 40 * 4)?;
+        let raw = self.copy_device_range(self.cone.work.buffer, 0, 48 * 4)?;
         let w = u32_words(&raw);
         let at = |i: usize| w.get(i).copied().unwrap_or(0);
         Ok((0..count)
             .map(|c| {
                 let i = c as usize;
-                let cap = u32::try_from(cone_cap(theta, c)).unwrap_or(u32::MAX);
+                let cap = u32::try_from(layout.cap[i]).unwrap_or(u32::MAX);
                 let probes = at(i);
                 crate::ConeCascadeStats {
                     probes,
@@ -373,6 +440,7 @@ impl Gpu {
                     dropped_insert: at(32 + i),
                     cones_traced: at(16 + i),
                     cones_closed: at(24 + i),
+                    seat_fallbacks: at(40 + i),
                 }
             })
             .collect())
@@ -380,17 +448,17 @@ impl Gpu {
 
     /// Cascade `c`'s probes as last frame wrote them. Waits for that frame.
     pub(crate) fn cone_probes(&mut self, c: u32) -> Result<Vec<crate::ConeProbe>, String> {
-        let (theta, count) = self.cone.work_shape;
-        if self.cone.work.buffer.is_null() || c >= count {
+        let layout = self.cone.layout;
+        if self.cone.work.buffer.is_null() || c >= layout.count {
             return Ok(Vec::new());
         }
         self.idle_device();
         let head = u32_words(&self.copy_device_range(self.cone.work.buffer, 0, 8 * 4)?);
-        let kept = u64::from(head.get(c as usize).copied().unwrap_or(0)).min(cone_cap(theta, c));
+        let kept = u64::from(head.get(c as usize).copied().unwrap_or(0)).min(layout.cap[c as usize]);
         if kept == 0 {
             return Ok(Vec::new());
         }
-        let at = cone_hash_at(theta, c) + cone_hash_size(c) * CONE_HASH_WORDS;
+        let at = layout.probes_at[c as usize];
         let raw = self.copy_device_range(self.cone.work.buffer, at * 4, kept * CONE_PROBE_WORDS * 4)?;
         let w = u32_words(&raw);
         let stride = CONE_PROBE_WORDS as usize;

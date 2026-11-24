@@ -1,7 +1,9 @@
 #version 450
 // Cone-traced cascades, pass 2: each filled hash slot of cascade params.x
-// becomes a probe: its seat (the mean point, lifted along the mean normal when
-// that holds) and, at cascade 0, its cones' start (the mean point and normal).
+// becomes a probe: its seat (the field voxel's surface point, lifted along
+// its normal when that holds) and, at cascade 0, its cones' start (that point
+// and normal). A voxel the field has no surface for (a mover) is seated at
+// its centre and counted.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
@@ -25,16 +27,26 @@ void main() {
         return;
     }
     cwork.w[at + 8u] = index;
-    float count = float(max(cwork.w[at + 1u], 1u));
-    vec3 sum = vec3(ivec3(cwork.w[at + 2u], cwork.w[at + 3u], cwork.w[at + 4u])) / CONE_FIXED;
-    vec3 nsum = vec3(ivec3(cwork.w[at + 5u], cwork.w[at + 6u], cwork.w[at + 7u])) / CONE_FIXED;
-    vec3 mean = scene.eye.xyz + sum / count;
-    float held = length(nsum) / count;
-    vec3 normal = length(nsum) > 0.0 ? normalize(nsum) : vec3(0.0, 1.0, 0.0);
-    vec3 seat = mean + (held > CONE_SEAT_HELD ? normal * CONE_LIFT * cone_size(CONE_FINEST) : vec3(0.0));
+    uint count = cwork.w[at + 1u];
     int lod = int((key >> 27u) & 15u);
     ivec3 rel = ivec3(int((key >> 18u) & 511u), int((key >> 9u) & 511u), int(key & 511u)) - ivec3(CONE_KEY_SPAN);
     ivec3 cell = rel + ivec3(floor(scene.eye.xyz / cone_spacing(lod, c)));
+    vec3 mean;
+    vec3 normal;
+    float held;
+    if ((pc.lamp.x & CONE_PIXEL_SEAT) != 0u) {
+        // Gate knockout only (gate.rs CONE_FIELD_SEAT): the pixels' mean.
+        float n = float(max(count, 1u));
+        vec3 sum = vec3(ivec3(cwork.w[at + 2u], cwork.w[at + 3u], cwork.w[at + 4u])) / CONE_FIXED;
+        vec3 nsum = vec3(ivec3(cwork.w[at + 5u], cwork.w[at + 6u], cwork.w[at + 7u])) / CONE_FIXED;
+        mean = scene.eye.xyz + sum / n;
+        held = length(nsum) / n;
+        normal = length(nsum) > 0.0 ? normalize(nsum) : vec3(0.0, 1.0, 0.0);
+    } else if (!cone_seat(lod + c, cell, mean, normal, held)) {
+        mean = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c);
+        atomicAdd(cwork.w[CONE_SEAT_FALLBACK + uint(c)], 1u);
+    }
+    vec3 seat = mean + (held > CONE_SEAT_HELD ? normal * CONE_LIFT * cone_size(CONE_FINEST) : vec3(0.0));
     uint r = cone_probe(c, index);
     cwork.w[r] = key;
     cwork.w[r + 1u] = uint(lod);
@@ -43,7 +55,7 @@ void main() {
     cwork.w[r + 4u] = uint(cell.x);
     cwork.w[r + 5u] = uint(cell.y);
     cwork.w[r + 6u] = uint(cell.z);
-    cwork.w[r + 7u] = uint(count);
+    cwork.w[r + 7u] = count;
     cone_put3(r + 8u, seat);
     cone_put3(r + 12u, mean);
     cone_put3(r + 16u, normal);

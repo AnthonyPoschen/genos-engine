@@ -402,3 +402,16 @@ Limits: clipped 1%, swing 2 stops, opens at least 2 stops. `make sponza-gate` pa
 The tables that overflow are cascade 0's probe table and its insert hash, and cascade 4's probe table (256). Where nothing is dropped, a still frame does not pop and a turn and back gives the same picture bit for bit: the flicker is the drops. Seats move everywhere (gate C): they are the pixel mean. The earlier 28% to 70% still-camera numbers were wrong: `step` advanced the paused hall and moved its lamps, and field rebuilds landed in the measurement.
 
 The gates go into `scripts/ci-gate-knockout.sh` in step 4, when they pass; that script has to stay green. Already failing before this work, on lavapipe: `gpu_frame`'s `a_bright_lamp_does_not_cross_an_opaque_wall`, `a_close_lamp_does_not_cross_the_wall` and `the_corridor_carries_bounce_around_the_bend`, besides the two AGENTS.md lists (`5a5e5058`).
+
+**Step 4 result, 25 Nov 2026.** The voxel layer as section 3 has it. A pixel's probe is the field voxel its surface is filed in (a quarter voxel behind the surface, as the field files points); the level is the finest whose voxel is about `probe_px` pixels wide, measured from the voxel's centre to the eye snapped to a grid four voxels wide at that level. The seat is the voxel's **field seat**: the area-weighted mean of the surface points the field filed in it, stored as a seat word (fine records grow to 33 words; coarse texels use their spare word), lifted along the area-weighted normal of its ways. A voxel the field has no surface for (a mover, or a level past 8 m) is seated at its centre and counted (`seat_fallbacks`). The tables come from the layer's cap: cascade 0 holds 5 probes for each `probe_px` square of the screen (3.0 to 3.5 measured), each cascade a third of the one below, each hash at most half full; the layout is written into the work buffer's header each frame (`cone_layout`).
+
+`tools/lighting/cone_stability_gate.py`, every view and size of step 3: every gate passes. A: no pixel pops. B: nothing dropped; the most full table is under half its cap. C: 0 of 14,298 to 36,279 shared probes move their seat after a 5° yaw or a 10 cm step. D: 0 pixels change after a turn away and back. In CI, `crates/render/tests/cone_stability.rs` runs B and D and C on lavapipe and goes red when `cone_table_cap` (22,176 dropped) or `cone_field_seat` (511 of 525 seats moved) is knocked out (`scripts/ci-gate-knockout.sh`).
+
+Cost (`tools/lighting/cone_cost.py`, RTX 4070, scene paused, frame ms; the cone mode has no bounce and no sun yet):
+
+| View | 1280x720 old / cone | 1920x1080 old / cone | Cascade-0 probes at 1080p | Seat fallbacks c0 |
+|---|---|---|---|---|
+| Hall | 5.1 / 21.6 | 8.4 / 34.1 | 37,170 | 31 |
+| Sponza arcade | 16.1 / 21.9 | 21.2 / 35.7 | 27,726 | 461 |
+
+The work buffer is 160 MiB at 1280x720, 364 MiB at 1920x1080 and 303 MiB at 1262x1376, on top of the field (264 MiB hall, 633 MiB Sponza): over ADR 0012's budget. The cone cost is the trace step; it is the next thing to cut after the field (step 5).

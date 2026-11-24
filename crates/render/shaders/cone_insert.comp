@@ -1,6 +1,8 @@
 #version 450
 // Cone-traced cascades, pass 1: every pixel puts its probe of each cascade in
-// that cascade's hash and adds its point and normal to the probe's seat.
+// that cascade's hash and counts itself there. The probe is the field voxel
+// the pixel's surface was filed in (the voxel layer); the pixel chooses which
+// voxels have probes, never where a probe sits.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "lighting_common.glsl"
@@ -18,23 +20,26 @@ void main() {
     if (!lighting_surface(p, pos, n, albedo, two_sided)) {
         return;
     }
-    int lod = cone_pixel_lod(pos);
-    ivec3 at = ivec3(round((pos - scene.eye.xyz) * CONE_FIXED));
-    ivec3 normal = ivec3(round(n * CONE_FIXED));
+    int lod = cone_pixel_lod(pos, n);
     int count = int(pc.params.z);
     for (int c = 0; c < count; c++) {
-        uint key = cone_key(lod, ivec3(floor(pos / cone_spacing(lod, c))), c);
+        uint key = cone_key(lod, cone_cell(pos, n, cone_spacing(lod, c)), c);
         uint slot = key == CONE_EMPTY ? CONE_NO_BRICK : cone_slot(c, key, true);
         if (slot == CONE_NO_BRICK) {
             atomicAdd(cwork.w[CONE_INSERT_DROPPED + uint(c)], 1u);
             continue;
         }
         atomicAdd(cwork.w[slot + 1u], 1u);
-        atomicAdd(cwork.w[slot + 2u], uint(at.x));
-        atomicAdd(cwork.w[slot + 3u], uint(at.y));
-        atomicAdd(cwork.w[slot + 4u], uint(at.z));
-        atomicAdd(cwork.w[slot + 5u], uint(normal.x));
-        atomicAdd(cwork.w[slot + 6u], uint(normal.y));
-        atomicAdd(cwork.w[slot + 7u], uint(normal.z));
+        if ((pc.lamp.x & CONE_PIXEL_SEAT) != 0u) {
+            // Gate knockout only (gate.rs CONE_FIELD_SEAT): the stage-2 seat.
+            ivec3 at = ivec3(round((pos - scene.eye.xyz) * CONE_FIXED));
+            ivec3 normal = ivec3(round(n * CONE_FIXED));
+            atomicAdd(cwork.w[slot + 2u], uint(at.x));
+            atomicAdd(cwork.w[slot + 3u], uint(at.y));
+            atomicAdd(cwork.w[slot + 4u], uint(at.z));
+            atomicAdd(cwork.w[slot + 5u], uint(normal.x));
+            atomicAdd(cwork.w[slot + 6u], uint(normal.y));
+            atomicAdd(cwork.w[slot + 7u], uint(normal.z));
+        }
     }
 }

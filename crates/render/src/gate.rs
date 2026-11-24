@@ -34,6 +34,19 @@ pub const MOVING_LAMP_WALL: &str = "moving_lamp_wall";
 /// collapses to a hard edge.
 pub const LAMP_DISC: &str = "lamp_disc";
 
+/// The cone-traced cascades size their tables from the voxel layer's cap.
+///
+/// Knocking this out sizes them for a sixteenth of the screen's probes, so
+/// cascade 0 runs past its cap, probes are dropped, and which ones depends on
+/// the GPU's thread order: the presented frame no longer comes back bit for bit.
+pub const CONE_TABLE_CAP: &str = "cone_table_cap";
+
+/// The cone-traced cascades seat each probe on its field voxel's surface.
+///
+/// Knocking this out seats it on the mean of the pixels it stands for (the
+/// stage-2 rule): the seat follows what the camera sees, and a turn moves it.
+pub const CONE_FIELD_SEAT: &str = "cone_field_seat";
+
 /// True when the named production guard is in force.
 #[must_use]
 #[inline]
@@ -81,6 +94,8 @@ mod tests {
         assert!(super::guard(super::BOUNCE_IN_COMPOSE));
         assert!(super::guard(super::MOVING_LAMP_WALL));
         assert!(super::guard(super::LAMP_DISC));
+        assert!(super::guard(super::CONE_TABLE_CAP));
+        assert!(super::guard(super::CONE_FIELD_SEAT));
         assert!(super::guard("unknown_guard"));
     }
 }

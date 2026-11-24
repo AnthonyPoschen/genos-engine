@@ -1626,6 +1626,7 @@ impl Tools {
                             ("dropped_insert", num(f64::from(s.dropped_insert))),
                             ("cones_traced", num(f64::from(s.cones_traced))),
                             ("cones_closed", num(f64::from(s.cones_closed))),
+                            ("seat_fallbacks", num(f64::from(s.seat_fallbacks))),
                         ])
                     })
                     .collect();
