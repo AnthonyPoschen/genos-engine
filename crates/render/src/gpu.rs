@@ -1244,6 +1244,7 @@ impl Renderer {
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
+        self.gpu.sync_cone(world)?;
         self.gpu.set_froxel_frame(&world.scene, camera, aspect);
         if !self.gpu.record_and_submit(&matrix)? {
             return Ok(None);
@@ -2006,6 +2007,8 @@ struct Gpu {
     mesh_field_dirty: Vec<(usize, usize)>,
     /// GI frame path (lighting_gpu.rs).
     lighting: Lighting,
+    /// The cone-traced cascades (experimental, `cone_gpu.rs`).
+    cone: ConeGpu,
     /// Fragment shader for the next raster pipeline built, instead of overlay.frag.
     frag_override: Option<&'static [u8]>,
     /// The vertex shader the next raster pipeline uses instead of scene.vert.
@@ -2958,6 +2961,7 @@ impl Gpu {
                 mesh_field_shadow: Vec::new(),
                 mesh_field_dirty: Vec::new(),
                 lighting: Lighting::default(),
+                cone: ConeGpu::new(),
                 frag_override: None,
                 vert_override: None,
                 layout_override: std::ptr::null_mut(),
@@ -4440,6 +4444,7 @@ impl Gpu {
             self.init_fresh_atlas();
             self.update_resident_scene()?;
             self.update_resident_fields()?;
+            self.cone_upload()?;
             let swap = self.swap_images[index as usize];
             // The acquire semaphore is waited in color output. The layout
             // transition has to happen in that stage, or it races the
@@ -10620,6 +10625,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
+include!("cone_gpu.rs");
 include!("reflections_frame.rs");
 include!("vk_platform.rs");
 

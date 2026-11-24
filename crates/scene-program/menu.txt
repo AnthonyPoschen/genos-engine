@@ -41,6 +41,7 @@ Mesh | mesh_replay | Replay | closed | mesh_events
 Pipeline | - | - | open | lighting_direct
 Pipeline | - | - | open | lighting_shadows
 Pipeline | - | - | open | lighting_gi
+Pipeline | - | - | open | lighting_cone_cascades
 Pipeline | - | - | open | lighting_world_cache
 Pipeline | - | - | open | lighting_sky
 Pipeline | - | - | open | lighting_emissive

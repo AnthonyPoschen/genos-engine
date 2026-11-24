@@ -3877,6 +3877,7 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_shadow_filter" => "Shadow cell cache",
         "lighting_gi" => "GI",
         "lighting_emissive" => "Emissive",
+        "lighting_cone_cascades" => "Cone-traced cascades",
         "lighting_compose_reuse" => "Compose reuse",
         "lighting_full_effort" => "Full effort",
         _ => fallback,

@@ -181,6 +181,14 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         ("HDR_AGX_SPV", "hdr_agx.comp"),
         ("HDR_BLOOM_SPV", "hdr_bloom.comp"),
         ("HDR_METER_SPV", "hdr_meter.comp"),
+        // The cone-traced cascades (experimental, lighting key cone_cascades).
+        ("CONE_INSERT_SPV", "cone_insert.comp"),
+        ("CONE_COMPACT_SPV", "cone_compact.comp"),
+        ("CONE_CHAIN_SPV", "cone_chain.comp"),
+        ("CONE_TRACE_SPV", "cone_trace.comp"),
+        ("CONE_WEIGHTS_SPV", "cone_weights.comp"),
+        ("CONE_MERGE_SPV", "cone_merge.comp"),
+        ("CONE_SHADE_SPV", "cone_shade.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -326,6 +334,7 @@ fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
 
 fn rerun_shader_pieces() {
     for piece in [
+        "cone_common.glsl",
         "lighting_common.glsl",
         "lighting_screen_probe.glsl",
         "lighting_pack.glsl",

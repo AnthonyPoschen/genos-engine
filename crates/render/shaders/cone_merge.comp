@@ -1,0 +1,68 @@
+#version 450
+// Cone-traced cascades, pass 6: cascade params.x takes the merged cones of
+// the next one (the paper's equation 7): its own interval's light, plus the
+// share it passed times the mean of the next cascade's four finer
+// directions, read from the probes pass 5 chose. A direction no probe has is
+// left out, not read as dark.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+void main() {
+    int c = int(pc.params.x);
+    uint dirs = cone_dirs(c);
+    uint index = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint probe = index / dirs;
+    uint bin = index % dirs;
+    if (probe >= min(cwork.w[CONE_COUNTS + uint(c)], cone_cap(c))) {
+        return;
+    }
+    uint at = cone_record_at(c, probe, bin);
+    vec3 light;
+    float beta;
+    vec3 moment;
+    if (!cone_get(at, light, beta, moment) || beta <= 0.0) {
+        return;
+    }
+    uint r = cone_probe(c, probe);
+    uint theta = cone_theta(c);
+    uint theta_up = cone_theta(c + 1);
+    uint x = bin % (2u * theta);
+    uint y = bin / (2u * theta);
+    vec3 far = vec3(0.0);
+    vec3 far_moment = vec3(0.0);
+    float found = 0.0;
+    for (uint k = 0u; k < 4u; k++) {
+        uint child = (2u * y + (k >> 1u)) * 2u * theta_up + 2u * x + (k & 1u);
+        vec3 sum = vec3(0.0);
+        vec3 msum = vec3(0.0);
+        float weight = 0.0;
+        for (int j = 0; j < 8; j++) {
+            uint q = cwork.w[r + 20u + uint(j)];
+            if (q == CONE_NO_BRICK) {
+                break;
+            }
+            vec2 pair = unpackHalf2x16(cwork.w[r + 28u + uint(j / 2)]);
+            float w = (j % 2 == 0) ? pair.x : pair.y;
+            vec3 l;
+            float th;
+            vec3 m;
+            if (w > 0.0 && cone_get(cone_record_at(c + 1, q, child), l, th, m)) {
+                sum += l * w;
+                msum += m * w;
+                weight += w;
+            }
+        }
+        if (weight > 0.0) {
+            far += sum / weight;
+            far_moment += msum / weight;
+            found += 1.0;
+        }
+    }
+    if (found > 0.0) {
+        light += far * (beta / found);
+        moment += far_moment * (beta / found);
+    }
+    cone_put(at, light, beta, moment);
+}

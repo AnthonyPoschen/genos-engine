@@ -1058,7 +1058,7 @@ impl Gpu {
             count: u32,
             bindings: *const Binding,
         }
-        let bindings: Vec<Binding> = [0u32, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20]
+        let bindings: Vec<Binding> = [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
             .iter()
             .map(|&b| Binding {
                 binding: b,
@@ -1147,8 +1147,8 @@ impl Gpu {
                 ),
                 "lighting pipeline layout",
             )?;
-            // 3 sets × 16 storage bindings (added mover table/pool at 15).
-            let size = Size { kind: 7, count: 51 };
+            // 3 sets × 21 storage bindings (1-4 and 15: the cone-traced cascades).
+            let size = Size { kind: 7, count: 63 };
             let pool = PoolInfo {
                 s_type: 33,
                 next: std::ptr::null(),
@@ -1865,6 +1865,11 @@ impl Gpu {
                 (12, self.lighting.lamp_res.buffer),
                 (19, self.lighting.restir_buf.buffer),
                 (20, self.bound_or_standin(&self.lighting.area_mean)),
+                (1, self.bound_or_standin(&self.cone.table)),
+                (2, self.bound_or_standin(&self.cone.fine)),
+                (3, self.bound_or_standin(&self.cone.records)),
+                (4, self.bound_or_standin(&self.cone.coarse)),
+                (15, self.bound_or_standin(&self.cone.work)),
             ];
             let infos: Vec<BufInfo> = buffers
                 .iter()
@@ -3499,6 +3504,7 @@ impl Gpu {
             .unwrap_or_else(|| scene.lighting.clone());
         desired.apply_env()?;
         desired.sanitize();
+        cone_effective(&mut desired);
         let debug = scene.debug.effective(self.out_cli.as_deref());
         self.debug_out = debug.out;
         let async_on = desired.experiments.cache_async && !self.lighting.async_failed;
@@ -5187,6 +5193,9 @@ impl Gpu {
                 }
                 // Level 0 traces and shades every live voxel, then publish
                 // blends this level with the next coarser footprint level.
+                if pass == 7 {
+                    self.record_cone();
+                }
                 if pass == 7 && self.lighting.cache_full {
                     self.dispatch_cascade_upper();
                     self.dispatch_cascade_l0();
@@ -5610,6 +5619,7 @@ impl Gpu {
         // have given up while this frame and the world submission are queued.
         self.drain_for_teardown();
         self.wait_lighting_world();
+        self.destroy_cone();
         self.lighting.world_busy = false;
         let mut world_stats = std::mem::replace(&mut self.lighting.world_stats, Buffer::empty());
         let mut world_scene = std::mem::replace(&mut self.lighting.world_scene, Buffer::empty());

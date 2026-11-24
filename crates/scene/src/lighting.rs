@@ -384,6 +384,30 @@ impl SurfaceCacheBlend {
     }
 }
 
+/// The cone-traced cascades: experimental, off in every preset
+/// (`docs/systems/lighting/cone-traced-cascades-plan.md`). On, every point lamp
+/// is an emitter in a voxel field built when the scene loads, and a pixel's
+/// light is what the cascades bring it: the direct pass, its shadows, the GI
+/// passes and the ambient fill do not run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConeCascadeSettings {
+    pub enabled: bool,
+    /// A voxel-layer probe's size, in pixels on screen (4..=64).
+    pub probe_px: u32,
+    /// Directions at cascade 0 are `2 theta^2`; each cascade doubles theta (2..=8).
+    pub theta: u32,
+    /// Cascades (1..=5).
+    pub count: u32,
+    /// A point lamp's glowing sphere, in metres (0.02..=1).
+    pub lamp_radius: f32,
+}
+
+impl Default for ConeCascadeSettings {
+    fn default() -> Self {
+        Self { enabled: false, probe_px: 12, theta: 4, count: 5, lamp_radius: 0.1 }
+    }
+}
+
 /// Global illumination as a whole. Off skips every GI pass and the GI buffers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GiSettings {
@@ -720,6 +744,8 @@ pub struct LightingSettings {
     pub direct: DirectSettings,
     pub shadows: ShadowSettings,
     pub gi: GiSettings,
+    /// The cone-traced cascades (experimental).
+    pub cone: ConeCascadeSettings,
     pub surface_cache: SurfaceCacheSettings,
     pub bounce: BounceSettings,
     pub probes: ProbeSettings,
@@ -910,6 +936,7 @@ impl LightingSettings {
                 budget_shift: 0,
                 world_mode: None,
             },
+            cone: ConeCascadeSettings::default(),
             surface_cache: SurfaceCacheSettings {
                 attach_movers: true,
                 mover_texels: 32_768,
@@ -992,6 +1019,10 @@ impl LightingSettings {
         self.shadows.cell_metres = self.shadows.cell_metres.clamp(0.05, 2.0);
         self.gi.refresh_frames = self.gi.refresh_frames.max(1);
         self.gi.budget_shift = self.gi.budget_shift.min(7);
+        self.cone.probe_px = self.cone.probe_px.clamp(4, 64);
+        self.cone.theta = self.cone.theta.clamp(2, 8);
+        self.cone.count = self.cone.count.clamp(1, 5);
+        self.cone.lamp_radius = if self.cone.lamp_radius.is_finite() { self.cone.lamp_radius.clamp(0.02, 1.0) } else { 0.1 };
         self.surface_cache.firefly_sigma = if self.surface_cache.firefly_sigma.is_finite() {
             self.surface_cache.firefly_sigma.max(0.0)
         } else {
@@ -1323,6 +1354,11 @@ impl LightingSettings {
         let _ = writeln!(out, "gi={}", bit(self.gi.enabled));
         let _ = writeln!(out, "gi_refresh={}", self.gi.refresh_frames);
         let _ = writeln!(out, "budget_shift={}", self.gi.budget_shift);
+        let _ = writeln!(out, "cone_cascades={}", bit(self.cone.enabled));
+        let _ = writeln!(out, "cone_cascades.probe_px={}", self.cone.probe_px);
+        let _ = writeln!(out, "cone_cascades.theta={}", self.cone.theta);
+        let _ = writeln!(out, "cone_cascades.count={}", self.cone.count);
+        let _ = writeln!(out, "cone_cascades.lamp_radius={}", num_text(self.cone.lamp_radius));
         let _ = writeln!(
             out,
             "surface_cache.attach_movers={}",
@@ -1577,6 +1613,11 @@ impl LightingSettings {
             "gi" => self.gi.enabled = on(value)?,
             "gi_refresh" => self.gi.refresh_frames = num_u32(value)?.max(1),
             "budget_shift" => self.gi.budget_shift = num_u32(value)?.min(7),
+            "cone_cascades" => self.cone.enabled = on(value)?,
+            "cone_cascades.probe_px" => self.cone.probe_px = num_u32(value)?.clamp(4, 64),
+            "cone_cascades.theta" => self.cone.theta = num_u32(value)?.clamp(2, 8),
+            "cone_cascades.count" => self.cone.count = num_u32(value)?.clamp(1, 5),
+            "cone_cascades.lamp_radius" => self.cone.lamp_radius = num_f32(value)?.clamp(0.02, 1.0),
             "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
             "surface_cache.mover_texels" => self.surface_cache.mover_texels = num_u32(value)?,
             "surface_cache.blend" => {

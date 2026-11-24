@@ -582,6 +582,7 @@ pub fn lighting_knobs(lighting: &LightingSettings) -> Vec<Knob> {
         ),
         Knob::switch("lighting_sky", "Lighting sky", lighting.sky),
         Knob::switch("lighting_emissive", "Emissive", lighting.emissive),
+        Knob::switch("lighting_cone_cascades", "Cone-traced cascades", lighting.cone.enabled),
         Knob::switch("lighting_prefill", "Prefill", lighting.prefill),
         Knob::switch(
             "lighting_full_effort",
@@ -748,6 +749,7 @@ pub fn apply_lighting_knob(
         "lighting_compose_reuse" => ("compose_reuse", on_off(v)),
         "lighting_sky" => ("sky", on_off(v)),
         "lighting_emissive" => ("emissive", on_off(v)),
+        "lighting_cone_cascades" => ("cone_cascades", on_off(v)),
         "lighting_prefill" => ("prefill", on_off(v)),
         "lighting_full_effort" => ("full_effort", on_off(v)),
         "lighting_ambient" => (
@@ -1005,6 +1007,7 @@ mod tests {
         "lighting_compose_reuse",
         "lighting_sky",
         "lighting_emissive",
+        "lighting_cone_cascades",
         "lighting_prefill",
         "lighting_full_effort",
         "lighting_ambient",
