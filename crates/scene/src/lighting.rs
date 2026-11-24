@@ -2015,8 +2015,12 @@ impl LightingSettings {
 
     fn apply_launch(&mut self, launch: &LightingLaunch) {
         let clock = self.time_of_day;
+        // The cone-traced cascades are a pipeline switch, not a quality tier: a
+        // preset lock keeps them as the menu or a command set them.
+        let cone = self.cone;
         if let Some(preset) = launch.preset {
             *self = Self::preset(preset);
+            self.cone = cone;
         }
         if let Some(count) = launch.bounces {
             self.bounce.count = count;
@@ -2751,6 +2755,19 @@ mod launch_tests {
         assert!(settings.apply_env_from(&["--bounces", "2"], &good).is_ok());
         assert_eq!(settings.bounce.count, 2);
         assert!(!settings.gi.enabled);
+    }
+
+    #[test]
+    fn a_preset_lock_keeps_the_cone_cascades_switch() {
+        let none = |_: &str| None;
+        let mut settings = LightingSettings::default();
+        settings.set_key("cone_cascades", "on").unwrap();
+        settings.set_key("cone_cascades.probe_px", "20").unwrap();
+        settings.set_key("gi", "off").unwrap();
+        settings.apply_env_from(&["--preset", "high"], &none).unwrap();
+        assert!(settings.cone.enabled);
+        assert_eq!(settings.cone.probe_px, 20);
+        assert!(settings.gi.enabled, "the preset still sets its own keys");
     }
 
     fn hours_near(value: f32, hours: f32) {
