@@ -23,7 +23,7 @@
 
 mod gpu;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -159,6 +159,11 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        are traced finest first, and the share open is the
                        product of the chain's finer probes' passed shares
                        in the bins holding the direction (default off)
+  --descend            a covered coarse step is walked front to back from its
+                       coarsest half down: a piece with no surface in or next
+                       to its cells is passed whole, and only the rest goes
+                       down to the refine level's crossing test (--gpu-bench
+                       follows it)
   --seat-at-start      with --cone-voxel nearest: the merge's visibility test
                        aims at the voxel-layer point a coarse probe's cones
                        start from, not at the probe's seat
@@ -262,6 +267,7 @@ struct Options {
     own_interval: bool,
     seat_at_start: bool,
     near_check: NearCheck,
+    descend: bool,
     refine_cascades: usize,
     probe_px: f32,
     theta: u32,
@@ -316,6 +322,7 @@ fn parse_args() -> Result<Option<Options>, String> {
         own_interval: false,
         seat_at_start: false,
         near_check: NearCheck::Off,
+        descend: false,
         refine_cascades: usize::MAX,
         probe_px: 4.0,
         theta: 4,
@@ -466,6 +473,7 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--gpu-bench" => o.gpu_bench = true,
             "--own-interval" => o.own_interval = true,
             "--seat-at-start" => o.seat_at_start = true,
+            "--descend" => o.descend = true,
             "--near-check" => {
                 o.near_check = match value()?.as_str() {
                     "off" => NearCheck::Off,
@@ -703,6 +711,9 @@ struct Voxels {
     /// nothing moves).
     shadow_rays: u64,
     points: usize,
+    /// `--descend`: the cells at each level that hold a surface or are next
+    /// to one (dilated by one cell), built on first use.
+    occupancy: std::sync::OnceLock<HashSet<(u8, [i32; 3])>>,
 }
 
 fn voxel_size(level: u8) -> f32 {
@@ -711,7 +722,35 @@ fn voxel_size(level: u8) -> f32 {
 
 impl Voxels {
     fn new() -> Self {
-        Self { cells: HashMap::new(), lookups: AtomicU64::new(0), shadow_rays: 0, points: 0 }
+        Self { cells: HashMap::new(), lookups: AtomicU64::new(0), shadow_rays: 0, points: 0, occupancy: std::sync::OnceLock::new() }
+    }
+
+    /// The dilated occupancy: every cell with a surface, and its 26 neighbours.
+    fn occupancy(&self) -> &HashSet<(u8, [i32; 3])> {
+        self.occupancy.get_or_init(|| {
+            let mut set = HashSet::new();
+            for ((level, cell), voxel) in &self.cells {
+                if voxel.area.iter().all(|a| *a <= 0.0) {
+                    continue;
+                }
+                for dz in -1..=1 {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            set.insert((*level, [cell[0] + dx, cell[1] + dy, cell[2] + dz]));
+                        }
+                    }
+                }
+            }
+            set
+        })
+    }
+
+    /// Whether the piece of the axis from `a` to `b` at `level` can meet a
+    /// surface: its start, middle or end is in a dilated occupied cell.
+    fn occupied(&self, level: u8, start: V3, dir: V3, a: f32, b: f32) -> bool {
+        let size = voxel_size(level);
+        let set = self.occupancy();
+        [a, f32::midpoint(a, b), b].iter().any(|t| set.contains(&(level, nearest_cell(add(start, scale(dir, *t)), size))))
     }
 
     /// A patch of surface: its point, the way it faces, its area and the
@@ -2060,6 +2099,31 @@ fn march_span(voxels: &Voxels, o: &Options, start: V3, dir: V3, width: f32, end:
             let fine = voxel_size(o.refine_level);
             lamps_here(&mut lamps);
             let mut u = from;
+            if o.descend {
+                // Front to back, the coarsest piece first: a piece no surface
+                // is in or next to is passed whole (its lamps still taken);
+                // else one level finer, down to the refine level's crossing.
+                while u < to && span.covered < 0.98 {
+                    let mut l = level - 1;
+                    loop {
+                        let next = (u + voxel_size(l)).min(to);
+                        let refine = l <= o.refine_level;
+                        if refine || !voxels.occupied(l, start, dir, u, next) {
+                            if refine {
+                                voxels.crossed(o.refine_level, add(start, scale(dir, u)), add(start, scale(dir, next)), dir, rules, &mut found);
+                            } else {
+                                found.clear();
+                            }
+                            found.extend(lamps.iter().filter(|m| m.depth > u && m.depth <= next).map(|m| Met { depth: m.depth - u, ..*m }));
+                            found.sort_by(|x, y| x.depth.total_cmp(&y.depth));
+                            span.take(&found, o.multiply_cover, sink.as_deref_mut());
+                            u = next;
+                            break;
+                        }
+                        l -= 1;
+                    }
+                }
+            }
             while u < to && span.covered < 0.98 {
                 let next = (u + fine).min(to);
                 voxels.crossed(o.refine_level, add(start, scale(dir, u)), add(start, scale(dir, next)), dir, rules, &mut found);
@@ -2749,6 +2813,15 @@ fn gpu_bench(
         }
         volumes[6][at + 3] = half(voxel.lamp_area);
     }
+    // The dilated occupancy over all levels, as `Voxels::occupied` reads it.
+    let mut occupancy = vec![0u8; texels / 4];
+    for (level, cell) in voxels.occupancy() {
+        let k = usize::from(level - VOXEL_FINEST);
+        let local = [cell[0] - corner[k][0], cell[1] - corner[k][1], cell[2] - corner[k][2]];
+        if local.iter().all(|v| *v >= 0 && *v < side) {
+            occupancy[volume_texel(local, k, side) / 4] = u8::MAX;
+        }
+    }
     // The plane volumes, over the levels a crossing reads.
     let refine = o.refine_level.clamp(VOXEL_FINEST, VOXEL_COARSEST);
     let plane_levels = u32::from(refine - VOXEL_FINEST + 1);
@@ -2788,6 +2861,8 @@ fn gpu_bench(
             faces: &volumes,
             planes: &planes,
             plane_levels,
+            occupancy: &occupancy,
+            descend: o.descend,
             clip,
             width0: o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt(),
             cascades: u32::try_from(o.cascades).unwrap_or(u32::MAX),

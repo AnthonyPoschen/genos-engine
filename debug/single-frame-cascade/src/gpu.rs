@@ -30,6 +30,10 @@ pub struct CascadeInput<'a> {
     /// Twelve RGBA8 volumes over the plane levels: six A, then six B.
     pub planes: &'a [Vec<u8>; 12],
     pub plane_levels: u32,
+    /// One R8 volume over all levels: 255 where a cell holds a surface or
+    /// is next to one.
+    pub occupancy: &'a [u8],
+    pub descend: bool,
     pub clip: [[f32; 4]; 8],
     pub width0: f32,
     pub cascades: u32,
@@ -346,8 +350,10 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
         for planes in input.planes {
             views.push(gpu.volume(planes, vk::Format::R8G8B8A8_UNORM, input.plane_levels)?);
         }
+        views.push(gpu.volume(input.occupancy, vk::Format::R8_UNORM, LEVELS)?);
         let texture_bytes = input.faces.iter().map(|f| std::mem::size_of_val(f.as_slice())).sum::<usize>()
-            + input.planes.iter().map(Vec::len).sum::<usize>();
+            + input.planes.iter().map(Vec::len).sum::<usize>()
+            + input.occupancy.len();
         let linear = gpu
             .logical
             .create_sampler(
@@ -379,6 +385,7 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
         params[40..43].copy_from_slice(&input.sky);
         params[43] = if input.own_interval { 1.0 } else { 0.0 };
         params[44] = input.refine_cascades.min(64) as f32;
+        params[45] = if input.descend { 1.0 } else { 0.0 };
         let (uniform, uniform_ptr) = gpu.buffer(192, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
         std::ptr::copy_nonoverlapping(params.as_ptr().cast::<u8>(), uniform_ptr, 192);
 
@@ -399,13 +406,14 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
             binding(4, storage, 1),
             binding(5, storage, 1),
             binding(6, vk::DescriptorType::UNIFORM_BUFFER, 1),
+            binding(7, image, 1),
         ];
         let layout = gpu
             .logical
             .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)
             .map_err(err("set layout"))?;
         let sizes = [
-            vk::DescriptorPoolSize { ty: image, descriptor_count: 19 },
+            vk::DescriptorPoolSize { ty: image, descriptor_count: 20 },
             vk::DescriptorPoolSize { ty: storage, descriptor_count: 3 },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1 },
         ];
@@ -439,6 +447,7 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
                 write(4, storage).buffer_info(&results_info),
                 write(5, storage).buffer_info(&stats_info),
                 write(6, vk::DescriptorType::UNIFORM_BUFFER).buffer_info(&uniform_info),
+                write(7, image).image_info(&images[19..20]),
             ],
             &[],
         );
