@@ -28,7 +28,7 @@ layout(std140, set = 0, binding = 6) uniform Params {
     vec4 misc;      // width0, cascades, cones, refine level
     vec4 misc2;     // full results (1) or packed (0), cross full, box margin, side
     vec4 sky;       // rgb; w: each cone marches only its cascade's interval
-    vec4 extra;     // x: cascades below this take the crossing test and the refine walk; y: descend
+    vec4 extra;     // x: cascades below this take the crossing test and the refine walk; y: descend; z: above 0, every interval's cone width
 };
 
 const float BASE = 1.0 / 64.0;
@@ -252,7 +252,7 @@ void main() {
     }
     for (int c = first; c < cascades; c++) {
         float end = c + 1 == cascades ? REACH : reach;
-        float width = misc.x / float(1 << c);
+        float width = extra.z > 0.0 ? extra.z : misc.x / float(1 << c);
         float open = 1.0 - covered;
         vec3 light = vec3(0.0);
         bool fine = float(c) < extra.x;

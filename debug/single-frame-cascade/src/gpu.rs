@@ -13,7 +13,8 @@ use ash::vk;
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cascade.spv"));
 
-/// Texels along x and y of one voxel level's clip volume; z holds the levels.
+/// Texels along x and y of one voxel level's clip volume by default; z holds
+/// the levels.
 pub const SIDE: u32 = 96;
 pub const LEVELS: u32 = 8;
 /// Cones whose per-interval results are kept: the shader writes cone `i` to
@@ -30,6 +31,8 @@ pub struct CascadeInput<'a> {
     /// Twelve RGBA8 volumes over the plane levels: six A, then six B.
     pub planes: &'a [Vec<u8>; 12],
     pub plane_levels: u32,
+    /// Texels along each side of a level's clip volume.
+    pub side: u32,
     /// One R8 volume over all levels: 255 where a cell holds a surface or
     /// is next to one.
     pub occupancy: &'a [u8],
@@ -45,6 +48,8 @@ pub struct CascadeInput<'a> {
     pub own_interval: bool,
     /// Cascades below this take the crossing test and the refine walk.
     pub refine_cascades: u32,
+    /// Above 0, every interval's cone width a metre out (the gather's).
+    pub fixed_width: f32,
 }
 
 pub struct CascadeTiming {
@@ -56,6 +61,8 @@ pub struct CascadeTiming {
     pub reads_per_cone: f64,
     pub covered: f64,
     pub texture_mib: f64,
+    /// Each cone's cover at the end of its march.
+    pub covers: Vec<f32>,
 }
 
 fn err<E: std::fmt::Debug>(what: &'static str) -> impl Fn(E) -> String {
@@ -188,9 +195,9 @@ impl Device {
 
     /// One volume of `levels` stacked clip volumes, filled from `bytes`,
     /// ready to sample.
-    fn volume(&self, bytes: &[u8], format: vk::Format, levels: u32) -> Result<vk::ImageView, String> {
+    fn volume(&self, bytes: &[u8], format: vk::Format, side: u32, levels: u32) -> Result<vk::ImageView, String> {
         unsafe {
-            let extent = vk::Extent3D { width: SIDE, height: SIDE, depth: SIDE * levels };
+            let extent = vk::Extent3D { width: side, height: side, depth: side * levels };
             let image = self
                 .logical
                 .create_image(
@@ -345,12 +352,12 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
     unsafe {
         let mut views = Vec::new();
         for faces in input.faces {
-            views.push(gpu.volume(as_bytes(faces), vk::Format::R16G16B16A16_SFLOAT, LEVELS)?);
+            views.push(gpu.volume(as_bytes(faces), vk::Format::R16G16B16A16_SFLOAT, input.side, LEVELS)?);
         }
         for planes in input.planes {
-            views.push(gpu.volume(planes, vk::Format::R8G8B8A8_UNORM, input.plane_levels)?);
+            views.push(gpu.volume(planes, vk::Format::R8G8B8A8_UNORM, input.side, input.plane_levels)?);
         }
-        views.push(gpu.volume(input.occupancy, vk::Format::R8_UNORM, LEVELS)?);
+        views.push(gpu.volume(input.occupancy, vk::Format::R8_UNORM, input.side, LEVELS)?);
         let texture_bytes = input.faces.iter().map(|f| std::mem::size_of_val(f.as_slice())).sum::<usize>()
             + input.planes.iter().map(Vec::len).sum::<usize>()
             + input.occupancy.len();
@@ -381,11 +388,12 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
         params[36] = 1.0;
         params[37] = input.cross_full;
         params[38] = input.box_margin;
-        params[39] = SIDE as f32;
+        params[39] = input.side as f32;
         params[40..43].copy_from_slice(&input.sky);
         params[43] = if input.own_interval { 1.0 } else { 0.0 };
         params[44] = input.refine_cascades.min(64) as f32;
         params[45] = if input.descend { 1.0 } else { 0.0 };
+        params[46] = input.fixed_width;
         let (uniform, uniform_ptr) = gpu.buffer(192, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
         std::ptr::copy_nonoverlapping(params.as_ptr().cast::<u8>(), uniform_ptr, 192);
 
@@ -506,6 +514,7 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
             reads_per_cone: sum(1),
             covered: sum(2),
             texture_mib: texture_bytes as f64 / (1024.0 * 1024.0),
+            covers: per_cone.iter().map(|s| s[2]).collect(),
         })
     }
 }

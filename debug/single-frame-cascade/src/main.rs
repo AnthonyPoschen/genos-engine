@@ -146,6 +146,8 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        cosine of the luma-weighted mean direction of the light
                        that direction holds, carried through the merge
                        (default mean)
+  --gpu-side N         with --gpu-bench: texels along each side of a voxel
+                       level's clip volume around the eye (default 96)
   --own-interval       with --cone-start voxel: each cascade's cone marches
                        only its own cascade's interval, as a sparse cascade
                        traces, in place of every interval from the voxel
@@ -162,6 +164,9 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
   --transfer-sweeps N  with --mode full: sweeps of E = D + T E a frame, each one
                        bounce more, from E = D (default 32; the room no lamp
                        lights reads the same as at 256)
+  --gather-width F     with --mode full: each gather cone's width a metre out,
+                       the same at every distance (0: it narrows as the
+                       cascade's cones do; default 0)
   --gather-level L     with --mode full: gather patches are voxels of this
                        level, 2^L/64 m (default 4: 25 cm)
   --descend            a covered coarse step is walked front to back from its
@@ -275,6 +280,8 @@ struct Options {
     descend: bool,
     transfer_sweeps: usize,
     gather_level: u8,
+    gather_width: f32,
+    gpu_side: u32,
     refine_cascades: usize,
     probe_px: f32,
     theta: u32,
@@ -332,6 +339,8 @@ fn parse_args() -> Result<Option<Options>, String> {
         descend: false,
         transfer_sweeps: 32,
         gather_level: GATHER_LEVEL,
+        gather_width: 0.0,
+        gpu_side: gpu::SIDE,
         refine_cascades: usize::MAX,
         probe_px: 4.0,
         theta: 4,
@@ -484,6 +493,8 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--seat-at-start" => o.seat_at_start = true,
             "--descend" => o.descend = true,
             "--transfer-sweeps" => o.transfer_sweeps = num(&arg, &value()?)?,
+            "--gpu-side" => o.gpu_side = num::<u32>(&arg, &value()?)?.clamp(16, 256),
+            "--gather-width" => o.gather_width = num(&arg, &value()?)?,
             "--gather-level" => o.gather_level = num::<u8>(&arg, &value()?)?.clamp(VOXEL_FINEST + 1, VOXEL_COARSEST),
             "--near-check" => {
                 o.near_check = match value()?.as_str() {
@@ -1508,6 +1519,24 @@ fn trace_chain(
             handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         });
         traced.fetch_add(u64::try_from(jobs.len()).unwrap_or(u64::MAX), Ordering::Relaxed);
+        if let Ok(mut capture) = CONE_JOBS.lock() {
+            if capture.is_some() {
+                if let Ok(mut covers) = CHAIN_COVERS.lock() {
+                    covers.extend(deposits.iter().map(|(_, _, i)| if c + 1 < n { i.first().map_or(f32::NAN, |x| 1.0 - x.2) } else { f32::NAN }));
+                }
+            }
+            let _ = capture.as_mut();
+        }
+        if c + 1 < n {
+            if let Ok(mut sum) = CHAIN_COVER.lock() {
+                for (_, _, intervals) in &deposits {
+                    for (_, _, through) in intervals {
+                        sum.0 += f64::from(1.0 - through);
+                        sum.1 += 1;
+                    }
+                }
+            }
+        }
         for (v, dir, intervals) in deposits {
             for (k, radiance, through) in intervals {
                 let slot = ancestor[k][v as usize];
@@ -1529,6 +1558,14 @@ fn trace_chain(
 /// Cones `--near-check chain` left out in the last frame, closed before
 /// their interval.
 static CHAIN_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// `--near-check chain`: the sum of the cones' cover over their own interval,
+/// and their count, all cascades but the last (for `--gpu-bench` to compare).
+static CHAIN_COVER: std::sync::Mutex<(f64, u64)> = std::sync::Mutex::new((0.0, 0));
+
+/// `--gpu-bench`: each captured cone's CPU cover, in the capture's order (NaN
+/// for the last cascade, whose share passed is not kept).
+static CHAIN_COVERS: std::sync::Mutex<Vec<f32>> = std::sync::Mutex::new(Vec::new());
 
 fn trace_probes(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], traced: &AtomicU64, scene: &Scene, jitter: (f32, f32)) {
     let n = cascades.len();
@@ -2229,7 +2266,10 @@ fn march_cone_into(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3,
         // walk, so its cones keep them; the cascade's own cones follow
         // --refine-cascades.
         span.fine = o.fine_cross && (sink.is_some() || c < o.refine_cascades);
-        march_span(voxels, o, start, dir, width0 / (1u32 << c) as f32, end, &mut span, sink.as_deref_mut());
+        // A gather cone stands for its share of the hemisphere at every
+        // distance with --gather-width; else it narrows as the cascade's do.
+        let width = if sink.is_some() && o.gather_width > 0.0 { o.gather_width } else { width0 / (1u32 << c) as f32 };
+        march_span(voxels, o, start, dir, width, end, &mut span, sink.as_deref_mut());
         let mut through = (1.0 - span.covered) / open;
         if c + 1 == n {
             span.met = add(span.met, scale(sky, 1.0 - span.covered));
@@ -2804,8 +2844,9 @@ fn gpu_bench(
     if o.near_check == NearCheck::Chain {
         println!("  closed before their interval and not traced: {}", CHAIN_SKIPPED.load(Ordering::Relaxed));
     }
+    let cpu_cover = CHAIN_COVER.lock().map_or(0.0, |s| s.0 / (s.1.max(1)) as f64);
     // A clip volume of each voxel level around the eye, the levels stacked on z.
-    let side = gpu::SIDE as i32;
+    let side = i32::try_from(o.gpu_side).unwrap_or(i32::MAX);
     let mut clip = [[0.0f32; 4]; 8];
     let mut corner = [[0i32; 3]; 8];
     for level in VOXEL_FINEST..=VOXEL_COARSEST {
@@ -2885,6 +2926,7 @@ fn gpu_bench(
             faces: &volumes,
             planes: &planes,
             plane_levels,
+            side: o.gpu_side,
             occupancy: &occupancy,
             descend: o.descend,
             clip,
@@ -2895,11 +2937,48 @@ fn gpu_bench(
             box_margin: o.box_margin,
             sky,
             own_interval: o.own_interval,
+            fixed_width: 0.0,
             refine_cascades: u32::try_from(o.refine_cascades).unwrap_or(u32::MAX),
         },
         20,
     )?;
     let shown = pixels.iter().filter(|p| p.is_some()).count().max(1);
+    let last = f32::from(u8::try_from(o.cascades - 1).unwrap_or(u8::MAX));
+    let (gpu_sum, gpu_n) = jobs
+        .iter()
+        .zip(&timing.covers)
+        .filter(|(job, _)| (job[7] - last).abs() >= 0.5)
+        .fold((0.0f64, 0u64), |(s, n), (_, c)| (s + f64::from(*c), n + 1));
+    println!(
+        "  mean cover over a cone's own interval, all cascades but the last: GPU {:.4}, CPU {cpu_cover:.4}",
+        gpu_sum / (gpu_n.max(1)) as f64
+    );
+    if let Ok(cpu) = CHAIN_COVERS.lock() {
+        if cpu.len() == jobs.len() {
+            for c in 0..o.cascades.saturating_sub(1) {
+                let tag = f32::from(u8::try_from(c).unwrap_or(u8::MAX));
+                let rows: Vec<(usize, f32, f32)> = (0..jobs.len())
+                    .filter(|i| (jobs[*i][7] - tag).abs() < 0.5)
+                    .map(|i| (i, cpu[i], timing.covers[i]))
+                    .collect();
+                let n = rows.len().max(1) as f64;
+                let (mut cpu_sum, mut gpu_sum, mut more, mut less) = (0.0f64, 0.0f64, 0usize, 0usize);
+                for (_, a, b) in &rows {
+                    cpu_sum += f64::from(*a);
+                    gpu_sum += f64::from(*b);
+                    more += usize::from(*a - *b > 0.5);
+                    less += usize::from(*b - *a > 0.5);
+                }
+                println!("  c{c}: cover CPU {:.3} GPU {:.3}; CPU closed and GPU open (by 0.5) {more}, the other way {less}, of {}", cpu_sum / n, gpu_sum / n, rows.len());
+                for (i, a, b) in rows.iter().filter(|r| r.1 - r.2 > 0.5).take(3) {
+                    let j = jobs[*i];
+                    println!("      start {:.3},{:.3},{:.3} reach {:.3} dir {:.3},{:.3},{:.3}: CPU {a:.3} GPU {b:.3}", j[0], j[1], j[2], j[3], j[4], j[5], j[6]);
+                }
+            }
+        } else {
+            println!("  per-cone covers: {} CPU against {} cones", cpu.len(), jobs.len());
+        }
+    }
     println!("gpu bench on {}  {}x{}  {} cascades, theta {}", timing.device, o.width, o.height, o.cascades, o.theta);
     println!(
         "voxel-layer cascade: {:.3} ms median, {:.3} ms least for {} cones ({:.1} a shown pixel); {:.1} steps and {:.1} texture reads a cone, mean cover {:.3}",
@@ -2925,6 +3004,7 @@ fn gpu_bench(
                 faces: &volumes,
                 planes: &planes,
                 plane_levels,
+                side: o.gpu_side,
                 occupancy: &occupancy,
                 descend: o.descend,
                 clip,
@@ -2936,6 +3016,7 @@ fn gpu_bench(
                 sky,
                 own_interval: false,
                 refine_cascades: u32::MAX,
+                fixed_width: o.gather_width,
             },
             20,
         )?;

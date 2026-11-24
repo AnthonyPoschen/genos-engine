@@ -319,3 +319,18 @@ The cascade's cones in the hall are now 16 ms on the RTX 4070 at 720p, against p
 | Sponza dark corner | 20.5%, −8.8% | | 21.4%, −11.2% | |
 
 GPU total so far, hall, 720p: 15.9 ms for the cascade's cones and 16.4 ms for the gather's. Not timed: the transfer sweeps, the merge and the shade.
+
+**A fixed gather cone width** (`--gather-width`, default 0: off): 0.4 or 0.75 a metre at every distance takes the gather from 16.4 to 10.5 or 11.8 ms, but the room goes to 9.2% and 11.4% and the atrium to 19.7% and 21.0%. Not taken.
+
+**The GPU march against the CPU's, cone by cone.** `--gpu-bench` now prints each cascade's mean cover on both, and the cones the CPU closes and the GPU leaves open. With the 96-texel clip (6 m at the finest level, 12 m at the next) the GPU's cover is 0.14 against the CPU's 0.44 in the hall, and 0.27 against 0.47 in the room: the cones it leaves open start at the clip's edge or outside it, so its time is for a march through a mostly empty field. With `--gpu-side 192`:
+
+| | Room | Hall |
+|---|---|---|
+| Cover, GPU / CPU (all cascades but the last) | 0.444 / 0.466 | 0.308 / 0.437 |
+| Cascades 1–3, GPU / CPU | equal to three digits | 0.066–0.662 / 0.103–0.766 |
+| Voxels inside the clip | 321,768 of 1.3 million | 256,916 of 1.3 million |
+| Cascade cones, ms | 11.2 | 25.5 |
+
+The shader reads the field as the CPU does (the room's cascades 1–3 agree); the difference was the clip. The hall's time is still low, as a fifth of its voxels are inside. The dense clip volumes are 3.7 GiB at 192 texels. A renderer would need a sparse brick structure for the field, whose walk costs more than a texel fetch.
+
+Where phase 3 stands (hall, 720p, RTX 4070): the cascade's cones at least 25 ms, the gather at least 16 ms (timed at the 96-texel clip), the transfer sweeps, the merge and the shade not timed. ADR 0013's budget is 8 ms for all lighting at 1080p. Accuracy at these settings: hall 9.2%, room 4.8%, Sponza atrium 16.5%, dark corner 21.4%.
