@@ -26,7 +26,7 @@ void main() {
         uint key = cone_key(lod, ivec3(floor(pos / cone_spacing(lod, c))), c);
         uint slot = key == CONE_EMPTY ? CONE_NO_BRICK : cone_slot(c, key, true);
         if (slot == CONE_NO_BRICK) {
-            atomicAdd(cwork.w[CONE_DROPPED + uint(c)], 1u);
+            atomicAdd(cwork.w[CONE_INSERT_DROPPED + uint(c)], 1u);
             continue;
         }
         atomicAdd(cwork.w[slot + 1u], 1u);

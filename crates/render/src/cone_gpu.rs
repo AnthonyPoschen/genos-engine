@@ -147,8 +147,8 @@ fn cone_build(scene: &genos_scene::Scene, gltf: Option<&crate::gltf_surface::Glt
 }
 
 /// Cone mode runs only the cascades: the old pipeline's direct pass, shadows,
-/// GI and ambient fill are off, and compose takes the cascades' light as the
-/// surface's emitted light. The settings the user wrote stay as they are.
+/// GI, ambient fill, denoiser and compose reuse are off, and compose takes the
+/// cascades' light as the surface's emitted light. The settings the user wrote stay as they are.
 fn cone_effective(settings: &mut genos_scene::LightingSettings) {
     if !settings.cone.enabled {
         return;
@@ -160,6 +160,10 @@ fn cone_effective(settings: &mut genos_scene::LightingSettings) {
     settings.bounce.count = 0;
     settings.ambient.mode = genos_scene::AmbientMode::Off;
     settings.emissive = true;
+    // Nothing carries over between frames in this mode: the denoiser's
+    // history and compose reuse would hold an old frame's light.
+    settings.denoiser.enabled = false;
+    settings.compose_reuse = false;
 }
 
 impl Gpu {
@@ -344,6 +348,61 @@ impl Gpu {
         }
         self.cone_dispatch(6, push(0), pixels);
         compute(self);
+    }
+
+    /// Last frame's counts for each cascade. Waits for that frame. Empty
+    /// when cone mode has not run.
+    pub(crate) fn cone_stats(&mut self) -> Result<Vec<crate::ConeCascadeStats>, String> {
+        let (theta, count) = self.cone.work_shape;
+        if self.cone.work.buffer.is_null() || count == 0 {
+            return Ok(Vec::new());
+        }
+        self.idle_device();
+        let raw = self.copy_device_range(self.cone.work.buffer, 0, 40 * 4)?;
+        let w = u32_words(&raw);
+        let at = |i: usize| w.get(i).copied().unwrap_or(0);
+        Ok((0..count)
+            .map(|c| {
+                let i = c as usize;
+                let cap = u32::try_from(cone_cap(theta, c)).unwrap_or(u32::MAX);
+                let probes = at(i);
+                crate::ConeCascadeStats {
+                    probes,
+                    cap,
+                    dropped_compact: at(8 + i),
+                    dropped_insert: at(32 + i),
+                    cones_traced: at(16 + i),
+                    cones_closed: at(24 + i),
+                }
+            })
+            .collect())
+    }
+
+    /// Cascade `c`'s probes as last frame wrote them. Waits for that frame.
+    pub(crate) fn cone_probes(&mut self, c: u32) -> Result<Vec<crate::ConeProbe>, String> {
+        let (theta, count) = self.cone.work_shape;
+        if self.cone.work.buffer.is_null() || c >= count {
+            return Ok(Vec::new());
+        }
+        self.idle_device();
+        let head = u32_words(&self.copy_device_range(self.cone.work.buffer, 0, 8 * 4)?);
+        let kept = u64::from(head.get(c as usize).copied().unwrap_or(0)).min(cone_cap(theta, c));
+        if kept == 0 {
+            return Ok(Vec::new());
+        }
+        let at = cone_hash_at(theta, c) + cone_hash_size(c) * CONE_HASH_WORDS;
+        let raw = self.copy_device_range(self.cone.work.buffer, at * 4, kept * CONE_PROBE_WORDS * 4)?;
+        let w = u32_words(&raw);
+        let stride = CONE_PROBE_WORDS as usize;
+        Ok(w.chunks_exact(stride)
+            .map(|r| crate::ConeProbe {
+                key: r[0],
+                lod: r[1],
+                cell: [r[4] as i32, r[5] as i32, r[6] as i32],
+                pixels: r[7],
+                seat: [f32::from_bits(r[8]), f32::from_bits(r[9]), f32::from_bits(r[10])],
+            })
+            .collect())
     }
 
     fn destroy_cone(&mut self) {

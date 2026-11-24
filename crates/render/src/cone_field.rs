@@ -652,3 +652,28 @@ mod tests {
         }
     }
 }
+
+/// One cascade's probe counts from the last frame (`lighting.cone_stats`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConeCascadeStats {
+    /// Probes the hash held (kept plus dropped in compact).
+    pub probes: u32,
+    /// The cascade's probe table size.
+    pub cap: u32,
+    /// Probes past the cap: compact gave them no record, so nothing traced them.
+    pub dropped_compact: u32,
+    /// Pixels whose probe found no hash slot (the slot chain was full).
+    pub dropped_insert: u32,
+    pub cones_traced: u32,
+    pub cones_closed: u32,
+}
+
+/// One probe of a cascade as the GPU wrote it last frame (`lighting.cone_probes`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConeProbe {
+    pub key: u32,
+    pub lod: u32,
+    pub cell: [i32; 3],
+    pub pixels: u32,
+    pub seat: [f32; 3],
+}

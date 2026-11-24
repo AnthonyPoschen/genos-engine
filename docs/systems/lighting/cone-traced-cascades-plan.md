@@ -388,3 +388,17 @@ Stop and report to Anthony when a gate cannot be met, when a step needs a choice
 | **strength 0.3 (default)** | **0.23%** | **1.88** | **2.81** |
 
 Limits: clipped 1%, swing 2 stops, opens at least 2 stops. `make sponza-gate` passes all 14 checks. Already failing before this step and not from it: `legacy_shader` in `hdr_output_gate` ("40 bytes moved between frames", the same at `5a5e5058`) and `lighting_settings_round_trip_over_mcp` (the `gi-1bounce` world cache, on master since `edba58c6`). Waiting for Anthony to judge by eye.
+
+**Step 3 result, 25 Nov 2026.** Probes `lighting.cone_stats` (per cascade: probes, cap, dropped past the cap, insert misses, cones traced and closed) and `lighting.cone_probes` (one cascade's keys, cells and seats), and `tools/lighting/cone_stability_gate.py` (gates A to D; `debug-standard.md`, "Cone-traced cascades probes"). Cone mode also turns off the denoiser and compose reuse now: it carries nothing between frames. Scene paused, before step 4:
+
+| View | A popped (old path) | B dropped | C seats moved, 5° / 10 cm | D pixels changed |
+|---|---|---|---|---|
+| Hall 1280x720 | 0 (0) | none | 7,948 of 8,464 / 14,542 of 21,199 | 0 |
+| Sponza 1280x720 | 0 (0.0005) | none | 12,527 of 15,614 / 11,815 of 15,874 | 0 |
+| Hall 1920x1080 | 0.074 (0) | c0 16,737 past the cap of 32,768 and 10,370 insert misses; c3 33; c4 65 | | 1,390,410 |
+| Sponza 1920x1080 | 0.181 (0.0003) | c0 8,437 and 706; c4 66 | | 1,315,147 |
+| Sponza 1262x1376 | 0.232 (0.0013) | c0 3,957 and 129; c4 2 | | |
+
+The tables that overflow are cascade 0's probe table and its insert hash, and cascade 4's probe table (256). Where nothing is dropped, a still frame does not pop and a turn and back gives the same picture bit for bit: the flicker is the drops. Seats move everywhere (gate C): they are the pixel mean. The earlier 28% to 70% still-camera numbers were wrong: `step` advanced the paused hall and moved its lamps, and field rebuilds landed in the measurement.
+
+The gates go into `scripts/ci-gate-knockout.sh` in step 4, when they pass; that script has to stay green. Already failing before this work, on lavapipe: `gpu_frame`'s `a_bright_lamp_does_not_cross_an_opaque_wall`, `a_close_lamp_does_not_cross_the_wall` and `the_corridor_carries_bounce_around_the_bend`, besides the two AGENTS.md lists (`5a5e5058`).

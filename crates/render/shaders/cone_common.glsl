@@ -74,9 +74,10 @@ const float CONE_FIXED = 256.0;
 const vec3 CONE_LUMA = vec3(0.2126, 0.7152, 0.0722);
 // Work buffer: counters, then for each cascade its hash, probes and cones.
 const uint CONE_COUNTS = 0u;    // probes kept, per cascade
-const uint CONE_DROPPED = 8u;   // probes lost (out of the key's range or the hash full)
+const uint CONE_DROPPED = 8u;   // probes past the cascade's cap in compact
 const uint CONE_TRACED = 16u;   // cones traced, per cascade
 const uint CONE_CLOSED = 24u;   // cones the chain closed, per cascade
+const uint CONE_INSERT_DROPPED = 32u; // pixels whose probe found no hash slot, per cascade
 const uint CONE_HEADER_WORDS = 256u;
 const uint CONE_HASH_WORDS = 9u;   // key, count, sum xyz, normal sum xyz, probe
 const uint CONE_PROBE_WORDS = 32u; // see cone_probe_* below

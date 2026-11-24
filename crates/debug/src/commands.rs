@@ -33,7 +33,7 @@ pub fn section_of(name: &str) -> &'static str {
         "mesh"
     } else if has(&["reflection", "hdr", "fog", "particle", "material"]) || name.starts_with("fx") {
         "render"
-    } else if has(&["lighting", "preset", "gi_metrics", "level0"]) || name == "lights" || name == "light" {
+    } else if has(&["lighting", "preset", "gi_metrics", "level0", "cone"]) || name == "lights" || name == "light" {
         "lighting"
     } else if has(&["capture", "luminance", "flicker", "reference", "compare"]) || ["view", "diff", "timing"].contains(&name) {
         "capture"
@@ -123,6 +123,8 @@ fn plain_specs() -> Vec<CommandSpec> {
             "light",
             "Edit a light: add (position, color, intensity), or index with on, color, intensity, position, path [[x,y,z],..] + frames (+ loop), remove, reset, solo; solo_off clears a solo and does not need an index.",
         ),
+        spec("cone_stats", "The cone-traced cascades' counts from the last frame, one entry per cascade: probes the hash held, cap (the probe table size), dropped_compact (probes past the cap, never traced), dropped_insert (pixels whose probe found no hash slot), cones_traced, cones_closed. Empty when cone mode has not run. Waits for that frame."),
+        spec("cone_probes", "One cascade's probes from the last frame (cascade, default 0): key, lod, cell, pixels, seat. around [x,y,z] and radius (default 2 m) keep the probes whose seat is that near. Waits for that frame. Reply only; writes no file."),
         spec("level0_voxels", "Level-0 cascade voxels within radius (default 0.75 m) of around [x,y,z]: cell, level, axis, position, radiance, filled ring slots, and the four parent cells at twice the size (found, position, weight, radiance). Reply only; writes no file."),
         spec("objects", "Every solid: index, position, yaw, size, colour, edited."),
         spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), roughness and metallic (0-1, reference trace only until the specular pass lands), reset. Unknown fields are an error."),

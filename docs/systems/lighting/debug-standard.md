@@ -61,6 +61,12 @@ Run against the binary built at 13:31 on 23 Nov 2026, before the later fixes, 8 
 
 A fault that shows only while the camera moves is read at every step of the move, not before and after it. Pause the scene, set the camera, step one frame, then call `lighting.level0_voxels` around a world point and save the bounce view. Between two steps compare, by voxel key (cell, level, axis): how many voxels kept their key, how many kept their seat position, and how much the radiance of the kept ones changed. A seat that changes with a turn of the camera, or light that changes with the seat kept, is the fault. The pan, strafe and walk numbers in [sparse-radiance-cascades.md](sparse-radiance-cascades.md) are this probe.
 
+## Cone-traced cascades probes
+
+Cone mode (`cone_cascades`, experimental) has two probes and one gate. `lighting.cone_stats` returns, per cascade, the probes the hash held, the probe table's cap, the probes past the cap (`dropped_compact`: never traced, so their light is missing), the pixels whose probe found no hash slot (`dropped_insert`), and the cones traced and closed. `lighting.cone_probes` dumps one cascade's probes (key, level, cell, pixels, seat), optionally only those near a point. Both wait for the last frame and read the work buffer; nothing is read back while no one asks.
+
+`tools/lighting/cone_stability_gate.py --view hall|sponza --size WxH` grades four failure modes with the scene paused: A, still-camera flicker no worse than the old path's; B, nothing dropped; C, every cascade-0 probe keeps its seat (by world cell) within 1 mm after a 5° yaw and after a 10 cm step; D, turning away and back gives a bit-identical picture. Pause with `time` and move with `wait`, not `step`: `step` advances the scene, the hall's lamps move, and the field is rebuilt under the measurement. The plan's section 18 has the numbers.
+
 ## MCP debug endpoints
 
 One catalogue, three doors: MCP `tools/call`, `POST /cmd/<name>`, and the Rhai script functions. The list is `crates/debug/src/commands.rs`. The running notes are [Debugging](../debugging.md).

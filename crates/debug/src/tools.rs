@@ -1612,6 +1612,50 @@ impl Tools {
                 }))
             }
             "timing" => reply(self.timing_value(args.u32("frames")?.unwrap_or(60) as usize)),
+            "cone_stats" => {
+                let stats = ctx.renderer.cone_stats()?;
+                let items = stats
+                    .iter()
+                    .enumerate()
+                    .map(|(c, s)| {
+                        obj(vec![
+                            ("cascade", num(c as f64)),
+                            ("probes", num(f64::from(s.probes))),
+                            ("cap", num(f64::from(s.cap))),
+                            ("dropped_compact", num(f64::from(s.dropped_compact))),
+                            ("dropped_insert", num(f64::from(s.dropped_insert))),
+                            ("cones_traced", num(f64::from(s.cones_traced))),
+                            ("cones_closed", num(f64::from(s.cones_closed))),
+                        ])
+                    })
+                    .collect();
+                reply(obj(vec![("cascades", list(items))]))
+            }
+            "cone_probes" => {
+                let cascade = args.u32("cascade")?.unwrap_or(0);
+                let around = args.vec3("around")?;
+                let radius = args.f32("radius")?.unwrap_or(2.0);
+                let probes = ctx.renderer.cone_probes(cascade)?;
+                let items = probes
+                    .iter()
+                    .filter(|p| {
+                        around.is_none_or(|a| {
+                            let d = [p.seat[0] - a.x, p.seat[1] - a.y, p.seat[2] - a.z];
+                            d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius
+                        })
+                    })
+                    .map(|p| {
+                        obj(vec![
+                            ("key", num(f64::from(p.key))),
+                            ("lod", num(f64::from(p.lod))),
+                            ("cell", list(p.cell.iter().map(|v| num(f64::from(*v))).collect())),
+                            ("pixels", num(f64::from(p.pixels))),
+                            ("seat", list(p.seat.iter().map(|v| num(f64::from(*v))).collect())),
+                        ])
+                    })
+                    .collect();
+                reply(obj(vec![("cascade", num(f64::from(cascade))), ("probes", list(items))]))
+            }
             "level0_voxels" => {
                 let around = args.vec3("around")?.ok_or("level0_voxels needs around [x,y,z]")?;
                 let radius = args.f32("radius")?.unwrap_or(0.75);

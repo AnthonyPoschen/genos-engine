@@ -1613,6 +1613,17 @@ impl Renderer {
         self.gpu.lighting_level0_voxels()
     }
 
+    /// The cone-traced cascades' probe counts, per cascade, from the last
+    /// frame. Waits for that frame. Empty when cone mode has not run.
+    pub fn cone_stats(&mut self) -> Result<Vec<crate::ConeCascadeStats>, String> {
+        self.gpu.cone_stats()
+    }
+
+    /// Cascade `c`'s probes (key, level, cell, pixels, seat) from the last frame.
+    pub fn cone_probes(&mut self, c: u32) -> Result<Vec<crate::ConeProbe>, String> {
+        self.gpu.cone_probes(c)
+    }
+
     /// Level-0 voxels inserted and traced last frame. Waits for that frame.
     pub fn lighting_level0_counts(&mut self) -> Result<(u32, u32), String> {
         self.gpu.lighting_level0_counts()
