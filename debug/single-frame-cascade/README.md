@@ -153,3 +153,7 @@ The cone tracer also voxelises `kind gltf` scenes: points on every triangle's fr
 ## Phase 2 (in progress), 24 Nov 2026
 
 `--mode full`: every light an emitter and every bounce each frame; see the plan's section 12 for how and for the numbers. Arguments added: `--mode full`, `--gather-cones N` (default 16), `--patch-check` (the solved light of 40 patches in view against a path-traced reference there), `--sky on|off`. In full mode the per-frame error is printed after each frame, and the noise is over the frames after the first.
+
+## Cones from the voxel layer, 24 Nov 2026
+
+The cone tracer no longer starts a cone at a pixel. Every probe of every cascade traces one cone per direction; a coarse probe's cones start at the voxel-layer probe nearest its seat and are split into that probe's cascades. Arguments: `--cone-start voxel|probe` (default `voxel`), `--cone-voxel nearest|random` (default `nearest`), `--combine-visibility none|merge|shade|both` (default `both`). The plan's section 13 has the numbers. `--spp` and `--frames` jitter now only drive the ray tracer.

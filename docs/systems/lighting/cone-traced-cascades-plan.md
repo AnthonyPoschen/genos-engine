@@ -1,6 +1,6 @@
 # Cone-traced cascades: implementation plan
 
-Status: phases 0 and 1 passed, 24 Nov 2026 (section 11). Phase 2 in progress (section 12): the full loop works, the gate is not met yet. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
+Status: phases 0 and 1 passed, 24 Nov 2026 (sections 11 and 13: phase 1 passes again with the probe-traced cascade). Phase 2 in progress (sections 12 and 13). Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
 
 ## 1. What Anthony asked for
 
@@ -45,8 +45,8 @@ One frame, in order. Each step names what exists and what is new.
    - A mover's voxels are re-written when it moves.
    - A lamp is written each frame from its position, colour and size. That is the only per-lamp work, and it does not depend on the picture size.
 2. **Surface light** (new). The light a voxel sends out is its albedo times the irradiance the cascade gathered there last frame, plus its emission. So bounce light gains one bounce a frame, and the lamps' own light arrives in the first frame. No shadow ray to a lamp is cast for this.
-3. **Cascade** (exists, changed). The probes are today's level-0 voxels and upper cells. Each visible point marches one cone through the voxel field. The cone's width in each cascade's interval is that cascade's direction spacing. Each interval deposits its light and the share that passes through, as the paper's split ray does. The cascades merge from the last one down. Every cascade is recomputed every frame. There is no running mean, no refresh period and no change signal. A candidate, if the shadow gates need it: the cascade-0 interval is marched in screen space against the depth buffer, and only the upper intervals go through the voxels (step 6).
-4. **Shade** (exists). A pixel reads the cascade-0 directions around it. Lamp light and bounce light arrive the same way. There is no direct-light pass for point lamps.
+3. **Cascade** (exists, changed; Anthony, 24 Nov 2026). No cone starts at a pixel. Cascade 0 is the voxel layer: a probe on each fine voxel of the visible surface, seated on the mean point of the pixels it stands for. The coarser cascades are world probes at twice the spacing, four times the directions and four times the reach each, as radiance cascades space them. Each probe of each cascade traces one cone for each of its directions, as wide as that cascade's direction spacing, so the cost is probes times directions. The cone of a coarser probe starts at the voxel layer (the cascade-0 probe under it nearest its seat) and runs through every interval; each interval is deposited into that voxel probe's probe of the same cascade (the paper's ray splitting, from the voxel layer). A coarse probe that traced from its own seat started its interval past any wall within the shorter intervals under it. Every cascade is recomputed every frame; nothing in it is random, so a still scene does not change. A candidate, if the shadow gates need it: the cascade-0 interval is marched in screen space against the depth buffer (step 6).
+4. **Combine and shade** (exists). The cascades merge from the last one down (the paper's equation 7): a direction's cone is its own interval plus what passed it times the coarser cascade's cones, read from the coarser probes around it. That merge is where the voxel layer's short-range detail meets the world probes' long-range light. A pixel reads the voxel layer's probes around it, weighed by the light's mean direction in each direction (phase 0's direction moment). Lamp light and bounce light arrive the same way; there is no direct-light pass for point lamps.
 5. **Sun** (exists as an exact ray, to become an emitter). The sun is tried as an emitter in phase 2b, in this order:
    - **A. The sun in the sky.** A cone that leaves the field with light still passing through reads the sky in its direction, and the sun is a small, very bright disc in that sky. No new pass. The sun is 0.5 degrees wide and a cascade-0 direction is one of 16, so the sun's energy is spread over the cone it falls in, to keep the total right. Risks: a coarse cosine, a blurred shadow from the coarse upper cascades, and any wall leak (E1) multiplied by the sun's brightness.
    - **B. Sun visibility in the voxels.** Each voxel stores whether it sees the sun, written by a march through the field toward the sun when the sun or a mover moves. A voxel's light adds albedo times sun times visibility, so sun bounce costs nothing more. A pixel reads that visibility with one texture read. Fog can read the same visibility in place of `trace::sees`. The shadow is as soft as a voxel, and the cost follows the voxel count and the movers, not the pixels.
@@ -207,3 +207,29 @@ Gate numbers, 8 frames, 16,384 reference rays a block, `--gather-cones 32` (16 i
 The weak part is the lamps' own light at the pixels (E3). Lamp light alone (`--mode emissive`, 10 cm lamps): Sponza atrium 21.7% error and 20% noise, dark corner 36% and −18% bias; the hall 10.3% and −3%. Rays are 78 to 83% with over 100% noise, so the cones are the better tracer, but three small lamps in a large space are still found by too few cones a frame. Next: the lamp term (E3's candidates: more cascade-0 directions for lamps, the cone footprint aimed at the lamp's voxels), then the shadow checks and the fixture lamp.
 
 Cost, CPU: the bake 11 to 30 s for the stress building and 82 to 88 s for Sponza; each frame's gather and solve 4.6 s (stress) and 21 to 37 s (Sponza) at 16 to 32 cones on 16 threads. Phase 3 has to time the GPU version.
+
+## 13. Cones from the voxel layer, 24 Nov 2026
+
+Anthony's direction: no cone from a pixel; cascade 0 is the voxel layer that stands for the pixels over it, the coarser cascades are world probes, and the pixel's light comes from combining the layers as radiance cascades do. Section 3 steps 3 and 4 now say so. Measured with `--theta 8 --probe-px 12` (128 cascade-0 directions, a voxel-layer probe every 12 pixels), the default the gates use:
+
+| Step | What changed | Room no lamp lights | Hall | Noise |
+|---|---|---|---|---|
+| Each probe traces its own interval from its seat (`--cone-start probe`) | 32 directions, 8 px | 36.8%, +33% | 4.7% | 0 |
+| Coarse probes' cones start at a voxel probe under them, split into its cascades (`--cone-start voxel --cone-voxel random`) | 32 directions, 8 px | 11.4%, −7.9% | 4.4% | 1.9% |
+| The same, 128 directions, 12 px | | 6.4% | 3.0% | 2.0% |
+| The voxel probe nearest the coarse probe's seat, every direction and frame (`--cone-voxel nearest`, default) | | 6.4% | 2.65% | 0 |
+
+The visibility test on the combine (`--combine-visibility`) changed nothing measurable once the cones start at the voxel layer.
+
+Phase 1 with this tracer (one bounce, limits in section 6): room 6.4%, hall 2.65%, Sponza atrium 7.6%, dark corner 5.9%. Cones: 10 to 17 million a frame at 1280x720 (8 to 19 for each shown pixel), against 0.9 million when every pixel marched one cone; phase 3 has to time it.
+
+Phase 2 with this tracer (`--mode full`, 32 gather cones a patch, fixed directions), after the first frame:
+
+| View | Error | Bias | Noise |
+|---|---|---|---|
+| Hall | 4.8% | −1.6% | 0 |
+| Room no lamp lights | 12.4% | +11% | 0 |
+| Sponza atrium | 13.4% | −4.2% | 0 |
+| Sponza dark corner | 17.8% | −6.0% | 0 |
+
+Left for phase 2: the room's bounce (+11%), and in Sponza the lamps' own light (16.8% alone in the atrium): a lamp's shadow edge is as soft as the cone that finds it.

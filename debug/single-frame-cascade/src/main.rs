@@ -60,6 +60,19 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        its light through the voxels with 16 cones, so bounce
                        gains one bounce a frame; the sun is left out; the
                        reference is a multi-bounce path trace (default nee)
+  --cone-start S       with --tracer cone, where each probe direction's cone
+                       starts. voxel: at one of the cascade-0 voxel probes under
+                       the probe, run through every interval and split into
+                       that voxel's probes (default). probe: at the probe's own
+                       seat, over its own interval only
+  --cone-voxel P       with --cone-start voxel, which voxel probe a coarser
+                       probe's cones start at. nearest: the one nearest its
+                       seat, for every direction and frame (default). random:
+                       a new one for each direction and frame
+  --combine-visibility V  with --tracer cone: where a read between probes takes
+                       only what passes from the reader to each probe's seat.
+                       merge: a probe reading the coarser cascade. shade: a
+                       pixel reading the voxel layer. none or both (default both)
   --gather-cones N     with --mode full: cones each 25 cm patch gathers its lamp
                        and sky light with each frame (default 16)
   --patch-check        with --mode full: after the frames, the solved light of
@@ -195,6 +208,10 @@ struct Options {
     sky: bool,
     gather_cones: u64,
     patch_check: bool,
+    see_merge: bool,
+    cones_from_voxels: bool,
+    random_cone_voxel: bool,
+    see_shade: bool,
     lamp_radius: f32,
     cone: bool,
     world_voxels: bool,
@@ -239,6 +256,10 @@ fn parse_args() -> Result<Option<Options>, String> {
         sky: true,
         gather_cones: GATHER_CONES,
         patch_check: false,
+        see_merge: true,
+        cones_from_voxels: true,
+        random_cone_voxel: false,
+        see_shade: true,
         lamp_radius: 0.1,
         cone: false,
         world_voxels: true,
@@ -306,6 +327,30 @@ fn parse_args() -> Result<Option<Options>, String> {
             }
             "--gather-cones" => o.gather_cones = num::<u64>(&arg, &value()?)?.max(1),
             "--patch-check" => o.patch_check = true,
+            "--cone-voxel" => {
+                o.random_cone_voxel = match value()?.as_str() {
+                    "nearest" => false,
+                    "random" => true,
+                    other => return Err(format!("bad --cone-voxel: {other}")),
+                }
+            }
+            "--cone-start" => {
+                o.cones_from_voxels = match value()?.as_str() {
+                    "probe" => false,
+                    "voxel" => true,
+                    other => return Err(format!("bad --cone-start: {other}")),
+                }
+            }
+            "--combine-visibility" => {
+                let v = value()?;
+                (o.see_merge, o.see_shade) = match v.as_str() {
+                    "none" => (false, false),
+                    "merge" => (true, false),
+                    "shade" => (false, true),
+                    "both" => (true, true),
+                    other => return Err(format!("bad --combine-visibility: {other}")),
+                };
+            }
             "--sky" => {
                 o.sky = match value()?.as_str() {
                     "on" => true,
@@ -968,6 +1013,13 @@ struct Cascade {
     /// The merged cone's luma-weighted direction sum, merged as `cone` is.
     cone_moment: Vec<V3>,
     filled: Vec<bool>,
+    /// For each probe, the sum of the points and normals of the pixels it
+    /// serves, and their count: where a probe traced with cones sits.
+    seat: Vec<(V3, V3, f32)>,
+    /// Where each probe sits: the mean of its pixels' points, lifted 0.75 of
+    /// the finest voxel along their mean normal. Its cones start here, and the
+    /// layers are combined between these points.
+    seat_point: Vec<V3>,
 }
 
 impl Cascade {
@@ -1081,6 +1133,183 @@ fn bounce_reference(scene: &Scene, walls: &dyn Surfaces, point: V3, normal: V3, 
     scale(sum, PI / samples.max(1) as f32)
 }
 
+/// The cone tracer's frame: every probe of every cascade traces one cone for
+/// each of its directions, over its own cascade's interval, as wide as that
+/// cascade's direction spacing (the paper's Algorithm 1, its probes traced
+/// with cones in place of rays). Cascade 0's probes are the voxel layer over
+/// the visible surface: each sits on the mean point of the pixels it serves,
+/// lifted along their mean normal, and its short interval holds the fine
+/// detail. Each coarser cascade has twice the spacing, four times the
+/// directions and four times the reach. A direction keeps the light its cone
+/// met in the interval and the share that passed; the merge and the shade
+/// combine the layers. No cone starts at a pixel.
+/// The cone tracer's frame, every cone from the voxel layer: for each probe
+/// of each cascade and each of its directions, one cone starts at the seat of
+/// one of the cascade-0 voxel probes under it (a different one for each
+/// direction and frame) and runs out through every cascade's interval, as wide
+/// as each interval's direction spacing. Each interval is deposited into that
+/// voxel probe's probe of the same cascade (the paper's ray splitting, section
+/// 5, from the voxel layer instead of from pixels). Every interval starts at a
+/// surface: a coarse probe's interval, traced from its own seat, began past
+/// whatever wall lay within the shorter intervals under it, and the room no
+/// lamp lights read through it. Probes times directions, as in
+/// [`trace_probes`].
+/// A cone from a voxel probe: the probe, its direction, and per interval
+/// reached (cascade, light over what entered, share passed).
+type VoxelCone = (u32, V3, Vec<(usize, V3, f32)>);
+
+fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], index: &HashMap<Key, u32>, traced: &AtomicU64, scene: &Scene, jitter: (f32, f32)) {
+    let n = cascades.len();
+    let sky = if o.mode == Mode::Emissive { [0.0; 3] } else { scene.sky.as_ref().map_or([0.0; 3], |s| s.color) };
+    // Each voxel probe's probe in every cascade, and each probe's voxels.
+    let voxel_keys = cascades[0].keys.clone();
+    let mut ancestor: Vec<Vec<u32>> = vec![Vec::with_capacity(voxel_keys.len()); n];
+    for key in &voxel_keys {
+        let s0 = spacing(key.lod, 0);
+        let centre = key.cell.map(|c| (c as f32 + 0.5) * s0);
+        for (c, list) in ancestor.iter_mut().enumerate() {
+            let up = Key { lod: key.lod, cascade: u8::try_from(c).unwrap_or(u8::MAX), cell: nearest_cell(centre, spacing(key.lod, c)) };
+            list.push(index.get(&up).copied().unwrap_or(u32::MAX));
+        }
+    }
+    let mut under: Vec<Vec<Vec<u32>>> = cascades.iter().map(|c| vec![Vec::new(); c.keys.len()]).collect();
+    for (c, list) in ancestor.iter().enumerate() {
+        for (v, &slot) in list.iter().enumerate() {
+            if slot != u32::MAX {
+                under[c][slot as usize].push(u32::try_from(v).unwrap_or(u32::MAX));
+            }
+        }
+    }
+    // The voxel probes' surface points and normals.
+    let surface: Vec<(V3, V3)> = cascades[0].seat.iter().map(|(sum, nsum, count)| (scale(*sum, 1.0 / count.max(1.0)), normalize(*nsum))).collect();
+    let frame = u64::from((jitter.0 * 65_536.0) as u32);
+    // The cones: (cascade, probe, direction) -> (voxel probe, direction vector).
+    let mut jobs: Vec<(u32, V3)> = Vec::new();
+    for (c, cascade) in cascades.iter().enumerate() {
+        let theta = cascade.theta;
+        for (slot, voxels_under) in under[c].iter().enumerate() {
+            if voxels_under.is_empty() {
+                continue;
+            }
+            // The representative voxel probe: the one whose surface point is
+            // nearest the probe's own seat, for every direction and frame.
+            let seat = cascade.seat_point[slot];
+            let nearest = voxels_under
+                .iter()
+                .copied()
+                .min_by(|a, b| {
+                    let (pa, pb) = (surface[*a as usize].0, surface[*b as usize].0);
+                    dot(sub(pa, seat), sub(pa, seat)).total_cmp(&dot(sub(pb, seat), sub(pb, seat)))
+                })
+                .unwrap_or(voxels_under[0]);
+            for b in 0..cascade.dirs() {
+                let v = if o.random_cone_voxel {
+                    let pick = hashed(frame ^ ((c as u64) << 56) ^ ((slot as u64) << 20) ^ b as u64);
+                    voxels_under[((pick * voxels_under.len() as f32) as usize).min(voxels_under.len() - 1)]
+                } else {
+                    nearest
+                };
+                jobs.push((v, bin_dir(b, theta)));
+            }
+        }
+    }
+    let chunk = jobs.len().div_ceil(o.threads).max(1);
+    let deposits: Vec<VoxelCone> = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .chunks(chunk)
+            .map(|part| {
+                let surface = &surface;
+                let voxel_keys = &voxel_keys;
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|(v, dir)| {
+                            let (point, normal) = surface[*v as usize];
+                            let t0 = o.t0 * spacing(voxel_keys[*v as usize].lod, 0);
+                            (*v, *dir, march_cone(voxels, o, point, normal, *dir, t0, sky))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    traced.fetch_add(jobs.len() as u64, Ordering::Relaxed);
+    for (v, dir, intervals) in deposits {
+        for (c, radiance, through) in intervals {
+            let slot = ancestor[c][v as usize];
+            if slot == u32::MAX {
+                continue;
+            }
+            let cascade = &mut cascades[c];
+            let at = slot as usize * cascade.dirs() + dir_bin(dir, cascade.theta);
+            cascade.count[at] += 1;
+            cascade.radiance[at] = add(cascade.radiance[at], radiance);
+            cascade.moment[at] = add(cascade.moment[at], scale(dir, luma(radiance)));
+            cascade.through[at] += through;
+        }
+    }
+}
+
+fn trace_probes(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], traced: &AtomicU64, scene: &Scene, jitter: (f32, f32)) {
+    let n = cascades.len();
+    let _ = jitter;
+    let finest = voxel_size(VOXEL_FINEST);
+    let sky = if o.mode == Mode::Emissive { [0.0; 3] } else { scene.sky.as_ref().map_or([0.0; 3], |s| s.color) };
+    let width0 = o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt();
+    for (c, cascade) in cascades.iter_mut().enumerate() {
+        let dirs = cascade.dirs();
+        let theta = cascade.theta;
+        let directions: Vec<V3> = (0..dirs).map(|b| bin_dir(b, theta)).collect();
+        let width = width0 / (1u32 << c) as f32;
+        let probes = cascade.keys.len();
+        let chunk = probes.div_ceil(o.threads).max(1);
+        let keys = &cascade.keys;
+        let seats = &cascade.seat_point;
+        let directions = &directions;
+        let results: Vec<Vec<(V3, f32)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..probes)
+                .step_by(chunk)
+                .map(|first| {
+                    scope.spawn(move || {
+                        let mut out = Vec::new();
+                        for slot in first..(first + chunk).min(probes) {
+                            let start = seats[slot];
+                            let t0 = o.t0 * spacing(keys[slot].lod, 0);
+                            let from = if c == 0 { 0.25 * finest } else { t0 * 4f32.powi(i32::try_from(c).unwrap_or(0) - 1) };
+                            let end = if c + 1 == n { REACH } else { t0 * 4f32.powi(i32::try_from(c).unwrap_or(0)) };
+                            let mut row = Vec::with_capacity(directions.len());
+                            for dir in directions {
+                                let mut span = Span { done: from, covered: 0.0, met: [0.0; 3] };
+                                march_span(voxels, o, start, *dir, width, end, &mut span, None);
+                                let mut met = span.met;
+                                let mut through = 1.0 - span.covered;
+                                if c + 1 == n {
+                                    met = add(met, scale(sky, through));
+                                    through = 0.0;
+                                }
+                                row.push((met, through));
+                            }
+                            out.push(row);
+                        }
+                        out
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        traced.fetch_add((probes * dirs) as u64, Ordering::Relaxed);
+        for (slot, row) in results.into_iter().enumerate() {
+            for (b, (met, through)) in row.into_iter().enumerate() {
+                let at = slot * dirs + b;
+                cascade.radiance[at] = met;
+                cascade.moment[at] = scale(directions[b], luma(met));
+                cascade.through[at] = through;
+                cascade.count[at] = 1;
+            }
+        }
+    }
+}
+
 fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
     let o = setup.options;
     let n = o.cascades;
@@ -1097,6 +1326,8 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
             cone: Vec::new(),
             cone_moment: Vec::new(),
             filled: Vec::new(),
+            seat: Vec::new(),
+            seat_point: Vec::new(),
         })
         .collect();
     // The probe of each pixel in each cascade.
@@ -1111,12 +1342,29 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
             };
             let slot = *index.entry(key).or_insert_with(|| {
                 cascade.keys.push(key);
+                cascade.seat.push(([0.0; 3], [0.0; 3], 0.0));
                 u32::try_from(cascade.keys.len() - 1).unwrap_or(u32::MAX)
             });
             home[p * n + c] = slot;
+            let seat = &mut cascade.seat[slot as usize];
+            seat.0 = add(seat.0, pixel.point);
+            seat.1 = add(seat.1, pixel.normal);
+            seat.2 += 1.0;
         }
     }
     for cascade in &mut cascades {
+        let finest = voxel_size(VOXEL_FINEST);
+        cascade.seat_point = cascade
+            .seat
+            .iter()
+            .map(|(sum, nsum, count)| {
+                // A probe over floor and wall and ceiling has normals that
+                // cancel: it is not lifted then.
+                let held = dot(*nsum, *nsum).sqrt() / count.max(1.0);
+                let lift = if held > 0.3 { scale(normalize(*nsum), 0.75 * finest) } else { [0.0; 3] };
+                add(scale(*sum, 1.0 / count.max(1.0)), lift)
+            })
+            .collect();
         let len = cascade.keys.len() * cascade.dirs();
         cascade.radiance = vec![[0.0; 3]; len];
         cascade.moment = vec![[0.0; 3]; len];
@@ -1126,6 +1374,19 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
         cascade.cone_moment = vec![[0.0; 3]; len];
         cascade.filled = vec![false; len];
     }
+    let cones_traced = AtomicU64::new(0);
+    if let Some(voxels) = setup.voxels {
+        if o.cones_from_voxels {
+            trace_from_voxels(voxels, o, &mut cascades, &index, &cones_traced, setup.scene, jitter);
+        } else {
+            trace_probes(voxels, o, &mut cascades, &cones_traced, setup.scene, jitter);
+        }
+    }
+    // The ray tracer: rays from the pixels, split into the cascades
+    // (the paper's section 5). The cone tracer traced its probes above.
+    let counted = Counted { inner: setup.surfaces, rays: AtomicU64::new(0) };
+    let shadow_rays = AtomicU64::new(0);
+    if setup.voxels.is_none() {
     // Ray generation (Algorithm 3): probes under one coarser probe take a
     // contiguous run of the R2 sequence, so each cascade's directions are
     // covered evenly.
@@ -1187,8 +1448,6 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
     }
     // Trace. Each ray is split: the cascade whose interval holds the hit takes
     // its radiance, and every cascade under it learns the way was clear.
-    let counted = Counted { inner: setup.surfaces, rays: AtomicU64::new(0) };
-    let shadow_rays = AtomicU64::new(0);
     let sky = if o.mode == Mode::Emissive {
         [0.0; 3]
     } else {
@@ -1214,18 +1473,6 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                             let mut dir = decode_dir((u + jitter.0).fract(), (v + jitter.1).fract());
                             if dot(dir, pixel.normal) < 0.0 {
                                 dir = scale(dir, -1.0);
-                            }
-                            if let Some(voxels) = setup.voxels {
-                                for (c, radiance, through) in march_cone(voxels, o, pixel.point, pixel.normal, dir, t0, sky) {
-                                    out.push(Deposit {
-                                        pixel: u32::try_from(p).unwrap_or(u32::MAX),
-                                        dir,
-                                        cascade: u8::try_from(c).unwrap_or(u8::MAX),
-                                        radiance,
-                                        through,
-                                    });
-                                }
-                                continue;
                             }
                             let (cascade, radiance) = match counted.first_hit(origin, dir, REACH) {
                                 Some(hit) => {
@@ -1271,6 +1518,7 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
         cascade.moment[at] = add(cascade.moment[at], scale(d.dir, luma(d.radiance)));
         cascade.through[at] += d.through;
     }
+    }
     // Merge from the last cascade down (the paper's equation 7).
     for c in (0..n).rev() {
         let (lower, upper) = cascades.split_at_mut(c + 1);
@@ -1285,6 +1533,11 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                 (key.cell[1] as f32 + 0.5) * s,
                 (key.cell[2] as f32 + 0.5) * s,
             ];
+            // The coarser probes this one reads, once for all its
+            // directions. Traced with cones, with --combine-visibility, it
+            // takes only the probes this probe's seat sees.
+            let seen = setup.voxels.filter(|_| o.see_merge).map(|v| (v, o, cascade.seat_point[slot]));
+            let weights = above.map_or_else(Vec::new, |above| probe_weights(above, &index, key.lod, c + 1, centre, seen));
             for bin in 0..dirs {
                 let at = slot * dirs + bin;
                 let count = cascade.count[at];
@@ -1305,7 +1558,7 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                     let mut found = 0.0;
                     for k in 0..4u32 {
                         let child = ((2 * y + (k >> 1)) * 2 * above.theta + 2 * x + (k & 1)) as usize;
-                        if let Some((v, m)) = interpolate(above, &index, key.lod, c + 1, centre, child) {
+                        if let Some((v, m)) = read_cone(above, &weights, child) {
                             far = add(far, v);
                             far_moment = add(far_moment, m);
                             found += 1.0;
@@ -1333,13 +1586,17 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
         let Some(pixel) = pixel else { continue };
         let mut sum = [0.0; 3];
         let mut weight = 0.0;
+        // The voxel layer's probes around the pixel; traced with cones, only
+        // those the pixel sees.
+        let seen = setup.voxels.filter(|_| o.see_shade).map(|v| (v, o, add(pixel.point, scale(pixel.normal, LIFT))));
+        let weights = probe_weights(first, &index, pixel.lod, 0, pixel.point, seen);
         for (bin, dir) in bin_dirs.iter().enumerate() {
             let cosine = dot(*dir, pixel.normal);
             if cosine <= 0.0 {
                 continue;
             }
             wanted += f64::from(cosine);
-            match interpolate(first, &index, pixel.lod, 0, pixel.point, bin) {
+            match read_cone(first, &weights, bin) {
                 Some((v, m)) => {
                     // The light's own cosine when it is known: a bright patch
                     // that fills a small part of the direction is weighed where
@@ -1366,7 +1623,7 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
     }
     Frame {
         irradiance,
-        rays: counted.rays.load(Ordering::Relaxed),
+        rays: counted.rays.load(Ordering::Relaxed) + cones_traced.load(Ordering::Relaxed),
         shadow_rays: shadow_rays.load(Ordering::Relaxed),
         voxel_lookups: setup.voxels.map_or(0, |v| v.lookups.swap(0, Ordering::Relaxed)),
         probes: cascades.iter().map(|c| c.keys.len()).collect(),
@@ -1428,156 +1685,129 @@ fn march_cone(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: 
     march_cone_into(voxels, o, point, normal, dir, t0, sky, None)
 }
 
+/// Where a march along one cone has got to: the depth read up to, the share
+/// of the cone covered, and the light met so far.
+struct Span {
+    done: f32,
+    covered: f32,
+    met: V3,
+}
+
+impl Span {
+    /// Take what a step met, nearest first, until the cone is covered.
+    fn take(&mut self, found: &[Met], multiply: bool, mut sink: Option<&mut Sink>) {
+        for m in found {
+            let seen = if multiply { m.cover * (1.0 - self.covered) } else { m.cover.min(1.0 - self.covered) };
+            if seen <= 0.0 {
+                break;
+            }
+            // A lamp read wider than the voxel (cover over 1) sends all of it;
+            // what it blocks stops at the open share.
+            let lit = if m.patch == u32::MAX { seen * m.cover.max(1.0) } else { seen };
+            self.met = add(self.met, scale(m.radiance, lit));
+            if let Some(sink) = sink.as_deref_mut() {
+                if m.patch == u32::MAX {
+                    sink.direct = add(sink.direct, scale(m.radiance, lit));
+                } else if m.patch == NO_PATCH {
+                    sink.unassigned += seen;
+                } else {
+                    sink.records.push((m.patch, scale(m.albedo, seen / PI)));
+                }
+            }
+            self.covered += seen;
+        }
+    }
+}
+
+/// March one cone from `start` along `dir`, `width` radians wide, from
+/// `span.done` to `end`. Steps tile the axis: each covers from where the last
+/// ended, so a level that changes between steps leaves no stretch unread. At
+/// and under the refine level each step counts the planes the axis crosses,
+/// each once; a coarser step that meets cover is walked again so. Lamps are
+/// read at the step's own level, each voxel once at its centroid's depth.
+#[expect(clippy::too_many_arguments, reason = "the march's inputs, plus the transfer sink")]
+fn march_span(voxels: &Voxels, o: &Options, start: V3, dir: V3, width: f32, end: f32, span: &mut Span, mut sink: Option<&mut Sink>) {
+    let finest = voxel_size(VOXEL_FINEST);
+    let rules = (o.cross_full, o.box_margin);
+    let mut found = Vec::new();
+    let mut lamps = Vec::new();
+    while span.done < end && span.covered < 0.98 {
+        let wide = (width * span.done).max(finest);
+        let level = ((wide / BASE_SPACING).log2().ceil() as i32)
+            .clamp(i32::from(VOXEL_FINEST), i32::from(o.max_level)) as u8;
+        let step = voxel_size(level);
+        let (from, to) = (span.done, span.done + step);
+        let front = o.front_order.then_some(start);
+        let lamps_here = |lamps: &mut Vec<Met>| {
+            voxels.lamps_between(level, start, dir, from, to, lamps);
+            for lamp in lamps.iter_mut() {
+                // A wide cone's read can take a lamp beside a wall: only what
+                // passes from the cone to the lamp counts.
+                lamp.cover *= lamp_passing(voxels, o, start, lamp.albedo, step);
+            }
+            lamps.retain(|l| l.cover > 0.0);
+        };
+        if o.fine_cross && level <= o.refine_level {
+            voxels.crossed(level, add(start, scale(dir, from)), add(start, scale(dir, to)), dir, rules, &mut found);
+            lamps_here(&mut lamps);
+            found.extend(lamps.iter().map(|l| Met { depth: l.depth - from, ..*l }));
+            found.sort_by(|a, b| a.depth.total_cmp(&b.depth));
+            span.take(&found, o.multiply_cover, sink.as_deref_mut());
+            span.done = to;
+            continue;
+        }
+        let (cover, light) = voxels.sample(level, add(start, scale(dir, from + 0.5 * step)), dir, front);
+        if cover > 0.0 && o.fine_cross {
+            // Something is here: walk this step again at the refine level,
+            // whose read cannot reach the far side of a wall.
+            let fine = voxel_size(o.refine_level);
+            lamps_here(&mut lamps);
+            let mut u = from;
+            while u < to && span.covered < 0.98 {
+                let next = (u + fine).min(to);
+                voxels.crossed(o.refine_level, add(start, scale(dir, u)), add(start, scale(dir, next)), dir, rules, &mut found);
+                found.extend(lamps.iter().filter(|l| l.depth > u && l.depth <= next).map(|l| Met { depth: l.depth - u, ..*l }));
+                found.sort_by(|a, b| a.depth.total_cmp(&b.depth));
+                span.take(&found, o.multiply_cover, sink.as_deref_mut());
+                u = next;
+            }
+        } else if cover > 0.0 {
+            let seen = cover.min(1.0 - span.covered);
+            span.met = add(span.met, scale(light, seen / cover));
+            span.covered += seen;
+        }
+        span.done = to;
+    }
+}
+
+/// A whole cone from a surface point, through every cascade's interval in
+/// turn (the gather's cones): for each interval reached, the light met in it
+/// over the light that entered it, and the share that passed.
 #[expect(clippy::too_many_arguments, reason = "the march's inputs, plus the transfer sink")]
 fn march_cone_into(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: f32, sky: V3, mut sink: Option<&mut Sink>) -> Vec<(usize, V3, f32)> {
     let n = o.cascades;
     let finest = voxel_size(VOXEL_FINEST);
     let width0 = o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt();
     let start = add(point, scale(normal, 0.75 * finest));
-    // Steps tile the axis: each covers from where the last ended, so a level
-    // that changes between steps (or between cascades) leaves no stretch
-    // unread. The first step's centre is 0.75 of the finest voxel out.
-    let mut done = 0.25 * finest;
-    let mut covered = 0.0f32;
+    let mut span = Span { done: 0.25 * finest, covered: 0.0, met: [0.0; 3] };
     let mut reach = t0;
     let mut out = Vec::with_capacity(n);
     for c in 0..n {
         let end = if c + 1 == n { REACH } else { reach };
-        let width = width0 / (1u32 << c) as f32;
-        let open = 1.0 - covered;
-        let mut met = [0.0; 3];
-        while done < end && covered < 0.98 {
-            let wide = (width * done).max(finest);
-            let level = ((wide / BASE_SPACING).log2().ceil() as i32)
-                .clamp(i32::from(VOXEL_FINEST), i32::from(o.max_level)) as u8;
-            let step = voxel_size(level);
-            let t = done + 0.5 * step;
-            let front = o.front_order.then_some(start);
-            if o.fine_cross && level <= o.refine_level {
-                // A fine step: the planes the axis crosses in it, each once.
-                let mut found = Vec::new();
-                let (from, to) = ((t - 0.5 * step).max(0.0), t + 0.5 * step);
-                voxels.crossed(level, add(start, scale(dir, from)), add(start, scale(dir, to)), dir, (o.cross_full, o.box_margin), &mut found);
-                // Lamps as wide as the cone, trilinear at this step: a step a
-                // voxel long takes each lamp's share along the axis, so the
-                // steps over a lamp add up to it once.
-                let mut lamp_found = Vec::new();
-                voxels.lamps_between(level, start, dir, done, done + step, &mut lamp_found);
-                for mut lamp in lamp_found {
-                    // A wide cone's read can take a lamp beside a wall: only
-                    // what passes from the axis to the lamp counts.
-                    lamp.cover *= lamp_passing(voxels, o, start, lamp.albedo, step);
-                    lamp.depth -= from;
-                    if lamp.cover > 0.0 {
-                        found.push(lamp);
-                    }
-                }
-                found.sort_by(|a, b| a.depth.total_cmp(&b.depth));
-                for m in &found {
-                    let (cover, radiance) = (&m.cover, &m.radiance);
-                    let seen = if o.multiply_cover { cover * (1.0 - covered) } else { cover.min(1.0 - covered) };
-                    // A lamp read wider than the voxel (cover over 1) sends all
-                    // of it; what it blocks stops at the open share.
-                    let lit = if m.patch == u32::MAX { seen * cover.max(1.0) } else { seen };
-                    if seen <= 0.0 {
-                        break;
-                    }
-                    met = add(met, scale(*radiance, lit));
-                    if let Some(sink) = sink.as_deref_mut() {
-                        if m.patch == u32::MAX {
-                            sink.direct = add(sink.direct, scale(*radiance, lit));
-                        } else if m.patch == NO_PATCH {
-                            sink.unassigned += seen;
-                        } else {
-                            sink.records.push((m.patch, scale(m.albedo, seen / PI)));
-                        }
-                    }
-                    covered += seen;
-                }
-                done += step;
-                continue;
-            }
-            let (cover, light) = voxels.sample(level, add(start, scale(dir, t)), dir, front);
-            if cover > 0.0 && level > o.refine_level {
-                // Something is here: walk this step again at the finer level,
-                // whose read cannot reach the far side of a wall.
-                let fine = voxel_size(o.refine_level);
-                if o.fine_cross {
-                    // The planes the axis crosses in this step, each once,
-                    // nearest first. The lamps stay at this step's level, as
-                    // wide as the cone, and are met at their centroid's depth.
-                    let mut found = Vec::new();
-                    // This step's lamp share, at the cone's width, met half way.
-                    // The lamps in this step, at the cone's level, each met at its
-                    // own depth.
-                    let mut lamps = Vec::new();
-                    voxels.lamps_between(level, start, dir, done, done + step, &mut lamps);
-                    for lamp in &mut lamps {
-                        lamp.cover *= lamp_passing(voxels, o, start, lamp.albedo, step);
-                    }
-                    lamps.retain(|l| l.cover > 0.0);
-                    let mut u = (t - 0.5 * step).max(0.0);
-                    while u < t + 0.5 * step && covered < 0.98 {
-                        let next = (u + fine).min(t + 0.5 * step);
-                        voxels.crossed(o.refine_level, add(start, scale(dir, u)), add(start, scale(dir, next)), dir, (o.cross_full, o.box_margin), &mut found);
-                        for l in lamps.iter().filter(|l| l.depth > u && l.depth <= next) {
-                            found.push(Met { depth: l.depth - u, ..*l });
-                        }
-                        found.sort_by(|a, b| a.depth.total_cmp(&b.depth));
-                        for m in &found {
-                    let (cover, radiance) = (&m.cover, &m.radiance);
-                            let seen = if o.multiply_cover { cover * (1.0 - covered) } else { cover.min(1.0 - covered) };
-                    // A lamp read wider than the voxel (cover over 1) sends all
-                    // of it; what it blocks stops at the open share.
-                    let lit = if m.patch == u32::MAX { seen * cover.max(1.0) } else { seen };
-                            if seen <= 0.0 {
-                                break;
-                            }
-                            met = add(met, scale(*radiance, lit));
-                    if let Some(sink) = sink.as_deref_mut() {
-                        if m.patch == u32::MAX {
-                            sink.direct = add(sink.direct, scale(*radiance, lit));
-                        } else if m.patch == NO_PATCH {
-                            sink.unassigned += seen;
-                        } else {
-                            sink.records.push((m.patch, scale(m.albedo, seen / PI)));
-                        }
-                    }
-                            covered += seen;
-                        }
-                        u = next;
-                    }
-                    done += step;
-                    continue;
-                }
-                let mut u = t - 0.5 * step + 0.5 * fine;
-                while u < t + 0.5 * step && covered < 0.98 {
-                    let (cover, light) = voxels.sample(o.refine_level, add(start, scale(dir, u)), dir, front);
-                    if cover > 0.0 {
-                        let seen = cover.min(1.0 - covered);
-                        met = add(met, scale(light, seen / cover));
-                        covered += seen;
-                    }
-                    u += fine;
-                }
-            } else if cover > 0.0 {
-                let seen = cover.min(1.0 - covered);
-                met = add(met, scale(light, seen / cover));
-                covered += seen;
-            }
-            done += step;
-        }
-        let mut through = (1.0 - covered) / open;
+        let open = 1.0 - span.covered;
+        span.met = [0.0; 3];
+        march_span(voxels, o, start, dir, width0 / (1u32 << c) as f32, end, &mut span, sink.as_deref_mut());
+        let mut through = (1.0 - span.covered) / open;
         if c + 1 == n {
-            met = add(met, scale(sky, 1.0 - covered));
+            span.met = add(span.met, scale(sky, 1.0 - span.covered));
             if let Some(sink) = sink.as_deref_mut() {
-                sink.direct = add(sink.direct, scale(sky, 1.0 - covered));
-                sink.sky = add(sink.sky, scale(sky, 1.0 - covered));
+                sink.direct = add(sink.direct, scale(sky, 1.0 - span.covered));
+                sink.sky = add(sink.sky, scale(sky, 1.0 - span.covered));
             }
             through = 0.0;
         }
-        out.push((c, scale(met, 1.0 / open), through));
-        if covered >= 0.98 {
+        out.push((c, scale(span.met, 1.0 / open), through));
+        if span.covered >= 0.98 {
             break;
         }
         reach *= 4.0;
@@ -1597,46 +1827,45 @@ fn cone_total(intervals: &[(usize, V3, f32)]) -> V3 {
     sum
 }
 
-/// Sparse trilinear read of one direction's cone: the probes that exist and
-/// have that direction, renormalised.
-fn interpolate(
-    cascade: &Cascade,
-    index: &HashMap<Key, u32>,
-    lod: i8,
-    level: usize,
-    at: V3,
-    bin: usize,
-) -> Option<(V3, V3)> {
+/// The probes of `cascade` a read at `at` takes, with their trilinear
+/// weights: the probes that exist among the eight around it. With `seen`, each
+/// weight is also scaled by the share of light that passes from the reader to
+/// the probe's seat through the voxel field: a probe on the far side of a wall
+/// does not lend its light. The weights serve every direction of the read.
+fn probe_weights(cascade: &Cascade, index: &HashMap<Key, u32>, lod: i8, level: usize, at: V3, seen: Option<(&Voxels, &Options, V3)>) -> Vec<(usize, f32)> {
     let s = spacing(lod, level);
     let g = [at[0] / s - 0.5, at[1] / s - 0.5, at[2] / s - 0.5];
-    let base = [g[0].floor(), g[1].floor(), g[2].floor()];
+    let base = g.map(f32::floor);
     let f = [g[0] - base[0], g[1] - base[1], g[2] - base[2]];
-    let dirs = cascade.dirs();
-    let mut sum = [0.0; 3];
-    let mut moment = [0.0; 3];
-    let mut weight = 0.0;
-    for corner in 0..8u32 {
+    let mut out = Vec::with_capacity(8);
+    for corner in 0..8i32 {
         let o = [corner & 1, (corner >> 1) & 1, (corner >> 2) & 1];
-        let w = (0..3)
-            .map(|a| if o[a] == 1 { f[a] } else { 1.0 - f[a] })
-            .product::<f32>();
+        let mut w = (0..3).map(|a| if o[a] == 1 { f[a] } else { 1.0 - f[a] }).product::<f32>();
         if w <= 0.0 {
             continue;
         }
-        let key = Key {
-            lod,
-            cascade: u8::try_from(level).unwrap_or(u8::MAX),
-            cell: [
-                base[0] as i32 + o[0] as i32,
-                base[1] as i32 + o[1] as i32,
-                base[2] as i32 + o[2] as i32,
-            ],
-        };
+        let key = Key { lod, cascade: u8::try_from(level).unwrap_or(u8::MAX), cell: [floor_i32(base[0]) + o[0], floor_i32(base[1]) + o[1], floor_i32(base[2]) + o[2]] };
         let Some(&slot) = index.get(&key) else { continue };
-        let i = slot as usize * dirs + bin;
+        if let Some((voxels, opts, from)) = seen {
+            w *= voxels.passing(opts.refine_level, from, cascade.seat_point[slot as usize], (opts.cross_full, opts.box_margin));
+        }
+        if w > 0.0 {
+            out.push((slot as usize, w));
+        }
+    }
+    out
+}
+
+/// One direction's merged cone from the weighted probes: those that have it,
+/// renormalised.
+fn read_cone(cascade: &Cascade, weights: &[(usize, f32)], bin: usize) -> Option<(V3, V3)> {
+    let dirs = cascade.dirs();
+    let (mut sum, mut moment, mut weight) = ([0.0; 3], [0.0; 3], 0.0f32);
+    for (slot, w) in weights {
+        let i = slot * dirs + bin;
         if cascade.filled[i] {
-            sum = add(sum, scale(cascade.cone[i], w));
-            moment = add(moment, scale(cascade.cone_moment[i], w));
+            sum = add(sum, scale(cascade.cone[i], *w));
+            moment = add(moment, scale(cascade.cone_moment[i], *w));
             weight += w;
         }
     }
@@ -1724,6 +1953,7 @@ fn gather_patches(points: &[Point], scene: &Scene) -> (Vec<u32>, Vec<Option<(V3,
     (of_point, patches)
 }
 
+
 /// Iterations of `E = D + T E` a frame.
 const TRANSFER_ITERATIONS: usize = 256;
 
@@ -1792,7 +2022,11 @@ fn gather_rows(voxels: &Voxels, patches: &[Option<(V3, V3)>], o: &Options, cones
 /// light holds every bounce. Returns each point's radiance.
 #[expect(clippy::too_many_arguments, reason = "the field, its patches, the baked transfer and the frame")]
 fn gather(voxels: &Voxels, points: &[Point], patch_of: &[u32], patches: &[Option<(V3, V3)>], t: &[Vec<(u32, V3)>], o: &Options, frame: u32, sky: V3) -> Vec<V3> {
-    let d: Vec<V3> = gather_rows(voxels, patches, o, o.gather_cones, u64::from(frame), sky).into_iter().map(|r| r.0).collect();
+    // Each patch's cone directions stay the same from frame to frame: a still
+    // scene's light does not change, and a lamp that moves changes it in the
+    // frame it moves.
+    let _ = frame;
+    let d: Vec<V3> = gather_rows(voxels, patches, o, o.gather_cones, 7, sky).into_iter().map(|r| r.0).collect();
     let mut e = d.clone();
     for _ in 0..TRANSFER_ITERATIONS {
         e = t.iter().zip(&d).map(|(row, d)| row.iter().fold(*d, |acc, (j, w)| add(acc, mul(*w, e[*j as usize])))).collect();
