@@ -26,6 +26,7 @@ layout(std140, set = 0, binding = 6) uniform Params {
     vec4 misc;      // width0, cascades, cones, refine level
     vec4 misc2;     // full results (1) or packed (0), cross full, box margin, side
     vec4 sky;       // rgb; w: each cone marches only its cascade's interval
+    vec4 extra;     // x: cascades below this take the crossing test and the refine walk
 };
 
 const float BASE = 1.0 / 64.0;
@@ -241,6 +242,7 @@ void main() {
         float width = misc.x / float(1 << c);
         float open = 1.0 - covered;
         vec3 met = vec3(0.0);
+        bool fine = float(c) < extra.x;
         while (done < end && covered < FULL) {
             float wide = max(width * done, finest);
             int level = clamp(int(ceil(log2(wide / BASE))), FINEST, COARSEST);
@@ -248,7 +250,7 @@ void main() {
             float from = done;
             float to = done + step;
             steps += 1.0;
-            if (level <= refine) {
+            if (fine && level <= refine) {
                 int n = crossed(level, start + dir * from, start + dir * to, dir, found);
                 float lc;
                 vec3 ll;
@@ -272,7 +274,11 @@ void main() {
             if (lc > 0.0) {
                 met += ll * min(lc, 1.0 - covered);
             }
-            if (cov > 0.0) {
+            if (cov > 0.0 && !fine) {
+                float seen = min(cov, 1.0 - covered);
+                met += li * seen;
+                covered += seen;
+            } else if (cov > 0.0) {
                 // Something is here: walk this step again at the refine level.
                 float fine = BASE * exp2(float(refine));
                 float u = from;

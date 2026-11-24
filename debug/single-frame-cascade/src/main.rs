@@ -146,9 +146,25 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        cosine of the luma-weighted mean direction of the light
                        that direction holds, carried through the merge
                        (default mean)
-  --gpu-own-interval   with --gpu-bench: each cone marches only its own
-                       cascade's interval, as a sparse cascade traces, in
-                       place of every interval from the voxel layer
+  --own-interval       with --cone-start voxel: each cascade's cone marches
+                       only its own cascade's interval, as a sparse cascade
+                       traces, in place of every interval from the voxel
+                       layer (--gpu-bench follows it)
+  --near-check C       with --own-interval: a cascade-c cone (c > 0) first
+                       marches from its start to its interval; closed, the
+                       probe takes no value in that direction. off, filtered
+                       (the filtered read only), fine (with the crossing
+                       test and the walk), or chain: no march; each probe
+                       starts on a finer child's start voxel, the cascades
+                       are traced finest first, and the share open is the
+                       product of the chain's finer probes' passed shares
+                       in the bins holding the direction (default off)
+  --seat-at-start      with --cone-voxel nearest: the merge's visibility test
+                       aims at the voxel-layer point a coarse probe's cones
+                       start from, not at the probe's seat
+  --refine-cascades N  only cascades below N take the plane-crossing test and
+                       walk a covered coarse step again at the refine level;
+                       the rest take the filtered read (default all)
   --threads N          worker threads (default the machine's)
   --out DIR            output directory (default ./genos-debug/single-frame-cascade)
   -h, --help           this text
@@ -243,7 +259,10 @@ struct Options {
     voxel_check: bool,
     probe_pixel: Option<(usize, usize)>,
     gpu_bench: bool,
-    gpu_own_interval: bool,
+    own_interval: bool,
+    seat_at_start: bool,
+    near_check: NearCheck,
+    refine_cascades: usize,
     probe_px: f32,
     theta: u32,
     cascades: usize,
@@ -294,7 +313,10 @@ fn parse_args() -> Result<Option<Options>, String> {
         voxel_check: false,
         probe_pixel: None,
         gpu_bench: false,
-        gpu_own_interval: false,
+        own_interval: false,
+        seat_at_start: false,
+        near_check: NearCheck::Off,
+        refine_cascades: usize::MAX,
         probe_px: 4.0,
         theta: 4,
         cascades: 4,
@@ -442,7 +464,18 @@ fn parse_args() -> Result<Option<Options>, String> {
                 }
             }
             "--gpu-bench" => o.gpu_bench = true,
-            "--gpu-own-interval" => o.gpu_own_interval = true,
+            "--own-interval" => o.own_interval = true,
+            "--seat-at-start" => o.seat_at_start = true,
+            "--near-check" => {
+                o.near_check = match value()?.as_str() {
+                    "off" => NearCheck::Off,
+                    "filtered" => NearCheck::Filtered,
+                    "fine" => NearCheck::Fine,
+                    "chain" => NearCheck::Chain,
+                    other => return Err(format!("bad --near-check: {other}")),
+                }
+            }
+            "--refine-cascades" => o.refine_cascades = num(&arg, &value()?)?,
             "--probe-px" => o.probe_px = num(&arg, &value()?)?,
             "--theta" => o.theta = num(&arg, &value()?)?,
             "--cascades" => o.cascades = num(&arg, &value()?)?,
@@ -1223,10 +1256,15 @@ fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], ind
     }
     // The voxel probes' surface points and normals.
     let surface: Vec<(V3, V3)> = cascades[0].seat.iter().map(|(sum, nsum, count)| (scale(*sum, 1.0 / count.max(1.0)), normalize(*nsum))).collect();
+    if o.own_interval && o.near_check == NearCheck::Chain {
+        trace_chain(voxels, o, cascades, &ancestor, &under, &surface, &voxel_keys, traced, sky);
+        return;
+    }
     let frame = u64::from((jitter.0 * 65_536.0) as u32);
     // The cones: (cascade, probe, direction) -> (voxel probe, direction vector).
     let mut jobs: Vec<(u32, V3)> = Vec::new();
     let mut job_cascade: Vec<u8> = Vec::new();
+    let mut starts: Vec<(usize, usize, V3)> = Vec::new();
     for (c, cascade) in cascades.iter().enumerate() {
         let theta = cascade.theta;
         for (slot, voxels_under) in under[c].iter().enumerate() {
@@ -1244,6 +1282,7 @@ fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], ind
                     dot(sub(pa, seat), sub(pa, seat)).total_cmp(&dot(sub(pb, seat), sub(pb, seat)))
                 })
                 .unwrap_or(voxels_under[0]);
+            starts.push((c, slot, surface[nearest as usize].0));
             for b in 0..cascade.dirs() {
                 let v = if o.random_cone_voxel {
                     let pick = hashed(frame ^ ((c as u64) << 56) ^ ((slot as u64) << 20) ^ b as u64);
@@ -1266,19 +1305,35 @@ fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], ind
             }
         }
     }
-    let chunk = jobs.len().div_ceil(o.threads).max(1);
+    // The merge's visibility test aims at the point a probe's cones start
+    // from, not at its seat: a coarse probe over both sides of a wall starts
+    // on one of them.
+    if o.seat_at_start && !o.random_cone_voxel {
+        for (c, slot, start) in starts {
+            if c > 0 {
+                cascades[c].seat_point[slot] = start;
+            }
+        }
+    }
+    let tagged: Vec<(u32, V3, u8)> = jobs.iter().zip(&job_cascade).map(|((v, dir), c)| (*v, *dir, *c)).collect();
+    let chunk = tagged.len().div_ceil(o.threads).max(1);
     let deposits: Vec<VoxelCone> = std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
+        let handles: Vec<_> = tagged
             .chunks(chunk)
             .map(|part| {
                 let surface = &surface;
                 let voxel_keys = &voxel_keys;
                 scope.spawn(move || {
                     part.iter()
-                        .map(|(v, dir)| {
+                        .map(|(v, dir, c)| {
                             let (point, normal) = surface[*v as usize];
                             let t0 = o.t0 * spacing(voxel_keys[*v as usize].lod, 0);
-                            (*v, *dir, march_cone(voxels, o, point, normal, *dir, t0, sky))
+                            let intervals = if o.own_interval {
+                                march_own(voxels, o, point, normal, *dir, t0, sky, usize::from(*c))
+                            } else {
+                                march_cone(voxels, o, point, normal, *dir, t0, sky)
+                            };
+                            (*v, *dir, intervals)
                         })
                         .collect::<Vec<_>>()
                 })
@@ -1302,6 +1357,123 @@ fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], ind
         }
     }
 }
+
+/// `--near-check chain`: the voxel-layer cascade with each cone over its own
+/// interval, traced finest first. Every probe starts on the start voxel of
+/// one of its finer children (the one nearest its seat), so the stretch
+/// before a cone's interval has already been marched by the finer probes on
+/// that chain: a cone they closed is not traced, and its bin stays empty.
+#[expect(clippy::too_many_arguments, reason = "the voxel-layer tracer's tables")]
+fn trace_chain(
+    voxels: &Voxels,
+    o: &Options,
+    cascades: &mut [Cascade],
+    ancestor: &[Vec<u32>],
+    under: &[Vec<Vec<u32>>],
+    surface: &[(V3, V3)],
+    voxel_keys: &[Key],
+    traced: &AtomicU64,
+    sky: V3,
+) {
+    let n = cascades.len();
+    // start[c][slot]: the voxel probe a probe's cones start from; child[c][slot]:
+    // the probe of cascade c - 1 on its chain.
+    let mut start: Vec<Vec<u32>> = vec![under[0].iter().map(|u| u.first().copied().unwrap_or(u32::MAX)).collect()];
+    let mut child: Vec<Vec<u32>> = vec![vec![u32::MAX; cascades[0].keys.len()]];
+    for c in 1..n {
+        let mut best: Vec<(f32, u32)> = vec![(f32::INFINITY, u32::MAX); cascades[c].keys.len()];
+        for (t, &v) in start[c - 1].iter().enumerate() {
+            let Some(&parent) = ancestor[c].get(v as usize) else { continue };
+            if parent == u32::MAX {
+                continue;
+            }
+            let seat = cascades[c].seat_point[parent as usize];
+            let d = sub(surface[v as usize].0, seat);
+            let b = &mut best[parent as usize];
+            if dot(d, d) < b.0 {
+                *b = (dot(d, d), u32::try_from(t).unwrap_or(u32::MAX));
+            }
+        }
+        let next: Vec<u32> = best.iter().map(|(_, t)| start[c - 1].get(*t as usize).copied().unwrap_or(u32::MAX)).collect();
+        start.push(next);
+        child.push(best.iter().map(|(_, t)| *t).collect());
+    }
+    let mut skipped = 0u64;
+    for c in 0..n {
+        let theta = cascades[c].theta;
+        let mut jobs: Vec<(u32, V3)> = Vec::new();
+        for (slot, &v) in start[c].iter().enumerate() {
+            if v == u32::MAX {
+                continue;
+            }
+            for b in 0..cascades[c].dirs() {
+                let dir = bin_dir(b, theta);
+                let mut open = 1.0f32;
+                let (mut t, mut k) = (child[c][slot], c);
+                while k > 0 && t != u32::MAX && open >= 0.02 {
+                    k -= 1;
+                    let fine = &cascades[k];
+                    let at = t as usize * fine.dirs() + dir_bin(dir, fine.theta);
+                    open *= if fine.count[at] > 0 { fine.through[at] / fine.count[at] as f32 } else { 0.0 };
+                    t = child[k][t as usize];
+                }
+                if open < 0.02 {
+                    skipped += 1;
+                    continue;
+                }
+                jobs.push((v, dir));
+            }
+        }
+        if let Ok(mut capture) = CONE_JOBS.lock() {
+            if let Some(list) = capture.as_mut() {
+                for (v, dir) in &jobs {
+                    let (point, normal) = surface[*v as usize];
+                    let at = add(point, scale(normal, 0.75 * voxel_size(VOXEL_FINEST)));
+                    let t0 = o.t0 * spacing(voxel_keys[*v as usize].lod, 0);
+                    list.push([at[0], at[1], at[2], t0, dir[0], dir[1], dir[2], f32::from(u8::try_from(c).unwrap_or(u8::MAX))]);
+                }
+            }
+        }
+        let chunk = jobs.len().div_ceil(o.threads).max(1);
+        let deposits: Vec<VoxelCone> = std::thread::scope(|scope| {
+            let handles: Vec<_> = jobs
+                .chunks(chunk)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .map(|(v, dir)| {
+                                let (point, normal) = surface[*v as usize];
+                                let t0 = o.t0 * spacing(voxel_keys[*v as usize].lod, 0);
+                                (*v, *dir, march_own(voxels, o, point, normal, *dir, t0, sky, c))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        traced.fetch_add(u64::try_from(jobs.len()).unwrap_or(u64::MAX), Ordering::Relaxed);
+        for (v, dir, intervals) in deposits {
+            for (k, radiance, through) in intervals {
+                let slot = ancestor[k][v as usize];
+                if slot == u32::MAX {
+                    continue;
+                }
+                let cascade = &mut cascades[k];
+                let at = slot as usize * cascade.dirs() + dir_bin(dir, cascade.theta);
+                cascade.count[at] += 1;
+                cascade.radiance[at] = add(cascade.radiance[at], radiance);
+                cascade.moment[at] = add(cascade.moment[at], scale(dir, luma(radiance)));
+                cascade.through[at] += through;
+            }
+        }
+    }
+    CHAIN_SKIPPED.store(skipped, Ordering::Relaxed);
+}
+
+/// Cones `--near-check chain` left out in the last frame, closed before
+/// their interval.
+static CHAIN_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
 fn trace_probes(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], traced: &AtomicU64, scene: &Scene, jitter: (f32, f32)) {
     let n = cascades.len();
@@ -1332,7 +1504,7 @@ fn trace_probes(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], traced: 
                             let end = if c + 1 == n { REACH } else { t0 * 4f32.powi(i32::try_from(c).unwrap_or(0)) };
                             let mut row = Vec::with_capacity(directions.len());
                             for dir in directions {
-                                let mut span = Span { done: from, covered: 0.0, met: [0.0; 3] };
+                                let mut span = Span { done: from, covered: 0.0, met: [0.0; 3], fine: o.fine_cross };
                                 march_span(voxels, o, start, *dir, width, end, &mut span, None);
                                 let mut met = span.met;
                                 let mut through = 1.0 - span.covered;
@@ -1638,7 +1810,7 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                 .seat_point
                 .iter()
                 .map(|seat| {
-                    let mut span = Span { done: 0.25 * finest, covered: 0.0, met: [0.0; 3] };
+                    let mut span = Span { done: 0.25 * finest, covered: 0.0, met: [0.0; 3], fine: o.fine_cross };
                     march_span(voxels, o, *seat, sun.toward, 0.01, REACH, &mut span, None);
                     (1.0 - span.covered).max(0.0)
                 })
@@ -1813,6 +1985,9 @@ struct Span {
     done: f32,
     covered: f32,
     met: V3,
+    /// Fine levels take the plane-crossing test, and a covered coarse step is
+    /// walked again at the refine level; off, the filtered read is taken.
+    fine: bool,
 }
 
 impl Span {
@@ -1869,7 +2044,7 @@ fn march_span(voxels: &Voxels, o: &Options, start: V3, dir: V3, width: f32, end:
             }
             lamps.retain(|l| l.cover > 0.0);
         };
-        if o.fine_cross && level <= o.refine_level {
+        if span.fine && level <= o.refine_level {
             voxels.crossed(level, add(start, scale(dir, from)), add(start, scale(dir, to)), dir, rules, &mut found);
             lamps_here(&mut lamps);
             found.extend(lamps.iter().map(|l| Met { depth: l.depth - from, ..*l }));
@@ -1879,7 +2054,7 @@ fn march_span(voxels: &Voxels, o: &Options, start: V3, dir: V3, width: f32, end:
             continue;
         }
         let (cover, light) = voxels.sample(level, add(start, scale(dir, from + 0.5 * step)), dir, front);
-        if cover > 0.0 && o.fine_cross {
+        if cover > 0.0 && span.fine {
             // Something is here: walk this step again at the refine level,
             // whose read cannot reach the far side of a wall.
             let fine = voxel_size(o.refine_level);
@@ -1902,6 +2077,58 @@ fn march_span(voxels: &Voxels, o: &Options, start: V3, dir: V3, width: f32, end:
     }
 }
 
+/// `--near-check`: how an own-interval cone tests the stretch before its
+/// interval.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NearCheck {
+    Off,
+    /// The filtered read only.
+    Filtered,
+    /// With the crossing test and the refine walk.
+    Fine,
+    /// No march: each probe starts on one of its finer children's start
+    /// voxels, and the share open is the product of what the finer probes on
+    /// that chain passed in the bins that hold the direction.
+    Chain,
+}
+
+/// `--own-interval`: a cascade-`c` cone from a voxel-layer point over its own
+/// cascade's interval only, as a sparse cascade traces; the merge brings the
+/// rest. Returns that one interval's light and the share that passed.
+#[expect(clippy::too_many_arguments, reason = "the march's inputs and the cascade")]
+fn march_own(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3, t0: f32, sky: V3, c: usize) -> Vec<(usize, V3, f32)> {
+    let n = o.cascades;
+    let finest = voxel_size(VOXEL_FINEST);
+    let width0 = o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt();
+    let start = add(point, scale(normal, 0.75 * finest));
+    let power = |k: usize| 4f32.powi(i32::try_from(k).unwrap_or(0));
+    let from = if c == 0 { 0.25 * finest } else { t0 * power(c - 1) };
+    let end = if c + 1 == n { REACH } else { t0 * power(c) };
+    let width = width0 / (1u32 << c) as f32;
+    if c > 0 && matches!(o.near_check, NearCheck::Filtered | NearCheck::Fine) {
+        // The stretch before this interval, from the same start: closed, the
+        // cone gives this probe no value in this direction, as the march over
+        // every interval did.
+        let mut near = Span { done: 0.25 * finest, covered: 0.0, met: [0.0; 3], fine: o.near_check == NearCheck::Fine };
+        march_span(voxels, o, start, dir, width, from, &mut near, None);
+        if near.covered >= 0.98 {
+            return Vec::new();
+        }
+    }
+    let mut span = Span { done: from, covered: 0.0, met: [0.0; 3], fine: o.fine_cross && c < o.refine_cascades };
+    march_span(voxels, o, start, dir, width, end, &mut span, None);
+    let mut met = span.met;
+    let mut through = 1.0 - span.covered;
+    if c + 1 == n {
+        met = add(met, scale(sky, through));
+        if !o.sun_in_voxels {
+            met = add(met, scale(sun_in_sky(o, dir), through));
+        }
+        through = 0.0;
+    }
+    vec![(c, met, through)]
+}
+
 /// A whole cone from a surface point, through every cascade's interval in
 /// turn (the gather's cones): for each interval reached, the light met in it
 /// over the light that entered it, and the share that passed.
@@ -1911,13 +2138,17 @@ fn march_cone_into(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3,
     let finest = voxel_size(VOXEL_FINEST);
     let width0 = o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt();
     let start = add(point, scale(normal, 0.75 * finest));
-    let mut span = Span { done: 0.25 * finest, covered: 0.0, met: [0.0; 3] };
+    let mut span = Span { done: 0.25 * finest, covered: 0.0, met: [0.0; 3], fine: o.fine_cross };
     let mut reach = t0;
     let mut out = Vec::with_capacity(n);
     for c in 0..n {
         let end = if c + 1 == n { REACH } else { reach };
         let open = 1.0 - span.covered;
         span.met = [0.0; 3];
+        // The gather records its transfer only in the crossing test and the
+        // walk, so its cones keep them; the cascade's own cones follow
+        // --refine-cascades.
+        span.fine = o.fine_cross && (sink.is_some() || c < o.refine_cascades);
         march_span(voxels, o, start, dir, width0 / (1u32 << c) as f32, end, &mut span, sink.as_deref_mut());
         let mut through = (1.0 - span.covered) / open;
         if c + 1 == n {
@@ -2128,7 +2359,7 @@ fn gather_rows(voxels: &Voxels, patches: &[Option<(V3, V3)>], o: &Options, cones
                             let cosine = dot(sun.toward, normal);
                             if cosine > 0.0 {
                                 let start = add(at, scale(normal, 0.75 * voxel_size(VOXEL_FINEST)));
-                                let mut span = Span { done: 0.25 * voxel_size(VOXEL_FINEST), covered: 0.0, met: [0.0; 3] };
+                                let mut span = Span { done: 0.25 * voxel_size(VOXEL_FINEST), covered: 0.0, met: [0.0; 3], fine: o.fine_cross };
                                 march_span(voxels, o, start, sun.toward, 0.01, REACH, &mut span, None);
                                 let pass = (1.0 - span.covered).max(0.0);
                                 sink.direct = add(sink.direct, scale(sun.irradiance, cosine * pass * cones as f32 / PI));
@@ -2472,6 +2703,19 @@ fn gpu_bench(
     let _ = run_frame(&Setup { scene, walls, surfaces, voxels: Some(voxels), pixels, options: o }, (0.0, 0.0));
     let cpu_seconds = started.elapsed().as_secs_f64();
     let jobs = CONE_JOBS.lock().map_err(|_| "gpu bench: capture lock")?.take().unwrap_or_default();
+    let probes: Vec<String> = (0..o.cascades)
+        .map(|c| {
+            let tag = f32::from(u8::try_from(c).unwrap_or(u8::MAX));
+            let n = jobs.iter().filter(|job| (job[7] - tag).abs() < 0.5).count();
+            let theta = o.theta << c;
+            let dirs = usize::try_from(2 * theta * theta).unwrap_or(usize::MAX);
+            format!("c{c} {n} ({} probes x {dirs})", n / dirs.max(1))
+        })
+        .collect();
+    println!("cones by cascade: {}", probes.join(", "));
+    if o.near_check == NearCheck::Chain {
+        println!("  closed before their interval and not traced: {}", CHAIN_SKIPPED.load(Ordering::Relaxed));
+    }
     // A clip volume of each voxel level around the eye, the levels stacked on z.
     let side = gpu::SIDE as i32;
     let mut clip = [[0.0f32; 4]; 8];
@@ -2551,7 +2795,8 @@ fn gpu_bench(
             cross_full: o.cross_full,
             box_margin: o.box_margin,
             sky,
-            own_interval: o.gpu_own_interval,
+            own_interval: o.own_interval,
+            refine_cascades: u32::try_from(o.refine_cascades).unwrap_or(u32::MAX),
         },
         20,
     )?;

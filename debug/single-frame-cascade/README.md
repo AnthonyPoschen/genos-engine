@@ -165,3 +165,5 @@ The cone tracer no longer starts a cone at a pixel. Every probe of every cascade
 ## Phase 3, 24 Nov 2026
 
 `--gpu-bench` (with `--tracer cone`) lists one frame's voxel-layer cones on the CPU and times their march on the GPU (`shaders/cascade.comp`); `--gpu-own-interval` marches each cone over its own cascade's interval only. See the plan's section 15.
+
+`--own-interval`, `--near-check off|filtered|fine|chain`, `--refine-cascades N`, `--seat-at-start`: the cost cuts in the plan's section 16. `--gpu-bench` follows `--own-interval` and `--refine-cascades`, and times the cones the chain leaves.

@@ -39,6 +39,8 @@ pub struct CascadeInput<'a> {
     pub sky: [f32; 3],
     /// Each cone marches only its own cascade's interval.
     pub own_interval: bool,
+    /// Cascades below this take the crossing test and the refine walk.
+    pub refine_cascades: u32,
 }
 
 pub struct CascadeTiming {
@@ -362,7 +364,7 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
         let ring = cones.min(RING) * u64::from(input.cascades) * 16;
         let results = gpu.device_buffer(ring, None)?;
         let stats = gpu.device_buffer(cones * 16, None)?;
-        let mut params = [0f32; 44];
+        let mut params = [0f32; 48];
         for (level, clip) in input.clip.iter().enumerate() {
             params[level * 4..level * 4 + 4].copy_from_slice(clip);
         }
@@ -376,8 +378,9 @@ pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, 
         params[39] = SIDE as f32;
         params[40..43].copy_from_slice(&input.sky);
         params[43] = if input.own_interval { 1.0 } else { 0.0 };
-        let (uniform, uniform_ptr) = gpu.buffer(176, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
-        std::ptr::copy_nonoverlapping(params.as_ptr().cast::<u8>(), uniform_ptr, 176);
+        params[44] = input.refine_cascades.min(64) as f32;
+        let (uniform, uniform_ptr) = gpu.buffer(192, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
+        std::ptr::copy_nonoverlapping(params.as_ptr().cast::<u8>(), uniform_ptr, 192);
 
         let binding = |b: u32, ty: vk::DescriptorType, count: u32| {
             vk::DescriptorSetLayoutBinding::default()

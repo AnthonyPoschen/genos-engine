@@ -1,6 +1,6 @@
 # Cone-traced cascades: implementation plan
 
-Status: phases 0 and 1 passed; phase 2 accepted by Anthony at hall 5.3%, room 11.1%, Sponza atrium 12.9%, dark corner 15.9% (section 13); phase 2b passed with option B (section 14). Phase 3: the GPU timing (section 15) is about 190 times over the lighting budget; the ADR waits on Anthony's decision. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
+Status: phases 0 and 1 passed; phase 2 accepted by Anthony at hall 5.3%, room 11.1%, Sponza atrium 12.9%, dark corner 15.9% (section 13); phase 2b passed with option B (section 14). Phase 3 in progress: Anthony chose to cut the cost and recheck accuracy (sections 15 and 16). Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
 
 ## 1. What Anthony asked for
 
@@ -280,3 +280,22 @@ B passes the leak check and sits at the edge of the sunlit limit; it is the sun'
 Textures 459 MiB, cone list 739 MiB. Only 93,401 of the hall's 1.3 million voxels are inside the 96-texel clip volumes, so a larger clip would add cost.
 
 Where the time goes: 24 million cones a frame, about 26 a shown pixel (the old one-cone-a-pixel bench marched 0.9 million), and 1.5 ns a step against 0.43 ns for the old shader, because the plane-crossing test reads up to 16 cells with 6 ways each and keeps its hits in local arrays. To reach 8 ms the cones must fall about tenfold (fewer cascade-0 directions, fewer coarse probes, or cascade directions shared between probes as the paper's sparse probes are) and the step about tenfold (a crossing table per voxel in place of the cell search, the coarse levels without the refine walk). Neither is shown to keep phase 2's accuracy.
+
+## 16. Cutting the cost, 24 Nov 2026
+
+Anthony chose to cut the cost and recheck the accuracy. Converged references (131,072 samples a block), `--cascades 5 --t0 2.5 --probe-px 12`, after the first frame.
+
+**Each cone over its own interval** (`--own-interval`), as a sparse cascade traces, is about five times cheaper on the GPU. On its own it leaks: the room no lamp lights goes from +11% to +50%. The march over every interval had a visibility mask for free: a coarse cone closed before its own interval gave its probe no value in that direction. With its own interval only, the cone starts past the wall and brings the lit room's light back, wherever the reader's finer cascade has not reached that wall yet. Marching that near stretch again with the full rules (`--near-check fine`) brings the room back to 11.4%, at the old cost. With the filtered read only, it reaches 31%.
+
+**The chain** (`--near-check chain`) gets the mask for no march. Every probe starts on the start voxel of one of its finer children (the one nearest its seat), recursively down to the voxel layer, and the cascades are traced finest first. The share open before a cone's interval is the product of what the finer probes on its chain passed, in the bins that hold its direction. A cone the chain closed is not traced, and its bin stays empty.
+
+| View | Phase 2 as accepted | Own interval, chain, theta 8 | Own interval, chain, theta 4 |
+|---|---|---|---|
+| Hall | 5.3% (24.2 M cones) | | 8.6%, −3.9% (2.4 M) |
+| Room no lamp lights | 11.1% (14.6 M) | 14.3% (6.1 M) | 10.7%, +10.0% (1.4 M) |
+| Sponza atrium | 12.9% (16.7 M) | | 15.4%, −10.7% (1.4 M) |
+| Sponza dark corner | 15.9% (9.6 M) | | 20.5%, −8.8% (1.1 M) |
+
+Tried and dropped: theta 4 or `--probe-px 24` without the chain (room +40% and +67%); the refine walk in the first cascades only (`--refine-cascades`: in the bounce gather it loses the transfer entries, which are recorded only by the crossing test and the walk, −38%; in the cascade it leaks); the merge's visibility test aimed at a coarse probe's start voxel (`--seat-at-start`, no better).
+
+GPU, hall, theta 4 with the chain: 165 ms for 2.4 million cones (16 steps and 95 reads a cone); 3.6 million cones closed by the chain are not traced. The cones are 10 times fewer than phase 2's and the time 45 times less, but the step with the crossing test and the walk costs about 68 ns a cone, and has to fall about 20 times. Not yet timed: the bounce gather (about 3 million cones a frame in the hall over every interval, and 256 sweeps of the transfer), the merge and the shade.
