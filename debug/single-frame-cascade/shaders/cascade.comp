@@ -1,0 +1,312 @@
+#version 450
+// Voxel-layer cascade benchmark (genos-single-frame-cascade --gpu-bench): the
+// CPU prototype's march (`march_span`) for every cone of a frame, each from a
+// voxel-layer probe through every cascade's interval. The voxel levels are
+// clip volumes around the eye, stacked along z: seven filtered RGBA16F
+// textures over all levels (rgb: light of the area that faces each axis way,
+// a: that area; the seventh the lamps), and two RGBA8 textures for each way
+// over the levels a crossing reads (A: the area's centroid along its axis and
+// its points' box across it, low and high on the first axis, low on the
+// second; B: high on the second). Departures from the CPU march, for cost:
+// the coarse sample has no front rule (it needs a centroid at every level) and
+// the lamps are read trilinear at each step's centre.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform sampler3D faces[7];
+layout(set = 0, binding = 1) uniform sampler3D plane_a[6];
+layout(set = 0, binding = 2) uniform sampler3D plane_b[6];
+// Two a cone: start.xyz and t0; dir.xyz and unused.
+layout(std430, set = 0, binding = 3) readonly buffer Jobs { vec4 job[]; };
+// Per cone and interval: light, share passed (written when misc2.x is 1).
+layout(std430, set = 0, binding = 4) writeonly buffer Out { vec4 result[]; };
+// Per cone: steps, texture reads, cover, light luma.
+layout(std430, set = 0, binding = 5) writeonly buffer Stats { vec4 stats[]; };
+layout(std140, set = 0, binding = 6) uniform Params {
+    vec4 clip[8];   // xyz: the world corner of each level's clip volume
+    vec4 misc;      // width0, cascades, cones, refine level
+    vec4 misc2;     // full results (1) or packed (0), cross full, box margin, side
+    vec4 sky;       // rgb; w: each cone marches only its cascade's interval
+};
+
+const float BASE = 1.0 / 64.0;
+const int FINEST = 2;
+const int COARSEST = 9;
+const float REACH = 200.0;
+const float LEVELS = 8.0;
+const float FULL = 0.98;
+const float GROWTH = 4.0;
+const float TOWARD_MIN = 0.05;
+const float UNORM_SPAN = 2.0;
+const float UNORM_FLOOR = -0.5;
+// Half a voxel: from a corner to the centre.
+const float HALF_CELL = 0.5;
+// A float switch in the parameters is on above this.
+const float SWITCH_ON = 0.5;
+// Texture reads for a plane test (A and B).
+const float PLANE_READS = 2.0;
+// The march starts this share of the finest voxel from its start point.
+const float START_GAP = 0.25;
+// The least opening an interval's light is divided by.
+const float OPEN_MIN = 1.0e-6;
+// Step centre, as a share of the step.
+const float MID_STEP = 0.5;
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+// Cones whose per-interval results are kept (gpu.rs RING).
+const uint RING = 1048576u;
+
+vec3 axis_of(int d) {
+    int a = d / 2;
+    float s = (d % 2 == 0) ? 1.0 : -1.0;
+    return a == 0 ? vec3(s, 0.0, 0.0) : (a == 1 ? vec3(0.0, s, 0.0) : vec3(0.0, 0.0, s));
+}
+
+float side() { return misc2.w; }
+
+// A voxel's texel in a stacked volume, or -1 outside the clip.
+ivec3 texel(int level, ivec3 cell, int first) {
+    vec3 corner = clip[level - FINEST].xyz;
+    float size = BASE * exp2(float(level));
+    ivec3 local = cell - ivec3(floor(corner / size + HALF_CELL));
+    if (any(lessThan(local, ivec3(0))) || any(greaterThanEqual(local, ivec3(int(side()))))) {
+        return ivec3(-1);
+    }
+    return ivec3(local.xy, local.z + int(side()) * (level - first));
+}
+
+float reads = 0.0;
+
+struct Met { float depth; float cover; vec3 radiance; };
+const int MAX_MET = 24;
+
+// The planes the axis crosses between `from` and `to` at a fine `level`,
+// each once, nearest first, in the voxel that holds the crossing point and
+// inside its points' box.
+int crossed(int level, vec3 from, vec3 to, vec3 dir, inout Met met[MAX_MET]) {
+    float size = BASE * exp2(float(level));
+    ivec3 cells[16];
+    int count = 0;
+    for (int e = 0; e < 2; e++) {
+        vec3 p = e == 0 ? from : to;
+        ivec3 base = ivec3(floor(p / size - HALF_CELL));
+        for (int k = 0; k < 8; k++) {
+            ivec3 cell = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            bool seen = false;
+            for (int j = 0; j < count; j++) {
+                seen = seen || all(equal(cells[j], cell));
+            }
+            if (!seen) {
+                cells[count++] = cell;
+            }
+        }
+    }
+    int n = 0;
+    float margin = misc2.z;
+    for (int j = 0; j < count; j++) {
+        ivec3 t = texel(level, cells[j], FINEST);
+        if (t.x < 0) {
+            continue;
+        }
+        for (int d = 0; d < 6; d++) {
+            vec3 axis = axis_of(d);
+            float toward = -dot(dir, axis);
+            if (toward <= TOWARD_MIN) {
+                continue;
+            }
+            // The face and plane volumes both stack from the finest level.
+            vec4 face = texelFetch(faces[d], t, 0);
+            reads += 1.0;
+            if (face.a <= 0.0) {
+                continue;
+            }
+            vec4 a = texelFetch(plane_a[d], t, 0);
+            vec4 b = texelFetch(plane_b[d], t, 0);
+            reads += PLANE_READS;
+            int ax = d / 2;
+            int u = (ax + 1) % 3;
+            int v = (ax + 2) % 3;
+            vec3 cell_min = vec3(cells[j]) * size;
+            float centre = cell_min[ax] + (a.x * UNORM_SPAN + UNORM_FLOOR) * size;
+            float sa = (from[ax] - centre) * axis[ax];
+            float sb = (to[ax] - centre) * axis[ax];
+            if (!(sa > 0.0 && sb <= 0.0)) {
+                continue;
+            }
+            vec3 hit = from + (to - from) * (sa / (sa - sb));
+            if (int(floor(hit[u] / size)) != cells[j][u] || int(floor(hit[v] / size)) != cells[j][v]) {
+                continue;
+            }
+            float lo_u = cell_min[u] + (a.y * UNORM_SPAN + UNORM_FLOOR) * size;
+            float hi_u = cell_min[u] + (a.z * UNORM_SPAN + UNORM_FLOOR) * size;
+            float lo_v = cell_min[v] + (a.w * UNORM_SPAN + UNORM_FLOOR) * size;
+            float hi_v = cell_min[v] + (b.x * UNORM_SPAN + UNORM_FLOOR) * size;
+            if (hit[u] < lo_u - margin || hit[u] > hi_u + margin || hit[v] < lo_v - margin || hit[v] > hi_v + margin) {
+                continue;
+            }
+            if (n < MAX_MET) {
+                float fill = face.a / (size * size);
+                met[n].depth = dot(hit - from, dir);
+                met[n].cover = fill >= misc2.y ? 1.0 : fill;
+                met[n].radiance = face.rgb / face.a;
+                n++;
+            }
+        }
+    }
+    // Nearest first.
+    for (int i = 1; i < n; i++) {
+        Met m = met[i];
+        int j = i - 1;
+        while (j >= 0 && met[j].depth > m.depth) {
+            met[j + 1] = met[j];
+            j--;
+        }
+        met[j + 1] = m;
+    }
+    return n;
+}
+
+// The filtered read of one level at `at`: cover of the cross-section by the
+// areas that face the cone and by the lamps, and their light.
+void coarse(int level, vec3 at, vec3 dir, out float cover, out vec3 light, out float lamp_cover, out vec3 lamp_light) {
+    cover = 0.0;
+    light = vec3(0.0);
+    lamp_cover = 0.0;
+    lamp_light = vec3(0.0);
+    float size = BASE * exp2(float(level));
+    vec3 local = (at - clip[level - FINEST].xyz) / size;
+    if (any(lessThan(local, vec3(HALF_CELL))) || any(greaterThan(local, vec3(side() - HALF_CELL)))) {
+        return;
+    }
+    vec3 uvw = vec3(local.xy / side(), (local.z + side() * float(level - FINEST)) / (side() * LEVELS));
+    float cross_section = size * size;
+    vec4 lamp = textureLod(faces[6], uvw, 0.0);
+    reads += 1.0;
+    lamp_cover = lamp.a / cross_section;
+    lamp_light = lamp.a > 0.0 ? lamp.rgb / lamp.a : vec3(0.0);
+    float facing = 0.0;
+    vec3 sent = vec3(0.0);
+    for (int d = 0; d < 6; d++) {
+        float toward = -dot(dir, axis_of(d));
+        if (toward > 0.0) {
+            vec4 v = textureLod(faces[d], uvw, 0.0);
+            facing += v.a * toward;
+            sent += v.rgb * toward;
+            reads += 1.0;
+        }
+    }
+    float raw = facing / cross_section;
+    if (raw > 0.0) {
+        cover = min(raw, 1.0);
+        light = sent / facing;
+    }
+}
+
+void take(inout float covered, inout vec3 met, Met m) {
+    float seen = min(m.cover, 1.0 - covered);
+    if (seen > 0.0) {
+        met += m.radiance * seen;
+        covered += seen;
+    }
+}
+
+void main() {
+    uint c_index = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (c_index >= uint(misc.z)) {
+        return;
+    }
+    vec4 j0 = job[2u * c_index];
+    vec4 j1 = job[2u * c_index + 1u];
+    vec3 start = j0.xyz;
+    float t0 = j0.w;
+    vec3 dir = j1.xyz;
+    int cascades = int(misc.y);
+    int refine = int(misc.w);
+    float finest = BASE * exp2(float(FINEST));
+    float done = START_GAP * finest;
+    float covered = 0.0;
+    float reach = t0;
+    float total = 0.0;
+    float steps = 0.0;
+    Met found[MAX_MET];
+    int first = 0;
+    if (sky.w > SWITCH_ON) {
+        // As a sparse cascade traces: cascade c's cone walks [t0 4^(c-1), t0 4^c] only.
+        first = int(j1.w);
+        if (first > 0) {
+            done = t0 * pow(GROWTH, float(first - 1));
+            reach = t0 * pow(GROWTH, float(first));
+        }
+    }
+    for (int c = first; c < cascades; c++) {
+        float end = c + 1 == cascades ? REACH : reach;
+        float width = misc.x / float(1 << c);
+        float open = 1.0 - covered;
+        vec3 met = vec3(0.0);
+        while (done < end && covered < FULL) {
+            float wide = max(width * done, finest);
+            int level = clamp(int(ceil(log2(wide / BASE))), FINEST, COARSEST);
+            float step = BASE * exp2(float(level));
+            float from = done;
+            float to = done + step;
+            steps += 1.0;
+            if (level <= refine) {
+                int n = crossed(level, start + dir * from, start + dir * to, dir, found);
+                float lc;
+                vec3 ll;
+                float cov;
+                vec3 li;
+                coarse(level, start + dir * (from + MID_STEP * step), dir, cov, li, lc, ll);
+                if (lc > 0.0) {
+                    met += ll * min(lc, 1.0 - covered);
+                }
+                for (int i = 0; i < n && covered < FULL; i++) {
+                    take(covered, met, found[i]);
+                }
+                done = to;
+                continue;
+            }
+            float cov;
+            vec3 li;
+            float lc;
+            vec3 ll;
+            coarse(level, start + dir * (from + MID_STEP * step), dir, cov, li, lc, ll);
+            if (lc > 0.0) {
+                met += ll * min(lc, 1.0 - covered);
+            }
+            if (cov > 0.0) {
+                // Something is here: walk this step again at the refine level.
+                float fine = BASE * exp2(float(refine));
+                float u = from;
+                while (u < to && covered < FULL) {
+                    float next = min(u + fine, to);
+                    int n = crossed(refine, start + dir * u, start + dir * next, dir, found);
+                    for (int i = 0; i < n && covered < FULL; i++) {
+                        take(covered, met, found[i]);
+                    }
+                    u = next;
+                    steps += 1.0;
+                }
+            }
+            done = to;
+        }
+        float through = (1.0 - covered) / max(open, OPEN_MIN);
+        if (c + 1 == cascades) {
+            met += sky.rgb * (1.0 - covered);
+            through = 0.0;
+        }
+        total += dot(met, LUMA);
+        if (misc2.x > SWITCH_ON) {
+            result[(c_index % RING) * uint(cascades) + uint(c)] = vec4(met / max(open, OPEN_MIN), through);
+        }
+        if (sky.w > SWITCH_ON) {
+            break;
+        }
+        if (covered >= FULL) {
+            for (int k = c + 1; k < cascades && misc2.x > SWITCH_ON; k++) {
+                result[(c_index % RING) * uint(cascades) + uint(k)] = vec4(0.0);
+            }
+            break;
+        }
+        reach *= GROWTH;
+    }
+    stats[c_index] = vec4(steps, reads, covered, total);
+}

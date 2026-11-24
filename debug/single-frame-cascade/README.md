@@ -161,3 +161,7 @@ The cone tracer no longer starts a cone at a pixel. Every probe of every cascade
 ## Phase 2b, 24 Nov 2026
 
 `--sun on|off` (default off), `--sun-path sky|voxel` (default `voxel`), `--no-lamps`. See the plan's section 14.
+
+## Phase 3, 24 Nov 2026
+
+`--gpu-bench` (with `--tracer cone`) lists one frame's voxel-layer cones on the CPU and times their march on the GPU (`shaders/cascade.comp`); `--gpu-own-interval` marches each cone over its own cascade's interval only. See the plan's section 15.

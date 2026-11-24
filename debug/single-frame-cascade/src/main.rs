@@ -146,6 +146,9 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        cosine of the luma-weighted mean direction of the light
                        that direction holds, carried through the merge
                        (default mean)
+  --gpu-own-interval   with --gpu-bench: each cone marches only its own
+                       cascade's interval, as a sparse cascade traces, in
+                       place of every interval from the voxel layer
   --threads N          worker threads (default the machine's)
   --out DIR            output directory (default ./genos-debug/single-frame-cascade)
   -h, --help           this text
@@ -240,6 +243,7 @@ struct Options {
     voxel_check: bool,
     probe_pixel: Option<(usize, usize)>,
     gpu_bench: bool,
+    gpu_own_interval: bool,
     probe_px: f32,
     theta: u32,
     cascades: usize,
@@ -290,6 +294,7 @@ fn parse_args() -> Result<Option<Options>, String> {
         voxel_check: false,
         probe_pixel: None,
         gpu_bench: false,
+        gpu_own_interval: false,
         probe_px: 4.0,
         theta: 4,
         cascades: 4,
@@ -437,6 +442,7 @@ fn parse_args() -> Result<Option<Options>, String> {
                 }
             }
             "--gpu-bench" => o.gpu_bench = true,
+            "--gpu-own-interval" => o.gpu_own_interval = true,
             "--probe-px" => o.probe_px = num(&arg, &value()?)?,
             "--theta" => o.theta = num(&arg, &value()?)?,
             "--cascades" => o.cascades = num(&arg, &value()?)?,
@@ -780,7 +786,7 @@ impl Voxels {
                 }
             }
         }
-        self.lookups.fetch_add(cells.len() as u64, Ordering::Relaxed);
+        self.lookups.fetch_add(u64::try_from(cells.len()).unwrap_or(u64::MAX), Ordering::Relaxed);
         for cell in cells {
             let Some(voxel) = self.cells.get(&(level, cell)) else { continue };
             for (d, axis) in AXES.iter().enumerate() {
@@ -1189,6 +1195,10 @@ fn bounce_reference(scene: &Scene, walls: &dyn Surfaces, point: V3, normal: V3, 
 /// reached (cascade, light over what entered, share passed).
 type VoxelCone = (u32, V3, Vec<(usize, V3, f32)>);
 
+/// `--gpu-bench`: when armed, the voxel-layer tracer copies its cones here
+/// (start, first reach; direction) for the GPU to march.
+static CONE_JOBS: std::sync::Mutex<Option<Vec<[f32; 8]>>> = std::sync::Mutex::new(None);
+
 fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], index: &HashMap<Key, u32>, traced: &AtomicU64, scene: &Scene, jitter: (f32, f32)) {
     let n = cascades.len();
     let sky = if o.mode == Mode::Emissive { [0.0; 3] } else { scene.sky.as_ref().map_or([0.0; 3], |s| s.color) };
@@ -1216,6 +1226,7 @@ fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], ind
     let frame = u64::from((jitter.0 * 65_536.0) as u32);
     // The cones: (cascade, probe, direction) -> (voxel probe, direction vector).
     let mut jobs: Vec<(u32, V3)> = Vec::new();
+    let mut job_cascade: Vec<u8> = Vec::new();
     for (c, cascade) in cascades.iter().enumerate() {
         let theta = cascade.theta;
         for (slot, voxels_under) in under[c].iter().enumerate() {
@@ -1241,6 +1252,17 @@ fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], ind
                     nearest
                 };
                 jobs.push((v, bin_dir(b, theta)));
+                job_cascade.push(u8::try_from(c).unwrap_or(u8::MAX));
+            }
+        }
+    }
+    if let Ok(mut capture) = CONE_JOBS.lock() {
+        if let Some(list) = capture.as_mut() {
+            for ((v, dir), c) in jobs.iter().zip(&job_cascade) {
+                let (point, normal) = surface[*v as usize];
+                let start = add(point, scale(normal, 0.75 * voxel_size(VOXEL_FINEST)));
+                let t0 = o.t0 * spacing(voxel_keys[*v as usize].lod, 0);
+                list.push([start[0], start[1], start[2], t0, dir[0], dir[1], dir[2], f32::from(*c)]);
             }
         }
     }
@@ -1264,7 +1286,7 @@ fn trace_from_voxels(voxels: &Voxels, o: &Options, cascades: &mut [Cascade], ind
             .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
     });
-    traced.fetch_add(jobs.len() as u64, Ordering::Relaxed);
+    traced.fetch_add(u64::try_from(jobs.len()).unwrap_or(u64::MAX), Ordering::Relaxed);
     for (v, dir, intervals) in deposits {
         for (c, radiance, through) in intervals {
             let slot = ancestor[c][v as usize];
@@ -2410,17 +2432,46 @@ fn half(v: f32) -> u16 {
     }
 }
 
-/// `--gpu-bench`: the cone march on the GPU over the same voxels, and the
-/// hardware ray tracer on the same picture.
+/// A value from 0 to 1 as a byte, clamped.
+fn unit_byte(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The first of a voxel's four texels in the stacked clip volumes: `local`
+/// inside level `k`'s volume of `side` texels a side.
+fn volume_texel(local: [i32; 3], k: usize, side: i32) -> usize {
+    let level = i32::try_from(k).unwrap_or(0);
+    usize::try_from(((local[2] + side * level) * side + local[1]) * side + local[0]).unwrap_or(0) * 4
+}
+
+/// The plane volumes' byte for a position across a voxel: -0.5 to 1.5 voxels
+/// from its low corner (`UNORM_FLOOR`, `UNORM_SPAN` in cascade.comp).
+fn plane_byte(x: f32, low: f32, size: f32) -> u8 {
+    unit_byte(((x - low) / size).mul_add(0.5, 0.25))
+}
+
+/// `--gpu-bench`: one frame's voxel-layer cascade cones marched on the GPU
+/// over the same voxels, and the hardware ray tracer on the same picture.
+#[expect(clippy::too_many_arguments, reason = "the bench takes the frame's whole setup")]
 fn gpu_bench(
     o: &Options,
     scene: &Scene,
     mesh: &SceneMesh,
     pixels: &[Option<Pixel>],
     voxels: &Voxels,
+    [walls, surfaces]: [&dyn Surfaces; 2],
     eye: V3,
     [forward, right, up]: [V3; 3],
 ) -> Result<(), String> {
+    if !o.cone || !o.cones_from_voxels {
+        return Err("--gpu-bench times the voxel-layer cascade: give --tracer cone and --cone-start voxel".into());
+    }
+    // One CPU frame, to list its cones.
+    *CONE_JOBS.lock().map_err(|_| "gpu bench: capture lock")? = Some(Vec::new());
+    let started = std::time::Instant::now();
+    let _ = run_frame(&Setup { scene, walls, surfaces, voxels: Some(voxels), pixels, options: o }, (0.0, 0.0));
+    let cpu_seconds = started.elapsed().as_secs_f64();
+    let jobs = CONE_JOBS.lock().map_err(|_| "gpu bench: capture lock")?.take().unwrap_or_default();
     // A clip volume of each voxel level around the eye, the levels stacked on z.
     let side = gpu::SIDE as i32;
     let mut clip = [[0.0f32; 4]; 8];
@@ -2442,7 +2493,7 @@ fn gpu_bench(
             continue;
         }
         inside += 1;
-        let at = (((local[2] + side * k as i32) * side + local[1]) * side + local[0]) as usize * 4;
+        let at = volume_texel(local, k, side);
         for d in 0..6 {
             for c in 0..3 {
                 volumes[d][at + c] = half(voxel.light[d][c]);
@@ -2454,37 +2505,68 @@ fn gpu_bench(
         }
         volumes[6][at + 3] = half(voxel.lamp_area);
     }
-    let surface: Vec<[f32; 8]> = pixels
-        .iter()
-        .map(|p| match p {
-            Some(p) => [
-                p.point[0], p.point[1], p.point[2], o.t0 * spacing(p.lod, 0),
-                p.normal[0], p.normal[1], p.normal[2], 1.0,
-            ],
-            None => [0.0; 8],
-        })
-        .collect();
+    // The plane volumes, over the levels a crossing reads.
+    let refine = o.refine_level.clamp(VOXEL_FINEST, VOXEL_COARSEST);
+    let plane_levels = u32::from(refine - VOXEL_FINEST + 1);
+    let plane_texels = texels / usize::try_from(gpu::LEVELS).unwrap_or(1) * usize::try_from(plane_levels).unwrap_or(1);
+    let mut planes: [Vec<u8>; 12] = std::array::from_fn(|_| vec![0u8; plane_texels]);
+    for ((level, cell), voxel) in &voxels.cells {
+        if *level > refine {
+            continue;
+        }
+        let k = usize::from(level - VOXEL_FINEST);
+        let local = [cell[0] - corner[k][0], cell[1] - corner[k][1], cell[2] - corner[k][2]];
+        if local.iter().any(|v| *v < 0 || *v >= side) {
+            continue;
+        }
+        let size = voxel_size(*level);
+        let low = cell.map(|c| c as f32 * size);
+        let at = volume_texel(local, k, side);
+        for d in 0..6 {
+            if voxel.area[d] <= 0.0 {
+                continue;
+            }
+            let (ax, u, v) = (d / 2, (d / 2 + 1) % 3, (d / 2 + 2) % 3);
+            let centroid = voxel.at[d][ax] / voxel.area[d];
+            planes[d][at..at + 4].copy_from_slice(&[
+                plane_byte(centroid, low[ax], size),
+                plane_byte(voxel.lo[d][u], low[u], size),
+                plane_byte(voxel.hi[d][u], low[u], size),
+                plane_byte(voxel.lo[d][v], low[v], size),
+            ]);
+            planes[6 + d][at] = plane_byte(voxel.hi[d][v], low[v], size);
+        }
+    }
     let sky = if o.mode == Mode::Emissive { [0.0; 3] } else { scene.sky.as_ref().map_or([0.0; 3], |s| s.color) };
-    let timing = gpu::time_cones(
-        &gpu::ConeInput {
-            surface: &surface,
-            volumes: &volumes,
+    let timing = gpu::time_cascade(
+        &gpu::CascadeInput {
+            jobs: &jobs,
+            faces: &volumes,
+            planes: &planes,
+            plane_levels,
             clip,
             width0: o.cone_width * (4.0 * PI / (2 * o.theta * o.theta) as f32).sqrt(),
             cascades: u32::try_from(o.cascades).unwrap_or(u32::MAX),
+            refine_level: u32::from(refine),
+            cross_full: o.cross_full,
+            box_margin: o.box_margin,
             sky,
+            own_interval: o.gpu_own_interval,
         },
-        60,
+        20,
     )?;
-    println!("gpu bench on {}  {}x{}  mode {}", timing.device, o.width, o.height, if o.mode == Mode::Emissive { "emissive" } else { "nee" });
+    let shown = pixels.iter().filter(|p| p.is_some()).count().max(1);
+    println!("gpu bench on {}  {}x{}  {} cascades, theta {}", timing.device, o.width, o.height, o.cascades, o.theta);
     println!(
-        "cone march: {:.3} ms median, {:.3} ms least, {} cones, {:.1} steps and {:.1} filtered texture reads a cone, mean cover {:.3}",
-        timing.ms_median, timing.ms_min, timing.cones, timing.steps_per_cone, timing.reads_per_cone, timing.covered
+        "voxel-layer cascade: {:.3} ms median, {:.3} ms least for {} cones ({:.1} a shown pixel); {:.1} steps and {:.1} texture reads a cone, mean cover {:.3}",
+        timing.ms_median, timing.ms_min, timing.cones, timing.cones as f64 / shown as f64, timing.steps_per_cone, timing.reads_per_cone, timing.covered
     );
+    println!("  the same cones on the CPU: {cpu_seconds:.2} s for the whole frame (cones, merge and shade) on {} threads", o.threads);
     println!(
-        "  voxel textures: 7 volumes of {side}x{side}x{} RGBA16F ({:.0} MiB), {inside} of {} voxels inside the clip volumes",
+        "  textures {:.0} MiB (7 RGBA16F volumes of {side}x{side}x{}, 12 RGBA8 plane volumes over {plane_levels} levels); cone list {:.0} MiB; {inside} of {} voxels inside the clip volumes",
+        timing.texture_mib,
         side * gpu::LEVELS as i32,
-        7.0 * texels as f64 * 2.0 / (1024.0 * 1024.0),
+        (jobs.len() * 32) as f64 / (1024.0 * 1024.0),
         voxels.cells.len(),
     );
     let tris: Vec<genos_gpuref::Tri> = mesh
@@ -2536,7 +2618,7 @@ fn gpu_bench(
 }
 
 fn tone(c: V3, exposure: f32) -> [u8; 3] {
-    c.map(|v| ((v * exposure).max(0.0).powf(1.0 / 2.2).min(1.0) * 255.0).round() as u8)
+    c.map(|v| unit_byte((v * exposure).max(0.0).powf(1.0 / 2.2)))
 }
 
 fn run(o: &Options) -> Result<(), String> {
@@ -2626,7 +2708,7 @@ fn run(o: &Options) -> Result<(), String> {
         None => (None, Vec::new()),
     };
     if let (true, Some(voxels)) = (o.gpu_bench, &voxels) {
-        return gpu_bench(o, scene, &mesh, &pixels, voxels, eye, [forward, right, up]);
+        return gpu_bench(o, scene, &mesh, &pixels, voxels, [walls, surfaces], eye, [forward, right, up]);
     }
     if let (Some((px, py)), Some(voxels)) = (o.probe_pixel, &voxels) {
         let Some(pixel) = &pixels[py * o.width + px] else { return Err(format!("pixel {px},{py} shows nothing")) };

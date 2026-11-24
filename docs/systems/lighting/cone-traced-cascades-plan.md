@@ -1,6 +1,6 @@
 # Cone-traced cascades: implementation plan
 
-Status: phases 0 and 1 passed; phase 2 accepted by Anthony at hall 5.3%, room 11.1%, Sponza atrium 12.9%, dark corner 15.9% (section 13); phase 2b passed with option B (section 14). Phase 3 (GPU cost and the ADR) is next. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
+Status: phases 0 and 1 passed; phase 2 accepted by Anthony at hall 5.3%, room 11.1%, Sponza atrium 12.9%, dark corner 15.9% (section 13); phase 2b passed with option B (section 14). Phase 3: the GPU timing (section 15) is about 190 times over the lighting budget; the ADR waits on Anthony's decision. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
 
 ## 1. What Anthony asked for
 
@@ -265,3 +265,18 @@ Anthony accepted phase 2 at the numbers in section 13 and asked to go on. `--sun
 | Dark corner, sun and lamps | 15.7%, +0.9% | 15.7%, +0.9% | bias under 10% |
 
 B passes the leak check and sits at the edge of the sunlit limit; it is the sun's path. The sun's cost is one narrow cone for each voxel-layer probe and each gather patch, whatever the lamp count. No sun ray starts at a pixel.
+
+## 15. Phase 3: the voxel-layer cascade on the GPU, 24 Nov 2026
+
+`--gpu-bench` now times the voxel-layer cascade, not one cone a pixel. One CPU frame lists its cones (start on the voxel layer, first reach, direction, cascade). `shaders/cascade.comp` marches each one on the GPU through the clip volumes: seven RGBA16F face volumes over all eight levels, and twelve RGBA8 plane volumes (centroid and point box) over the levels a crossing reads. The jobs and the stats are in device memory. Per-interval results go to a ring of a million cones, so the writes are paid. Departures from the CPU march: no front rule on the coarse read, and lamps are read trilinear at each step's centre. Hall, 1280x720, `--theta 8 --probe-px 12 --cascades 5 --t0 2.5`, RTX 4070:
+
+| March | ms a frame | Cones | Steps a cone | Texture reads a cone |
+|---|---|---|---|---|
+| Every interval from the voxel layer (as the CPU prototype does) | 7,362 | 24.2 million | 119 | 657 |
+| Each cone its own cascade's interval (`--gpu-own-interval`) | 1,486 | 24.2 million | 40 | 213 |
+| Budget (ADR 0013: all lighting at 1080p) | 8 | | | |
+| For scale: one hardware path a pixel with 6 lamps' shadow rays | 6.1 | | | |
+
+Textures 459 MiB, cone list 739 MiB. Only 93,401 of the hall's 1.3 million voxels are inside the 96-texel clip volumes, so a larger clip would add cost.
+
+Where the time goes: 24 million cones a frame, about 26 a shown pixel (the old one-cone-a-pixel bench marched 0.9 million), and 1.5 ns a step against 0.43 ns for the old shader, because the plane-crossing test reads up to 16 cells with 6 ways each and keeps its hits in local arrays. To reach 8 ms the cones must fall about tenfold (fewer cascade-0 directions, fewer coarse probes, or cascade directions shared between probes as the paper's sparse probes are) and the step about tenfold (a crossing table per voxel in place of the cell search, the coarse levels without the refine walk). Neither is shown to keep phase 2's accuracy.

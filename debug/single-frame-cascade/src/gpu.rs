@@ -6,37 +6,50 @@
 #![expect(
     clippy::disallowed_types,
     clippy::undocumented_unsafe_blocks,
-    clippy::cast_ptr_alignment,
     reason = "offline benchmark on its own Vulkan device through ash, as genos-gpuref (ADR 0007 covers the renderer)"
 )]
 
 use ash::vk;
 
-const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cone.spv"));
+const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cascade.spv"));
 
-/// Texels along x and y of one voxel level's clip volume; z holds 8 levels.
+/// Texels along x and y of one voxel level's clip volume; z holds the levels.
 pub const SIDE: u32 = 96;
 pub const LEVELS: u32 = 8;
+/// Cones whose per-interval results are kept: the shader writes cone `i` to
+/// slot `i % RING`, so every write is paid without a buffer for all of them.
+const RING: u64 = 1 << 20;
+/// Workgroups along x a dispatch stays within (the minimum spec limit).
+const GROUPS_X: u32 = 65_535;
 
-pub struct ConeInput<'a> {
-    /// Two vec4 a pixel: point and cascade-0 ray length; normal and 1 when shown.
-    pub surface: &'a [[f32; 8]],
-    /// Seven RGBA16F volumes, `SIDE` x `SIDE` x `SIDE * LEVELS` texels.
-    pub volumes: &'a [Vec<u16>; 7],
+pub struct CascadeInput<'a> {
+    /// Two vec4 a cone: its start and its first interval's reach; its direction.
+    pub jobs: &'a [[f32; 8]],
+    /// Seven RGBA16F volumes over all levels: six axis ways, then the lamps.
+    pub faces: &'a [Vec<u16>; 7],
+    /// Twelve RGBA8 volumes over the plane levels: six A, then six B.
+    pub planes: &'a [Vec<u8>; 12],
+    pub plane_levels: u32,
     pub clip: [[f32; 4]; 8],
     pub width0: f32,
     pub cascades: u32,
+    pub refine_level: u32,
+    pub cross_full: f32,
+    pub box_margin: f32,
     pub sky: [f32; 3],
+    /// Each cone marches only its own cascade's interval.
+    pub own_interval: bool,
 }
 
-pub struct ConeTiming {
+pub struct CascadeTiming {
     pub device: String,
     pub ms_median: f64,
     pub ms_min: f64,
+    pub cones: u64,
     pub steps_per_cone: f64,
     pub reads_per_cone: f64,
     pub covered: f64,
-    pub cones: u64,
+    pub texture_mib: f64,
 }
 
 fn err<E: std::fmt::Debug>(what: &'static str) -> impl Fn(E) -> String {
@@ -167,16 +180,17 @@ impl Device {
         }
     }
 
-    /// One RGBA16F volume, filled from `texels`, ready to sample.
-    fn volume(&self, texels: &[u16]) -> Result<vk::ImageView, String> {
+    /// One volume of `levels` stacked clip volumes, filled from `bytes`,
+    /// ready to sample.
+    fn volume(&self, bytes: &[u8], format: vk::Format, levels: u32) -> Result<vk::ImageView, String> {
         unsafe {
-            let extent = vk::Extent3D { width: SIDE, height: SIDE, depth: SIDE * LEVELS };
+            let extent = vk::Extent3D { width: SIDE, height: SIDE, depth: SIDE * levels };
             let image = self
                 .logical
                 .create_image(
                     &vk::ImageCreateInfo::default()
                         .image_type(vk::ImageType::TYPE_3D)
-                        .format(vk::Format::R16G16B16A16_SFLOAT)
+                        .format(format)
                         .extent(extent)
                         .mip_levels(1)
                         .array_layers(1)
@@ -194,9 +208,8 @@ impl Device {
                 .allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None)
                 .map_err(err("volume memory"))?;
             self.logical.bind_image_memory(image, memory, 0).map_err(err("bind image"))?;
-            let bytes = std::mem::size_of_val(texels);
-            let (staging, ptr) = self.buffer(bytes as u64, vk::BufferUsageFlags::TRANSFER_SRC)?;
-            std::ptr::copy_nonoverlapping(texels.as_ptr().cast::<u8>(), ptr, bytes);
+            let (staging, ptr) = self.buffer(u64::try_from(bytes.len()).unwrap_or(u64::MAX), vk::BufferUsageFlags::TRANSFER_SRC)?;
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
             let range = vk::ImageSubresourceRange::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .level_count(1)
@@ -261,7 +274,7 @@ impl Device {
                     &vk::ImageViewCreateInfo::default()
                         .image(image)
                         .view_type(vk::ImageViewType::TYPE_3D)
-                        .format(vk::Format::R16G16B16A16_SFLOAT)
+                        .format(format)
                         .subresource_range(range),
                     None,
                 )
@@ -270,13 +283,70 @@ impl Device {
     }
 }
 
-/// Time the cone march: one cone a pixel, `frames` dispatches after a warm-up.
-pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> {
+impl Device {
+    /// A device-local storage buffer of `size` bytes, filled from `bytes` if given.
+    fn device_buffer(&self, size: u64, bytes: Option<&[u8]>) -> Result<vk::Buffer, String> {
+        unsafe {
+            let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC;
+            let buffer = self
+                .logical
+                .create_buffer(&vk::BufferCreateInfo::default().size(size.max(16)).usage(usage), None)
+                .map_err(err("device buffer"))?;
+            let req = self.logical.get_buffer_memory_requirements(buffer);
+            let ty = self
+                .memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+                .ok_or("gpu bench: no device memory for a buffer")?;
+            let memory = self
+                .logical
+                .allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None)
+                .map_err(err("device buffer memory"))?;
+            self.logical.bind_buffer_memory(buffer, memory, 0).map_err(err("bind device buffer"))?;
+            if let Some(bytes) = bytes {
+                let (staging, ptr) = self.buffer(u64::try_from(bytes.len()).unwrap_or(u64::MAX), vk::BufferUsageFlags::TRANSFER_SRC)?;
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+                self.run(|cmd| {
+                    self.logical.cmd_copy_buffer(cmd, staging, buffer, &[vk::BufferCopy::default().size(u64::try_from(bytes.len()).unwrap_or(u64::MAX))]);
+                })?;
+                self.logical.destroy_buffer(staging, None);
+            }
+            Ok(buffer)
+        }
+    }
+
+    /// The first `size` bytes of a device buffer, copied to the host.
+    fn read_back(&self, buffer: vk::Buffer, size: u64) -> Result<Vec<u8>, String> {
+        unsafe {
+            let (host, ptr) = self.buffer(size, vk::BufferUsageFlags::TRANSFER_DST)?;
+            self.run(|cmd| {
+                self.logical.cmd_copy_buffer(cmd, buffer, host, &[vk::BufferCopy::default().size(size)]);
+            })?;
+            let out = std::slice::from_raw_parts(ptr, usize::try_from(size).unwrap_or(0)).to_vec();
+            self.logical.destroy_buffer(host, None);
+            Ok(out)
+        }
+    }
+}
+
+fn as_bytes<T: Copy>(v: &[T]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(v.as_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
+}
+
+/// Time the voxel-layer cascade's cones: every cone of one frame, each through
+/// all its intervals, `frames` dispatches after a warm-up.
+pub fn time_cascade(input: &CascadeInput, frames: u32) -> Result<CascadeTiming, String> {
     let gpu = Device::new()?;
-    let pixels = input.surface.len();
+    let cones = u64::try_from(input.jobs.len()).unwrap_or(u64::MAX);
     unsafe {
-        let views: Vec<vk::ImageView> = input.volumes.iter().map(|v| gpu.volume(v)).collect::<Result<_, _>>()?;
-        let sampler = gpu
+        let mut views = Vec::new();
+        for faces in input.faces {
+            views.push(gpu.volume(as_bytes(faces), vk::Format::R16G16B16A16_SFLOAT, LEVELS)?);
+        }
+        for planes in input.planes {
+            views.push(gpu.volume(planes, vk::Format::R8G8B8A8_UNORM, input.plane_levels)?);
+        }
+        let texture_bytes = input.faces.iter().map(|f| std::mem::size_of_val(f.as_slice())).sum::<usize>()
+            + input.planes.iter().map(Vec::len).sum::<usize>();
+        let linear = gpu
             .logical
             .create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -288,51 +358,52 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
                 None,
             )
             .map_err(err("sampler"))?;
-        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
-        let surface_bytes = std::mem::size_of_val(input.surface);
-        let (surface, surface_ptr) = gpu.buffer(surface_bytes as u64, storage)?;
-        std::ptr::copy_nonoverlapping(input.surface.as_ptr().cast::<u8>(), surface_ptr, surface_bytes);
-        let out_bytes = pixels * 5 * 16;
-        let (out, out_ptr) = gpu.buffer(out_bytes as u64, storage)?;
-        let mut params = [0f32; 40];
+        let jobs = gpu.device_buffer(std::mem::size_of_val(input.jobs) as u64, Some(as_bytes(input.jobs)))?;
+        let ring = cones.min(RING) * u64::from(input.cascades) * 16;
+        let results = gpu.device_buffer(ring, None)?;
+        let stats = gpu.device_buffer(cones * 16, None)?;
+        let mut params = [0f32; 44];
         for (level, clip) in input.clip.iter().enumerate() {
             params[level * 4..level * 4 + 4].copy_from_slice(clip);
         }
         params[32] = input.width0;
         params[33] = input.cascades as f32;
-        params[34] = pixels as f32;
-        params[36..39].copy_from_slice(&input.sky);
-        let (uniform, uniform_ptr) = gpu.buffer(160, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
+        params[34] = cones as f32;
+        params[35] = input.refine_level as f32;
+        params[36] = 1.0;
+        params[37] = input.cross_full;
+        params[38] = input.box_margin;
+        params[39] = SIDE as f32;
+        params[40..43].copy_from_slice(&input.sky);
+        params[43] = if input.own_interval { 1.0 } else { 0.0 };
+        let (uniform, uniform_ptr) = gpu.buffer(176, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
+        std::ptr::copy_nonoverlapping(params.as_ptr().cast::<u8>(), uniform_ptr, 176);
 
+        let binding = |b: u32, ty: vk::DescriptorType, count: u32| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(b)
+                .descriptor_type(ty)
+                .descriptor_count(count)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        };
+        let image = vk::DescriptorType::COMBINED_IMAGE_SAMPLER;
+        let storage = vk::DescriptorType::STORAGE_BUFFER;
         let bindings = [
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .descriptor_count(7)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
-            vk::DescriptorSetLayoutBinding::default()
-                .binding(3)
-                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                .descriptor_count(1)
-                .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            binding(0, image, 7),
+            binding(1, image, 6),
+            binding(2, image, 6),
+            binding(3, storage, 1),
+            binding(4, storage, 1),
+            binding(5, storage, 1),
+            binding(6, vk::DescriptorType::UNIFORM_BUFFER, 1),
         ];
         let layout = gpu
             .logical
             .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)
             .map_err(err("set layout"))?;
         let sizes = [
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER, descriptor_count: 7 },
-            vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 2 },
+            vk::DescriptorPoolSize { ty: image, descriptor_count: 19 },
+            vk::DescriptorPoolSize { ty: storage, descriptor_count: 3 },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 1 },
         ];
         let pool = gpu
@@ -348,35 +419,23 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
             .iter()
             .map(|view| {
                 vk::DescriptorImageInfo::default()
-                    .sampler(sampler)
+                    .sampler(linear)
                     .image_view(*view)
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             })
             .collect();
         let whole = |buffer| [vk::DescriptorBufferInfo::default().buffer(buffer).range(vk::WHOLE_SIZE)];
-        let (surface_info, out_info, uniform_info) = (whole(surface), whole(out), whole(uniform));
+        let (jobs_info, results_info, stats_info, uniform_info) = (whole(jobs), whole(results), whole(stats), whole(uniform));
+        let write = |b: u32, ty: vk::DescriptorType| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(b).descriptor_type(ty);
         gpu.logical.update_descriptor_sets(
             &[
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(0)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&images),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(1)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(&surface_info),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(2)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(&out_info),
-                vk::WriteDescriptorSet::default()
-                    .dst_set(set)
-                    .dst_binding(3)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(&uniform_info),
+                write(0, image).image_info(&images[0..7]),
+                write(1, image).image_info(&images[7..13]),
+                write(2, image).image_info(&images[13..19]),
+                write(3, storage).buffer_info(&jobs_info),
+                write(4, storage).buffer_info(&results_info),
+                write(5, storage).buffer_info(&stats_info),
+                write(6, vk::DescriptorType::UNIFORM_BUFFER).buffer_info(&uniform_info),
             ],
             &[],
         );
@@ -401,43 +460,40 @@ pub fn time_cones(input: &ConeInput, frames: u32) -> Result<ConeTiming, String> 
                 None,
             )
             .map_err(|(_, e)| format!("gpu bench: pipeline: {e:?}"))?[0];
-        let groups = u32::try_from(pixels.div_ceil(64)).map_err(err("groups"))?;
+        let groups = u32::try_from(cones.div_ceil(64)).map_err(err("groups"))?;
+        let (gx, gy) = (groups.min(GROUPS_X), groups.div_ceil(GROUPS_X).max(1));
         let mut times = Vec::new();
-        let warm = 5u32;
+        let warm = 3u32;
         for frame in 0..warm + frames.max(1) {
-            params[35] = frame as f32;
-            std::ptr::copy_nonoverlapping(params.as_ptr().cast::<u8>(), uniform_ptr, 160);
             let ms = gpu.run(|cmd| {
                 gpu.logical.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
                 gpu.logical.cmd_bind_descriptor_sets(cmd, vk::PipelineBindPoint::COMPUTE, pipe_layout, 0, &[set], &[]);
-                gpu.logical.cmd_dispatch(cmd, groups, 1, 1);
+                gpu.logical.cmd_dispatch(cmd, gx, gy, 1);
             })?;
             if frame >= warm {
                 times.push(ms);
             }
         }
         times.sort_by(f64::total_cmp);
-        let result = std::slice::from_raw_parts(out_ptr.cast::<[f32; 4]>(), pixels * 5);
-        let (mut cones, mut steps, mut reads, mut covered) = (0u64, 0.0f64, 0.0f64, 0.0f64);
-        for (p, surface) in input.surface.iter().enumerate() {
-            if surface[7] > 0.5 {
-                let stats = result[p * 5 + 4];
-                cones += 1;
-                steps += f64::from(stats[0]);
-                reads += f64::from(stats[1]);
-                covered += f64::from(stats[2]);
-            }
-        }
+        let bytes = gpu.read_back(stats, cones * 16)?;
+        let per_cone: Vec<[f32; 4]> = bytes
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|c| std::array::from_fn(|i| f32::from_le_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]])))
+            .collect();
         let n = (cones.max(1)) as f64;
+        let sum = |k: usize| per_cone.iter().map(|s| f64::from(s[k])).sum::<f64>() / n;
         gpu.logical.device_wait_idle().ok();
-        Ok(ConeTiming {
+        Ok(CascadeTiming {
             device: gpu.name.clone(),
             ms_median: times[times.len() / 2],
             ms_min: times[0],
-            steps_per_cone: steps / n,
-            reads_per_cone: reads / n,
-            covered: covered / n,
             cones,
+            steps_per_cone: sum(0),
+            reads_per_cone: sum(1),
+            covered: sum(2),
+            texture_mib: texture_bytes as f64 / (1024.0 * 1024.0),
         })
     }
 }
