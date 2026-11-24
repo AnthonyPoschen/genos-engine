@@ -34,7 +34,7 @@ const CONE_MIN_CAP: u64 = 64;
 /// Header words cleared each frame; the layout follows them.
 const CONE_CLEARED: u64 = 64;
 const CONE_LAYOUT_AT: u64 = 64;
-const CONE_PIPES: usize = 7;
+const CONE_PIPES: usize = 8;
 const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-insert",
     "cone-compact",
@@ -43,7 +43,13 @@ const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-weights",
     "cone-merge",
     "cone-shade",
+    "cone-lamps",
 ];
+/// Points on each lamp's sphere (`cone_lamps.comp`), and the field levels it
+/// is written at: the most lamp-hash entries one lamp can fill.
+const CONE_LAMP_POINTS: u64 = 256;
+const CONE_LAMP_ENTRIES: u64 = CONE_LAMP_POINTS * 8;
+const CONE_LAMP_WORDS: u64 = 5;
 
 fn cone_dirs(theta: u32, c: u32) -> u64 {
     let t = u64::from(theta) << c;
@@ -60,10 +66,13 @@ struct ConeLayout {
     cones_at: [u64; 5],
     dirs: [u64; 5],
     count: u32,
+    /// The lamp hash: entries (a power of two) and word offset.
+    lamp_hash: u64,
+    lamp_at: u64,
     words: u64,
 }
 
-fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32) -> ConeLayout {
+fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32, lamps: u64) -> ConeLayout {
     let px = u64::from(probe_px.max(1));
     let base = pixels.div_ceil(px * px).max(1) * CONE_PROBE_SLACK;
     let count = count.min(5);
@@ -83,6 +92,9 @@ fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32) -> ConeLayout
         at += l.cap[c] * l.dirs[c] * CONE_CONE_WORDS;
         cap = cap.div_ceil(CONE_CASCADE_SHARE);
     }
+    l.lamp_hash = (2 * lamps.max(1) * CONE_LAMP_ENTRIES).next_power_of_two();
+    l.lamp_at = at;
+    at += l.lamp_hash * CONE_LAMP_WORDS;
     l.words = at;
     l
 }
@@ -93,6 +105,7 @@ impl ConeLayout {
         let w = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
         (0..5)
             .flat_map(|c| [w(self.hash[c]), w(self.cap[c]), w(self.hash_at[c]), w(self.probes_at[c]), w(self.cones_at[c])])
+            .chain([w(self.lamp_hash), w(self.lamp_at)])
             .collect()
     }
 }
@@ -111,8 +124,13 @@ struct ConeGpu {
     /// Bytes still to upload: (buffer 0..3, bytes, cursor).
     pending: Vec<(usize, Vec<u8>, usize)>,
     ready: bool,
-    /// The work buffer's shape (theta, cascades, pixels, probe_px) and layout.
-    work_shape: (u32, u32, u64, u32),
+    /// The work buffer's shape (theta, cascades, pixels, probe_px, lamps) and layout.
+    work_shape: (u32, u32, u64, u32, u64),
+    /// Knockout only ([`crate::gate::CONE_LAMP_FOLLOW`]): the lamps were
+    /// written once and are kept.
+    lamps_frozen: bool,
+    /// Lights in the scene, suns included: the lamp pass's lamp count.
+    scene_lights: u32,
     layout: ConeLayout,
     /// The last build's sizes, for the debug tools.
     report: String,
@@ -131,29 +149,34 @@ impl ConeGpu {
             building: None,
             pending: Vec::new(),
             ready: false,
-            work_shape: (0, 0, 0, 0),
+            work_shape: (0, 0, 0, 0, 0),
+            lamps_frozen: false,
+            scene_lights: 0,
             layout: ConeLayout::default(),
             report: String::new(),
         }
     }
 }
 
-/// What a cone-cascade field depends on: the world, its glTF model, its point
-/// lamps and their sphere's radius.
-fn cone_world_key(world: &World, radius: f32) -> u64 {
+/// What a cone-cascade field depends on: the world and its glTF model. The
+/// lamps are written each frame (`cone_lamps.comp`), so a lamp that moves or
+/// changes does not rebuild it.
+fn cone_world_key(world: &World) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     world.identity().hash(&mut h);
     world.gltf_surface.as_ref().map(|g| g.key()).hash(&mut h);
-    radius.to_bits().hash(&mut h);
-    let scene = &world.scene;
-    for i in 0..scene.light_len() {
-        let l = scene.light(i);
-        for v in [l.position.x, l.position.y, l.position.z, l.color[0], l.color[1], l.color[2], l.direction.x, l.direction.y, l.direction.z] {
-            v.to_bits().hash(&mut h);
-        }
-    }
     h.finish()
+}
+
+/// The scene's point lamps (a sun is not a sphere in the field).
+fn cone_point_lamps(scene: &genos_scene::Scene) -> u64 {
+    (0..scene.light_len())
+        .filter(|&i| {
+            let d = scene.light(i).direction;
+            d.x == 0.0 && d.y == 0.0 && d.z == 0.0
+        })
+        .count() as u64
 }
 
 fn cone_bytes(words: &[u32]) -> Vec<u8> {
@@ -185,8 +208,9 @@ fn cone_field_bytes(field: &crate::cone_field::ConeField) -> [Vec<u8>; 4] {
     [cone_bytes(&table), cone_bytes(&field.fine_bricks), cone_bytes(&field.fine_voxels), cone_bytes(&coarse)]
 }
 
-/// The field for a scene, built off the frame thread.
-fn cone_build(scene: &genos_scene::Scene, gltf: Option<&crate::gltf_surface::GltfSurface>, radius: f32) -> crate::cone_field::ConeField {
+/// The field for a scene, built off the frame thread: its surfaces. The lamps
+/// are not in it; they are written each frame.
+fn cone_build(scene: &genos_scene::Scene, gltf: Option<&crate::gltf_surface::GltfSurface>) -> crate::cone_field::ConeField {
     // The engine's paint reflectance on the analytic shapes, as compose has it.
     const PAINT: f32 = 0.8;
     let points = crate::cone_field::surface_points(scene, gltf, PAINT);
@@ -194,7 +218,6 @@ fn cone_build(scene: &genos_scene::Scene, gltf: Option<&crate::gltf_surface::Glt
     for (at, normal, area, _) in &points {
         voxels.add_surface(*at, *normal, *area, [0.0; 3]);
     }
-    voxels.add_scene_lamps(scene, radius);
     voxels.brick()
 }
 
@@ -225,7 +248,7 @@ impl Gpu {
         if !cone.enabled {
             return Ok(());
         }
-        let key = cone_world_key(world, cone.lamp_radius);
+        let key = cone_world_key(world);
         // One build at a time. A moving lamp changes the key every frame, and a
         // thread for each frame's key held a field each and ran the machine out
         // of memory in a minute. The next build starts when this one is done,
@@ -233,10 +256,9 @@ impl Gpu {
         if self.cone.key != key && self.cone.building.is_none() {
             let scene = world.scene.clone();
             let gltf = world.gltf_surface.clone();
-            let radius = cone.lamp_radius;
             let handle = std::thread::Builder::new()
                 .name("cone-field".into())
-                .spawn(move || cone_build(&scene, gltf.as_deref(), radius))
+                .spawn(move || cone_build(&scene, gltf.as_deref()))
                 .map_err(|e| format!("cone field thread: {e}"))?;
             self.cone.building = Some((key, handle));
         }
@@ -247,10 +269,13 @@ impl Gpu {
             }
         }
         let pixels = u64::from(self.lighting.dims[0]) * u64::from(self.lighting.dims[1]);
-        let shape = (cone.theta, cone.count, pixels, cone.probe_px);
+        // Room for at least 16 lamps, so lamps added in play rarely resize it.
+        let lamps = cone_point_lamps(&world.scene).max(16).next_power_of_two();
+        self.cone.scene_lights = u32::try_from(world.scene.light_len()).unwrap_or(u32::MAX);
+        let shape = (cone.theta, cone.count, pixels, cone.probe_px, lamps);
         if pixels > 0 && (self.cone.work_shape != shape || self.cone.work.buffer.is_null()) {
             let sized = if crate::gate::guard(crate::gate::CONE_TABLE_CAP) { pixels } else { pixels / CONE_KNOCKOUT_SHARE };
-            let layout = cone_layout(cone.theta, cone.count, sized, cone.probe_px);
+            let layout = cone_layout(cone.theta, cone.count, sized, cone.probe_px, lamps);
             let words = layout.words;
             self.idle_device();
             let mut old = std::mem::replace(&mut self.cone.work, Buffer::empty());
@@ -264,7 +289,7 @@ impl Gpu {
             }
         }
         if self.cone.pipes[0].is_null() && self.lighting.ready {
-            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV];
+            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV];
             for (k, code) in codes.iter().enumerate() {
                 self.cone.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, CONE_PIPE_NAMES[k])?;
             }
@@ -306,6 +331,7 @@ impl Gpu {
         }
         self.cone.pending = bytes.into_iter().enumerate().map(|(k, b)| (k, b, 0)).collect();
         self.cone.ready = false;
+        self.cone.lamps_frozen = false;
         self.cone.key = key;
         if self.lighting.ready {
             self.write_lighting_sets()?;
@@ -366,7 +392,10 @@ impl Gpu {
         let (theta, count) = (cone.theta, cone.count);
         let seat = if crate::gate::guard(crate::gate::CONE_FIELD_SEAT) { 0 } else { CONE_PIXEL_SEAT };
         let flags = CONE_SEE_MERGE | CONE_SEE_SHADE | seat;
-        let push = |c: u32| [w, h, 0, 0, c, theta, count, cone.probe_px, flags, CONE_T0.to_bits(), 0, 0];
+        let radius = cone.lamp_radius.to_bits();
+        let push = |c: u32| [w, h, 0, 0, c, theta, count, cone.probe_px, flags, CONE_T0.to_bits(), radius, 0];
+        // Knockout only: the lamps written once and kept, as when the field held them.
+        let write_lamps = crate::gate::guard(crate::gate::CONE_LAMP_FOLLOW) || !self.cone.lamps_frozen;
         let layout = self.cone.layout;
         let header = layout.header();
         unsafe {
@@ -381,6 +410,9 @@ impl Gpu {
             for c in 0..count as usize {
                 (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, layout.hash_at[c] * 4, layout.hash[c] * CONE_HASH_WORDS * 4, 0);
             }
+            if write_lamps {
+                (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, layout.lamp_at * 4, layout.lamp_hash * CONE_LAMP_WORDS * 4, 0);
+            }
         }
         let compute = |gpu: &Self| gpu.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
         self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
@@ -390,6 +422,11 @@ impl Gpu {
             let x = groups.min(65_535);
             (u32::try_from(x).unwrap_or(1), u32::try_from(groups.div_ceil(x.max(1))).unwrap_or(1))
         };
+        if write_lamps {
+            self.cone_dispatch(7, push(0), line(u64::from(self.cone.scene_lights) * CONE_LAMP_POINTS));
+            compute(self);
+            self.cone.lamps_frozen = true;
+        }
         self.cone_dispatch(0, push(0), pixels);
         compute(self);
         for c in 0..count {
@@ -444,6 +481,16 @@ impl Gpu {
                 }
             })
             .collect())
+    }
+
+    /// Lamp points that found no lamp-hash slot last frame. Waits for that frame.
+    pub(crate) fn cone_lamp_drops(&mut self) -> Result<u32, String> {
+        if self.cone.work.buffer.is_null() {
+            return Ok(0);
+        }
+        self.idle_device();
+        let raw = self.copy_device_range(self.cone.work.buffer, 48 * 4, 4)?;
+        Ok(u32_words(&raw).first().copied().unwrap_or(0))
     }
 
     /// Cascade `c`'s probes as last frame wrote them. Waits for that frame.

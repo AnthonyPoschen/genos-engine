@@ -4,13 +4,14 @@
 //! frame comes back bit for bit after the camera turns away and back, and a
 //! probe's seat does not move with a turn of the head
 //! (`docs/systems/lighting/cone-traced-cascades-plan.md`, section 18).
-//! `scripts/ci-gate-knockout.sh` knocks out `cone_table_cap` and
-//! `cone_field_seat` and these go red.
+//! A lamp's light follows it in the frame it moves.
+//! `scripts/ci-gate-knockout.sh` knocks out `cone_table_cap`,
+//! `cone_field_seat` and `cone_lamp_follow` and these go red.
 
 mod common;
 
 use common::PresentedFrame;
-use genos_render::{Renderer, World, CONE_FIELD_SEAT, CONE_TABLE_CAP};
+use genos_render::{Renderer, World, CONE_FIELD_SEAT, CONE_LAMP_FOLLOW, CONE_TABLE_CAP};
 use genos_scene::{Camera, Floor, LightingPreset, LightingSettings, Light, Scene, Vec3, Wall};
 use genos_window::Window;
 
@@ -100,8 +101,8 @@ fn the_cone_cascades_drop_nothing_and_turn_back_to_the_same_frame() {
     assert_eq!(dropped, 0, "the cone cascades dropped {dropped} probes (guard {CONE_TABLE_CAP})");
     let _ = draw(window, renderer, &world, &camera(0.5));
     let after = draw(window, renderer, &world, &camera(0.0));
-    let changed = before.pixels.chunks(4).zip(after.pixels.chunks(4)).filter(|(a, b)| a != b).count();
-    eprintln!("cone gate: {changed} pixels changed after turning away and back");
+    let changed = far_apart(&before, &after);
+    eprintln!("cone gate: {changed} pixels changed by more than one code after turning away and back");
     assert_eq!(changed, 0, "{changed} presented pixels changed after a turn away and back (guard {CONE_TABLE_CAP})");
 }
 
@@ -132,4 +133,42 @@ fn a_turn_of_the_head_does_not_move_a_cone_probe() {
     eprintln!("cone gate: {moved} of {shared} shared probes moved their seat");
     assert!(shared > 0, "no probe was seen at both poses");
     assert_eq!(moved, 0, "{moved} of {shared} probes moved their seat with a turn of the head (guard {CONE_FIELD_SEAT})");
+}
+
+/// Pixels whose display codes differ by more than one: a lamp whose light
+/// lags changes many by far more.
+fn far_apart(a: &PresentedFrame, b: &PresentedFrame) -> usize {
+    a.pixels
+        .chunks(4)
+        .zip(b.pixels.chunks(4))
+        .filter(|(p, q)| p.iter().zip(q.iter()).any(|(x, y)| x.abs_diff(*y) > 1))
+        .count()
+}
+
+/// A lamp that moves is lit where it is in the next frame: that frame matches
+/// the one many frames later. Fails when `cone_lamp_follow` is knocked out
+/// (the lamps written once, as when the field held them).
+#[test]
+fn a_moved_lamp_lights_from_its_new_place_in_the_next_frame() {
+    let (_gpu, mut owner) = open();
+    let window = &mut *owner.window;
+    let renderer = &mut *owner.device;
+    let mut world = World::from_scene(scene());
+    let camera = camera(0.0);
+    resident(window, renderer, &world, &camera);
+    let before = draw(window, renderer, &world, &camera);
+    world.scene.light_mut(0).position = Vec3::new(-0.8, 1.2, 0.3);
+    let next = PresentedFrame::from_draw(window, renderer, &world, &camera);
+    let mut later = None;
+    for _ in 0..30 {
+        later = Some(PresentedFrame::from_draw(window, renderer, &world, &camera));
+    }
+    let later = later.expect("a frame");
+    let far = far_apart(&next, &later);
+    let moved = far_apart(&before, &next);
+    let dropped = renderer.cone_lamp_drops().expect("lamp drops");
+    eprintln!("cone gate: {moved} pixels changed with the move; {far} apart between the next frame and 30 later; {dropped} lamp points dropped");
+    assert!(moved > 100, "only {moved} pixels changed when the lamp moved (guard {CONE_LAMP_FOLLOW})");
+    assert_eq!(dropped, 0, "the lamp hash dropped {dropped} points (guard {CONE_LAMP_FOLLOW})");
+    assert_eq!(far, 0, "{far} pixels changed after the frame the lamp moved in (guard {CONE_LAMP_FOLLOW})");
 }

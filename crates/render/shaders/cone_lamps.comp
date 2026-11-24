@@ -1,0 +1,59 @@
+#version 450
+// Cone-traced cascades, pass 0: every point lamp is written into the lamp
+// hash this frame, so a moving lamp costs what a still one does and its light
+// follows in the frame it moves. A lamp is a glowing sphere of
+// cone_cascades.lamp_radius (lamp.z) shared over CONE_LAMP_POINTS points on it;
+// each point adds its share of the disc's area and its light to the voxel that
+// holds it at every field level, as the field build did (cone_field.rs
+// add_lamp). One thread per lamp and point.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint lamp_i = index / CONE_LAMP_POINTS;
+    uint point = index % CONE_LAMP_POINTS;
+    if (lamp_i >= scene.lamp_count) {
+        return;
+    }
+    Lamp lamp = scene_lamp(lamp_i);
+    // A sun has no range (pack.rs lamp_range); it is not a sphere in the field.
+    if (lamp.color.w <= 0.0) {
+        return;
+    }
+    if (point == 0u) {
+        // Presence: the cells around the lamp at CONE_LAMP_NEAR_LEVEL.
+        ivec3 home = ivec3(floor(lamp.pos.xyz / cone_size(CONE_LAMP_NEAR_LEVEL)));
+        int side = 2 * CONE_LAMP_NEAR + 1;
+        for (int k = 0; k < side * side * side; k++) {
+            ivec3 o = ivec3(k % side, (k / side) % side, k / (side * side)) - ivec3(CONE_LAMP_NEAR);
+            uint key = cone_lamp_near_key(home + o);
+            if (key != CONE_EMPTY && cone_lamp_slot(key, true) == CONE_NO_BRICK) {
+                atomicAdd(cwork.w[CONE_LAMP_DROPPED], 1u);
+            }
+        }
+    }
+    float radius = uintBitsToFloat(pc.lamp.z);
+    float share = CONE_PI * radius * radius / float(CONE_LAMP_POINTS);
+    vec3 light = lamp.color.rgb * (CONE_LAMP_UNIT / float(CONE_LAMP_POINTS));
+    vec3 at = lamp.pos.xyz + cone_lamp_dir(point) * radius;
+    uint area_q = uint(round(share / CONE_LAMP_AREA_Q));
+    uvec3 light_q = uvec3(round(max(light, vec3(0.0)) / CONE_LAMP_LIGHT_Q));
+    for (int level = CONE_FINEST; level <= CONE_COARSEST; level++) {
+        uint key = cone_lamp_key(level, ivec3(floor(at / cone_size(level))));
+        if (key == CONE_EMPTY) {
+            continue;
+        }
+        uint slot = cone_lamp_slot(key, true);
+        if (slot == CONE_NO_BRICK) {
+            atomicAdd(cwork.w[CONE_LAMP_DROPPED], 1u);
+            continue;
+        }
+        atomicAdd(cwork.w[slot + 1u], area_q);
+        atomicAdd(cwork.w[slot + 2u], light_q.x);
+        atomicAdd(cwork.w[slot + 3u], light_q.y);
+        atomicAdd(cwork.w[slot + 4u], light_q.z);
+    }
+}

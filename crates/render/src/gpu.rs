@@ -1619,6 +1619,11 @@ impl Renderer {
         self.gpu.cone_stats()
     }
 
+    /// Lamp points the cone cascades' lamp hash had no slot for last frame.
+    pub fn cone_lamp_drops(&mut self) -> Result<u32, String> {
+        self.gpu.cone_lamp_drops()
+    }
+
     /// Cascade `c`'s probes (key, level, cell, pixels, seat) from the last frame.
     pub fn cone_probes(&mut self, c: u32) -> Result<Vec<crate::ConeProbe>, String> {
         self.gpu.cone_probes(c)

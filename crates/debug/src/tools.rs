@@ -1630,7 +1630,8 @@ impl Tools {
                         ])
                     })
                     .collect();
-                reply(obj(vec![("cascades", list(items))]))
+                let lamp_dropped = ctx.renderer.cone_lamp_drops()?;
+                reply(obj(vec![("cascades", list(items)), ("lamp_dropped", num(f64::from(lamp_dropped)))]))
             }
             "cone_probes" => {
                 let cascade = args.u32("cascade")?.unwrap_or(0);

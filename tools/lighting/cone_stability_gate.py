@@ -15,6 +15,11 @@ paused so nothing moves but the camera, and grades cone mode
   D  return to pose: turn 30 degrees away and back, with exposure held fixed;
      the picture is bit-identical (cone mode keeps no history). The old path's
      count is printed for reference only: its caches carry the turn.
+  E  a lamp follows in one frame: move a point lamp 0.5 m; no pixel of the
+     frame drawn right after differs by more than one display code from the
+     frame 30 frames later (a lamp that lags changes thousands by far more;
+     a few one-code pixels come from other passes' history and are reported),
+     and the lamp hash dropped no point (lighting.cone_stats lamp_dropped)
 
 Views: --view hall (lighting-stress, the hall checkpoint) or --view sponza
 (the arcade pose of section 18). Each gate prints PASS or FAIL; the exit code
@@ -26,8 +31,12 @@ goes to --out.
   --bin PATH           genos-lighting binary (default target/release/genos-lighting)
   --port N             command port (default 18797)
   --out DIR            evidence directory (default genos-debug/cone-stability/<view>-<size>)
-  --only A,B,C,D       run these gates only
+  --only A,B,C,D,E     run these gates only
   --flicker-margin F   added to the old path's popped share in gate A (default 0.002)
+  --reflections on|off screen reflections during the gates (default on)
+  --fog on|off         froxel fog during the gates (default off). Fog keeps its own
+                       history and in Sponza moves a few pixels by one code from
+                       frame to frame; the gates grade the cone lighting
   -h, --help           this text
 """
 import json
@@ -44,7 +53,7 @@ VIEWS = {
     "sponza": ("sponza", [-13.39384, 2.12628, -4.41117], -4.62119, -0.102),
 }
 ARGS = {"view": "hall", "size": "1280x720", "bin": "target/release/genos-lighting", "port": "18797", "out": "",
-        "only": "A,B,C,D", "flicker-margin": "0.002"}
+        "only": "A,B,C,D,E", "flicker-margin": "0.002", "fog": "off", "reflections": "on"}
 argv = sys.argv[1:]
 while argv:
     a = argv.pop(0)
@@ -106,16 +115,29 @@ def seat_moves(a, b):
     return len(shared), moved, worst
 
 
-def turn_back_changes(label):
+def differing(path_a, path_b):
+    """Pixels that differ at all, and by more than one display code."""
     from PIL import Image, ImageChops
+    a, b = Image.open(path_a).convert("RGB"), Image.open(path_b).convert("RGB")
+    diff = ImageChops.difference(a, b)
+    data = diff.get_flattened_data() if hasattr(diff, "get_flattened_data") else diff.getdata()
+    return sum(1 for p in data if max(p) > 0), sum(1 for p in data if max(p) > 1), a.width * a.height
+
+
+def turn_back_changes(label):
+    # Other passes (reflections, fog) keep a short history of their own; let
+    # the earlier gates' camera moves settle out before the first shot.
+    pose(frames=120)
     before = shot(f"d-{label}-before")
+    albedo_before = call("capture", {"path": f"d-{label}-albedo-before.png", "mode": "albedo"})["path"]
     pose(yaw=YAW + math.radians(30))
     pose(frames=60)
     after = shot(f"d-{label}-after")
-    a, b = Image.open(before).convert("RGB"), Image.open(after).convert("RGB")
-    diff = ImageChops.difference(a, b)
-    data = diff.get_flattened_data() if hasattr(diff, "get_flattened_data") else diff.getdata()
-    return sum(1 for p in data if max(p) > 0), a.width * a.height
+    albedo_after = call("capture", {"path": f"d-{label}-albedo-after.png", "mode": "albedo"})["path"]
+    full = os.path.join
+    changed, far, total = differing(before, after)
+    albedo, _, _ = differing(*(p if os.path.isabs(p) else full(OUT, p) for p in (albedo_before, albedo_after)))
+    return changed, far, total, albedo
 
 
 def wait_cone_ready():
@@ -145,11 +167,17 @@ try:
     else:
         sys.exit("UNSURE: the scene did not load")
     call("time", {"pause": True})
+    if ARGS["fog"] == "off":
+        call("set_fog_settings", {"enabled": "off"})
+    if ARGS["reflections"] == "off":
+        call("set_reflection_settings", {"enabled": "off"})
     pose(frames=60)
     old_turn = None
-    if "D" in ONLY:
+    if "D" in ONLY or "E" in ONLY:
+        # Exposure held fixed: D and E grade the lighting, not the meter.
         ev = call("get_hdr")["ev100"]
         call("set_hdr_settings", {"exposure_mode": "fixed", "ev100": str(ev)})
+    if "D" in ONLY:
         old_turn = turn_back_changes("old")
     old_flicker = None
     if "A" in ONLY:
@@ -185,9 +213,35 @@ try:
                   f"{moved} of {shared} shared cells moved their seat over 1 mm (worst {worst * 1000:.1f} mm)")
         pose()
     if "D" in ONLY:
-        changed, total = turn_back_changes("cone")
-        grade("D return to pose", changed == 0,
-              f"{changed} of {total} pixels differ after turning away and back (old path {old_turn[0]})")
+        changed, far, total, albedo = turn_back_changes("cone")
+        grade("D return to pose", far == 0,
+              f"{far} of {total} pixels differ by more than one code after turning away and back ({changed} at all; "
+              f"the albedo view changed {albedo}; old path {old_turn[0]})")
+    if "E" in ONLY:
+        from PIL import Image, ImageChops
+        lamps = [i for i, l in enumerate(call("lights")) if not l.get("directional")]
+        if not lamps:
+            grade("E lamp follows in one frame", False, "the view has no point lamp")
+        else:
+            i = lamps[0]
+            # Fog keeps a history of its own; let the turn of gate D settle out.
+            call("wait", {"frames": 60})
+            p = call("lights")[i]["position"]
+            still = shot("e-before")
+            call("light", {"index": i, "position": [p[0] + 0.5, p[1], p[2]]})
+            call("wait", {"frames": 1})
+            first = shot("e-first")
+            call("wait", {"frames": 30})
+            later = shot("e-later")
+            a, b = Image.open(first).convert("RGB"), Image.open(later).convert("RGB")
+            diff = ImageChops.difference(a, b)
+            data = diff.get_flattened_data() if hasattr(diff, "get_flattened_data") else diff.getdata()
+            changed = sum(1 for q in data if max(q) > 0)
+            far = sum(1 for q in data if max(q) > 1)
+            _, moved, _ = differing(still, first)
+            dropped = call("cone_stats").get("lamp_dropped", 0)
+            grade("E lamp follows in one frame", far == 0 and dropped == 0 and moved > 0,
+                  f"{moved} pixels changed with the move; {far} differ by more than one code ({changed} at all) between the first frame after the move and 30 frames later; {dropped} lamp points dropped")
     call("quit")
 finally:
     time.sleep(2)

@@ -7,7 +7,8 @@
 // cascade 0, params.z the cascade count, params.w the probe size in pixels;
 // lamp.x flags (bit 0 visibility in the merge, bit 1 visibility in the shade,
 // bit 2 seats on the pixels' mean: the gate knockout of the field seat),
-// lamp.y the first reach t0 in probe spacings, as float bits.
+// lamp.y the first reach t0 in probe spacings, as float bits; lamp.z the
+// lamps' sphere radius in metres, as float bits.
 
 // head: atlas texels xyz, coarse bricks. lv[2k]: brick origin xyz and the
 // table offset of level k + 2; lv[2k + 1]: the table's dims in bricks.
@@ -95,6 +96,8 @@ const uint CONE_DROPPED = 8u;   // probes past the cascade's cap in compact
 const uint CONE_TRACED = 16u;   // cones traced, per cascade
 const uint CONE_CLOSED = 24u;   // cones the chain closed, per cascade
 const uint CONE_SEAT_FALLBACK = 40u; // probes the field had no seat for (seated at the cell centre)
+const uint CONE_LAMP_DROPPED = 48u; // lamp points that found no lamp-hash slot
+const uint CONE_LAMP_LAYOUT = 89u;  // the lamp hash's size and word offset
 const uint CONE_LAYOUT = 64u;   // per cascade 5 words: hash size, cap, hash, probes, cones (cone_gpu.rs)
 const uint CONE_CLEARED = 64u;  // header words cleared every frame
 const uint CONE_INSERT_DROPPED = 32u; // pixels whose probe found no hash slot, per cascade
@@ -237,6 +240,97 @@ vec3 cone_bin_dir(uint bin, uint theta) {
     float z = v * CONE_HALVES - 1.0;
     float r = sqrt(max(1.0 - z * z, 0.0));
     return vec3(r * cos(phi), r * sin(phi), z);
+}
+
+// ---- The lamps ----
+// Every point lamp is written each frame into a hash keyed by field level and
+// cell (cone_lamps.comp), so the march reads a lamp where it is now. An entry:
+// key, then the area and the light its points add, in fixed point.
+
+const uint CONE_LAMP_POINTS = 256u;
+// The engine's lamp unit: a lamp's colour times this is its power (cone_field.rs).
+const float CONE_LAMP_UNIT = 72.0;
+const float CONE_LAMP_AREA_Q = 1.0e-8;
+const float CONE_LAMP_LIGHT_Q = 1.0e-4;
+const uint CONE_LAMP_WORDS = 5u;
+// A lamp key holds the cell relative to the eye's cell at that level: 10 bits
+// across, 9 up (about 32 m and 16 m at 6.25 cm, more at the coarser levels).
+const int CONE_LAMP_SPAN_XZ = 512;
+const int CONE_LAMP_SPAN_Y = 256;
+
+uint cone_lamp_size() {
+    return cwork.w[CONE_LAMP_LAYOUT];
+}
+uint cone_lamp_at() {
+    return cwork.w[CONE_LAMP_LAYOUT + 1u];
+}
+// The plastic sequence's point `i` on the unit sphere (cone_field.rs r2 and decode_dir).
+vec3 cone_lamp_dir(uint i) {
+    const float g = 1.324718;
+    float u = fract(0.5 + float(i) / g);
+    float v = fract(0.5 + float(i) / (g * g));
+    float phi = u * CONE_TAU;
+    float z = 2.0 * v - 1.0;
+    float r = sqrt(max(1.0 - z * z, 0.0));
+    return vec3(r * cos(phi), r * sin(phi), z);
+}
+uint cone_lamp_key(int level, ivec3 cell) {
+    ivec3 rel = cell - ivec3(floor(scene.eye.xyz / cone_size(level)));
+    ivec3 span = ivec3(CONE_LAMP_SPAN_XZ, CONE_LAMP_SPAN_Y, CONE_LAMP_SPAN_XZ);
+    if (any(lessThanEqual(rel, -span)) || any(greaterThanEqual(rel, span))) {
+        return CONE_EMPTY;
+    }
+    uvec3 q = uvec3(rel + span);
+    return (uint(level - CONE_FINEST) << 29u) | (q.x << 19u) | (q.y << 10u) | q.z;
+}
+// The lamp-hash slot (word offset) of `key`, claimed when `insert`.
+uint cone_lamp_slot(uint key, bool insert) {
+    uint size = cone_lamp_size();
+    if (size == 0u) {
+        return CONE_NO_BRICK;
+    }
+    uint h = cone_hash_of(key) & (size - 1u);
+    for (uint k = 0u; k < CONE_HASH_PROBES; k++) {
+        uint at = cone_lamp_at() + ((h + k) & (size - 1u)) * CONE_LAMP_WORDS;
+        uint seen = insert ? atomicCompSwap(cwork.w[at], CONE_EMPTY, key) : cwork.w[at];
+        if (seen == key || (insert && seen == CONE_EMPTY)) {
+            return at;
+        }
+        if (seen == CONE_EMPTY) {
+            return CONE_NO_BRICK;
+        }
+    }
+    return CONE_NO_BRICK;
+}
+// Lamp presence: each lamp also claims the cells of the coarsest level within
+// CONE_LAMP_NEAR of the one its centre is in (area 0, so a read there is
+// unchanged), so a coarse step far from every lamp skips its eight lamp reads
+// after one lookup. Two cells: a level-9 step's corners reach one cell past
+// its own, and a sphere of at most 1 m one past its centre's.
+const int CONE_LAMP_NEAR_LEVEL = CONE_COARSEST;
+const int CONE_LAMP_NEAR = 2;
+uint cone_lamp_near_key(ivec3 cell) {
+    return cone_lamp_key(CONE_LAMP_NEAR_LEVEL, cell);
+}
+bool cone_lamp_near(vec3 at) {
+    uint key = cone_lamp_near_key(ivec3(floor(at / cone_size(CONE_LAMP_NEAR_LEVEL))));
+    return key != CONE_EMPTY && cone_lamp_slot(key, false) != CONE_NO_BRICK;
+}
+// The lamps' area and light in the voxel at `level` and `cell`.
+bool cone_lamp_get(int level, ivec3 cell, out float area, out vec3 light) {
+    area = 0.0;
+    light = vec3(0.0);
+    uint key = cone_lamp_key(level, cell);
+    if (key == CONE_EMPTY) {
+        return false;
+    }
+    uint at = cone_lamp_slot(key, false);
+    if (at == CONE_NO_BRICK) {
+        return false;
+    }
+    area = float(cwork.w[at + 1u]) * CONE_LAMP_AREA_Q;
+    light = vec3(cwork.w[at + 2u], cwork.w[at + 3u], cwork.w[at + 4u]) * CONE_LAMP_LIGHT_Q;
+    return area > 0.0;
 }
 
 // ---- The field ----
@@ -428,15 +522,11 @@ void cone_fine_lamp(int level, vec3 at, out float cover, out vec3 light) {
     cover = 0.0;
     light = vec3(0.0);
     float size = cone_size(level);
-    uint r = cone_record(level, ivec3(floor(at / size)));
-    if (r == CONE_NO_BRICK) {
-        return;
-    }
-    vec2 rg = unpackHalf2x16(crec.fv[r + 30u]);
-    vec2 ba = unpackHalf2x16(crec.fv[r + 31u]);
-    if (ba.y > 0.0) {
-        cover = ba.y / (size * size);
-        light = vec3(rg, ba.x) / ba.y;
+    float area;
+    vec3 sum;
+    if (cone_lamp_get(level, ivec3(floor(at / size)), area, sum)) {
+        cover = area / (size * size);
+        light = sum / area;
     }
 }
 
@@ -451,18 +541,36 @@ void cone_coarse(int level, vec3 at, vec3 dir, out float cover, out vec3 light, 
     lamp_light = vec3(0.0);
     float size = cone_size(level);
     ivec3 home = ivec3(floor(at / size));
+    vec3 g = at / size - CONE_HALF;
+    ivec3 base = ivec3(floor(g));
+    vec3 f = g - vec3(base);
+    float cross_section = size * size;
+    // The lamps, trilinear about `at`, wherever the field has a brick or not.
+    float lamp_a = 0.0;
+    vec3 lamp_s = vec3(0.0);
+    bool near = cone_lamp_near(at);
+    for (int k = 0; k < 8 && near; k++) {
+        ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        vec3 wv = mix(vec3(1.0) - f, f, vec3(o));
+        float wt = wv.x * wv.y * wv.z;
+        float area;
+        vec3 sum;
+        if (wt > 0.0 && cone_lamp_get(level, base + o, area, sum)) {
+            lamp_a += wt * area;
+            lamp_s += wt * sum;
+        }
+    }
+    if (lamp_a > 0.0) {
+        lamp_cover = lamp_a / cross_section;
+        lamp_light = lamp_s / lamp_a;
+    }
     uint slot = cone_entry(level, home);
     if (slot == CONE_NO_BRICK) {
         return;
     }
-    vec3 g = at / size - CONE_HALF;
-    ivec3 base = ivec3(floor(g));
-    vec3 f = g - vec3(base);
     ivec3 origin = (home >> 3) * CONE_BRICK;
     float facing = 0.0;
     vec3 sent = vec3(0.0);
-    float lamp_a = 0.0;
-    vec3 lamp_s = vec3(0.0);
     for (int k = 0; k < 8; k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
         vec3 wv = mix(vec3(1.0) - f, f, vec3(o));
@@ -472,11 +580,6 @@ void cone_coarse(int level, vec3 at, vec3 dir, out float cover, out vec3 light, 
         }
         uint t = cone_coarse_texel(slot, base + o - origin + ivec3(1));
         cone_reads += 1.0;
-        vec2 lb = unpackHalf2x16(ccoarse.cw[t + 13u]);
-        if (lb.y > 0.0) {
-            lamp_a += wt * lb.y;
-            lamp_s += wt * vec3(unpackHalf2x16(ccoarse.cw[t + 12u]), lb.x);
-        }
         for (int d = 0; d < 6; d++) {
             float toward = -dot(dir, cone_axis(d));
             if (toward <= 0.0) {
@@ -490,14 +593,9 @@ void cone_coarse(int level, vec3 at, vec3 dir, out float cover, out vec3 light, 
             sent += wt * vec3(unpackHalf2x16(ccoarse.cw[t + uint(2 * d)]), ba.x) * toward;
         }
     }
-    float cross_section = size * size;
     if (facing > 0.0) {
         cover = min(facing / cross_section, 1.0);
         light = sent / facing;
-    }
-    if (lamp_a > 0.0) {
-        lamp_cover = lamp_a / cross_section;
-        lamp_light = lamp_s / lamp_a;
     }
 }
 

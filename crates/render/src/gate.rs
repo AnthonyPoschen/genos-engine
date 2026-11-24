@@ -47,6 +47,13 @@ pub const CONE_TABLE_CAP: &str = "cone_table_cap";
 /// stage-2 rule): the seat follows what the camera sees, and a turn moves it.
 pub const CONE_FIELD_SEAT: &str = "cone_field_seat";
 
+/// The cone-traced cascades write every point lamp into the lamp hash each frame.
+///
+/// Knocking this out writes the lamps once, when the field becomes resident,
+/// and keeps that hash (the lamps baked into the field, as before): a lamp
+/// that moves leaves its light where it was.
+pub const CONE_LAMP_FOLLOW: &str = "cone_lamp_follow";
+
 /// True when the named production guard is in force.
 #[must_use]
 #[inline]
@@ -96,6 +103,7 @@ mod tests {
         assert!(super::guard(super::LAMP_DISC));
         assert!(super::guard(super::CONE_TABLE_CAP));
         assert!(super::guard(super::CONE_FIELD_SEAT));
+        assert!(super::guard(super::CONE_LAMP_FOLLOW));
         assert!(super::guard("unknown_guard"));
     }
 }
