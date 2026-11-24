@@ -81,7 +81,7 @@ pub use hdr_output::{
     camera_ev100, display_transform, ev100_from_luminance, exposure_adapt_outside,
     exposure_from_camera, exposure_from_ev100, exposure_overshoot, exposure_still_change,
     exposure_with_compensation, grade_peak, grade_relative, grade_weight, graphics_white_linear,
-    hdr10_pq, histogram_ev100, histogram_ev100_bins, histogram_ev100_from_counts,
+    hdr10_pq, histogram_ev100, histogram_ev100_bins, histogram_ev100_from_counts, auto_ev100, histogram_percentile_log2,
     karis_downsample_rgb, karis_firefly_response, karis_weight, legacy_display,
     legacy_display_channel, near_grade, nits_from_display, pack_f32, pick_hdr_output, pq_st2084,
     present_host, rec2020_from_rec709, rec709_y, resolve_swapchain, scene_luma, scene_peak_error,

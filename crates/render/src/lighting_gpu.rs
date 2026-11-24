@@ -3637,7 +3637,13 @@ impl Gpu {
         if occupied == 0 {
             return;
         }
-        self.lighting.meter_ev = Some(crate::hdr_output::histogram_ev100_from_counts(&counts));
+        let hdr = &self.lighting.hdr;
+        self.lighting.meter_ev = Some(crate::hdr_output::auto_ev100(
+            &counts,
+            hdr.adapt_strength,
+            hdr.highlight_percentile,
+            hdr.highlight_stops,
+        ));
         self.write_histogram_dump(&counts);
         self.lighting.histogram_counts = counts;
     }

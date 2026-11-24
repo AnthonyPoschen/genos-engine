@@ -47,6 +47,13 @@ pub struct HdrSettings {
     pub shutter: f64,
     pub adapt_down: f64,
     pub adapt_up: f64,
+    /// How far auto exposure follows the metered average when the frame is
+    /// darker than its highlight key: 1 follows it fully, 0 holds the key.
+    pub adapt_strength: f64,
+    /// The share of metered pixels under the highlight luminance (0.5..=1).
+    pub highlight_percentile: f64,
+    /// Stops above mid-grey that the highlight luminance may sit (the key).
+    pub highlight_stops: f64,
     /// Histogram bins. High 256, Medium 128, Low 64, Fallback unused.
     pub histogram_bins: u32,
     pub display: DisplayTransform,
@@ -72,6 +79,9 @@ pub struct HdrCli {
     pub shutter: Option<f64>,
     pub adapt_down: Option<f64>,
     pub adapt_up: Option<f64>,
+    pub adapt_strength: Option<f64>,
+    pub highlight_percentile: Option<f64>,
+    pub highlight_stops: Option<f64>,
     pub display: Option<DisplayTransform>,
     pub bloom: Option<bool>,
     pub bloom_intensity: Option<f64>,
@@ -82,7 +92,7 @@ pub struct HdrCli {
 
 /// Environment mirrors of the design-table keys, then `GENOS_HDR_OUT` for `--out`.
 /// The argument wins. The variable applies only when that argument was omitted.
-pub const HDR_ENV_MIRRORS: [&str; 15] = [
+pub const HDR_ENV_MIRRORS: [&str; 18] = [
     "GENOS_HDR_EXPOSURE_MODE",
     "GENOS_HDR_EV100",
     "GENOS_HDR_COMPENSATION",
@@ -91,6 +101,9 @@ pub const HDR_ENV_MIRRORS: [&str; 15] = [
     "GENOS_HDR_SHUTTER",
     "GENOS_HDR_ADAPT_DOWN",
     "GENOS_HDR_ADAPT_UP",
+    "GENOS_HDR_ADAPT_STRENGTH",
+    "GENOS_HDR_HIGHLIGHT_PERCENTILE",
+    "GENOS_HDR_HIGHLIGHT_STOPS",
     "GENOS_HDR_DISPLAY",
     "GENOS_HDR_BLOOM",
     "GENOS_HDR_BLOOM_INTENSITY",
@@ -118,6 +131,9 @@ impl HdrSettings {
             shutter: 1.0 / 60.0,
             adapt_down: 0.40,
             adapt_up: 0.80,
+            adapt_strength: 1.0,
+            highlight_percentile: HIGHLIGHT_PERCENTILE,
+            highlight_stops: HIGHLIGHT_STOPS,
             histogram_bins: 256,
             display: DisplayTransform::Legacy,
             bloom: false,
@@ -142,6 +158,7 @@ impl HdrSettings {
         } else {
             0.05
         };
+        settings.adapt_strength = ADAPT_STRENGTH;
         match preset {
             LightingPreset::Fallback => {
                 settings.exposure_mode = ExposureMode::Fixed;
@@ -217,6 +234,16 @@ impl HdrSettings {
                     cli.adapt_down = Some(parse_f64("adapt_down", &take(&mut index)?)?);
                 }
                 "--adapt-up" => cli.adapt_up = Some(parse_f64("adapt_up", &take(&mut index)?)?),
+                "--adapt-strength" => {
+                    cli.adapt_strength = Some(parse_share("adapt_strength", &take(&mut index)?)?);
+                }
+                "--highlight-percentile" => {
+                    cli.highlight_percentile =
+                        Some(parse_percentile(&take(&mut index)?)?);
+                }
+                "--highlight-stops" => {
+                    cli.highlight_stops = Some(parse_stops(&take(&mut index)?)?);
+                }
                 "--hdr-display" => cli.display = Some(parse_display(&take(&mut index)?)?),
                 "--display" => {
                     let value = take(&mut index)?;
@@ -260,6 +287,9 @@ impl HdrSettings {
             shutter: env("GENOS_HDR_SHUTTER"),
             adapt_down: env("GENOS_HDR_ADAPT_DOWN"),
             adapt_up: env("GENOS_HDR_ADAPT_UP"),
+            adapt_strength: env("GENOS_HDR_ADAPT_STRENGTH"),
+            highlight_percentile: env("GENOS_HDR_HIGHLIGHT_PERCENTILE"),
+            highlight_stops: env("GENOS_HDR_HIGHLIGHT_STOPS"),
             display: env("GENOS_HDR_DISPLAY"),
             bloom: env("GENOS_HDR_BLOOM"),
             bloom_intensity: env("GENOS_HDR_BLOOM_INTENSITY"),
@@ -320,6 +350,26 @@ impl HdrSettings {
         {
             out.adapt_up = value;
         }
+        if let Some(value) = cli.adapt_strength.or_else(|| {
+            env.adapt_strength
+                .as_deref()
+                .and_then(|v| parse_share("adapt_strength", v).ok())
+        }) {
+            out.adapt_strength = value;
+        }
+        if let Some(value) = cli.highlight_percentile.or_else(|| {
+            env.highlight_percentile
+                .as_deref()
+                .and_then(|v| parse_percentile(v).ok())
+        }) {
+            out.highlight_percentile = value;
+        }
+        if let Some(value) = cli
+            .highlight_stops
+            .or_else(|| env.highlight_stops.as_deref().and_then(|v| parse_stops(v).ok()))
+        {
+            out.highlight_stops = value;
+        }
         if let Some(value) = cli
             .display
             .or_else(|| env.display.as_deref().and_then(|v| parse_display(v).ok()))
@@ -362,7 +412,7 @@ impl HdrSettings {
 
     pub fn to_text(&self) -> String {
         format!(
-            "exposure_mode={}\nev100={}\ncompensation={}\niso={}\naperture={}\nshutter={}\nadapt_down={}\nadapt_up={}\nhistogram_bins={}\ndisplay={}\nbloom={}\nbloom_intensity={}\nbloom_levels={}\noutput={}\ntransition={}\nlegacy_bytes={}\n",
+            "exposure_mode={}\nev100={}\ncompensation={}\niso={}\naperture={}\nshutter={}\nadapt_down={}\nadapt_up={}\nadapt_strength={}\nhighlight_percentile={}\nhighlight_stops={}\nhistogram_bins={}\ndisplay={}\nbloom={}\nbloom_intensity={}\nbloom_levels={}\noutput={}\ntransition={}\nlegacy_bytes={}\n",
             exposure_name(self.exposure_mode),
             self.ev100,
             self.compensation,
@@ -371,6 +421,9 @@ impl HdrSettings {
             self.shutter,
             self.adapt_down,
             self.adapt_up,
+            self.adapt_strength,
+            self.highlight_percentile,
+            self.highlight_stops,
             self.histogram_bins,
             display_name(self.display),
             if self.bloom { "on" } else { "off" },
@@ -413,6 +466,9 @@ impl HdrSettings {
             "shutter" => self.shutter = parse_f64("shutter", value)?,
             "adapt_down" => self.adapt_down = parse_f64("adapt_down", value)?,
             "adapt_up" => self.adapt_up = parse_f64("adapt_up", value)?,
+            "adapt_strength" => self.adapt_strength = parse_share("adapt_strength", value)?,
+            "highlight_percentile" => self.highlight_percentile = parse_percentile(value)?,
+            "highlight_stops" => self.highlight_stops = parse_stops(value)?,
             "histogram_bins" => self.histogram_bins = parse_u32("histogram_bins", value)?,
             "display" => self.display = parse_display(value)?,
             "bloom" => self.bloom = parse_on(value)?,
@@ -430,7 +486,7 @@ impl HdrSettings {
 /// The keys a scene file stores as its look, in the order they are written.
 /// `output` is the machine's choice. `histogram_bins` follows the preset.
 /// `legacy_bytes` is internal.
-pub const HDR_LOOK_KEYS: [&str; 13] = [
+pub const HDR_LOOK_KEYS: [&str; 16] = [
     "exposure_mode",
     "ev100",
     "compensation",
@@ -439,6 +495,9 @@ pub const HDR_LOOK_KEYS: [&str; 13] = [
     "shutter",
     "adapt_down",
     "adapt_up",
+    "adapt_strength",
+    "highlight_percentile",
+    "highlight_stops",
     "display",
     "bloom",
     "bloom_intensity",
@@ -475,6 +534,9 @@ pub struct HdrEnv {
     pub shutter: Option<String>,
     pub adapt_down: Option<String>,
     pub adapt_up: Option<String>,
+    pub adapt_strength: Option<String>,
+    pub highlight_percentile: Option<String>,
+    pub highlight_stops: Option<String>,
     pub display: Option<String>,
     pub bloom: Option<String>,
     pub bloom_intensity: Option<String>,
@@ -511,6 +573,38 @@ fn parse_f64(name: &str, value: &str) -> Result<f64, String> {
     } else {
         Err(format!("{name} needs a finite number, got {value}"))
     }
+}
+
+/// Auto exposure's default strength in the auto presets (`adapt_strength`).
+pub const ADAPT_STRENGTH: f64 = 0.3;
+/// The default highlight percentile (`highlight_percentile`).
+pub const HIGHLIGHT_PERCENTILE: f64 = 0.98;
+/// The default highlight key in stops above mid-grey (`highlight_stops`).
+pub const HIGHLIGHT_STOPS: f64 = 3.0;
+
+/// A share from 0 to 1.
+fn parse_share(name: &str, value: &str) -> Result<f64, String> {
+    let share = parse_f64(name, value)?;
+    if !(0.0..=1.0).contains(&share) {
+        return Err(format!("{name} needs 0 to 1, got {value}"));
+    }
+    Ok(share)
+}
+
+fn parse_percentile(value: &str) -> Result<f64, String> {
+    let share = parse_f64("highlight_percentile", value)?;
+    if !(0.5..=1.0).contains(&share) {
+        return Err(format!("highlight_percentile needs 0.5 to 1, got {value}"));
+    }
+    Ok(share)
+}
+
+fn parse_stops(value: &str) -> Result<f64, String> {
+    let stops = parse_f64("highlight_stops", value)?;
+    if !(0.5..=10.0).contains(&stops) {
+        return Err(format!("highlight_stops needs 0.5 to 10, got {value}"));
+    }
+    Ok(stops)
 }
 
 /// A length of time. Negative seconds are refused.
@@ -610,6 +704,9 @@ pub fn hdr_flag_needs_value(arg: &str) -> Option<bool> {
             | "--shutter"
             | "--adapt-down"
             | "--adapt-up"
+            | "--adapt-strength"
+            | "--highlight-percentile"
+            | "--highlight-stops"
             | "--hdr-display"
             | "--bloom"
             | "--bloom-intensity"

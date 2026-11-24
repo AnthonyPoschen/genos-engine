@@ -1336,6 +1336,21 @@ kind = "mirror"
 detail = "--adapt-up"
 
 [[var]]
+name = "GENOS_HDR_ADAPT_STRENGTH"
+kind = "mirror"
+detail = "--adapt-strength"
+
+[[var]]
+name = "GENOS_HDR_HIGHLIGHT_PERCENTILE"
+kind = "mirror"
+detail = "--highlight-percentile"
+
+[[var]]
+name = "GENOS_HDR_HIGHLIGHT_STOPS"
+kind = "mirror"
+detail = "--highlight-stops"
+
+[[var]]
 name = "GENOS_HDR_DISPLAY"
 kind = "mirror"
 detail = "--hdr-display"

@@ -527,6 +527,48 @@ pub fn histogram_ev100_from_counts(counts: &[u32]) -> f64 {
     acc / f64::from(seen) + 8.0_f64.log2()
 }
 
+/// log2 luminance under which `share` of the counted pixels fall (a bin
+/// centre). `None` when nothing was counted.
+#[must_use]
+pub fn histogram_percentile_log2(counts: &[u32], share: f64) -> Option<f64> {
+    let bins = counts.len().min(4096);
+    let counts = &counts[..bins];
+    let total: u64 = counts.iter().map(|c| u64::from(*c)).sum();
+    if total == 0 {
+        return None;
+    }
+    let want = (share.clamp(0.0, 1.0) * total as f64).ceil().max(1.0) as u64;
+    let mut seen = 0_u64;
+    for (index, count) in counts.iter().enumerate() {
+        seen += u64::from(*count);
+        if seen >= want {
+            return Some(bin_center(index, bins));
+        }
+    }
+    Some(bin_center(bins - 1, bins))
+}
+
+/// Auto exposure's EV100 for one histogram. The meter's EV places the mean
+/// at mid-grey ([`histogram_ev100_from_counts`]). The highlight key is the EV
+/// that places the `percentile` luminance `stops` above where the mean goes.
+/// When the frame meters darker than that key (standing in shadow with sun
+/// in view), exposure follows the meter only `strength` of the way from the
+/// key, so the lit areas keep their shape. A frame whose highlights sit
+/// within `stops` of the mean (a dark room, an even view) adapts fully.
+#[must_use]
+pub fn auto_ev100(counts: &[u32], strength: f64, percentile: f64, stops: f64) -> f64 {
+    let metered = histogram_ev100_from_counts(counts);
+    let Some(high) = histogram_percentile_log2(counts, percentile) else {
+        return metered;
+    };
+    let key = high + 8.0_f64.log2() - stops;
+    if metered >= key {
+        metered
+    } else {
+        key + strength.clamp(0.0, 1.0) * (metered - key)
+    }
+}
+
 /// Max relative change over 8 identical frames, starting on the target.
 #[must_use]
 pub fn exposure_still_change() -> f64 {
@@ -2263,6 +2305,37 @@ mod tests {
         assert_eq!(pack_f32(1.0 / 60.0).to_bits(), 0x3c88_8889);
         assert!(pack_f32(f64::NAN).is_nan());
         assert_eq!(pack_f32(f64::INFINITY).to_bits(), 0x7f80_0000);
+    }
+
+    /// A frame of `dark` pixels at luminance `low` and `bright` at `high`.
+    fn split_counts(dark: usize, low: f64, bright: usize, high: f64) -> Vec<u32> {
+        let mut samples = vec![low; dark];
+        samples.extend(std::iter::repeat_n(high, bright));
+        histogram_counts(&samples, 256)
+    }
+
+    #[test]
+    fn auto_exposure_in_shadow_with_sun_in_view_holds_back_from_the_mean() {
+        // Most of the view in shadow, a fifth of it sunlit 6 stops brighter.
+        let counts = split_counts(800, 0.02, 200, 0.02 * 64.0);
+        let metered = histogram_ev100_from_counts(&counts);
+        let partial = auto_ev100(&counts, 0.7, 0.98, 3.0);
+        let full = auto_ev100(&counts, 1.0, 0.98, 3.0);
+        let held = auto_ev100(&counts, 0.0, 0.98, 3.0);
+        assert!((full - metered).abs() < 1.0e-12, "strength 1 is the plain meter");
+        assert!(partial > metered + 0.5, "exposure opens less: {partial} vs {metered}");
+        assert!(held > partial, "strength 0 holds the highlight key");
+        // At strength 0 the sunlit pixels sit 3 stops above where the mean goes.
+        let sun_log2 = (0.02_f64 * 64.0).log2();
+        assert!((held - (sun_log2 + 3.0 - 3.0)).abs() < 0.2, "{held}");
+    }
+
+    #[test]
+    fn auto_exposure_in_an_evenly_dark_room_adapts_fully() {
+        let counts = split_counts(900, 0.002, 100, 0.004);
+        let metered = histogram_ev100_from_counts(&counts);
+        assert!((auto_ev100(&counts, 0.7, 0.98, 3.0) - metered).abs() < 1.0e-12);
+        assert_eq!(auto_ev100(&[], 0.7, 0.98, 3.0), 0.0);
     }
 
     #[test]

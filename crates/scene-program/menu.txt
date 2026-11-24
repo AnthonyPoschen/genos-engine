@@ -110,6 +110,9 @@ Output | - | - | open | hdr_aperture
 Output | - | - | open | hdr_shutter
 Output | - | - | open | hdr_adapt_down
 Output | - | - | open | hdr_adapt_up
+Output | - | - | open | hdr_adapt_strength
+Output | - | - | open | hdr_highlight_percentile
+Output | - | - | open | hdr_highlight_stops
 Output | - | - | open | hdr_transition
 Output | - | - | open | hdr_display
 Output | - | - | open | hdr_bloom

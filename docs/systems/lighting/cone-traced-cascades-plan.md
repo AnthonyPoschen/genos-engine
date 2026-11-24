@@ -377,3 +377,14 @@ The first run filled 30 GiB of memory and swap in a minute and systemd-oomd kill
 6. **Grade, then stage 3 and stage 4.** Converged references: hall, room, Sponza atrium and dark corner, against section 13. Stage 3, bounce through the gather patches and light transfer. Stage 4, the sun as an emitter (option B).
 
 Stop and report to Anthony when a gate cannot be met, when a step needs a choice this plan does not settle, or when step 2 is ready to judge by eye.
+
+**Step 2 result, 25 Nov 2026.** Auto exposure now takes a highlight key from the frame (`auto_ev100`; `docs/systems/hdr-output-design.md`, "Highlight key"). The plan said "a scene key"; a fixed EV would follow each scene's light units, so the key is the EV that puts the 98th-percentile luminance 3 stops above where the mean goes, and when the frame meters darker than that, exposure goes only `adapt_strength` of the way to the meter. New `HdrSettings` keys `adapt_strength` (0.3 on the auto presets, tuned below), `highlight_percentile` (0.98), `highlight_stops` (3), each with a flag, a `GENOS_HDR_*` mirror, MCP and an Output-page slider. `tools/lighting/exposure_gate.py`, Sponza, under the arcade (the pose above) against the courtyard the same way and the dark corner:
+
+| | Clipped at the arcade | Swing arcade to courtyard | Dark corner opens |
+|---|---|---|---|
+| Before (`adapt_strength=1`) | 3.7% | 3.62 stops | 2.64 stops |
+| strength 0.7 | 0.72% | 2.88 | 2.71 |
+| strength 0.5 | 0.38% | 2.38 | 2.77 |
+| **strength 0.3 (default)** | **0.23%** | **1.88** | **2.81** |
+
+Limits: clipped 1%, swing 2 stops, opens at least 2 stops. `make sponza-gate` passes all 14 checks. Already failing before this step and not from it: `legacy_shader` in `hdr_output_gate` ("40 bytes moved between frames", the same at `5a5e5058`) and `lighting_settings_round_trip_over_mcp` (the `gi-1bounce` world cache, on master since `edba58c6`). Waiting for Anthony to judge by eye.

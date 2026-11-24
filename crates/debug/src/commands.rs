@@ -253,11 +253,11 @@ fn hdr_specs() -> Vec<CommandSpec> {
     vec![
         spec(
             "get_hdr_settings",
-            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --adapt-down, --adapt-up, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, --output, and --hdr-transition win over GENOS_HDR_*. --out wins over GENOS_HDR_OUT. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
+            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --adapt-down, --adapt-up, --adapt-strength, --highlight-percentile, --highlight-stops, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, --output, and --hdr-transition win over GENOS_HDR_*. --out wins over GENOS_HDR_OUT. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
         ),
         spec(
             "set_hdr_settings",
-            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, transition, legacy_bytes). transition is the seconds a change of ev100, compensation, or the bloom intensity takes to reach the picture; 0 applies it on the next frame. A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
+            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, adapt_strength, highlight_percentile, highlight_stops, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, transition, legacy_bytes). transition is the seconds a change of ev100, compensation, or the bloom intensity takes to reach the picture; 0 applies it on the next frame. A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
         ),
         spec(
             "save_hdr_to_scene",
