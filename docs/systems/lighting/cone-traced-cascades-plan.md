@@ -1,6 +1,6 @@
 # Cone-traced cascades: implementation plan
 
-Status: phases 0 and 1 passed; phase 2 accepted by Anthony at hall 5.3%, room 11.1%, Sponza atrium 12.9%, dark corner 15.9% (section 13); phase 2b passed with option B (section 14). Phase 3 in progress: Anthony chose to cut the cost and recheck accuracy (sections 15 and 16). Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
+Status: phases 0 and 1 passed; phase 2 accepted by Anthony at hall 5.3%, room 11.1%, Sponza atrium 12.9%, dark corner 15.9% (section 13); phase 2b passed with option B (section 14). Phase 3's gate is not met (sections 15 and 16). Anthony asked for no rejection and no revert, a cost cut to 10 to 12 ms or less with sparse voxels, and an experimental GPU path in the renderer so the editor shows it (section 17): phase 4 is in progress behind a setting that is off by default. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
 
 ## 1. What Anthony asked for
 
@@ -334,3 +334,23 @@ GPU total so far, hall, 720p: 15.9 ms for the cascade's cones and 16.4 ms for th
 The shader reads the field as the CPU does (the room's cascades 1–3 agree); the difference was the clip. The hall's time is still low, as a fifth of its voxels are inside. The dense clip volumes are 3.7 GiB at 192 texels. A renderer would need a sparse brick structure for the field, whose walk costs more than a texel fetch.
 
 Where phase 3 stands (hall, 720p, RTX 4070): the cascade's cones at least 25 ms, the gather at least 16 ms (timed at the 96-texel clip), the transfer sweeps, the merge and the shade not timed. ADR 0013's budget is 8 ms for all lighting at 1080p. Accuracy at these settings: hall 9.2%, room 4.8%, Sponza atrium 16.5%, dark corner 21.4%.
+
+## 17. The experimental path in the renderer, 25 Nov 2026
+
+Anthony's decision: there is no rejection and no revert. Cut the cost to 10 to 12 ms or under with a sparse voxel field, and put the path in the renderer now, so the editor shows it, behind a setting that is off by default. Phase 3's gate (cost under today's lighting, then the ADR) is not met; the experimental path does not wait for it, and the old path stays the default until the gates pass.
+
+Stages, each its own change:
+
+1. The field in `crates/render` (`cone_field.rs`), built on the CPU at load from the scene's surfaces and lamps, uploaded as sparse bricks; a debug view of it.
+2. The cascade on the GPU: voxel-layer probes hashed from the G-buffer, cascades traced finest first with the chain mask and the descent, merged, and shaded into compose in place of the direct and bounce terms. Lamp light and shadows, no bounce.
+3. The bounce gather and the transfer sweeps.
+4. The sun (phase 2b, option B).
+
+**The sparse field.** 8x8x8 bricks for each level over the whole scene, stored only where a surface or a lamp is. The fine levels (6.25 and 12.5 cm), which the march reads one voxel at a time, are compact: a 33-word header for each brick (a 512-bit mask and its counts) and a 32-word record for each voxel (light and area, and the plane for each way; the lamp term). The coarse levels, which it reads filtered, are dense bricks with a one-voxel apron in an atlas, so the hardware filter stays inside a brick. Dense bricks for every level took the hall to 4.3 GiB.
+
+| Scene | Voxels | Fine bricks / records | Coarse bricks | GPU memory | Voxelise / brick (CPU) |
+|---|---|---|---|---|---|
+| Hall | 1.30 million | 16,071 / 1.23 million (152 MiB) | 1,608 (111 MiB) | 264 MiB | 5.4 s / 0.8 s |
+| Sponza | 3.84 million | 39,593 / 3.66 million (452 MiB) | 2,215 (167 MiB) | 633 MiB | 45.5 s / 2.5 s |
+
+Both are over ADR 0012's 200 MB. Next: a record for the ways a voxel faces only (most face one or two), and the lamp term only where a lamp is. The build runs off the frame thread.

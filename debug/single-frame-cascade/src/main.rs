@@ -146,6 +146,8 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        cosine of the luma-weighted mean direction of the light
                        that direction holds, carried through the merge
                        (default mean)
+  --renderer-field     build the renderer's voxel field (crates/render
+                       cone_field) for the scene, print its size, and stop
   --gpu-side N         with --gpu-bench: texels along each side of a voxel
                        level's clip volume around the eye (default 96)
   --own-interval       with --cone-start voxel: each cascade's cone marches
@@ -282,6 +284,7 @@ struct Options {
     gather_level: u8,
     gather_width: f32,
     gpu_side: u32,
+    renderer_field: bool,
     refine_cascades: usize,
     probe_px: f32,
     theta: u32,
@@ -341,6 +344,7 @@ fn parse_args() -> Result<Option<Options>, String> {
         gather_level: GATHER_LEVEL,
         gather_width: 0.0,
         gpu_side: gpu::SIDE,
+        renderer_field: false,
         refine_cascades: usize::MAX,
         probe_px: 4.0,
         theta: 4,
@@ -493,6 +497,7 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--seat-at-start" => o.seat_at_start = true,
             "--descend" => o.descend = true,
             "--transfer-sweeps" => o.transfer_sweeps = num(&arg, &value()?)?,
+            "--renderer-field" => o.renderer_field = true,
             "--gpu-side" => o.gpu_side = num::<u32>(&arg, &value()?)?.clamp(16, 256),
             "--gather-width" => o.gather_width = num(&arg, &value()?)?,
             "--gather-level" => o.gather_level = num::<u8>(&arg, &value()?)?.clamp(VOXEL_FINEST + 1, VOXEL_COARSEST),
@@ -3089,6 +3094,39 @@ fn run(o: &Options) -> Result<(), String> {
     let (mut scene, gltf) = load_scene(&root, entry, o)?;
     if !o.sky {
         scene.sky = None;
+    }
+    if o.renderer_field {
+        let started = std::time::Instant::now();
+        let points = genos_render::cone_field::surface_points(&scene, gltf.as_ref().map(|g| &g.0), PAINT);
+        let mut voxels = genos_render::cone_field::FieldVoxels::default();
+        for (at, normal, area, _) in &points {
+            voxels.add_surface(*at, *normal, *area, [0.0; 3]);
+        }
+        voxels.add_scene_lamps(&scene, o.lamp_radius);
+        let built = started.elapsed().as_secs_f64();
+        let field = voxels.brick();
+        let mib = |b: usize| b as f64 / (1024.0 * 1024.0);
+        println!(
+            "renderer field: {} points, {} voxels; fine: {} bricks, {} records ({:.0} MiB); coarse: {} bricks, atlas {}x{}x{} ({:.0} MiB faces, {:.0} MiB occupancy); table {:.1} MiB; {:.0} MiB in all; {built:.1} s to voxelise, {:.1} s to brick",
+            field.points,
+            field.voxels,
+            field.fine_bricks.len() / genos_render::cone_field::FINE_HEADER,
+            field.fine_voxels.len() / genos_render::cone_field::FINE_RECORD,
+            mib((field.fine_bricks.len() + field.fine_voxels.len()) * 4),
+            field.coarse_bricks,
+            field.atlas[0],
+            field.atlas[1],
+            field.atlas[2],
+            mib(field.faces.iter().map(|f| f.len() * 2).sum()),
+            mib(field.occupancy.len()),
+            mib(field.table.len() * 4),
+            mib(field.bytes()),
+            started.elapsed().as_secs_f64() - built,
+        );
+        for (k, level) in field.levels.iter().enumerate() {
+            println!("  level {}: bricks from {:?}, {:?} in the table", k + 2, level.origin, level.dims);
+        }
+        return Ok(());
     }
     if gltf.is_some() && o.gpu_bench {
         return Err(format!("{name}: --gpu-bench takes the analytic building only"));

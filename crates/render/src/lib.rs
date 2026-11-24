@@ -2,6 +2,7 @@ mod aa;
 mod budget;
 mod cache_probe;
 mod cascade;
+pub mod cone_field;
 mod cooked_load;
 mod fog;
 mod fog_budget;
