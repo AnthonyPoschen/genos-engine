@@ -78,6 +78,16 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
   --patch-check        with --mode full: after the frames, the solved light of
                        40 patches in view against a path-traced reference
                        there, and their D against the exact lamp light
+  --sun on|off         with --mode full: the scene's sun as an emitter (phase
+                       2b): in the sky for the cascade's cones, one narrow cone
+                       toward it for each gather patch, exact in the reference
+                       (default off)
+  --sun-path P         how the pixels get the sun. sky: through the cascades, as
+                       a bright direction of the last one. voxel: each voxel-
+                       layer probe casts one narrow cone toward it, and a pixel
+                       takes the sun times its cosine times the probes' share
+                       that sees it (default voxel)
+  --no-lamps           leave the point lamps out
   --sky on|off         the scene's sky light, in the cascade and the reference
                        (default on)
   --lamp-radius M      sphere radius in emissive mode (default 0.1)
@@ -206,6 +216,9 @@ struct Options {
     lamps: Option<usize>,
     mode: Mode,
     sky: bool,
+    sun: bool,
+    sun_in_voxels: bool,
+    no_lamps: bool,
     gather_cones: u64,
     patch_check: bool,
     see_merge: bool,
@@ -254,6 +267,9 @@ fn parse_args() -> Result<Option<Options>, String> {
         lamps: None,
         mode: Mode::Nee,
         sky: true,
+        sun: false,
+        sun_in_voxels: true,
+        no_lamps: false,
         gather_cones: GATHER_CONES,
         patch_check: false,
         see_merge: true,
@@ -350,6 +366,21 @@ fn parse_args() -> Result<Option<Options>, String> {
                     "both" => (true, true),
                     other => return Err(format!("bad --combine-visibility: {other}")),
                 };
+            }
+            "--sun" => {
+                o.sun = match value()?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => return Err(format!("bad --sun: {other}")),
+                }
+            }
+            "--no-lamps" => o.no_lamps = true,
+            "--sun-path" => {
+                o.sun_in_voxels = match value()?.as_str() {
+                    "sky" => false,
+                    "voxel" => true,
+                    other => return Err(format!("bad --sun-path: {other}")),
+                }
             }
             "--sky" => {
                 o.sky = match value()?.as_str() {
@@ -1575,6 +1606,24 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
             }
         }
     }
+    // The sun in the voxel layer (phase 2b, option B): each voxel-layer probe
+    // casts one narrow cone toward the sun from its seat; a pixel takes the
+    // sun times its cosine times the probes' share that sees it.
+    let sun_seen: Vec<f32> = match (sun(), setup.voxels, o.sun_in_voxels) {
+        (Some(sun), Some(voxels), true) => {
+            let finest = voxel_size(VOXEL_FINEST);
+            cascades[0]
+                .seat_point
+                .iter()
+                .map(|seat| {
+                    let mut span = Span { done: 0.25 * finest, covered: 0.0, met: [0.0; 3] };
+                    march_span(voxels, o, *seat, sun.toward, 0.01, REACH, &mut span, None);
+                    (1.0 - span.covered).max(0.0)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
     // Shade: the cosine-weighted sum of the cascade-0 cones around the pixel.
     let first = &cascades[0];
     let dirs = first.dirs();
@@ -1620,6 +1669,14 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
         if weight > 0.0 {
             irradiance[p] = scale(sum, PI / weight);
         }
+        if let (Some(sun), false) = (sun(), sun_seen.is_empty()) {
+            let cosine = dot(sun.toward, pixel.normal);
+            let total: f32 = weights.iter().map(|w| w.1).sum();
+            if cosine > 0.0 && total > 0.0 {
+                let seen_share = weights.iter().map(|(slot, w)| sun_seen[*slot] * w).sum::<f32>() / total;
+                irradiance[p] = add(irradiance[p], scale(sun.irradiance, cosine * seen_share));
+            }
+        }
     }
     Frame {
         irradiance,
@@ -1639,6 +1696,49 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
 static LAST_E: std::sync::Mutex<Vec<V3>> = std::sync::Mutex::new(Vec::new());
 static LAST_D: std::sync::Mutex<Vec<V3>> = std::sync::Mutex::new(Vec::new());
 
+
+/// `--sun on` in `--mode full`: the way to the sun and its irradiance on a
+/// surface facing it (the engine's lamp unit at the prototype's fixed 7 m).
+#[derive(Clone, Copy)]
+struct SunLight {
+    toward: V3,
+    irradiance: V3,
+}
+
+static SUN: std::sync::OnceLock<Option<SunLight>> = std::sync::OnceLock::new();
+
+fn sun() -> Option<SunLight> {
+    SUN.get().copied().flatten()
+}
+
+/// The sun in the sky (phase 2b, option A): a cone that leaves the field in
+/// the last cascade's direction that holds the sun takes the sun's irradiance
+/// spread over that direction's solid angle, so the directions together hold
+/// it once.
+fn sun_in_sky(o: &Options, dir: V3) -> V3 {
+    let Some(sun) = sun() else { return [0.0; 3] };
+    let theta = o.theta << (o.cascades - 1);
+    if dir_bin(dir, theta) != dir_bin(sun.toward, theta) {
+        return [0.0; 3];
+    }
+    let solid = 4.0 * PI / (2 * theta * theta) as f32;
+    scale(sun.irradiance, 1.0 / solid)
+}
+
+/// The exact sun at a point, for the reference: its irradiance times the
+/// cosine, if a ray toward it is clear.
+fn sun_exact(walls: &dyn Surfaces, point: V3, normal: V3) -> V3 {
+    let Some(sun) = sun() else { return [0.0; 3] };
+    let cosine = dot(sun.toward, normal);
+    if cosine <= 0.0 {
+        return [0.0; 3];
+    }
+    let origin = add(point, scale(normal, LIFT));
+    if walls.blocked(origin, add(origin, scale(sun.toward, REACH))) {
+        return [0.0; 3];
+    }
+    scale(sun.irradiance, cosine)
+}
 
 /// A surface bucket no gather patch was assigned to.
 const NO_PATCH: u32 = u32::MAX - 1;
@@ -1800,6 +1900,9 @@ fn march_cone_into(voxels: &Voxels, o: &Options, point: V3, normal: V3, dir: V3,
         let mut through = (1.0 - span.covered) / open;
         if c + 1 == n {
             span.met = add(span.met, scale(sky, 1.0 - span.covered));
+            if sink.is_none() && !o.sun_in_voxels {
+                span.met = add(span.met, scale(sun_in_sky(o, dir), 1.0 - span.covered));
+            }
             if let Some(sink) = sink.as_deref_mut() {
                 sink.direct = add(sink.direct, scale(sky, 1.0 - span.covered));
                 sink.sky = add(sink.sky, scale(sky, 1.0 - span.covered));
@@ -1997,6 +2100,18 @@ fn gather_rows(voxels: &Voxels, patches: &[Option<(V3, V3)>], o: &Options, cones
                             let dir = normalize(add(add(scale(side, r * phi.cos()), scale(up, r * phi.sin())), scale(normal, (1.0 - u).max(0.0).sqrt())));
                             let _ = march_cone_into(voxels, o, at, normal, dir, voxel_size(GATHER_LEVEL), sky, Some(&mut sink));
                         }
+                        // The sun (phase 2b, option B): one narrow cone toward
+                        // it, its irradiance times what passes.
+                        if let Some(sun) = sun() {
+                            let cosine = dot(sun.toward, normal);
+                            if cosine > 0.0 {
+                                let start = add(at, scale(normal, 0.75 * voxel_size(VOXEL_FINEST)));
+                                let mut span = Span { done: 0.25 * voxel_size(VOXEL_FINEST), covered: 0.0, met: [0.0; 3] };
+                                march_span(voxels, o, start, sun.toward, 0.01, REACH, &mut span, None);
+                                let pass = (1.0 - span.covered).max(0.0);
+                                sink.direct = add(sink.direct, scale(sun.irradiance, cosine * pass * cones as f32 / PI));
+                            }
+                        }
                         let k = PI / cones as f32;
                         let mut row: HashMap<u32, V3> = HashMap::new();
                         for (j, w) in sink.records {
@@ -2085,7 +2200,7 @@ fn sphere_light_once(scene: &dyn Surfaces, lamps: &[(V3, V3)], radius: f32, poin
 /// bounces with Russian roulette after 2.
 #[expect(clippy::too_many_arguments, reason = "the scene, its lamps and the point")]
 fn full_reference(walls: &dyn Surfaces, paint: f32, lamps: &[(V3, V3)], radius: f32, sky: V3, point: V3, normal: V3, samples: u32, seed: u64) -> V3 {
-    let direct = sphere_light(walls, lamps, radius, point, normal);
+    let direct = add(sphere_light(walls, lamps, radius, point, normal), sun_exact(walls, point, normal));
     let cosine_dir = |normal: V3, u: f32, v: f32| {
         let side = normalize(cross(normal, if normal[1].abs() < 0.9 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] }));
         let up = cross(normal, side);
@@ -2109,7 +2224,7 @@ fn full_reference(walls: &dyn Surfaces, paint: f32, lamps: &[(V3, V3)], radius: 
             // Outgoing radiance of a diffuse hit: albedo over pi times its
             // irradiance, the lamps' share of which is sampled here.
             let s = path_seed.wrapping_mul(31).wrapping_add(bounce * 7);
-            let lamp = sphere_light_once(walls, lamps, radius, hit.point, hit.normal, s);
+            let lamp = add(sphere_light_once(walls, lamps, radius, hit.point, hit.normal, s), sun_exact(walls, hit.point, hit.normal));
             weight = mul(weight, scale(hit.albedo, paint));
             radiance = add(radiance, mul(weight, scale(lamp, 1.0 / PI)));
             if bounce >= 2 {
@@ -2487,12 +2602,22 @@ fn run(o: &Options) -> Result<(), String> {
     let shown = pixels.iter().filter(|p| p.is_some()).count();
     let glow: Vec<(V3, V3)> = (0..scene.light_len())
         .map(|i| scene.light(i))
-        .filter(|l| l.direction.x == 0.0 && l.direction.y == 0.0 && l.direction.z == 0.0)
+        .filter(|l| !o.no_lamps && l.direction.x == 0.0 && l.direction.y == 0.0 && l.direction.z == 0.0)
         .map(|l| {
             let centre = [l.position.x, l.position.y, l.position.z];
             (centre, scale(l.color, LAMP_UNIT / (PI * o.lamp_radius * o.lamp_radius)))
         })
         .collect();
+    // The sun as an emitter (phase 2b): the engine's lamp unit at the
+    // prototype's fixed 7 m, as `direct_light` takes it.
+    let sun_light = (o.sun && o.mode == Mode::Full)
+        .then(|| (0..scene.light_len()).map(|i| scene.light(i)).find(|l| l.direction.x != 0.0 || l.direction.y != 0.0 || l.direction.z != 0.0))
+        .flatten()
+        .map(|l| SunLight {
+            toward: scale(normalize([l.direction.x, l.direction.y, l.direction.z]), -1.0),
+            irradiance: scale(l.color, LAMP_UNIT / 49.0),
+        });
+    let _ = SUN.set(sun_light);
     let glowing = Glowing { scene: walls, lamps: glow.clone(), radius: o.lamp_radius };
     let surfaces: &dyn Surfaces = if o.mode == Mode::Nee { walls } else { &glowing };
     let built = (o.cone || o.gpu_bench).then(|| build_voxels(scene, &mesh, gltf.as_ref(), walls, &pixels, &glow, o));

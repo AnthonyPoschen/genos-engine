@@ -157,3 +157,7 @@ The cone tracer also voxelises `kind gltf` scenes: points on every triangle's fr
 ## Cones from the voxel layer, 24 Nov 2026
 
 The cone tracer no longer starts a cone at a pixel. Every probe of every cascade traces one cone per direction; a coarse probe's cones start at the voxel-layer probe nearest its seat and are split into that probe's cascades. Arguments: `--cone-start voxel|probe` (default `voxel`), `--cone-voxel nearest|random` (default `nearest`), `--combine-visibility none|merge|shade|both` (default `both`). The plan's section 13 has the numbers. `--spp` and `--frames` jitter now only drive the ray tracer.
+
+## Phase 2b, 24 Nov 2026
+
+`--sun on|off` (default off), `--sun-path sky|voxel` (default `voxel`), `--no-lamps`. See the plan's section 14.

@@ -1,6 +1,6 @@
 # Cone-traced cascades: implementation plan
 
-Status: phases 0 and 1 passed, 24 Nov 2026 (sections 11 and 13: phase 1 passes again with the probe-traced cascade). Phase 2 in progress (sections 12 and 13). Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
+Status: phases 0 and 1 passed; phase 2 accepted by Anthony at hall 5.3%, room 11.1%, Sponza atrium 12.9%, dark corner 15.9% (section 13); phase 2b passed with option B (section 14). Phase 3 (GPU cost and the ADR) is next. Nothing here is in the renderer. The evidence is a CPU prototype and a GPU timing of its trace step, in [`debug/single-frame-cascade/`](../../../debug/single-frame-cascade/README.md). A change to the product path needs an ADR first (phase 3).
 
 ## 1. What Anthony asked for
 
@@ -248,3 +248,20 @@ The lamps' own light (`--mode emissive`) against cascade count and t0, Sponza: 5
 | Sponza dark corner | 15.9% | +0.8% | 9.6 million |
 
 No noise: nothing in the frame is random. Closing a cone that ends at least 90% covered (so its shortfall takes no sky) changed nothing measurable and was taken out. The gate (10%) is not met in three of the four views: in Sponza by the edges of the small lamps' shadows, in the room by bounce (+7%) and sky (+5%) on a very dim picture.
+
+## 14. Phase 2b: the sun as an emitter, 24 Nov 2026
+
+Anthony accepted phase 2 at the numbers in section 13 and asked to go on. `--sun on` puts the scene's sun in, with `--sun-path`:
+
+- **A, the sun in the sky** (`--sun-path sky`): a cone that leaves the field in the last cascade's direction holding the sun takes the sun's irradiance over that direction's solid angle. The energy is right; the shadow is not: it comes through the coarsest cascade, whose probes are metres apart.
+- **B, the sun in the voxel layer** (`--sun-path voxel`, the default): each cascade-0 probe casts one narrow cone toward the sun from its seat; a pixel takes the sun times its cosine times the share of the probes around it that see it, with the same weights it reads the cascade with. The cascades carry no sun. For bounce, each gather patch casts one narrow cone toward the sun.
+
+`--cascades 5 --t0 2.5`, 32 gather cones, 65,536 reference samples a block, after the first frame:
+
+| View | A | B | Gate |
+|---|---|---|---|
+| Sponza atrium, sun only (`--no-lamps`) | 52.1% | 10.7%, bias −4.3% | within 10% |
+| Sponza colonnade, sun only | 19.4% | 23.7%, +13% (mean irradiance 0.005: the reference is weak there) | |
+| Dark corner, sun and lamps | 15.7%, +0.9% | 15.7%, +0.9% | bias under 10% |
+
+B passes the leak check and sits at the edge of the sunlit limit; it is the sun's path. The sun's cost is one narrow cone for each voxel-layer probe and each gather patch, whatever the lamp count. No sun ray starts at a pixel.
