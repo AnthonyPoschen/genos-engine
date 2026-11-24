@@ -3,7 +3,8 @@
 
 Starts genos-lighting headless under a memory cap, pauses scene time, and
 reads `timing` over --frames frames with the old path, then with
-cone_cascades=on once its field is resident. Prints the GPU and CPU frame
+cone_cascades=on once its field is resident. Also prints the seconds from
+turning cone mode on to its first probes (the field's build and upload). Prints the GPU and CPU frame
 milliseconds of each and the cone probe counts (`cone_stats`), and writes
 them to --out/cost.json. A measurement, not a gate: it always exits 0 unless
 the program could not be driven (UNSURE, exit 2).
@@ -82,19 +83,21 @@ try:
     call("wait_settled", {"timeout_frames": 900})
     old = timed()
     call("lighting.set_settings", {"cone_cascades": "on"})
-    for _ in range(240):
+    switched = time.time()
+    for _ in range(4000):
         st = call("cone_stats")["cascades"]
         if st and st[0]["probes"] > 0:
             break
-        call("wait", {"frames": 10})
-        time.sleep(1)
+        call("wait", {"frames": 1})
+    ready = time.time() - switched
     cone = timed()
     stats = call("cone_stats")["cascades"]
-    result = {"view": ARGS["view"], "size": ARGS["size"], "old": old, "cone": cone, "cone_stats": stats}
+    result = {"view": ARGS["view"], "size": ARGS["size"], "old": old, "cone": cone, "cone_stats": stats, "ready_seconds": ready}
     with open(os.path.join(OUT, "cost.json"), "w") as f:
         json.dump(result, f, indent=1)
     keys = [k for k in old if isinstance(old[k], (int, float))]
     print(f"{ARGS['view']} {ARGS['size']}: " + ", ".join(f"{k} old {old[k]:.2f} cone {cone[k]:.2f}" for k in keys))
+    print(f"  cone mode on to first probes: {ready:.2f} s")
     print("  probes " + " ".join(f"c{s['cascade']}={s['probes']}" for s in stats)
           + "  seat fallbacks " + " ".join(f"c{s['cascade']}={s['seat_fallbacks']}" for s in stats))
     call("quit")

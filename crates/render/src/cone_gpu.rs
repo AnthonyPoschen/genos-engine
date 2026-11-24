@@ -211,14 +211,8 @@ fn cone_field_bytes(field: &crate::cone_field::ConeField) -> [Vec<u8>; 4] {
 /// The field for a scene, built off the frame thread: its surfaces. The lamps
 /// are not in it; they are written each frame.
 fn cone_build(scene: &genos_scene::Scene, gltf: Option<&crate::gltf_surface::GltfSurface>) -> crate::cone_field::ConeField {
-    // The engine's paint reflectance on the analytic shapes, as compose has it.
-    const PAINT: f32 = 0.8;
-    let points = crate::cone_field::surface_points(scene, gltf, PAINT);
-    let mut voxels = crate::cone_field::FieldVoxels::default();
-    for (at, normal, area, _) in &points {
-        voxels.add_surface(*at, *normal, *area, [0.0; 3]);
-    }
-    voxels.brick()
+    let points = crate::cone_field::surface_shape_points(scene, gltf);
+    crate::cone_field::FieldVoxels::from_surfaces(&points).brick()
 }
 
 /// Cone mode runs only the cascades: the old pipeline's direct pass, shadows,

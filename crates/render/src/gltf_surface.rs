@@ -180,6 +180,16 @@ impl GltfSurface {
     }
 
     /// Whether the material a triangle names is `doubleSided` in the file.
+    /// The material can have holes: a texel alpha under its cutoff lets a ray
+    /// through (MASK or BLEND with a base-colour texture).
+    #[must_use]
+    pub fn holed(&self, material: u32) -> bool {
+        usize::try_from(material)
+            .ok()
+            .and_then(|i| self.materials.get(i))
+            .is_some_and(|m| m.cutoff > 0.0 && m.pbr.base_color_texture.is_some())
+    }
+
     /// Every triangle stops a ray from both sides either way.
     #[must_use]
     pub fn double_sided(&self, material: u32) -> bool {

@@ -16,6 +16,7 @@
 //! `debug/single-frame-cascade`.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::f32::consts::PI;
 
 use genos_scene::Scene;
@@ -280,6 +281,66 @@ fn half_floor(v: f32) -> i32 {
     floor_i32(v.clamp(0.0, 65_535.0))
 }
 
+/// The scene's surfaces as points for the field's shape, built on every core:
+/// as [`surface_points`], but a point's albedo is not read (it is 0), so only
+/// a triangle whose material has holes casts the short ray, which keeps a
+/// point only where the texel is not a hole. A solid triangle's points are
+/// all kept.
+#[must_use]
+pub fn surface_shape_points(scene: &Scene, gltf: Option<&GltfSurface>) -> Vec<FieldPoint> {
+    let step = 0.5 * voxel_size(FIELD_FINEST);
+    let mut points = Vec::new();
+    let mesh = SceneMesh::from_scene(scene);
+    for tri in &mesh.triangles {
+        let normal = normalize(tri.normals[0]);
+        sample_triangle(tri.positions, step, |at, each| {
+            points.push((at, normal, each, [0.0; 3]));
+            if tri.two_sided {
+                points.push((at, scale(normal, -1.0), each, [0.0; 3]));
+            }
+        });
+    }
+    if let Some(model) = gltf {
+        let triangles: Vec<_> = model.triangles().collect();
+        let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let chunk = triangles.len().div_ceil(threads).max(1);
+        let parts: Vec<Vec<FieldPoint>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = triangles
+                .chunks(chunk)
+                .map(|tris| {
+                    scope.spawn(move || {
+                        let mut out = Vec::new();
+                        for tri in tris {
+                            let [a, b, c] = tri.positions;
+                            let mut normal = normalize(cross(sub(b, a), sub(c, a)));
+                            if dot(normal, tri.normals[0]) < 0.0 {
+                                normal = scale(normal, -1.0);
+                            }
+                            let sides: &[f32] = if model.double_sided(tri.material) { &[1.0, -1.0] } else { &[1.0] };
+                            let holed = model.holed(tri.material);
+                            sample_triangle(tri.positions, step, |at, each| {
+                                for side in sides.iter().map(|k| scale(normal, *k)) {
+                                    if !holed || model.trace(add(at, scale(side, 0.01)), scale(side, -1.0), 0.02).is_some() {
+                                        out.push((at, side, each, [0.0; 3]));
+                                    }
+                                }
+                            });
+                        }
+                        out
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        points.reserve(parts.iter().map(Vec::len).sum());
+        for part in parts {
+            points.extend(part);
+        }
+    }
+    points.retain(|(at, normal, _, _)| !(normal[1] < -0.9 && at[1].abs() < 0.01));
+    points
+}
+
 /// The scene's surfaces as points: the analytic shapes and, when given, a
 /// glTF model's triangles (each point's albedo read by a short ray into it).
 /// The analytic albedo is scaled by `paint`.
@@ -321,11 +382,78 @@ pub fn surface_points(scene: &Scene, gltf: Option<&GltfSurface>, paint: f32) -> 
     points
 }
 
+/// A fast hasher for voxel keys (a multiply and a rotate a word; the keys are
+/// small integers, so `SipHash`'s guard against chosen keys buys nothing here).
+#[derive(Default)]
+struct CellHasher(u64);
+
+impl Hasher for CellHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(u64::from(*b));
+        }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(u64::from(i));
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(u64::from(i));
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.write_u32(i.cast_unsigned());
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+type Cells = HashMap<(u8, [i32; 3]), Voxel, BuildHasherDefault<CellHasher>>;
+
+/// Tasks a fine level's voxels are split over in [`FieldVoxels::from_surfaces`].
+const FINE_SPLIT: u64 = 4;
+
 /// The field's voxels, before bricking.
 #[derive(Default)]
 pub struct FieldVoxels {
-    cells: HashMap<(u8, [i32; 3]), Voxel>,
+    cells: Cells,
     points: usize,
+}
+
+/// One surface point's share of a voxel (`add_surface` and `from_surfaces`).
+fn accumulate(voxel: &mut Voxel, point: V3, normal: V3, area: f32, radiance: V3) {
+    for (d, axis) in AXES.iter().enumerate() {
+        let facing = dot(normal, *axis).max(0.0) * area;
+        voxel.area[d] += facing;
+        voxel.light[d] = add(voxel.light[d], scale(radiance, facing));
+        voxel.at[d] = add(voxel.at[d], scale(point, facing));
+        if facing > 0.0 {
+            for a in 0..3 {
+                voxel.lo[d][a] = voxel.lo[d][a].min(point[a]);
+                voxel.hi[d][a] = voxel.hi[d][a].max(point[a]);
+            }
+        }
+    }
+}
+
+/// The voxel a surface point is filed in at `level`: the one a quarter of a
+/// voxel (at most 6.25 cm) behind it.
+fn filed_cell(point: V3, normal: V3, level: u8) -> [i32; 3] {
+    let size = voxel_size(level);
+    cell_of(sub(point, scale(normal, 0.25 * size.min(0.25))), size)
+}
+
+fn split_of(cell: [i32; 3]) -> u64 {
+    let mut h = CellHasher::default();
+    for c in cell {
+        h.write_i32(c);
+    }
+    h.finish() % FINE_SPLIT
 }
 
 impl FieldVoxels {
@@ -333,22 +461,49 @@ impl FieldVoxels {
     pub fn add_surface(&mut self, point: V3, normal: V3, area: f32, radiance: V3) {
         self.points += 1;
         for level in FIELD_FINEST..=FIELD_COARSEST {
-            let size = voxel_size(level);
-            let inside = sub(point, scale(normal, 0.25 * size.min(0.25)));
-            let voxel = self.cells.entry((level, cell_of(inside, size))).or_default();
-            for (d, axis) in AXES.iter().enumerate() {
-                let facing = dot(normal, *axis).max(0.0) * area;
-                voxel.area[d] += facing;
-                voxel.light[d] = add(voxel.light[d], scale(radiance, facing));
-                voxel.at[d] = add(voxel.at[d], scale(point, facing));
-                if facing > 0.0 {
-                    for a in 0..3 {
-                        voxel.lo[d][a] = voxel.lo[d][a].min(point[a]);
-                        voxel.hi[d][a] = voxel.hi[d][a].max(point[a]);
-                    }
-                }
-            }
+            let voxel = self.cells.entry((level, filed_cell(point, normal, level))).or_default();
+            accumulate(voxel, point, normal, area, radiance);
         }
+    }
+
+    /// The voxels of these surface points (none sending light), built on
+    /// every core: one task a coarse level and [`FINE_SPLIT`] a fine one, each
+    /// reading every point in order and keeping its own voxels, so the sums
+    /// are the ones [`FieldVoxels::add_surface`] makes, bit for bit.
+    #[must_use]
+    pub fn from_surfaces(points: &[FieldPoint]) -> FieldVoxels {
+        let tasks: Vec<(u8, u64)> = (FIELD_FINEST..=FIELD_COARSEST)
+            .flat_map(|level| {
+                let parts = if level <= PLANE_COARSEST { FINE_SPLIT } else { 1 };
+                (0..parts).map(move |part| (level, part))
+            })
+            .collect();
+        let parts: Vec<Cells> = std::thread::scope(|scope| {
+            let handles: Vec<_> = tasks
+                .iter()
+                .map(|&(level, part)| {
+                    scope.spawn(move || {
+                        let split = level <= PLANE_COARSEST;
+                        let mut cells = Cells::default();
+                        for (at, normal, area, _) in points {
+                            let cell = filed_cell(*at, *normal, level);
+                            if split && split_of(cell) != part {
+                                continue;
+                            }
+                            accumulate(cells.entry((level, cell)).or_default(), *at, *normal, *area, [0.0; 3]);
+                        }
+                        cells
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        let mut cells = Cells::default();
+        cells.reserve(parts.iter().map(HashMap::len).sum());
+        for part in parts {
+            cells.extend(part);
+        }
+        FieldVoxels { cells, points: points.len() }
     }
 
     /// A lamp: a sphere of `radius` sending `glow` every way, its disc
@@ -377,6 +532,18 @@ impl FieldVoxels {
             let glow = scale(l.color, LAMP_UNIT / (PI * radius * radius));
             self.add_lamp([l.position.x, l.position.y, l.position.z], radius, glow);
         }
+    }
+
+    /// For each level: its voxels and the area they hold (all six ways).
+    #[must_use]
+    pub fn level_totals(&self) -> [(usize, f64); FIELD_LEVELS] {
+        let mut out = [(0usize, 0.0f64); FIELD_LEVELS];
+        for ((level, _), voxel) in &self.cells {
+            let k = usize::from(level - FIELD_FINEST);
+            out[k].0 += 1;
+            out[k].1 += voxel.area.iter().map(|a| f64::from(*a)).sum::<f64>();
+        }
+        out
     }
 
     #[must_use]
@@ -676,6 +843,29 @@ mod tests {
         }
         // Far from the wall there is no brick.
         assert!(field.face(FIELD_FINEST, cell_of([40.0, 1.0, 1.0], voxel_size(FIELD_FINEST)), 0).is_none());
+    }
+
+    #[test]
+    fn the_parallel_build_files_every_point_as_the_serial_one_does() {
+        let mut points = Vec::new();
+        let step = 0.5 * voxel_size(FIELD_FINEST);
+        for tri in [[[1.0, 0.0, 0.0], [1.0, 2.0, 0.0], [1.0, 2.0, 2.0]], [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 0.0, 3.0]]] {
+            let normal = normalize(cross(sub(tri[1], tri[0]), sub(tri[2], tri[0])));
+            sample_triangle(tri, step, |at, each| points.push((at, normal, each, [0.0; 3])));
+        }
+        let mut serial = FieldVoxels::default();
+        for (at, normal, area, _) in &points {
+            serial.add_surface(*at, *normal, *area, [0.0; 3]);
+        }
+        let parallel = FieldVoxels::from_surfaces(&points);
+        assert_eq!(serial.cells.len(), parallel.cells.len());
+        for (key, voxel) in &serial.cells {
+            let other = parallel.cells.get(key).expect("the same voxel");
+            assert_eq!(voxel.area, other.area, "{key:?}");
+            assert_eq!(voxel.at, other.at, "{key:?}");
+            assert_eq!(voxel.lo, other.lo, "{key:?}");
+            assert_eq!(voxel.hi, other.hi, "{key:?}");
+        }
     }
 
     #[test]

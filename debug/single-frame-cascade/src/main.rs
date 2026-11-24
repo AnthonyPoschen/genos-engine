@@ -147,7 +147,11 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        that direction holds, carried through the merge
                        (default mean)
   --renderer-field     build the renderer's voxel field (crates/render
-                       cone_field) for the scene, print its size, and stop
+                       cone_field) for the scene, print its size and build
+                       time, and stop
+  --field-check        as --renderer-field, then also build the reference
+                       field (every point's albedo ray, one thread) and print
+                       each level's voxels and area against it
   --gpu-side N         with --gpu-bench: texels along each side of a voxel
                        level's clip volume around the eye (default 96)
   --own-interval       with --cone-start voxel: each cascade's cone marches
@@ -285,6 +289,7 @@ struct Options {
     gather_width: f32,
     gpu_side: u32,
     renderer_field: bool,
+    field_check: bool,
     refine_cascades: usize,
     probe_px: f32,
     theta: u32,
@@ -345,6 +350,7 @@ fn parse_args() -> Result<Option<Options>, String> {
         gather_width: 0.0,
         gpu_side: gpu::SIDE,
         renderer_field: false,
+        field_check: false,
         refine_cascades: usize::MAX,
         probe_px: 4.0,
         theta: 4,
@@ -498,6 +504,10 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--descend" => o.descend = true,
             "--transfer-sweeps" => o.transfer_sweeps = num(&arg, &value()?)?,
             "--renderer-field" => o.renderer_field = true,
+            "--field-check" => {
+                o.renderer_field = true;
+                o.field_check = true;
+            }
             "--gpu-side" => o.gpu_side = num::<u32>(&arg, &value()?)?.clamp(16, 256),
             "--gather-width" => o.gather_width = num(&arg, &value()?)?,
             "--gather-level" => o.gather_level = num::<u8>(&arg, &value()?)?.clamp(VOXEL_FINEST + 1, VOXEL_COARSEST),
@@ -3097,13 +3107,36 @@ fn run(o: &Options) -> Result<(), String> {
     }
     if o.renderer_field {
         let started = std::time::Instant::now();
-        let points = genos_render::cone_field::surface_points(&scene, gltf.as_ref().map(|g| &g.0), PAINT);
-        let mut voxels = genos_render::cone_field::FieldVoxels::default();
-        for (at, normal, area, _) in &points {
-            voxels.add_surface(*at, *normal, *area, [0.0; 3]);
-        }
-        voxels.add_scene_lamps(&scene, o.lamp_radius);
+        // The renderer's build: shape points on every core, the albedo ray
+        // only where a material has holes, voxels on every core. The lamps
+        // are not in it; the renderer writes them each frame.
+        let points = genos_render::cone_field::surface_shape_points(&scene, gltf.as_ref().map(|g| &g.0));
+        let sampled = started.elapsed().as_secs_f64();
+        let voxels = genos_render::cone_field::FieldVoxels::from_surfaces(&points);
         let built = started.elapsed().as_secs_f64();
+        println!("renderer field build: {:.2} s to sample, {:.2} s to file", sampled, built - sampled);
+        if o.field_check {
+            // The reference: every point's albedo ray, one thread.
+            let reference = std::time::Instant::now();
+            let all = genos_render::cone_field::surface_points(&scene, gltf.as_ref().map(|g| &g.0), PAINT);
+            let mut serial = genos_render::cone_field::FieldVoxels::default();
+            for (at, normal, area, _) in &all {
+                serial.add_surface(*at, *normal, *area, [0.0; 3]);
+            }
+            println!("reference build: {} points in {:.1} s; renderer build {} points", all.len(), reference.elapsed().as_secs_f64(), points.len());
+            for (k, (fast, slow)) in voxels.level_totals().iter().zip(serial.level_totals().iter()).enumerate() {
+                println!(
+                    "  level {}: voxels {} / {} ({:+.3}%), area {:.1} / {:.1} m2 ({:+.3}%)",
+                    k + 2,
+                    fast.0,
+                    slow.0,
+                    100.0 * (fast.0 as f64 - slow.0 as f64) / (slow.0 as f64).max(1.0),
+                    fast.1,
+                    slow.1,
+                    100.0 * (fast.1 - slow.1) / slow.1.max(1e-9),
+                );
+            }
+        }
         let field = voxels.brick();
         let mib = |b: usize| b as f64 / (1024.0 * 1024.0);
         println!(
