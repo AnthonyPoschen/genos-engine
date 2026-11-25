@@ -1,7 +1,8 @@
 #version 450
 // Cone-traced cascades, pass 3: a probe of cascade params.x (1 or more) starts
-// its cones on the start of its child nearest its seat, so the stretch before
-// its interval was marched by the finer probes on that chain.
+// its cones on the voxel layer, at the field seat its chain of children
+// nearest its seat leads down to, so the stretch before its interval was
+// marched by the finer probes on that chain.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
@@ -17,26 +18,69 @@ void main() {
     int lod = int(cwork.w[r + 1u]);
     ivec3 cell = ivec3(int(cwork.w[r + 4u]), int(cwork.w[r + 5u]), int(cwork.w[r + 6u]));
     vec3 seat = cone_word3(r + 8u);
-    float best = CONE_FAR;
-    uint pick = CONE_NO_BRICK;
+    // The start is found by walking down the field, one cascade at a time,
+    // to the voxel layer: at each step the finer voxel under the current one
+    // whose field seat is nearest this probe's seat. It comes from the field
+    // alone, so it is the same whichever finer probes are on screen.
+    ivec3 at = cell;
+    vec3 start = vec3(0.0);
+    vec3 start_normal = vec3(0.0);
+    bool found = false;
+    for (int down = c - 1; down >= 0; down--) {
+        float best = CONE_FAR;
+        ivec3 next = ivec3(0);
+        bool any_child = false;
+        if (lod + down > CONE_COARSEST) {
+            // Past the field: the finer cell that holds the seat.
+            at = ivec3(floor(seat / cone_size(lod + down)));
+            continue;
+        }
+        for (int k = 0; k < 8; k++) {
+            ivec3 child = at * 2 + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            vec3 mean;
+            vec3 normal;
+            float held;
+            if (!cone_seat(lod + down, child, mean, normal, held)) {
+                continue;
+            }
+            vec3 d = mean - seat;
+            if (dot(d, d) < best) {
+                best = dot(d, d);
+                next = child;
+                start = mean;
+                start_normal = normal;
+                any_child = true;
+            }
+        }
+        if (!any_child) {
+            break;
+        }
+        found = true;
+        at = next;
+    }
+    if (!found) {
+        return;
+    }
+    // The chain link for the closing test in the trace: the child probe on
+    // screen nearest this probe's seat. Which one that is follows what is on
+    // screen, but a closed cone is written dark and closed (it passed under
+    // 2% below), so it moves the light by at most that share.
+    float near = CONE_FAR;
+    uint link = CONE_NO_BRICK;
     for (int k = 0; k < 8; k++) {
         ivec3 child = cell * 2 + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
         uint j = cone_find(c - 1, cone_key(lod, child, c - 1));
         if (j == CONE_NO_BRICK) {
             continue;
         }
-        vec3 d = cone_word3(cone_probe(c - 1, j) + 12u) - seat;
-        if (dot(d, d) < best) {
-            best = dot(d, d);
-            pick = j;
+        vec3 d = cone_word3(cone_probe(c - 1, j) + 8u) - seat;
+        if (dot(d, d) < near) {
+            near = dot(d, d);
+            link = j;
         }
     }
-    if (pick == CONE_NO_BRICK) {
-        return;
-    }
-    uint q = cone_probe(c - 1, pick);
-    cwork.w[r + 2u] = pick;
-    cwork.w[r + 3u] = cwork.w[q + 3u];
-    cone_put3(r + 12u, cone_word3(q + 12u));
-    cone_put3(r + 16u, cone_word3(q + 16u));
+    cwork.w[r + 2u] = link;
+    cwork.w[r + 3u] = uint(lod);
+    cone_put3(r + 12u, start);
+    cone_put3(r + 16u, start_normal);
 }

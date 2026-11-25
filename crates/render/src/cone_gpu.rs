@@ -3,7 +3,7 @@
 // use the lighting descriptor set, its layout and its push constant. The
 // field (`cone_field.rs`) is built on a thread when the world, its glTF model
 // or its lamps change, uploaded over a few frames, and then every frame the
-// seven passes in `shaders/cone_*.comp` run before compose.
+// passes in `shaders/cone_*.comp` run before compose.
 
 /// Bytes of the field uploaded each frame.
 const CONE_UPLOAD_STEP: usize = 64 << 20;
@@ -24,17 +24,18 @@ const CONE_HASH_WORDS: u64 = 9;
 const CONE_PROBE_WORDS: u64 = 32;
 const CONE_CONE_WORDS: u64 = 4;
 /// Cascade 0's probes for each `probe_px` square of the screen. The voxel
-/// layer measured 3.0 to 3.5 (floors seen at a grazing angle, voxels split
-/// between levels), so 5 leaves room; gate B fails if it does not.
-const CONE_PROBE_SLACK: u64 = 5;
+/// layer with each pixel's eight neighbours measured 2.8 in the hall (floors
+/// seen at a grazing angle add to it), so 6 leaves room; gate B fails if it
+/// does not.
+const CONE_PROBE_SLACK: u64 = 6;
 /// Each cascade holds this share of the probes of the one below (measured
-/// 1/3.4: probes on a surface, at twice the spacing).
+/// 1/3.1 with the neighbours spread: probes on a surface, at twice the spacing).
 const CONE_CASCADE_SHARE: u64 = 3;
 const CONE_MIN_CAP: u64 = 64;
 /// Header words cleared each frame; the layout follows them.
 const CONE_CLEARED: u64 = 64;
 const CONE_LAYOUT_AT: u64 = 64;
-const CONE_PIPES: usize = 8;
+const CONE_PIPES: usize = 9;
 const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-insert",
     "cone-compact",
@@ -44,6 +45,7 @@ const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-merge",
     "cone-shade",
     "cone-lamps",
+    "cone-spread",
 ];
 /// Points on each lamp's sphere (`cone_lamps.comp`), and the field levels it
 /// is written at: the most lamp-hash entries one lamp can fill.
@@ -283,7 +285,7 @@ impl Gpu {
             }
         }
         if self.cone.pipes[0].is_null() && self.lighting.ready {
-            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV];
+            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV];
             for (k, code) in codes.iter().enumerate() {
                 self.cone.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, CONE_PIPE_NAMES[k])?;
             }
@@ -392,6 +394,9 @@ impl Gpu {
         let write_lamps = crate::gate::guard(crate::gate::CONE_LAMP_FOLLOW) || !self.cone.lamps_frozen;
         let layout = self.cone.layout;
         let header = layout.header();
+        // The clears below are transfers: order them after every compute read
+        // and write of the work buffer before them, last frame's included.
+        self.memory_barrier(0x800, 0x1000, 0x20 | 0x40, 0x1000);
         unsafe {
             (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, 0, CONE_CLEARED * 4, 0);
             (self.fns.cmd_update_buffer)(
@@ -421,9 +426,15 @@ impl Gpu {
             compute(self);
             self.cone.lamps_frozen = true;
         }
+        // Cascade 0 from the pixels, then each cascade from the one below it
+        // (its compact first, so its probes are numbered).
         self.cone_dispatch(0, push(0), pixels);
         compute(self);
         for c in 0..count {
+            if c > 0 {
+                self.cone_dispatch(8, push(c), line(layout.cap[c as usize - 1]));
+                compute(self);
+            }
             self.cone_dispatch(1, push(c), line(layout.hash[c as usize]));
             compute(self);
         }

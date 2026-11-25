@@ -20,6 +20,12 @@ paused so nothing moves but the camera, and grades cone mode
      frame 30 frames later (a lamp that lags changes thousands by far more;
      a few one-code pixels come from other passes' history and are reported),
      and the lamp hash dropped no point (lighting.cone_stats lamp_dropped)
+  F  moving camera: step the camera sideways 1 cm a frame for --steps steps,
+     exposure held fixed; count pixels whose second difference over three
+     steps, |f(i+1) - 2 f(i) + f(i-1)|, is over 6 codes where neither depth
+     nor albedo changed (a slide over a gradient is near 0, a pop is not).
+     The mean over the walk is at most --pop-ratio times the old path's on
+     the same walk. Before section 18 step 4b: 5 to 7 times in the hall
 
 Views: --view hall (lighting-stress, the hall checkpoint) or --view sponza
 (the arcade pose of section 18). Each gate prints PASS or FAIL; the exit code
@@ -31,7 +37,9 @@ goes to --out.
   --bin PATH           genos-lighting binary (default target/release/genos-lighting)
   --port N             command port (default 18797)
   --out DIR            evidence directory (default genos-debug/cone-stability/<view>-<size>)
-  --only A,B,C,D,E     run these gates only
+  --only A,B,C,D,E,F   run these gates only
+  --steps N            gate F's 1 cm steps (default 30)
+  --pop-ratio F        gate F's limit against the old path (default 2.5)
   --flicker-margin F   added to the old path's popped share in gate A (default 0.002)
   --reflections on|off screen reflections during the gates (default on)
   --fog on|off         froxel fog during the gates (default off). Fog keeps its own
@@ -53,7 +61,7 @@ VIEWS = {
     "sponza": ("sponza", [-13.39384, 2.12628, -4.41117], -4.62119, -0.102),
 }
 ARGS = {"view": "hall", "size": "1280x720", "bin": "target/release/genos-lighting", "port": "18797", "out": "",
-        "only": "A,B,C,D,E", "flicker-margin": "0.002", "fog": "off", "reflections": "on"}
+        "only": "A,B,C,D,E,F", "flicker-margin": "0.002", "steps": "30", "pop-ratio": "2.5", "fog": "off", "reflections": "on"}
 argv = sys.argv[1:]
 while argv:
     a = argv.pop(0)
@@ -140,6 +148,30 @@ def turn_back_changes(label):
     return changed, far, total, albedo
 
 
+def moving_pops(label):
+    """Gate F: the mean count of popping pixels a step on a sideways walk."""
+    import numpy as np
+    from PIL import Image
+    right = [math.cos(YAW), 0.0, -math.sin(YAW)]
+    frames = []
+    for i in range(int(ARGS["steps"])):
+        pose(pos=[POS[k] + right[k] * 0.01 * i for k in range(3)], frames=3)
+        views = []
+        for mode in ("full", "depth", "albedo"):
+            r = call("capture", {"path": f"f-{label}-{i:03}-{mode}.png", "mode": mode})["path"]
+            path = r if os.path.isabs(r) else os.path.join(OUT, r)
+            views.append(np.asarray(Image.open(path).convert("L"), dtype=np.int16))
+        frames.append(views)
+    counts = []
+    for i in range(1, len(frames) - 1):
+        (a, da, aa), (b, db, ab), (c, dc, ac) = frames[i - 1], frames[i], frames[i + 1]
+        second = np.abs(c - 2 * b + a)
+        moved = (np.abs(db - da) > 2) | (np.abs(dc - db) > 2) | (np.abs(ab - aa) > 2) | (np.abs(ac - ab) > 2)
+        counts.append(int(((second > 6) & ~moved).sum()))
+    pose(frames=30)
+    return sum(counts) / max(len(counts), 1), max(counts, default=0)
+
+
 def wait_cone_ready():
     for _ in range(240):
         stats = call("cone_stats")["cascades"]
@@ -173,12 +205,13 @@ try:
         call("set_reflection_settings", {"enabled": "off"})
     pose(frames=60)
     old_turn = None
-    if "D" in ONLY or "E" in ONLY:
+    if "D" in ONLY or "E" in ONLY or "F" in ONLY:
         # Exposure held fixed: D and E grade the lighting, not the meter.
         ev = call("get_hdr")["ev100"]
         call("set_hdr_settings", {"exposure_mode": "fixed", "ev100": str(ev)})
     if "D" in ONLY:
         old_turn = turn_back_changes("old")
+    old_pops = moving_pops("old") if "F" in ONLY else None
     old_flicker = None
     if "A" in ONLY:
         call("wait_settled", {"timeout_frames": 900})
@@ -242,6 +275,11 @@ try:
             dropped = call("cone_stats").get("lamp_dropped", 0)
             grade("E lamp follows in one frame", far == 0 and dropped == 0 and moved > 0,
                   f"{moved} pixels changed with the move; {far} differ by more than one code ({changed} at all) between the first frame after the move and 30 frames later; {dropped} lamp points dropped")
+    if "F" in ONLY:
+        cone_pops = moving_pops("cone")
+        limit = old_pops[0] * float(ARGS["pop-ratio"])
+        grade("F moving camera", cone_pops[0] <= limit,
+              f"cone {cone_pops[0]:.0f} popping pixels a 1 cm step (worst {cone_pops[1]}), old path {old_pops[0]:.0f} (worst {old_pops[1]}); limit {limit:.0f}")
     call("quit")
 finally:
     time.sleep(2)

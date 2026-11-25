@@ -50,10 +50,6 @@ const uint CONE_RECORD = 33u;
 // surface, 10 bits an axis over its cell from half a voxel below to half past.
 const uint CONE_SEAT_WORD = 32u;
 const uint CONE_TEXEL_SEAT = 15u;
-// The pixel level's snap: each level's distance is measured from the eye
-// snapped to a grid this many of its cells wide, so a level boundary moves
-// only when the snapped eye does, and not with a turn of the head.
-const float CONE_SNAP = 4.0;
 // A level is chosen when its voxel is at least this share of the wanted
 // size: the nearest level in log2, as the rounding before had it.
 const float CONE_NEAREST = 0.70710678;
@@ -140,10 +136,13 @@ uint cone_cones_at(int c) {
 
 // A probe's record: 0 key, 1 lod, 2 the chain child (the probe of cascade
 // c - 1 its cones start from, or CONE_NO_BRICK), 3 the start's lod, 4..6 its
-// cell, 7 its pixel count, 8..10 the seat (the field voxel's surface point,
+// cell, 7 its pixel count, 11 1 when the field seated it (CONE_PROBE_SEATED), 8..10 the seat (the field voxel's surface point,
 // lifted along its surface's normal when that holds), 12..14 the cones' start point (on
 // the voxel layer), 16..18 that point's normal; 20..27 the probes of the next
 // cascade the merge reads and 28.. unused.
+const uint CONE_PROBE_SEATED = 11u;
+// No cell: a cone_weights `own` that matches none.
+const ivec3 CONE_NO_CELL = ivec3(-2147483647);
 uint cone_probe(int c, uint i) {
     return cone_probes_at(c) + i * CONE_PROBE_WORDS;
 }
@@ -205,24 +204,23 @@ uint cone_find(int c, uint key) {
 ivec3 cone_cell(vec3 pos, vec3 n, float size) {
     return ivec3(floor((pos - n * (CONE_BEHIND * min(size, CONE_BEHIND))) / size));
 }
+// From this cascade up, a probe merges only its parent (which it put there
+// itself); below it, the eight around it (cone_spread.comp,
+// cone_weights.comp). The coarse cascades hold most of the cones (four times
+// the directions each), and a rim probe there has no children to close its
+// cones early: neighbours up to cascade 2 cost the hall 62 ms a frame at
+// 1080p, up to cascade 1 50 ms (section 18, step 4b).
+const int CONE_PARENT_ONLY = 2;
 // A pixel's probe level: the finest level whose voxel is about `probe_px`
-// pixels wide or more, measured at the voxel's centre from the eye snapped
-// to that level's grid. Every pixel of a voxel agrees, a turn of the head
-// changes nothing, and a step moves a boundary only when the snapped eye moves.
-int cone_pixel_lod(vec3 pos, vec3 n) {
+// pixels wide or more at the pixel's distance from the eye. Every frame from
+// where the eye is, so a turn of the head changes nothing and a step moves a
+// level boundary a little, never in a jump.
+int cone_pixel_lod(vec3 pos) {
     float per_pixel = CONE_HALVES * scene.view_right.w / float(pc.dims.y);
     float px = float(pc.params.w);
-    for (int lod = CONE_FINEST; lod < CONE_MAX_LOD; lod++) {
-        float size = cone_size(lod);
-        float snap = size * CONE_SNAP;
-        vec3 eye = (floor(scene.eye.xyz / snap) + CONE_HALF) * snap;
-        vec3 away = (vec3(cone_cell(pos, n, size)) + CONE_HALF) * size - eye;
-        float reach = max(abs(away.x), max(abs(away.y), abs(away.z)));
-        if (size >= CONE_NEAREST * px * per_pixel * reach) {
-            return lod;
-        }
-    }
-    return CONE_MAX_LOD;
+    float reach = max(length(pos - scene.eye.xyz), CONE_TINY);
+    float level = log2(CONE_NEAREST * px * per_pixel * reach / CONE_BASE);
+    return clamp(int(ceil(level)), CONE_FINEST, CONE_MAX_LOD);
 }
 
 // Direction bins: 2 theta columns of azimuth by theta rows of z.
@@ -427,6 +425,36 @@ bool cone_seat(int level, ivec3 cell, out vec3 mean, out vec3 normal, out float 
         held = length(sum) / total;
     }
     return true;
+}
+
+// Whether cascade c's probe at `lod` and `cell` is wanted as a neighbour:
+// its field voxel has a surface, or the level is past the field's coarsest
+// (no surface is known there, so every cell is).
+bool cone_probe_wanted(int lod, int c, ivec3 cell) {
+    int level = lod + c;
+    if (level > CONE_COARSEST) {
+        return true;
+    }
+    vec3 mean;
+    vec3 normal;
+    float held;
+    return cone_seat(level, cell, mean, normal, held);
+}
+
+// Put cascade c's probe at `lod` and `cell` in its hash; the slot, or
+// CONE_NO_BRICK (counted) when the hash had no room or the cell is out of range.
+uint cone_insert_probe(int c, int lod, ivec3 cell) {
+    uint key = cone_key(lod, cell, c);
+    uint slot = key == CONE_EMPTY ? CONE_NO_BRICK : cone_slot(c, key, true);
+    if (slot == CONE_NO_BRICK) {
+        atomicAdd(cwork.w[CONE_INSERT_DROPPED + uint(c)], 1u);
+    }
+    return slot;
+}
+
+// The 8 cells of spacing `s` around `at` that a trilinear read takes.
+ivec3 cone_trilinear_base(vec3 at, float s) {
+    return ivec3(floor(at / s - CONE_HALF));
 }
 
 float cone_reads = 0.0;
@@ -733,7 +761,10 @@ uint cone_record_at(int c, uint probe, uint bin) {
 
 // The probes of cascade c at level `lod` around `at`, trilinear, at most 8,
 // each weighted by the share that passes from `from` to its seat when `see`.
-int cone_weights(int c, int lod, vec3 at, bool see, vec3 from, out uint probes[8], out float weights[8]) {
+// A probe the field had no seat for (seated at its cell's centre: a pixel on
+// something the field does not hold) is read only as the cell `own`: whether
+// it exists follows what is on screen, so no other probe or pixel leans on it.
+int cone_weights(int c, int lod, vec3 at, bool see, vec3 from, ivec3 own, out uint probes[8], out float weights[8]) {
     float s = cone_spacing(lod, c);
     vec3 g = at / s - CONE_HALF;
     vec3 base = floor(g);
@@ -750,8 +781,12 @@ int cone_weights(int c, int lod, vec3 at, bool see, vec3 from, out uint probes[8
         if (wt <= 0.0) {
             continue;
         }
-        uint probe = cone_find(c, cone_key(lod, ivec3(base) + o, c));
+        ivec3 cell = ivec3(base) + o;
+        uint probe = cone_find(c, cone_key(lod, cell, c));
         if (probe == CONE_NO_BRICK) {
+            continue;
+        }
+        if (cwork.w[cone_probe(c, probe) + CONE_PROBE_SEATED] == 0u && cell != own) {
             continue;
         }
         if (see) {

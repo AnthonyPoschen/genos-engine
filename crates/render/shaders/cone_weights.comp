@@ -20,7 +20,17 @@ void main() {
     vec3 centre = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c);
     uint probes[8];
     float weights[8];
-    cone_weights(c + 1, lod, centre, (pc.lamp.x & 1u) != 0u, cone_word3(r + 8u), probes, weights);
+    if (c + 1 >= CONE_PARENT_ONLY) {
+        // The parent, which this probe put there (cone_spread.comp).
+        vec3 at = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c);
+        uint parent = cone_find(c + 1, cone_key(lod, ivec3(floor(at / cone_spacing(lod, c + 1))), c + 1));
+        for (int k = 0; k < 8; k++) {
+            cwork.w[r + 20u + uint(k)] = k == 0 ? parent : CONE_NO_BRICK;
+        }
+        cwork.w[r + 28u] = packHalf2x16(vec2(parent == CONE_NO_BRICK ? 0.0 : 1.0, 0.0));
+        return;
+    }
+    cone_weights(c + 1, lod, centre, (pc.lamp.x & 1u) != 0u, cone_word3(r + 8u), CONE_NO_CELL, probes, weights);
     for (int k = 0; k < 8; k++) {
         cwork.w[r + 20u + uint(k)] = probes[k];
     }

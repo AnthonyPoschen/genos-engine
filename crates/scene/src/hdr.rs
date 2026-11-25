@@ -576,7 +576,7 @@ fn parse_f64(name: &str, value: &str) -> Result<f64, String> {
 }
 
 /// Auto exposure's default strength in the auto presets (`adapt_strength`).
-pub const ADAPT_STRENGTH: f64 = 0.3;
+pub const ADAPT_STRENGTH: f64 = 0.15;
 /// The default highlight percentile (`highlight_percentile`).
 pub const HIGHLIGHT_PERCENTILE: f64 = 0.98;
 /// The default highlight key in stops above mid-grey (`highlight_stops`).
@@ -795,7 +795,7 @@ mod tests {
         );
         assert_eq!(from_cli.adapt_down.to_bits(), 0.90_f64.to_bits());
         assert_eq!(from_cli.adapt_up.to_bits(), 1.25_f64.to_bits());
-        assert_eq!(HDR_ENV_MIRRORS.len(), 15);
+        assert_eq!(HDR_ENV_MIRRORS.len(), 18);
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_DOWN"));
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_UP"));
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_OUT"));

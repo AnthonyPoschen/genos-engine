@@ -199,7 +199,7 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 | `shutter` | seconds | 1/60 |
 | `adapt_down` | seconds, exposure falling (scene got brighter) | 0.40 |
 | `adapt_up` | seconds, exposure rising (scene got darker) | 0.80 |
-| `adapt_strength` | 0..1, how far auto exposure follows the meter when the frame is darker than its highlight key (see "Highlight key") | 0.3 on the auto presets; 1 on legacy bytes |
+| `adapt_strength` | 0..1, how far auto exposure follows the meter when the frame is darker than its highlight key (see "Highlight key") | 0.15 on the auto presets; 1 on legacy bytes |
 | `highlight_percentile` | 0.5..1, the luminance share that sets the highlight key | 0.98 |
 | `highlight_stops` | 0.5..10, stops above mid-grey the highlight key places that luminance | 3 |
 | `display` | `agx`, `aces`, `legacy` | `agx`. `aces` presents the legacy shoulder until `aces2_rec709` is the Academy CTL |
