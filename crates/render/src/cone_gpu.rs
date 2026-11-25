@@ -122,9 +122,18 @@ struct ConeGpu {
     work: Buffer,
     /// The world, model, lamps and lamp radius the field was built for.
     key: u64,
-    building: Option<(u64, std::thread::JoinHandle<crate::cone_field::ConeField>)>,
+    building: Option<(u64, [f32; 3], std::thread::JoinHandle<ConeBuilt>)>,
+    /// The eye the resident field's clip volumes are about.
+    clip_eye: [f32; 3],
+    /// The resident field has its fine levels (not the coarse levels alone).
+    has_fine: bool,
     /// Bytes still to upload: (buffer 0..3, bytes, cursor).
     pending: Vec<(usize, Vec<u8>, usize)>,
+    /// A field built while another is resident (the clip volumes about a
+    /// moved eye): its four buffers fill here while the resident field stays
+    /// bound, and take its place before a frame once they are full.
+    next: Vec<Buffer>,
+    next_full: bool,
     ready: bool,
     /// The work buffer's shape (theta, cascades, pixels, probe_px, lamps) and layout.
     work_shape: (u32, u32, u64, u32, u64),
@@ -149,7 +158,11 @@ impl ConeGpu {
             work: Buffer::empty(),
             key: 0,
             building: None,
+            clip_eye: [0.0; 3],
+            has_fine: false,
             pending: Vec::new(),
+            next: Vec::new(),
+            next_full: false,
             ready: false,
             work_shape: (0, 0, 0, 0, 0),
             lamps_frozen: false,
@@ -185,7 +198,8 @@ fn cone_bytes(words: &[u32]) -> Vec<u8> {
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
-/// The field's four buffers as bytes: the table (head and levels first), the
+/// The field's four buffers as bytes: the table (head, levels and clip
+/// volumes first), the
 /// fine headers, the fine records, and the coarse texels (16 words each).
 fn cone_field_bytes(field: &crate::cone_field::ConeField) -> [Vec<u8>; 4] {
     let mut table: Vec<u32> = vec![field.atlas[0], field.atlas[1], field.atlas[2], field.coarse_bricks];
@@ -194,6 +208,9 @@ fn cone_field_bytes(field: &crate::cone_field::ConeField) -> [Vec<u8>; 4] {
         table.push(level.offset);
         table.extend(level.dims);
         table.push(0);
+    }
+    for level in &field.levels {
+        table.extend(level.clip.map(|v| u32::from_ne_bytes(v.to_ne_bytes())));
     }
     table.extend_from_slice(&field.table);
     let texels = field.occupancy.len();
@@ -210,11 +227,38 @@ fn cone_field_bytes(field: &crate::cone_field::ConeField) -> [Vec<u8>; 4] {
     [cone_bytes(&table), cone_bytes(&field.fine_bricks), cone_bytes(&field.fine_voxels), cone_bytes(&coarse)]
 }
 
-/// The field for a scene, built off the frame thread: its surfaces. The lamps
-/// are not in it; they are written each frame.
-fn cone_build(scene: &genos_scene::Scene, gltf: Option<&crate::gltf_surface::GltfSurface>) -> crate::cone_field::ConeField {
-    let points = crate::cone_field::surface_shape_points(scene, gltf);
-    crate::cone_field::FieldVoxels::from_surfaces(&points).brick()
+/// The field for a scene around the eye, built off the frame thread: its
+/// surfaces, the fine levels in clip volumes about `eye`. The lamps are not
+/// in it; they are written each frame.
+fn cone_build(scene: &genos_scene::Scene, gltf: Option<&crate::gltf_surface::GltfSurface>, eye: [f32; 3], fine: bool) -> ConeBuilt {
+    let started = std::time::Instant::now();
+    let field = crate::cone_field::FieldVoxels::around_eye(scene, gltf, eye, fine).brick();
+    let bytes = cone_field_bytes(&field);
+    let report = format!(
+        "{} points, {} voxels, {} fine bricks, {} fine records, {} coarse bricks, {} MiB, built in {:.2} s",
+        field.points,
+        field.voxels,
+        field.fine_bricks.len() / crate::cone_field::FINE_HEADER,
+        field.fine_voxels.len() / crate::cone_field::FINE_RECORD,
+        field.coarse_bricks,
+        bytes.iter().map(Vec::len).sum::<usize>() >> 20,
+        started.elapsed().as_secs_f64()
+    );
+    ConeBuilt { bytes, report: if fine { report } else { format!("coarse levels only: {report}") }, fine }
+}
+
+/// A built field as the GPU takes it, packed on the build thread.
+struct ConeBuilt {
+    bytes: [Vec<u8>; 4],
+    report: String,
+    /// False for the coarse levels alone ([`cone_build`]).
+    fine: bool,
+}
+
+/// Whether the eye has moved far enough from the clip volumes' centre that
+/// they are built again around it.
+fn cone_clip_stale(built: [f32; 3], eye: [f32; 3]) -> bool {
+    (0..3).any(|a| (built[a] - eye[a]).abs() > crate::cone_field::CLIP_MOVE)
 }
 
 /// Cone mode runs only the cascades: the old pipeline's direct pass, shadows,
@@ -239,29 +283,40 @@ fn cone_effective(settings: &mut genos_scene::LightingSettings) {
 
 impl Gpu {
     /// Build, upload and size the cone field for this world when cone mode is on.
-    fn sync_cone(&mut self, world: &World) -> Result<(), String> {
+    fn sync_cone(&mut self, world: &World, eye: [f32; 3]) -> Result<(), String> {
         let cone = self.lighting.settings.cone;
         if !cone.enabled {
             return Ok(());
         }
+        self.cone_swap_next()?;
         let key = cone_world_key(world);
-        // One build at a time. A moving lamp changes the key every frame, and a
-        // thread for each frame's key held a field each and ran the machine out
-        // of memory in a minute. The next build starts when this one is done,
-        // from the world as it is then, so a moving lamp lags by a build.
-        if self.cone.key != key && self.cone.building.is_none() {
+        // One build at a time: each holds a field, and a thread a frame once
+        // ran the machine out of memory in a minute.
+        // The fine levels are clip volumes about the eye: a new world, or an
+        // eye that has left the middle of the volumes, builds them again
+        // (the field in use stays until the new one is resident).
+        // A new world first gets its coarse levels alone, which build in a
+        // fraction of the time, so cone mode lights at once; the fine levels
+        // follow in the next build.
+        let new_world = self.cone.key != key;
+        let stale = new_world || !self.cone.has_fine || cone_clip_stale(self.cone.clip_eye, eye);
+        if stale && self.cone.building.is_none() {
             let scene = world.scene.clone();
             let gltf = world.gltf_surface.clone();
+            let fine = !new_world;
             let handle = std::thread::Builder::new()
                 .name("cone-field".into())
-                .spawn(move || cone_build(&scene, gltf.as_deref()))
+                .spawn(move || cone_build(&scene, gltf.as_deref(), eye, fine))
                 .map_err(|e| format!("cone field thread: {e}"))?;
-            self.cone.building = Some((key, handle));
+            self.cone.building = Some((key, eye, handle));
         }
-        if self.cone.building.as_ref().is_some_and(|(_, h)| h.is_finished()) {
-            if let Some((k, handle)) = self.cone.building.take() {
-                let field = handle.join().map_err(|_| "cone field thread panicked".to_string())?;
-                self.cone_take_field(k, &field)?;
+        if self.cone.building.as_ref().is_some_and(|(_, _, h)| h.is_finished()) {
+            if let Some((k, at, handle)) = self.cone.building.take() {
+                let built = handle.join().map_err(|_| "cone field thread panicked".to_string())?;
+                let fine = built.fine;
+                self.cone_take_field(k, built)?;
+                self.cone.clip_eye = at;
+                self.cone.has_fine = fine;
             }
         }
         let pixels = u64::from(self.lighting.dims[0]) * u64::from(self.lighting.dims[1]);
@@ -294,19 +349,23 @@ impl Gpu {
     }
 
     /// A built field: new buffers, and its bytes queued for upload.
-    fn cone_take_field(&mut self, key: u64, field: &crate::cone_field::ConeField) -> Result<(), String> {
-        let bytes = cone_field_bytes(field);
-        self.cone.report = format!(
-            "{} points, {} voxels, {} fine bricks, {} fine records, {} coarse bricks, {} MiB",
-            field.points,
-            field.voxels,
-            field.fine_bricks.len() / crate::cone_field::FINE_HEADER,
-            field.fine_voxels.len() / crate::cone_field::FINE_RECORD,
-            field.coarse_bricks,
-            bytes.iter().map(Vec::len).sum::<usize>() >> 20
-        );
-        self.idle_device();
+    fn cone_take_field(&mut self, key: u64, built: ConeBuilt) -> Result<(), String> {
+        let ConeBuilt { bytes, report, .. } = built;
+        self.cone.report = report;
         let share = self.light_families();
+        if self.cone.ready && self.cone.next.is_empty() {
+            // A field is resident and lighting: fill the new one beside it.
+            for b in &bytes {
+                let size = u64::try_from(b.len().max(16)).unwrap_or(16);
+                let made = self.make_buffer_queues(size, 0x20 | 0x2, Memory::Device, &share)?;
+                self.cone.next.push(made);
+            }
+            self.cone.pending = bytes.into_iter().enumerate().map(|(k, b)| (k, b, 0)).collect();
+            self.cone.next_full = false;
+            self.cone.key = key;
+            return Ok(());
+        }
+        self.idle_device();
         for (k, b) in bytes.iter().enumerate() {
             let target = match k {
                 0 => &mut self.cone.table,
@@ -349,11 +408,12 @@ impl Gpu {
             }
             let end = (*cursor + budget).min(bytes.len());
             if end > *cursor {
-                let dst = match *k {
-                    0 => self.cone.table.buffer,
-                    1 => self.cone.fine.buffer,
-                    2 => self.cone.records.buffer,
-                    _ => self.cone.coarse.buffer,
+                let dst = match (self.cone.next.get(*k), *k) {
+                    (Some(next), _) => next.buffer,
+                    (None, 0) => self.cone.table.buffer,
+                    (None, 1) => self.cone.fine.buffer,
+                    (None, 2) => self.cone.records.buffer,
+                    (None, _) => self.cone.coarse.buffer,
                 };
                 self.write_device(cmd, dst, u64::try_from(*cursor).unwrap_or(0), &bytes[*cursor..end])?;
                 budget -= end - *cursor;
@@ -364,7 +424,36 @@ impl Gpu {
         self.cone.pending = pending;
         if self.cone.pending.is_empty() {
             self.memory_barrier(0x1000, 0x800, 0x1000, 0x20);
-            self.cone.ready = true;
+            if self.cone.next.is_empty() {
+                self.cone.ready = true;
+            } else {
+                self.cone.next_full = true;
+            }
+        }
+        Ok(())
+    }
+
+    /// Put a filled next field in the resident one's place, before a frame
+    /// is recorded (the lighting sets are written again).
+    fn cone_swap_next(&mut self) -> Result<(), String> {
+        if !self.cone.next_full {
+            return Ok(());
+        }
+        self.idle_device();
+        let mut next = std::mem::take(&mut self.cone.next);
+        for (k, made) in next.drain(..).enumerate() {
+            let target = match k {
+                0 => &mut self.cone.table,
+                1 => &mut self.cone.fine,
+                2 => &mut self.cone.records,
+                _ => &mut self.cone.coarse,
+            };
+            let mut old = std::mem::replace(target, made);
+            self.destroy_buffer(&mut old);
+        }
+        self.cone.next_full = false;
+        if self.lighting.ready {
+            self.write_lighting_sets()?;
         }
         Ok(())
     }
@@ -545,8 +634,14 @@ impl Gpu {
             );
             self.destroy_buffer(&mut old);
         }
+        let mut next = std::mem::take(&mut self.cone.next);
+        for buffer in &mut next {
+            self.destroy_buffer(buffer);
+        }
+        self.cone.next_full = false;
         self.cone.ready = false;
         self.cone.key = 0;
+        self.cone.has_fine = false;
         self.cone.pending.clear();
     }
 }

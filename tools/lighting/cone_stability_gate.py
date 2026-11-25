@@ -26,6 +26,10 @@ paused so nothing moves but the camera, and grades cone mode
      nor albedo changed (a slide over a gradient is near 0, a pop is not).
      The mean over the walk is at most --pop-ratio times the old path's on
      the same walk. Before section 18 step 4b: 5 to 7 times in the hall
+  G  a clip rebuild does not blink: walk 4 m forward in 10 cm steps, a frame
+     each, past the 2 m at which the fine levels are built again about the
+     eye; the field is rebuilt (cone_stats field changes) and no frame's
+     mean luminance falls under 80% of the mean of the frames either side
 
 Views: --view hall (lighting-stress, the hall checkpoint) or --view sponza
 (the arcade pose of section 18). Each gate prints PASS or FAIL; the exit code
@@ -37,7 +41,7 @@ goes to --out.
   --bin PATH           genos-lighting binary (default target/release/genos-lighting)
   --port N             command port (default 18797)
   --out DIR            evidence directory (default genos-debug/cone-stability/<view>-<size>)
-  --only A,B,C,D,E,F   run these gates only
+  --only A,B,C,D,E,F,G run these gates only
   --steps N            gate F's 1 cm steps (default 30)
   --pop-ratio F        gate F's limit against the old path (default 2.5)
   --flicker-margin F   added to the old path's popped share in gate A (default 0.002)
@@ -61,7 +65,7 @@ VIEWS = {
     "sponza": ("sponza", [-13.39384, 2.12628, -4.41117], -4.62119, -0.102),
 }
 ARGS = {"view": "hall", "size": "1280x720", "bin": "target/release/genos-lighting", "port": "18797", "out": "",
-        "only": "A,B,C,D,E,F", "flicker-margin": "0.002", "steps": "30", "pop-ratio": "2.5", "fog": "off", "reflections": "on"}
+        "only": "A,B,C,D,E,F,G", "flicker-margin": "0.002", "steps": "30", "pop-ratio": "2.5", "fog": "off", "reflections": "on"}
 argv = sys.argv[1:]
 while argv:
     a = argv.pop(0)
@@ -152,7 +156,7 @@ def moving_pops(label):
     """Gate F: the mean count of popping pixels a step on a sideways walk."""
     import numpy as np
     from PIL import Image
-    right = [math.cos(YAW), 0.0, -math.sin(YAW)]
+    right = [math.cos(YAW), 0.0, math.sin(YAW)]
     frames = []
     for i in range(int(ARGS["steps"])):
         pose(pos=[POS[k] + right[k] * 0.01 * i for k in range(3)], frames=3)
@@ -173,9 +177,12 @@ def moving_pops(label):
 
 
 def wait_cone_ready():
+    # The first field holds the coarse levels alone; wait for the fine ones.
     for _ in range(240):
-        stats = call("cone_stats")["cascades"]
-        if stats and stats[0]["probes"] > 0:
+        reply = call("cone_stats")
+        stats = reply["cascades"]
+        if stats and stats[0]["probes"] > 0 and not reply.get("field", "").startswith("coarse"):
+            call("wait", {"frames": 5})
             return stats
         call("wait", {"frames": 10})
         time.sleep(1)
@@ -280,6 +287,23 @@ try:
         limit = old_pops[0] * float(ARGS["pop-ratio"])
         grade("F moving camera", cone_pops[0] <= limit,
               f"cone {cone_pops[0]:.0f} popping pixels a 1 cm step (worst {cone_pops[1]}), old path {old_pops[0]:.0f} (worst {old_pops[1]}); limit {limit:.0f}")
+    if "G" in ONLY:
+        # Forward, down the open view: sideways runs into a column in both views.
+        ahead = [math.sin(YAW), 0.0, -math.cos(YAW)]  # look_direction (camera.rs)
+        pose(frames=30)
+        before = call("cone_stats").get("field", "")
+        lum = []
+        for i in range(41):
+            call("camera", {"position": [POS[k] + ahead[k] * 0.1 * i for k in range(3)], "yaw": YAW, "pitch": PITCH})
+            call("wait", {"frames": 1})
+            lum.append(call("luminance")["luminance"])
+        call("wait", {"frames": 60})
+        after = call("cone_stats").get("field", "")
+        dips = [i for i in range(1, len(lum) - 1) if lum[i] < 0.8 * 0.5 * (lum[i - 1] + lum[i + 1])]
+        save("g-luminance.json", lum)
+        grade("G clip rebuild", after != before and not dips,
+              f"rebuilt: {after != before}; frames dipping under 80% of their neighbours: {dips}; luminance {min(lum):.4f} to {max(lum):.4f}")
+        pose()
     call("quit")
 finally:
     time.sleep(2)

@@ -4,7 +4,8 @@
 Starts genos-lighting headless under a memory cap, pauses scene time, and
 reads `timing` over --frames frames with the old path, then with
 cone_cascades=on once its field is resident. Also prints the seconds from
-turning cone mode on to its first probes (the field's build and upload). Prints the GPU and CPU frame
+turning cone mode on to its first probes (the coarse levels' build and upload)
+and to the fine levels' (the clip volumes about the eye). Prints the GPU and CPU frame
 milliseconds of each and the cone probe counts (`cone_stats`), and writes
 them to --out/cost.json. A measurement, not a gate: it always exits 0 unless
 the program could not be driven (UNSURE, exit 2).
@@ -90,14 +91,22 @@ try:
             break
         call("wait", {"frames": 1})
     ready = time.time() - switched
+    # The first field holds the coarse levels alone; the fine ones follow.
+    for _ in range(4000):
+        if not call("cone_stats").get("field", "").startswith("coarse"):
+            break
+        call("wait", {"frames": 1})
+    full = time.time() - switched
+    call("wait", {"frames": 5})
     cone = timed()
     stats = call("cone_stats")["cascades"]
-    result = {"view": ARGS["view"], "size": ARGS["size"], "old": old, "cone": cone, "cone_stats": stats, "ready_seconds": ready}
+    result = {"view": ARGS["view"], "size": ARGS["size"], "old": old, "cone": cone, "cone_stats": stats, "ready_seconds": ready, "full_seconds": full}
     with open(os.path.join(OUT, "cost.json"), "w") as f:
         json.dump(result, f, indent=1)
     keys = [k for k in old if isinstance(old[k], (int, float))]
     print(f"{ARGS['view']} {ARGS['size']}: " + ", ".join(f"{k} old {old[k]:.2f} cone {cone[k]:.2f}" for k in keys))
-    print(f"  cone mode on to first probes: {ready:.2f} s")
+    print(f"  cone mode on to first probes: {ready:.2f} s; to the fine levels: {full:.2f} s")
+    print(f"  field: {call('cone_stats').get('field', '')}")
     print("  probes " + " ".join(f"c{s['cascade']}={s['probes']}" for s in stats)
           + "  seat fallbacks " + " ".join(f"c{s['cascade']}={s['seat_fallbacks']}" for s in stats))
     call("quit")

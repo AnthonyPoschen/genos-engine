@@ -1244,7 +1244,7 @@ impl Renderer {
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
-        self.gpu.sync_cone(world)?;
+        self.gpu.sync_cone(world, [camera.position.x, camera.position.y, camera.position.z])?;
         self.gpu.set_froxel_frame(&world.scene, camera, aspect);
         if !self.gpu.record_and_submit(&matrix)? {
             return Ok(None);
@@ -1622,6 +1622,21 @@ impl Renderer {
     /// Lamp points the cone cascades' lamp hash had no slot for last frame.
     pub fn cone_lamp_drops(&mut self) -> Result<u32, String> {
         self.gpu.cone_lamp_drops()
+    }
+
+    /// The resident cone field: its points, voxels, bricks, bytes and build
+    /// seconds. Empty before the first one is built.
+    #[must_use]
+    pub fn cone_field_report(&self) -> String {
+        self.gpu.cone.report.clone()
+    }
+
+    /// Whether the cone field in use has its fine levels (the clip volumes
+    /// about the eye), not the coarse levels alone of a world's first build,
+    /// and no newer field is filling.
+    #[must_use]
+    pub fn cone_field_fine(&self) -> bool {
+        self.gpu.cone.ready && self.gpu.cone.has_fine && self.gpu.cone.next.is_empty() && self.gpu.cone.building.is_none()
     }
 
     /// Cascade `c`'s probes (key, level, cell, pixels, seat) from the last frame.

@@ -72,12 +72,13 @@ fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Ca
     frame.expect("a frame")
 }
 
-/// Draw until the field is built and uploaded and the cascades have run.
+/// Draw until the field with its fine levels is built and uploaded and the
+/// cascades have run (a world's first field holds the coarse levels alone).
 fn resident(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) {
     for _ in 0..600 {
         let _ = PresentedFrame::from_draw(window, renderer, world, camera);
         let stats = renderer.cone_stats().expect("cone stats");
-        if stats.first().is_some_and(|s| s.probes > 0) {
+        if stats.first().is_some_and(|s| s.probes > 0) && renderer.cone_field_fine() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));

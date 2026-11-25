@@ -148,7 +148,8 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        (default mean)
   --renderer-field     build the renderer's voxel field (crates/render
                        cone_field) for the scene, print its size and build
-                       time, and stop
+                       time, and stop; with --eye, the field the renderer
+                       builds about that eye (fine levels in clip volumes)
   --field-check        as --renderer-field, then also build the reference
                        field (every point's albedo ray, one thread) and print
                        each level's voxels and area against it
@@ -3106,6 +3107,33 @@ fn run(o: &Options) -> Result<(), String> {
         scene.sky = None;
     }
     if o.renderer_field {
+        if let Some(eye) = o.eye {
+            let started = std::time::Instant::now();
+            let coarse = genos_render::cone_field::FieldVoxels::around_eye(&scene, gltf.as_ref().map(|g| &g.0), eye, false).brick();
+            println!(
+                "renderer field, coarse levels alone (the first build): {} voxels, {:.0} MiB, {:.2} s",
+                coarse.voxels,
+                coarse.bytes() as f64 / (1024.0 * 1024.0),
+                started.elapsed().as_secs_f64()
+            );
+            // The renderer's build about an eye: coarse levels for the whole
+            // scene, the fine levels in clip volumes around the eye.
+            let started = std::time::Instant::now();
+            let voxels = genos_render::cone_field::FieldVoxels::around_eye(&scene, gltf.as_ref().map(|g| &g.0), eye, true);
+            let filed = started.elapsed().as_secs_f64();
+            let field = voxels.brick();
+            println!(
+                "renderer field about {eye:?}: {} points, {} voxels, {:.0} MiB; {filed:.2} s to sample and file, {:.2} s to brick",
+                field.points,
+                field.voxels,
+                field.bytes() as f64 / (1024.0 * 1024.0),
+                started.elapsed().as_secs_f64() - filed
+            );
+            for (k, level) in field.levels.iter().enumerate() {
+                println!("  level {}: clip {:?}, {:?} bricks in the table", k + 2, level.clip, level.dims);
+            }
+            return Ok(());
+        }
         let started = std::time::Instant::now();
         // The renderer's build: shape points on every core, the albedo ray
         // only where a material has holes, voxels on every core. The lamps

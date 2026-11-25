@@ -88,13 +88,32 @@ impl Default for Voxel {
 pub type FieldPoint = (V3, V3, f32, V3);
 
 /// Where one level's bricks are: its table starts at `offset` in
-/// [`ConeField::table`], covering `dims` bricks from brick `origin`.
+/// [`ConeField::table`], covering `dims` bricks from brick `origin`. `clip`
+/// is the level's clip volume, `[x, y, z, side]` in its voxels: the box from
+/// that corner `side` voxels along each axis that the level holds. Past it
+/// the level holds nothing and a coarser one stands in. A side of 0 holds the
+/// whole scene.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FieldLevel {
     pub origin: [i32; 3],
     pub dims: [u32; 3],
     pub offset: u32,
+    pub clip: [i32; 4],
 }
+
+/// Voxels across each clip level's volume around the eye (8 m at 6.25 cm,
+/// 16 m at 12.5 cm, 32 m at 25 cm). The levels from [`WHOLE_FINEST`] up hold
+/// the whole scene.
+pub const CLIP_CELLS: i32 = 128;
+/// The eye may move this far from the clip volumes' centre (metres) before
+/// they are built again around it: a quarter of the finest volume's half.
+pub const CLIP_MOVE: f32 = 2.0;
+/// A clip volume that holds nothing: a fine level not built yet.
+pub const NO_CLIP: [i32; 4] = [0, 0, 0, -1];
+/// The first level kept for the whole scene (50 cm); finer ones are clip
+/// volumes. A dense brick of 25 cm voxels over a whole Sponza was 140 MiB and
+/// most of the first build.
+pub const WHOLE_FINEST: u8 = PLANE_COARSEST + 2;
 
 /// Words a fine brick's header holds: the index of its first voxel record,
 /// 16 words of mask (bit `x + 8 y + 64 z` set where a voxel is), and for each
@@ -288,10 +307,25 @@ fn half_floor(v: f32) -> i32 {
 /// all kept.
 #[must_use]
 pub fn surface_shape_points(scene: &Scene, gltf: Option<&GltfSurface>) -> Vec<FieldPoint> {
-    let step = 0.5 * voxel_size(FIELD_FINEST);
+    shape_points(scene, gltf, 0.5 * voxel_size(FIELD_FINEST), None)
+}
+
+/// Whether a triangle's box meets `bounds` (none: every triangle does).
+fn meets(positions: &[V3; 3], bounds: Option<(V3, V3)>) -> bool {
+    let Some((lo, hi)) = bounds else { return true };
+    (0..3).all(|a| {
+        let low = positions.iter().map(|p| p[a]).fold(f32::INFINITY, f32::min);
+        let high = positions.iter().map(|p| p[a]).fold(f32::NEG_INFINITY, f32::max);
+        high >= lo[a] && low <= hi[a]
+    })
+}
+
+/// As [`surface_shape_points`], with points `step` apart, from the triangles
+/// whose box meets `bounds` only.
+fn shape_points(scene: &Scene, gltf: Option<&GltfSurface>, step: f32, bounds: Option<(V3, V3)>) -> Vec<FieldPoint> {
     let mut points = Vec::new();
     let mesh = SceneMesh::from_scene(scene);
-    for tri in &mesh.triangles {
+    for tri in mesh.triangles.iter().filter(|t| meets(&t.positions, bounds)) {
         let normal = normalize(tri.normals[0]);
         sample_triangle(tri.positions, step, |at, each| {
             points.push((at, normal, each, [0.0; 3]));
@@ -301,7 +335,7 @@ pub fn surface_shape_points(scene: &Scene, gltf: Option<&GltfSurface>) -> Vec<Fi
         });
     }
     if let Some(model) = gltf {
-        let triangles: Vec<_> = model.triangles().collect();
+        let triangles: Vec<_> = model.triangles().filter(|t| meets(&t.positions, bounds)).collect();
         let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
         let chunk = triangles.len().div_ceil(threads).max(1);
         let parts: Vec<Vec<FieldPoint>> = std::thread::scope(|scope| {
@@ -423,6 +457,8 @@ const FINE_SPLIT: u64 = 4;
 pub struct FieldVoxels {
     cells: Cells,
     points: usize,
+    /// Each level's clip volume ([`FieldLevel::clip`]).
+    clips: [[i32; 4]; FIELD_LEVELS],
 }
 
 /// One surface point's share of a voxel (`add_surface` and `from_surfaces`).
@@ -433,12 +469,30 @@ fn accumulate(voxel: &mut Voxel, point: V3, normal: V3, area: f32, radiance: V3)
         voxel.light[d] = add(voxel.light[d], scale(radiance, facing));
         voxel.at[d] = add(voxel.at[d], scale(point, facing));
         if facing > 0.0 {
+            // A point stands for the patch about it, `area` square: the box
+            // covers that patch, so it does not shrink with sparser points.
+            let reach = 0.5 * area.sqrt();
             for a in 0..3 {
-                voxel.lo[d][a] = voxel.lo[d][a].min(point[a]);
-                voxel.hi[d][a] = voxel.hi[d][a].max(point[a]);
+                voxel.lo[d][a] = voxel.lo[d][a].min(point[a] - reach);
+                voxel.hi[d][a] = voxel.hi[d][a].max(point[a] + reach);
             }
         }
     }
+}
+
+/// Add voxel `from` into `into`, as if its points had been filed there.
+fn merge_voxel(into: &mut Voxel, from: &Voxel) {
+    for d in 0..6 {
+        into.area[d] += from.area[d];
+        into.light[d] = add(into.light[d], from.light[d]);
+        into.at[d] = add(into.at[d], from.at[d]);
+        for a in 0..3 {
+            into.lo[d][a] = into.lo[d][a].min(from.lo[d][a]);
+            into.hi[d][a] = into.hi[d][a].max(from.hi[d][a]);
+        }
+    }
+    into.lamp_area += from.lamp_area;
+    into.lamp_light = add(into.lamp_light, from.lamp_light);
 }
 
 /// The voxel a surface point is filed in at `level`: the one a quarter of a
@@ -454,6 +508,64 @@ fn split_of(cell: [i32; 3]) -> u64 {
         h.write_i32(c);
     }
     h.finish() % FINE_SPLIT
+}
+
+/// The clip volume of `level` about `eye`: [`CLIP_CELLS`] voxels across,
+/// its corner on a brick boundary.
+#[must_use]
+pub fn clip_around(eye: V3, level: u8) -> [i32; 4] {
+    let centre = cell_of(eye, voxel_size(level));
+    let corner = centre.map(|c| (c - CLIP_CELLS / 2).div_euclid(BRICK) * BRICK);
+    [corner[0], corner[1], corner[2], CLIP_CELLS]
+}
+
+/// Whether `cell` is inside clip volume `clip` (a side of 0 holds every cell).
+#[must_use]
+pub fn clip_holds(clip: [i32; 4], cell: [i32; 3]) -> bool {
+    clip[3] == 0 || (0..3).all(|a| cell[a] >= clip[a] && cell[a] < clip[a] + clip[3])
+}
+
+/// The voxels of `points` at `levels`, each kept only inside `clip`, on every
+/// core: [`FINE_SPLIT`] tasks for the finest of `levels` and one for each
+/// other, each reading every point in order (the sums are the serial ones).
+fn file_levels(points: &[FieldPoint], levels: std::ops::RangeInclusive<u8>, clip: Option<[i32; 4]>) -> Cells {
+    // The finest level of a set holds most of its voxels: split it.
+    let first = *levels.start();
+    let tasks: Vec<(u8, u64)> = levels
+        .flat_map(|level| {
+            let parts = if level == first { FINE_SPLIT } else { 1 };
+            (0..parts).map(move |part| (level, part))
+        })
+        .collect();
+    let parts: Vec<Cells> = std::thread::scope(|scope| {
+        let handles: Vec<_> = tasks
+            .iter()
+            .map(|&(level, part)| {
+                scope.spawn(move || {
+                    let split = level == first;
+                    let mut cells = Cells::default();
+                    for (at, normal, area, _) in points {
+                        let cell = filed_cell(*at, *normal, level);
+                        if split && split_of(cell) != part {
+                            continue;
+                        }
+                        if clip.is_some_and(|c| !clip_holds(c, cell)) {
+                            continue;
+                        }
+                        accumulate(cells.entry((level, cell)).or_default(), *at, *normal, *area, [0.0; 3]);
+                    }
+                    cells
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    let mut cells = Cells::default();
+    cells.reserve(parts.iter().map(HashMap::len).sum());
+    for part in parts {
+        cells.extend(part);
+    }
+    cells
 }
 
 impl FieldVoxels {
@@ -503,7 +615,68 @@ impl FieldVoxels {
         for part in parts {
             cells.extend(part);
         }
-        FieldVoxels { cells, points: points.len() }
+        FieldVoxels { cells, points: points.len(), clips: [[0; 4]; FIELD_LEVELS] }
+    }
+
+    /// The field around `eye`, sampled level by level: the coarse levels
+    /// ([`WHOLE_FINEST`] up) from points half a [`WHOLE_FINEST`] voxel apart
+    /// over the whole scene, and each finer level from points half its voxel
+    /// apart inside its clip volume ([`CLIP_CELLS`] across, about the eye).
+    /// A level's area is the same as from the finest points; its voxels'
+    /// seats are the mean of fewer points. Without `fine` the fine levels
+    /// hold nothing ([`NO_CLIP`]): the coarse levels alone, quick to build,
+    /// stand in until the fine ones are.
+    #[must_use]
+    pub fn around_eye(scene: &Scene, gltf: Option<&GltfSurface>, eye: V3, fine: bool) -> FieldVoxels {
+        let mut clips = [[0; 4]; FIELD_LEVELS];
+        for level in FIELD_FINEST..WHOLE_FINEST {
+            clips[usize::from(level - FIELD_FINEST)] = if fine { clip_around(eye, level) } else { NO_CLIP };
+        }
+        // The whole levels and each clip level at once: each samples and
+        // files on every core, and together they keep the cores busy while
+        // one of them samples.
+        let groups: Vec<(Cells, usize)> = std::thread::scope(|scope| {
+            let whole = scope.spawn(|| {
+                let points = shape_points(scene, gltf, 0.5 * voxel_size(WHOLE_FINEST), None);
+                let mut cells = file_levels(&points, WHOLE_FINEST..=WHOLE_FINEST, None);
+                // From the finest whole level up a point is filed the same
+                // distance behind it (filed_cell), so each coarser voxel is the
+                // sum of its eight children: built from them, not from the
+                // points again.
+                let mut below: Vec<([i32; 3], Voxel)> = cells.iter().map(|((_, c), v)| (*c, *v)).collect();
+                for level in WHOLE_FINEST + 1..=FIELD_COARSEST {
+                    let mut up = Cells::default();
+                    for (cell, voxel) in &below {
+                        merge_voxel(up.entry((level, cell.map(|c| c.div_euclid(2)))).or_default(), voxel);
+                    }
+                    below = up.iter().map(|((_, c), v)| (*c, *v)).collect();
+                    cells.extend(up);
+                }
+                (cells, points.len())
+            });
+            let fine: Vec<_> = (FIELD_FINEST..WHOLE_FINEST)
+                .filter(|_| fine)
+                .map(|level| {
+                    let clip = clips[usize::from(level - FIELD_FINEST)];
+                    scope.spawn(move || {
+                        let size = voxel_size(level);
+                        let lo = [0, 1, 2].map(|a| cell_low(clip[a], size) - size);
+                        let hi = [0, 1, 2].map(|a| cell_low(clip[a] + clip[3], size) + size);
+                        let points = shape_points(scene, gltf, 0.5 * size, Some((lo, hi)));
+                        (file_levels(&points, level..=level, Some(clip)), points.len())
+                    })
+                })
+                .collect();
+            std::iter::once(whole).chain(fine).filter_map(|h| h.join().ok()).collect()
+        });
+        let mut cells = Cells::default();
+        cells.reserve(groups.iter().map(|(c, _)| c.len()).sum());
+        let mut points = 0;
+        for (part, n) in groups {
+            cells.extend(part);
+            points += n;
+        }
+        FieldVoxels { cells, points, clips }
     }
 
     /// A lamp: a sphere of `radius` sending `glow` every way, its disc
@@ -556,31 +729,45 @@ impl FieldVoxels {
     pub fn brick(&self) -> ConeField {
         // The cells with a surface, and their neighbours; each level's bricks
         // (a coarse brick also where a voxel is one cell outside it, so its
-        // apron is whole).
-        let mut near: HashSet<(u8, [i32; 3])> = HashSet::new();
-        let mut bricks: Vec<HashSet<[i32; 3]>> = vec![HashSet::new(); FIELD_LEVELS];
-        for ((level, cell), voxel) in &self.cells {
-            let surface = voxel.area.iter().any(|a| *a > 0.0);
-            if !surface && voxel.lamp_area <= 0.0 {
-                continue;
-            }
-            let k = usize::from(level - FIELD_FINEST);
-            if *level <= PLANE_COARSEST {
-                bricks[k].insert(cell.map(|v| v.div_euclid(BRICK)));
-                continue;
-            }
-            for dz in -1..=1 {
-                for dy in -1..=1 {
-                    for dx in -1..=1 {
-                        let c = [cell[0] + dx, cell[1] + dy, cell[2] + dz];
-                        if surface {
-                            near.insert((*level, c));
+        // apron is whole). One task a level.
+        type CellSet = HashSet<[i32; 3], BuildHasherDefault<CellHasher>>;
+        let sets: Vec<(CellSet, CellSet)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (FIELD_FINEST..=FIELD_COARSEST)
+                .map(|level| {
+                    scope.spawn(move || {
+                        let mut near = CellSet::default();
+                        let mut bricks = CellSet::default();
+                        for ((l, cell), voxel) in &self.cells {
+                            if *l != level {
+                                continue;
+                            }
+                            let surface = voxel.area.iter().any(|a| *a > 0.0);
+                            if !surface && voxel.lamp_area <= 0.0 {
+                                continue;
+                            }
+                            if level <= PLANE_COARSEST {
+                                bricks.insert(cell.map(|v| v.div_euclid(BRICK)));
+                                continue;
+                            }
+                            for dz in -1..=1 {
+                                for dy in -1..=1 {
+                                    for dx in -1..=1 {
+                                        let c = [cell[0] + dx, cell[1] + dy, cell[2] + dz];
+                                        if surface {
+                                            near.insert(c);
+                                        }
+                                        bricks.insert(c.map(|v| v.div_euclid(BRICK)));
+                                    }
+                                }
+                            }
                         }
-                        bricks[k].insert(c.map(|v| v.div_euclid(BRICK)));
-                    }
-                }
-            }
-        }
+                        (near, bricks)
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        let (near, bricks): (Vec<CellSet>, Vec<CellSet>) = sets.into_iter().unzip();
         // Each level's table over the box of its bricks.
         let mut levels = [FieldLevel::default(); FIELD_LEVELS];
         let mut table: Vec<u32> = Vec::new();
@@ -590,13 +777,13 @@ impl FieldVoxels {
             let level = FIELD_FINEST + u8::try_from(k).unwrap_or(0);
             let offset = u32::try_from(table.len()).unwrap_or(u32::MAX);
             if set.is_empty() {
-                levels[k] = FieldLevel { origin: [0; 3], dims: [0; 3], offset };
+                levels[k] = FieldLevel { origin: [0; 3], dims: [0; 3], offset, clip: self.clips[k] };
                 continue;
             }
             let lo = set.iter().fold([i32::MAX; 3], |m, b| [m[0].min(b[0]), m[1].min(b[1]), m[2].min(b[2])]);
             let hi = set.iter().fold([i32::MIN; 3], |m, b| [m[0].max(b[0]), m[1].max(b[1]), m[2].max(b[2])]);
             let dims = [0, 1, 2].map(|a| u32::try_from(hi[a] - lo[a] + 1).unwrap_or(0));
-            levels[k] = FieldLevel { origin: lo, dims, offset };
+            levels[k] = FieldLevel { origin: lo, dims, offset, clip: self.clips[k] };
             table.resize(table.len() + usize::try_from(dims[0] * dims[1] * dims[2]).unwrap_or(0), NO_BRICK);
             let mut sorted: Vec<[i32; 3]> = set.iter().copied().collect();
             sorted.sort_unstable();
@@ -628,27 +815,56 @@ impl FieldVoxels {
             voxels: self.cells.len(),
             points: self.points,
         };
+        // The coarse texels are looked up on every core, a share of the
+        // bricks each, then written in.
+        let coarse_placed: Vec<(u8, [i32; 3], u32)> = placed.iter().copied().filter(|(l, _, _)| *l > PLANE_COARSEST).collect();
+        let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+        let chunk = coarse_placed.len().div_ceil(threads).max(1);
+        let atlas = field.atlas;
+        let flat = |t: [u32; 3]| usize::try_from((t[2] * atlas[1] + t[1]) * atlas[0] + t[0]).ok();
+        let near = &near;
+        let texels: Vec<Vec<(usize, bool, Option<(Voxel, u32)>)>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = coarse_placed
+                .chunks(chunk)
+                .map(|part| {
+                    scope.spawn(move || {
+                        let mut out = Vec::new();
+                        for &(level, b, s) in part {
+                            let place = [s % ATLAS_BRICKS, (s / ATLAS_BRICKS) % ATLAS_BRICKS, s / (ATLAS_BRICKS * ATLAS_BRICKS)];
+                            let near = &near[usize::from(level - FIELD_FINEST)];
+                            for z in 0..PADDED {
+                                for y in 0..PADDED {
+                                    for x in 0..PADDED {
+                                        let cell = [b[0] * BRICK + x - 1, b[1] * BRICK + y - 1, b[2] * BRICK + z - 1];
+                                        let local = [x, y, z].map(|v| u32::try_from(v).unwrap_or(0));
+                                        let Some(i) = flat([0, 1, 2].map(|a| place[a] * padded + local[a])) else { continue };
+                                        let voxel = self.cells.get(&(level, cell)).map(|v| (*v, seat_word(v, cell, voxel_size(level))));
+                                        let occupied = near.contains(&cell);
+                                        if occupied || voxel.is_some() {
+                                            out.push((i, occupied, voxel));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        out
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).collect()
+        });
+        for (i, occupied, voxel) in texels.into_iter().flatten() {
+            if occupied {
+                field.occupancy[i] = u8::MAX;
+            }
+            if let Some((voxel, seat)) = voxel {
+                coarse_texel(&mut field, i, &voxel);
+                field.coarse_seats[i] = seat;
+            }
+        }
         for (level, b, s) in placed {
             if level <= PLANE_COARSEST {
                 self.fill_fine(&mut field, level, b, s);
-                continue;
-            }
-            let place = [s % ATLAS_BRICKS, (s / ATLAS_BRICKS) % ATLAS_BRICKS, s / (ATLAS_BRICKS * ATLAS_BRICKS)];
-            for z in 0..PADDED {
-                for y in 0..PADDED {
-                    for x in 0..PADDED {
-                        let cell = [b[0] * BRICK + x - 1, b[1] * BRICK + y - 1, b[2] * BRICK + z - 1];
-                        let local = [x, y, z].map(|v| u32::try_from(v).unwrap_or(0));
-                        let t = [0, 1, 2].map(|a| place[a] * padded + local[a]);
-                        let Some(i) = field.flat(t) else { continue };
-                        if near.contains(&(level, cell)) {
-                            field.occupancy[i] = u8::MAX;
-                        }
-                        let Some(voxel) = self.cells.get(&(level, cell)) else { continue };
-                        coarse_texel(&mut field, i, voxel);
-                        field.coarse_seats[i] = seat_word(voxel, cell, voxel_size(level));
-                    }
-                }
             }
         }
         field
@@ -865,6 +1081,45 @@ mod tests {
             assert_eq!(voxel.at, other.at, "{key:?}");
             assert_eq!(voxel.lo, other.lo, "{key:?}");
             assert_eq!(voxel.hi, other.hi, "{key:?}");
+        }
+    }
+
+    /// The field about the eye covers a floor and a wall as the whole-scene
+    /// build does: each level holds the same area, though the levels are
+    /// sampled at their own spacing and the fine ones only in their clip
+    /// volumes. Built with the coarse levels alone, the clip levels hold
+    /// nothing and the whole levels the same.
+    #[test]
+    fn the_field_about_the_eye_covers_a_wall_as_the_whole_build_does() {
+        let scene = genos_scene::Scene::from_lists(
+            genos_scene::Floor { position: genos_scene::Vec3::ZERO, half_x: 3.0, half_z: 3.0, color: [0.8; 3] },
+            vec![genos_scene::Wall {
+                position: genos_scene::Vec3::new(0.0, 0.0, -1.0),
+                half_x: 2.0,
+                half_z: 0.1,
+                height: 2.0,
+                base: 0.0,
+                color: [0.8; 3],
+                absorption: 0.0,
+                reflectance: -1.0,
+                color_mix: -1.0,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        let whole = FieldVoxels::from_surfaces(&surface_shape_points(&scene, None)).level_totals();
+        let near = FieldVoxels::around_eye(&scene, None, [0.0, 1.0, 0.0], true).level_totals();
+        let coarse = FieldVoxels::around_eye(&scene, None, [0.0, 1.0, 0.0], false).level_totals();
+        for k in 0..FIELD_LEVELS {
+            let (want, got) = (whole[k].1, near[k].1);
+            assert!(want > 0.0, "level {}: the whole build holds no area", k + 2);
+            assert!((got - want).abs() <= 1e-3 * want, "level {}: area {got} about the eye, {want} whole", k + 2);
+            let level = FIELD_FINEST + u8::try_from(k).unwrap_or(0);
+            if level < WHOLE_FINEST {
+                assert_eq!(coarse[k].0, 0, "level {level}: the coarse build holds clip voxels");
+            } else {
+                assert!((coarse[k].1 - want).abs() <= 1e-3 * want, "level {level}: coarse area {}", coarse[k].1);
+            }
         }
     }
 

@@ -12,9 +12,12 @@
 
 // head: atlas texels xyz, coarse bricks. lv[2k]: brick origin xyz and the
 // table offset of level k + 2; lv[2k + 1]: the table's dims in bricks.
+// clip[k]: level k + 2's clip volume, corner xyz and side in its voxels
+// (side 0: the whole scene, below 0: nothing; cone_field.rs FieldLevel::clip).
 layout(std430, set = 0, binding = 1) readonly buffer ConeTable {
     uvec4 head;
     ivec4 lv[16];
+    ivec4 clip[8];
     uint table[];
 } ctab;
 // 33 words a fine brick: first record, 16 mask words, 16 counts before.
@@ -38,6 +41,9 @@ layout(std430, set = 0, binding = 15) buffer ConeWork {
 const float CONE_BASE = 1.0 / 64.0;
 const int CONE_FINEST = 2;
 const int CONE_COARSEST = 9;
+// The first level the field holds for the whole scene; finer ones are clip
+// volumes about the eye (cone_field.rs WHOLE_FINEST).
+const int CONE_WHOLE_FINEST = 5;
 // The levels a crossing reads, and the refine level of the walk.
 const int CONE_REFINE = 3;
 const int CONE_BRICK = 8;
@@ -208,19 +214,24 @@ ivec3 cone_cell(vec3 pos, vec3 n, float size) {
 // itself); below it, the eight around it (cone_spread.comp,
 // cone_weights.comp). The coarse cascades hold most of the cones (four times
 // the directions each), and a rim probe there has no children to close its
-// cones early: neighbours up to cascade 2 cost the hall 62 ms a frame at
-// 1080p, up to cascade 1 50 ms (section 18, step 4b).
-const int CONE_PARENT_ONLY = 2;
+// cones early. With the fine levels in clip volumes, neighbours up to
+// cascade 2 cost the hall 41.6 ms a frame at 1080p against 38 ms up to
+// cascade 1, and pop 1.8 times the old path while moving against 2.6
+// (section 18, step 5 part 2b).
+const int CONE_PARENT_ONLY = 3;
 // A pixel's probe level: the finest level whose voxel is about `probe_px`
 // pixels wide or more at the pixel's distance from the eye. Every frame from
 // where the eye is, so a turn of the head changes nothing and a step moves a
 // level boundary a little, never in a jump.
+int cone_held_level(int level, vec3 at);
 int cone_pixel_lod(vec3 pos) {
     float per_pixel = CONE_HALVES * scene.view_right.w / float(pc.dims.y);
     float px = float(pc.params.w);
     float reach = max(length(pos - scene.eye.xyz), CONE_TINY);
     float level = log2(CONE_NEAREST * px * per_pixel * reach / CONE_BASE);
-    return clamp(int(ceil(level)), CONE_FINEST, CONE_MAX_LOD);
+    int lod = clamp(int(ceil(level)), CONE_FINEST, CONE_MAX_LOD);
+    // Not finer than the field holds here (its clip volumes).
+    return lod < CONE_WHOLE_FINEST ? cone_held_level(lod, pos) : lod;
 }
 
 // Direction bins: 2 theta columns of azimuth by theta rows of z.
@@ -332,6 +343,23 @@ bool cone_lamp_get(int level, ivec3 cell, out float area, out vec3 light) {
 }
 
 // ---- The field ----
+
+// Whether the field holds `level` at `cell`: inside the level's clip volume.
+// Past a fine level's volume the next coarser level stands in.
+bool cone_held(int level, ivec3 cell) {
+    if (level > CONE_COARSEST) {
+        return true;
+    }
+    ivec4 c = ctab.clip[level - CONE_FINEST];
+    return c.w == 0 || (all(greaterThanEqual(cell, c.xyz)) && all(lessThan(cell, c.xyz + ivec3(c.w))));
+}
+// The finest level from `level` up that holds the point `at`.
+int cone_held_level(int level, vec3 at) {
+    while (level < CONE_COARSEST && !cone_held(level, ivec3(floor(at / cone_size(level))))) {
+        level++;
+    }
+    return level;
+}
 
 // The table entry of a voxel's brick, or CONE_NO_BRICK.
 uint cone_entry(int level, ivec3 cell) {
@@ -666,6 +694,9 @@ void cone_march(vec3 start, vec3 dir, float width, float done, float end, inout 
     while (done < end && covered < CONE_FULL) {
         float wide = max(width * done, finest);
         int level = clamp(int(ceil(log2(wide / CONE_BASE))), CONE_FINEST, CONE_COARSEST);
+        if (level < CONE_WHOLE_FINEST) {
+            level = cone_held_level(level, start + dir * done);
+        }
         float step = cone_size(level);
         float from = done;
         float to = done + step;
@@ -695,8 +726,12 @@ void cone_march(vec3 start, vec3 dir, float width, float done, float end, inout 
         if (cov > 0.0) {
             float u = from;
             while (u < to && covered < CONE_FULL) {
-                int l = level - 1;
-                while (l > CONE_REFINE && cone_occupied(l, start, dir, u, min(u + cone_size(l), to))) {
+                // The finest level the field holds here: the refine level
+                // inside its clip volume, else the finest whole level, whose
+                // filtered cover is taken in place of the crossing test.
+                int floor_level = cone_held_level(CONE_REFINE, start + dir * u);
+                int l = max(level - 1, floor_level);
+                while (l > floor_level && cone_occupied(l, start, dir, u, min(u + cone_size(l), to))) {
                     l--;
                 }
                 float next = min(u + cone_size(l), to);
@@ -704,6 +739,17 @@ void cone_march(vec3 start, vec3 dir, float width, float done, float end, inout 
                     int n = cone_crossed(CONE_REFINE, start + dir * u, start + dir * next, dir);
                     for (int i = 0; i < n && covered < CONE_FULL; i++) {
                         cone_take(covered, light, cone_met[i]);
+                    }
+                } else if (l == floor_level) {
+                    float fc;
+                    vec3 fl;
+                    float flc;
+                    vec3 fll;
+                    cone_coarse(l, start + dir * (CONE_HALF * (u + next)), dir, fc, fl, flc, fll);
+                    float seen = min(fc, 1.0 - covered);
+                    if (seen > 0.0) {
+                        light += fl * seen;
+                        covered += seen;
                     }
                 }
                 u = next;
@@ -723,15 +769,25 @@ float cone_passing(vec3 from, vec3 to) {
         return 1.0;
     }
     vec3 dir = way / length_;
-    float step = cone_size(CONE_REFINE);
-    float end = max(length_ - step, 0.0);
+    float end = max(length_ - cone_size(CONE_REFINE), 0.0);
     float blocked = 0.0;
     float u = 0.0;
     while (u < end && blocked < 1.0) {
-        float next = min(u + step, end);
-        int n = cone_crossed(CONE_REFINE, from + dir * u, from + dir * next, dir);
-        for (int i = 0; i < n; i++) {
-            blocked += cone_met[i].cover;
+        // Past the refine level's clip volume, the finest whole level's cover.
+        int level = cone_held_level(CONE_REFINE, from + dir * u);
+        float next = min(u + cone_size(level), end);
+        if (level <= CONE_REFINE) {
+            int n = cone_crossed(CONE_REFINE, from + dir * u, from + dir * next, dir);
+            for (int i = 0; i < n; i++) {
+                blocked += cone_met[i].cover;
+            }
+        } else {
+            float cov;
+            vec3 li;
+            float lc;
+            vec3 ll;
+            cone_coarse(level, from + dir * (CONE_HALF * (u + next)), dir, cov, li, lc, ll);
+            blocked += cov;
         }
         u = next;
     }
