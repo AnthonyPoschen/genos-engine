@@ -2,7 +2,8 @@
 // Cone-traced cascades, pass 7: a pixel's irradiance is the cosine-weighted
 // sum of the merged cascade-0 cones of the voxel-layer probes around it, each
 // weighted by the share that passes from the pixel to its seat (lamp.x bit 1).
-// The pixel's light, its emission plus its albedo's share of that, goes in
+// The pixel's light, its emission plus its albedo's share of that and of the
+// suns (one exact ray a pixel each, cone_sun), goes in
 // the G-buffer word compose reads as emitted light (the direct pass does not
 // run in this mode).
 #extension GL_GOOGLE_include_directive : require
@@ -59,6 +60,27 @@ vec3 level_irradiance(int lod, vec3 pos, vec3 n) {
     return weight > 0.0 ? sum * (CONE_PI / weight) : vec3(0.0);
 }
 
+// The suns, one exact shadow ray a pixel each (plan section 3's fallback for
+// the sun): a cone cascade reads the sky only past its coarsest interval, so
+// the sun came through in probe-sized blocks. Point lamps stay in the cones.
+// Lit as the old direct pass lights a pixel (lamp_light, albedo over pi).
+vec3 cone_sun(vec3 pos, vec3 n, bool two_sided) {
+    vec3 from = pos + n * CONE_SURFACE_LIFT;
+    vec3 sum = vec3(0.0);
+    for (uint i = 0u; i < scene.lamp_count; i++) {
+        Lamp lamp = scene_lamp(i);
+        if (lamp.pos.w <= 0.5) {
+            continue;
+        }
+        vec3 target;
+        vec3 light = lamp_light(lamp, from, n, two_sided, target);
+        if (light.r + light.g + light.b > 0.0 && !trace_occluded(from, target)) {
+            sum += light;
+        }
+    }
+    return sum;
+}
+
 void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
     if (any(greaterThanEqual(p, pc.dims.xy))) {
@@ -75,5 +97,5 @@ void main() {
     vec3 irradiance = level_irradiance(cone_pixel_lod(pos), pos, n);
     uint emitted = gbuf_word(pixel, 3u);
     vec3 glow = emitted == ~0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
-    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(glow + albedo * SCENE_LAMBERT * irradiance);
+    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(glow + albedo * SCENE_LAMBERT * irradiance + albedo * (1.0 / CONE_PI) * cone_sun(pos, n, two_sided));
 }

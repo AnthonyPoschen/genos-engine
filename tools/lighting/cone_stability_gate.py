@@ -21,7 +21,8 @@ paused so nothing moves but the camera, and grades cone mode
      a few one-code pixels come from other passes' history and are reported),
      and the lamp hash dropped no point (lighting.cone_stats lamp_dropped)
   F  moving camera: step the camera sideways 1 cm a frame for --steps steps,
-     exposure held fixed; count pixels whose second difference over three
+     exposure held fixed and the suns off (a sun's hard pixel-ray shadow edge
+     aliases as it slides; that is the picture's edge, not the light popping); count pixels whose second difference over three
      steps, |f(i+1) - 2 f(i) + f(i-1)|, is over 6 codes where neither depth
      nor albedo changed (a slide over a gradient is near 0, a pop is not).
      The mean over the walk is at most --pop-ratio times the old path's on
@@ -153,9 +154,15 @@ def turn_back_changes(label):
 
 
 def moving_pops(label):
-    """Gate F: the mean count of popping pixels a step on a sideways walk."""
+    """Gate F: the mean count of popping pixels a step on a sideways walk,
+    with the suns off: a sun's exact pixel ray gives a hard shadow edge that
+    aliases as it slides, which is the picture's edge, not the light popping
+    (Anthony, 25 Nov 2026)."""
     import numpy as np
     from PIL import Image
+    suns = [i for i, l in enumerate(call("lights")) if l.get("directional") and l.get("on", True)]
+    for i in suns:
+        call("light", {"index": i, "on": False})
     right = [math.cos(YAW), 0.0, math.sin(YAW)]
     frames = []
     for i in range(int(ARGS["steps"])):
@@ -172,6 +179,8 @@ def moving_pops(label):
         second = np.abs(c - 2 * b + a)
         moved = (np.abs(db - da) > 2) | (np.abs(dc - db) > 2) | (np.abs(ab - aa) > 2) | (np.abs(ac - ab) > 2)
         counts.append(int(((second > 6) & ~moved).sum()))
+    for i in suns:
+        call("light", {"index": i, "on": True})
     pose(frames=30)
     return sum(counts) / max(len(counts), 1), max(counts, default=0)
 
