@@ -236,9 +236,9 @@ fn median(values: &mut [Duration]) -> Duration {
 
 fn stage_medians(frames: &[FrameSample]) -> [Duration; STAGE_COUNT] {
     let mut medians = [Duration::ZERO; STAGE_COUNT];
-    for stage in 0..STAGE_COUNT {
+    for (stage, out) in medians.iter_mut().enumerate() {
         let mut times: Vec<Duration> = frames.iter().map(|frame| frame.stages[stage].cpu).collect();
-        medians[stage] = median(&mut times);
+        *out = median(&mut times);
     }
     medians
 }

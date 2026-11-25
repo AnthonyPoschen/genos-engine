@@ -342,6 +342,7 @@ fn build_node(
     }
     // Binned SAH over the widest useful axes.
     let mut best: Option<(f32, usize, f32)> = None;
+    #[expect(clippy::needless_range_loop, reason = "axis indexes the bounds and every centre")]
     for axis in 0..3 {
         let lo = box_c.min[axis];
         let extent = box_c.max[axis] - lo;

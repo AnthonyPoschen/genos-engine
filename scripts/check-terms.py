@@ -161,7 +161,8 @@ def run(root: Path, env: dict[str, str] | None = None) -> int:
         for a in diff_bases(root):
             # locally include uncommitted work (worktree diff); in CI diff to HEAD
             tail = ["HEAD"] if os.environ.get("GITHUB_ACTIONS") else []
-            v = violations(git("diff", "-U0", "--no-color", a, *tail, cwd=root), terms)
+            # Fixed prefixes: diff.mnemonicprefix (a user's config) writes w/ for the worktree.
+            v = violations(git("diff", "-U0", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", a, *tail, cwd=root), terms)
             bad = v if bad is None else [x for x in bad if x in v]
         bad = bad or []
     finally:
