@@ -1628,7 +1628,11 @@ impl Renderer {
     /// seconds. Empty before the first one is built.
     #[must_use]
     pub fn cone_field_report(&self) -> String {
-        self.gpu.cone.report.clone()
+        let movers = &self.gpu.cone.field_movers;
+        if movers.is_empty() {
+            return self.gpu.cone.report.clone();
+        }
+        format!("{}; moving solids left out: {movers:?}", self.gpu.cone.report)
     }
 
     /// Whether the cone field in use has its fine levels (the clip volumes

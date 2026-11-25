@@ -68,6 +68,10 @@ struct Voxel {
     hi: [V3; 6],
     lamp_area: f32,
     lamp_light: V3,
+    /// The surface's albedo times its area, and that area: the voxel's mean
+    /// albedo, which the renderer's light pass lights each frame.
+    albedo: V3,
+    albedo_area: f32,
 }
 
 impl Default for Voxel {
@@ -80,6 +84,8 @@ impl Default for Voxel {
             hi: [[f32::NEG_INFINITY; 3]; 6],
             lamp_area: 0.0,
             lamp_light: [0.0; 3],
+            albedo: [0.0; 3],
+            albedo_area: 0.0,
         }
     }
 }
@@ -123,8 +129,12 @@ pub const FINE_HEADER: usize = 33;
 /// (half2 r g, half2 b area), then for each way three words of its plane
 /// (half2 centroid low-u, half2 high-u low-v, half2 high-v 0), in voxels from
 /// the voxel's low corner, then two words of the lamp term, then the voxel's
-/// seat word ([`seat_word`]).
-pub const FINE_RECORD: usize = 33;
+/// seat word ([`seat_word`]), then its albedo (half2 r g, half2 b 0), then
+/// each way's share of the sun it sees (unorm8, ways 0 to 3 then 4 and 5),
+/// which the renderer's light pass marches and keeps.
+pub const FINE_RECORD: usize = 37;
+/// The seat word's place in a fine record.
+pub const FINE_SEAT: usize = 32;
 
 /// The field as the GPU takes it. The fine levels (6.25 and 12.5 cm), which
 /// the march reads one voxel at a time, are compact: a header for each brick
@@ -149,6 +159,17 @@ pub struct ConeField {
     pub occupancy: Vec<u8>,
     /// One word a texel: the voxel's seat word ([`seat_word`]), 0 where none.
     pub coarse_seats: Vec<u32>,
+    /// Three halves a texel: the voxel's mean albedo.
+    pub coarse_albedo: Vec<u16>,
+    /// Six halves a texel: for each way, where that way's surface lies along
+    /// its axis, in voxels from the voxel's low side (0 where it has none), so
+    /// a probe of that face sits on its own side of a slab.
+    pub coarse_planes: Vec<u16>,
+    /// For every fine brick and every coarse brick, by its index (fine) or
+    /// atlas slot (coarse): its brick coordinates and level, so a pass that
+    /// walks the bricks knows each voxel's cell.
+    pub fine_origins: Vec<[i32; 4]>,
+    pub coarse_origins: Vec<[i32; 4]>,
     pub voxels: usize,
     pub points: usize,
 }
@@ -228,6 +249,127 @@ impl ConeField {
         Some((half_to_f32(f[i + 3]), [half_to_f32(f[i]), half_to_f32(f[i + 1]), half_to_f32(f[i + 2])]))
     }
 
+    /// The finest level from `level` up whose clip volume holds `at`
+    /// (`cone_common.glsl` `cone_held_level`).
+    fn held_level(&self, mut level: u8, at: V3) -> u8 {
+        while level < FIELD_COARSEST {
+            let clip = self.levels[usize::from(level - FIELD_FINEST)].clip;
+            if clip_holds(clip, cell_of(at, voxel_size(level))) {
+                break;
+            }
+            level += 1;
+        }
+        level
+    }
+
+    /// The share of a thin ray from `from` along `dir` the field blocks, as
+    /// the renderer's sun march takes it (`cone_common.glsl` `sun_blocked`), and
+    /// each surface that blocked some of it: (distance, level, cell, way, cover).
+    #[must_use]
+    pub fn sun_blocked(&self, from: V3, dir: V3, level: u8, reach: f32) -> (f32, Vec<SunBlock>) {
+        const FULL: f32 = 0.98;
+        const STEP: f32 = 0.1;
+        let mut covered = 0.0f32;
+        let mut done = 0.0f32;
+        let mut met = Vec::new();
+        let least = voxel_size(level);
+        let level_of = |size: f32| -> u8 {
+            let l = (size / BASE).log2().ceil();
+            u8::try_from(floor_i32(l.clamp(f32::from(FIELD_FINEST), f32::from(FIELD_COARSEST)))).unwrap_or(FIELD_COARSEST)
+        };
+        while done < reach && covered < FULL {
+            let mut l = self.held_level(level_of(least), add(from, scale(dir, done)));
+            if l >= WHOLE_FINEST {
+                l = l.max(level_of(least.max(STEP * done)));
+            }
+            let step = voxel_size(l);
+            let a = add(from, scale(dir, done));
+            let b = add(from, scale(dir, done + step));
+            for (cell, way, cover) in self.crossed(l, a, b, dir) {
+                let seen = cover.min(1.0 - covered);
+                if seen > 0.0 {
+                    covered += seen;
+                    met.push((done, l, cell, way, seen));
+                }
+            }
+            done += step;
+        }
+        ((covered / FULL).clamp(0.0, 1.0), met)
+    }
+
+    /// The faces a thin ray from `a` to `b` crosses at `level`, and the cover
+    /// each gives (fine: `cone_crossed`; coarse: `coarse_crossed`).
+    #[expect(clippy::many_single_char_names, reason = "the shader's names: segment a to b, plane axes u and v")]
+    fn crossed(&self, level: u8, a: V3, b: V3, dir: V3) -> Vec<([i32; 3], usize, f32)> {
+        let size = voxel_size(level);
+        let mut out = Vec::new();
+        let mut cells: Vec<[i32; 3]> = Vec::new();
+        if level <= PLANE_COARSEST {
+            for p in [a, b] {
+                let base = p.map(|c| floor_i32(c / size - 0.5));
+                for k in 0..8 {
+                    let c = [base[0] + (k & 1), base[1] + ((k >> 1) & 1), base[2] + ((k >> 2) & 1)];
+                    if !cells.contains(&c) {
+                        cells.push(c);
+                    }
+                }
+            }
+        } else {
+            let (ca, cb) = (cell_of(a, size), cell_of(b, size));
+            for k in 0..8 {
+                let c = [ca[0].min(cb[0]) + (k & 1), ca[1].min(cb[1]) + ((k >> 1) & 1), ca[2].min(cb[2]) + ((k >> 2) & 1)];
+                if (0..3).all(|i| c[i] <= ca[i].max(cb[i])) {
+                    cells.push(c);
+                }
+            }
+        }
+        for cell in cells {
+            let low = cell.map(|c| cell_low(c, size));
+            for (d, &axis) in AXES.iter().enumerate() {
+                if -dot(dir, axis) <= 0.05 {
+                    continue;
+                }
+                let ax = d / 2;
+                let (u, v) = ((ax + 1) % 3, (ax + 2) % 3);
+                let (area, plane, boxed) = if level <= PLANE_COARSEST {
+                    let Some(r) = self.record(level, cell) else { continue };
+                    let area = unpack_half2(self.fine_voxels[r + 2 * d + 1]).1;
+                    let (p0x, lo_u) = unpack_half2(self.fine_voxels[r + 12 + 3 * d]);
+                    let (hi_u, lo_v) = unpack_half2(self.fine_voxels[r + 13 + 3 * d]);
+                    let (hi_v, _) = unpack_half2(self.fine_voxels[r + 14 + 3 * d]);
+                    (area, low[ax] + p0x * size, Some([low[u] + lo_u * size, low[u] + hi_u * size, low[v] + lo_v * size, low[v] + hi_v * size]))
+                } else {
+                    let Some(t) = self.texel(level, cell) else { continue };
+                    let Some(i) = self.flat(t) else { continue };
+                    let area = half_to_f32(self.faces[d][i * 4 + 3]);
+                    (area, low[ax] + half_to_f32(self.coarse_planes[i * 6 + d]) * size, None)
+                };
+                if area <= 0.0 {
+                    continue;
+                }
+                let sa = (a[ax] - plane) * axis[ax];
+                let sb = (b[ax] - plane) * axis[ax];
+                if !(sa > 0.0 && sb <= 0.0) {
+                    continue;
+                }
+                let hit = add(a, scale(sub(b, a), sa / (sa - sb)));
+                if floor_i32(hit[u] / size) != cell[u] || floor_i32(hit[v] / size) != cell[v] {
+                    continue;
+                }
+                if let Some([lu, hu, lv, hv]) = boxed {
+                    let m = 0.031_25;
+                    if hit[u] < lu - m || hit[u] > hu + m || hit[v] < lv - m || hit[v] > hv + m {
+                        continue;
+                    }
+                }
+                let fill = area / (size * size);
+                let cover = if level <= PLANE_COARSEST { if fill >= 0.5 { 1.0 } else { fill } } else { (fill / 0.75).min(1.0) };
+                out.push((cell, d, cover));
+            }
+        }
+        out
+    }
+
     fn flat(&self, t: [u32; 3]) -> Option<usize> {
         usize::try_from((t[2] * self.atlas[1] + t[1]) * self.atlas[0] + t[0]).ok()
     }
@@ -267,6 +409,12 @@ fn cell_of(p: V3, size: f32) -> [i32; 3] {
 
 /// The points of a triangle, `step` apart, each with its share of the area.
 fn sample_triangle(positions: [V3; 3], step: f32, mut emit: impl FnMut(V3, f32)) {
+    sample_triangle_uv(positions, step, |at, each, _, _| emit(at, each));
+}
+
+/// As [`sample_triangle`], with each point's barycentric `u`, `v` (towards
+/// the second and third corners).
+fn sample_triangle_uv(positions: [V3; 3], step: f32, mut emit: impl FnMut(V3, f32, f32, f32)) {
     let [corner, second, third] = positions;
     let (e1, e2) = (sub(second, corner), sub(third, corner));
     let area = 0.5 * dot(cross(e1, e2), cross(e1, e2)).sqrt();
@@ -285,13 +433,13 @@ fn sample_triangle(positions: [V3; 3], step: f32, mut emit: impl FnMut(V3, f32))
             let u = (f32::from(u16::try_from(i).unwrap_or(0)) + 0.5) / f32::from(u16::try_from(n1).unwrap_or(1));
             let v = (f32::from(u16::try_from(j).unwrap_or(0)) + 0.5) / f32::from(u16::try_from(n2).unwrap_or(1));
             if u + v <= 1.0 {
-                made.push(add(corner, add(scale(e1, u), scale(e2, v))));
+                made.push((add(corner, add(scale(e1, u), scale(e2, v))), u, v));
             }
         }
     }
     let each = area / f32::from(u16::try_from(made.len().max(1)).unwrap_or(u16::MAX));
-    for at in made {
-        emit(at, each);
+    for (at, u, v) in made {
+        emit(at, each, u, v);
     }
 }
 
@@ -300,11 +448,11 @@ fn half_floor(v: f32) -> i32 {
     floor_i32(v.clamp(0.0, 65_535.0))
 }
 
-/// The scene's surfaces as points for the field's shape, built on every core:
-/// as [`surface_points`], but a point's albedo is not read (it is 0), so only
-/// a triangle whose material has holes casts the short ray, which keeps a
-/// point only where the texel is not a hole. A solid triangle's points are
-/// all kept.
+/// The scene's surfaces as points for the field, built on every core: as
+/// [`surface_points`], but only a triangle whose material has holes casts the
+/// short ray (which keeps a point only where the texel is not a hole, and
+/// gives its albedo); a solid triangle's points read their albedo from the
+/// material at their texture coordinate.
 #[must_use]
 pub fn surface_shape_points(scene: &Scene, gltf: Option<&GltfSurface>) -> Vec<FieldPoint> {
     shape_points(scene, gltf, 0.5 * voxel_size(FIELD_FINEST), None)
@@ -327,10 +475,11 @@ fn shape_points(scene: &Scene, gltf: Option<&GltfSurface>, step: f32, bounds: Op
     let mesh = SceneMesh::from_scene(scene);
     for tri in mesh.triangles.iter().filter(|t| meets(&t.positions, bounds)) {
         let normal = normalize(tri.normals[0]);
+        let albedo = mesh.materials.get(usize::try_from(tri.material).unwrap_or(usize::MAX)).map_or([0.0; 3], |m| m.albedo);
         sample_triangle(tri.positions, step, |at, each| {
-            points.push((at, normal, each, [0.0; 3]));
+            points.push((at, normal, each, albedo));
             if tri.two_sided {
-                points.push((at, scale(normal, -1.0), each, [0.0; 3]));
+                points.push((at, scale(normal, -1.0), each, albedo));
             }
         });
     }
@@ -352,10 +501,14 @@ fn shape_points(scene: &Scene, gltf: Option<&GltfSurface>, step: f32, bounds: Op
                             }
                             let sides: &[f32] = if model.double_sided(tri.material) { &[1.0, -1.0] } else { &[1.0] };
                             let holed = model.holed(tri.material);
-                            sample_triangle(tri.positions, step, |at, each| {
+                            sample_triangle_uv(tri.positions, step, |at, each, u, v| {
                                 for side in sides.iter().map(|k| scale(normal, *k)) {
-                                    if !holed || model.trace(add(at, scale(side, 0.01)), scale(side, -1.0), 0.02).is_some() {
-                                        out.push((at, side, each, [0.0; 3]));
+                                    if holed {
+                                        if let Some(hit) = model.trace(add(at, scale(side, 0.01)), scale(side, -1.0), 0.02) {
+                                            out.push((at, side, each, hit.albedo));
+                                        }
+                                    } else {
+                                        out.push((at, side, each, model.albedo_on(tri, u, v)));
                                     }
                                 }
                             });
@@ -440,7 +593,7 @@ impl Hasher for CellHasher {
         self.write_u32(i.cast_unsigned());
     }
     fn write_usize(&mut self, i: usize) {
-        self.write_u64(i as u64);
+        self.write_u64(u64::try_from(i).unwrap_or(u64::MAX));
     }
     fn write_u64(&mut self, i: u64) {
         self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
@@ -472,9 +625,9 @@ fn accumulate(voxel: &mut Voxel, point: V3, normal: V3, area: f32, radiance: V3)
             // A point stands for the patch about it, `area` square: the box
             // covers that patch, so it does not shrink with sparser points.
             let reach = 0.5 * area.sqrt();
-            for a in 0..3 {
-                voxel.lo[d][a] = voxel.lo[d][a].min(point[a] - reach);
-                voxel.hi[d][a] = voxel.hi[d][a].max(point[a] + reach);
+            for ((lo, hi), p) in voxel.lo[d].iter_mut().zip(voxel.hi[d].iter_mut()).zip(point) {
+                *lo = lo.min(p - reach);
+                *hi = hi.max(p + reach);
             }
         }
     }
@@ -493,6 +646,8 @@ fn merge_voxel(into: &mut Voxel, from: &Voxel) {
     }
     into.lamp_area += from.lamp_area;
     into.lamp_light = add(into.lamp_light, from.lamp_light);
+    into.albedo = add(into.albedo, from.albedo);
+    into.albedo_area += from.albedo_area;
 }
 
 /// The voxel a surface point is filed in at `level`: the one a quarter of a
@@ -544,7 +699,7 @@ fn file_levels(points: &[FieldPoint], levels: std::ops::RangeInclusive<u8>, clip
                 scope.spawn(move || {
                     let split = level == first;
                     let mut cells = Cells::default();
-                    for (at, normal, area, _) in points {
+                    for (at, normal, area, albedo) in points {
                         let cell = filed_cell(*at, *normal, level);
                         if split && split_of(cell) != part {
                             continue;
@@ -552,7 +707,10 @@ fn file_levels(points: &[FieldPoint], levels: std::ops::RangeInclusive<u8>, clip
                         if clip.is_some_and(|c| !clip_holds(c, cell)) {
                             continue;
                         }
-                        accumulate(cells.entry((level, cell)).or_default(), *at, *normal, *area, [0.0; 3]);
+                        let voxel = cells.entry((level, cell)).or_default();
+                        accumulate(voxel, *at, *normal, *area, [0.0; 3]);
+                        voxel.albedo = add(voxel.albedo, scale(*albedo, *area));
+                        voxel.albedo_area += area;
                     }
                     cells
                 })
@@ -719,6 +877,21 @@ impl FieldVoxels {
         out
     }
 
+    /// Surface faces (a voxel's way with area) at `level` inside the box
+    /// `half` metres about `eye`: the probes a world layer at that level
+    /// would hold there, one a face.
+    #[must_use]
+    pub fn faces_within(&self, level: u8, eye: V3, half: f32) -> usize {
+        let size = voxel_size(level);
+        self.cells
+            .iter()
+            .filter(|((l, cell), _)| {
+                *l == level && (0..3).all(|a| ((f32::from(i16::try_from(cell[a].clamp(-32_768, 32_767)).unwrap_or(0)) + 0.5) * size - eye[a]).abs() <= half)
+            })
+            .map(|(_, v)| v.area.iter().filter(|a| **a > 0.0).count())
+            .sum()
+    }
+
     #[must_use]
     pub fn voxel_count(&self) -> usize {
         self.cells.len()
@@ -726,6 +899,7 @@ impl FieldVoxels {
 
     /// The bricks the GPU reads.
     #[must_use]
+    #[expect(clippy::too_many_lines, reason = "one pass over the levels; its steps share the atlas and the threads' results")]
     pub fn brick(&self) -> ConeField {
         // The cells with a surface, and their neighbours; each level's bricks
         // (a coarse brick also where a voxel is one cell outside it, so its
@@ -812,6 +986,10 @@ impl FieldVoxels {
             faces: std::array::from_fn(|_| vec![0u16; texels * 4]),
             occupancy: vec![0u8; texels],
             coarse_seats: vec![0u32; texels],
+            coarse_albedo: vec![0u16; texels * 3],
+            coarse_planes: vec![0u16; texels * 6],
+            fine_origins: vec![[0; 4]; usize::try_from(fine).unwrap_or(0)],
+            coarse_origins: vec![[0; 4]; usize::try_from(coarse).unwrap_or(0)],
             voxels: self.cells.len(),
             points: self.points,
         };
@@ -823,7 +1001,7 @@ impl FieldVoxels {
         let atlas = field.atlas;
         let flat = |t: [u32; 3]| usize::try_from((t[2] * atlas[1] + t[1]) * atlas[0] + t[0]).ok();
         let near = &near;
-        let texels: Vec<Vec<(usize, bool, Option<(Voxel, u32)>)>> = std::thread::scope(|scope| {
+        let texels: Vec<Vec<PlacedTexel>> = std::thread::scope(|scope| {
             let handles: Vec<_> = coarse_placed
                 .chunks(chunk)
                 .map(|part| {
@@ -838,7 +1016,8 @@ impl FieldVoxels {
                                         let cell = [b[0] * BRICK + x - 1, b[1] * BRICK + y - 1, b[2] * BRICK + z - 1];
                                         let local = [x, y, z].map(|v| u32::try_from(v).unwrap_or(0));
                                         let Some(i) = flat([0, 1, 2].map(|a| place[a] * padded + local[a])) else { continue };
-                                        let voxel = self.cells.get(&(level, cell)).map(|v| (*v, seat_word(v, cell, voxel_size(level))));
+                                        let size = voxel_size(level);
+                                        let voxel = self.cells.get(&(level, cell)).map(|v| (*v, seat_word(v, cell, size), face_planes(v, cell, size)));
                                         let occupied = near.contains(&cell);
                                         if occupied || voxel.is_some() {
                                             out.push((i, occupied, voxel));
@@ -857,14 +1036,24 @@ impl FieldVoxels {
             if occupied {
                 field.occupancy[i] = u8::MAX;
             }
-            if let Some((voxel, seat)) = voxel {
+            if let Some((voxel, seat, planes)) = voxel {
                 coarse_texel(&mut field, i, &voxel);
                 field.coarse_seats[i] = seat;
+                let albedo = mean_albedo(&voxel);
+                field.coarse_albedo[i * 3..i * 3 + 3].copy_from_slice(&albedo.map(f32_to_half));
+                field.coarse_planes[i * 6..i * 6 + 6].copy_from_slice(&planes);
             }
         }
         for (level, b, s) in placed {
+            let origin = [b[0], b[1], b[2], i32::from(level)];
+            let k = usize::try_from(s).unwrap_or(usize::MAX);
             if level <= PLANE_COARSEST {
                 self.fill_fine(&mut field, level, b, s);
+                if let Some(o) = field.fine_origins.get_mut(k) {
+                    *o = origin;
+                }
+            } else if let Some(o) = field.coarse_origins.get_mut(k) {
+                *o = origin;
             }
         }
         field
@@ -933,6 +1122,32 @@ fn fine_record(out: &mut Vec<u32>, voxel: &Voxel, cell: [i32; 3], size: f32) {
     out.push(pack_half2(voxel.lamp_light[0], voxel.lamp_light[1]));
     out.push(pack_half2(voxel.lamp_light[2], voxel.lamp_area));
     out.push(seat_word(voxel, cell, size));
+    let albedo = mean_albedo(voxel);
+    out.push(pack_half2(albedo[0], albedo[1]));
+    out.push(pack_half2(albedo[2], 0.0));
+    out.extend([0, 0]);
+}
+
+/// For each way, where that way's surface lies along its axis, in voxels
+/// from the voxel's low side, as halves (0 where it has none).
+fn face_planes(voxel: &Voxel, cell: [i32; 3], size: f32) -> [u16; 6] {
+    std::array::from_fn(|d| {
+        if voxel.area[d] <= 0.0 {
+            return 0;
+        }
+        let ax = d / 2;
+        let low = cell_low(cell[ax], size);
+        f32_to_half((voxel.at[d][ax] / voxel.area[d] - low) / size)
+    })
+}
+
+/// A voxel's mean albedo (0 with no surface).
+fn mean_albedo(voxel: &Voxel) -> V3 {
+    if voxel.albedo_area > 0.0 {
+        scale(voxel.albedo, 1.0 / voxel.albedo_area)
+    } else {
+        [0.0; 3]
+    }
 }
 
 /// A voxel's seat: the area-weighted mean of the surface points filed in it,
@@ -940,14 +1155,22 @@ fn fine_record(out: &mut Vec<u32>, voxel: &Voxel, cell: [i32; 3], size: f32) {
 /// the camera sees. Bit 31 set when the voxel has surface; bits 0..29 the
 /// point in 10 bits an axis over the voxel's cell from half a voxel below to
 /// half a voxel past (a point is filed a quarter voxel behind its surface, so
+/// A face that blocked part of a thin sun ray: (distance along the ray,
+/// level, cell, way, cover).
+pub type SunBlock = (f32, u8, [i32; 3], usize, f32);
+
+/// A coarse texel placed by a brick thread: (index, whether it is new, and
+/// its voxel, seat word and plane offsets when it has a surface).
+type PlacedTexel = (usize, bool, Option<(Voxel, u32, [u16; 6])>);
+
 /// it can sit just outside the cell). 0 when the voxel has no surface.
 #[must_use]
 pub fn seat_word_of(mean: V3, cell: [i32; 3], size: f32) -> u32 {
     let mut word = 0x8000_0000u32;
     for a in 0..3 {
         let rel = (mean[a] - cell_low(cell[a], size)) / size;
-        let q = ((rel + 0.5) * 0.5 * 1023.0).round().clamp(0.0, 1023.0);
-        word |= (q as u32) << (10 * a);
+        let q = (f32::midpoint(rel, 0.5) * 1023.0).round().clamp(0.0, 1023.0);
+        word |= u32::try_from(floor_i32(q)).unwrap_or(0) << (10 * a);
     }
     word
 }
@@ -976,7 +1199,7 @@ pub fn seat_point(word: u32, cell: [i32; 3], size: f32) -> Option<V3> {
     }
     let mut p = [0.0f32; 3];
     for a in 0..3 {
-        let q = ((word >> (10 * a)) & 1023) as f32;
+        let q = f32::from(u16::try_from((word >> (10 * a)) & 1023).unwrap_or(0));
         p[a] = cell_low(cell[a], size) + (q / 1023.0 * 2.0 - 0.5) * size;
     }
     Some(p)
@@ -1133,7 +1356,7 @@ mod tests {
             let cell = cell_of([1.0 - 0.25 * size.min(0.25), 1.45, 0.55], size);
             let word = if level <= PLANE_COARSEST {
                 let at = field.record(level, cell).expect("a fine record");
-                field.fine_voxels[at + FINE_RECORD - 1]
+                field.fine_voxels[at + FINE_SEAT]
             } else {
                 let t = field.texel(level, cell).expect("a coarse texel");
                 field.coarse_seats[field.flat(t).expect("texel")]
@@ -1201,6 +1424,9 @@ pub struct ConeCascadeStats {
 pub struct ConeProbe {
     pub key: u32,
     pub lod: u32,
+    /// The axis way its pixels face (0..6: +x, -x, +y, -y, +z, -z): each side
+    /// of a voxel's surface has its own probe.
+    pub face: u32,
     pub cell: [i32; 3],
     pub pixels: u32,
     pub seat: [f32; 3],

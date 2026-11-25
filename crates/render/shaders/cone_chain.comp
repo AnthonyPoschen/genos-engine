@@ -18,9 +18,10 @@ void main() {
     int lod = int(cwork.w[r + 1u]);
     ivec3 cell = ivec3(int(cwork.w[r + 4u]), int(cwork.w[r + 5u]), int(cwork.w[r + 6u]));
     vec3 seat = cone_word3(r + 8u);
+    int face = cone_key_face(cwork.w[r]);
     // The start is found by walking down the field, one cascade at a time,
     // to the voxel layer: at each step the finer voxel under the current one
-    // whose field seat is nearest this probe's seat. It comes from the field
+    // whose surface facing this probe's face is nearest its seat. It comes from the field
     // alone, so it is the same whichever finer probes are on screen.
     ivec3 at = cell;
     vec3 start = vec3(0.0);
@@ -38,9 +39,7 @@ void main() {
         for (int k = 0; k < 8; k++) {
             ivec3 child = at * 2 + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
             vec3 mean;
-            vec3 normal;
-            float held;
-            if (!cone_seat(lod + down, child, mean, normal, held)) {
+            if (!cone_seat_face(lod + down, child, face, mean)) {
                 continue;
             }
             vec3 d = mean - seat;
@@ -48,7 +47,7 @@ void main() {
                 best = dot(d, d);
                 next = child;
                 start = mean;
-                start_normal = normal;
+                start_normal = cone_axis(face);
                 any_child = true;
             }
         }
@@ -69,7 +68,7 @@ void main() {
     uint link = CONE_NO_BRICK;
     for (int k = 0; k < 8; k++) {
         ivec3 child = cell * 2 + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
-        uint j = cone_find(c - 1, cone_key(lod, child, c - 1));
+        uint j = cone_find(c - 1, cone_key(lod, child, c - 1, face));
         if (j == CONE_NO_BRICK) {
             continue;
         }

@@ -1654,6 +1654,7 @@ impl Tools {
                         obj(vec![
                             ("key", num(f64::from(p.key))),
                             ("lod", num(f64::from(p.lod))),
+                            ("face", num(f64::from(p.face))),
                             ("cell", list(p.cell.iter().map(|v| num(f64::from(*v))).collect())),
                             ("pixels", num(f64::from(p.pixels))),
                             ("seat", list(p.seat.iter().map(|v| num(f64::from(*v))).collect())),

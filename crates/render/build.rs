@@ -191,6 +191,8 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         ("CONE_SHADE_SPV", "cone_shade.comp"),
         ("CONE_LAMPS_SPV", "cone_lamps.comp"),
         ("CONE_SPREAD_SPV", "cone_spread.comp"),
+        ("CONE_LIGHT_SPV", "cone_light.comp"),
+        ("CONE_WORLD_SPV", "cone_world.comp"),
     ]
     .iter()
     .map(|(name, file)| {

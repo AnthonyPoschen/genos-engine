@@ -1,0 +1,279 @@
+#version 450
+// Cone-traced cascades, pass 0b, first in the frame: the bounce. Every
+// surface voxel of the field sends out its albedo's share of the light that
+// arrives at it, which the cones read this frame (plan section 18, step 6;
+// Anthony: the direct light every frame, the bounce a short history). What
+// arrives, facing the voxel's surface at its seat, is the irradiance the
+// cascade-0 probe on its seat (at the level nearest the voxel's) gathered
+// last frame (the lamps through the
+// lamp hash and the bounce before; its cones are still in the work buffer,
+// keyed from the eye in CONE_PREV_EYE) and this frame's suns, one exact
+// shadow ray each. A voxel no probe sat on takes the suns alone. The voxel's
+// light moves that share of the way there each frame (push lamp.w, from the
+// frame's time and cone_gpu.rs CONE_BOUNCE_SECONDS); a field just resident
+// takes it at once. No lamp is looked up: a lamp costs only its points in
+// the lamp pass. One thread per fine-brick bit, then per coarse texel
+// (aprons too: a texel is lit as its own voxel, so an apron matches its
+// owner).
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+const uint CONE_BRICK_VOXELS = 512u;
+// Under the largest half float (65504), with room for the sum of a few.
+const float CONE_HALF_MAX = 16384.0;
+// Twice a half float's relative resolution (2^-10).
+const float CONE_HALF_GRAIN = 0.002;
+const uint CONE_PADDED_TEXELS = 1000u;
+
+// Last frame's irradiance at a voxel of `level` whose seat is `seat`,
+// facing `n`: from the cascade-0 probe whose cell holds the seat at the
+// level nearest the voxel's that has one (pixels put probes at one level a
+// surface, by distance; the field holds the surface at every level, and the
+// cones read the coarse ones far off). False when no level has one.
+bool carried(int level, vec3 seat, int face, vec3 n, out vec3 irradiance) {
+    irradiance = vec3(0.0);
+    if (cwork.w[CONE_PREV_EYE + 3u] == 0u) {
+        return false;
+    }
+    vec3 eye = vec3(uintBitsToFloat(cwork.w[CONE_PREV_EYE]), uintBitsToFloat(cwork.w[CONE_PREV_EYE + 1u]), uintBitsToFloat(cwork.w[CONE_PREV_EYE + 2u]));
+    uint probe = CONE_NO_BRICK;
+    for (int step_ = 0; step_ <= 2 * (CONE_MAX_LOD - CONE_FINEST) && probe == CONE_NO_BRICK; step_++) {
+        // level, level - 1, level + 1, level - 2, ...
+        int lod = level + ((step_ & 1) == 0 ? step_ / 2 : -(step_ + 1) / 2);
+        if (lod < CONE_FINEST || lod > CONE_MAX_LOD) {
+            continue;
+        }
+        uint key = cone_key_from(lod, ivec3(floor(seat / cone_size(lod))), 0, face, eye);
+        if (key == CONE_EMPTY) {
+            continue;
+        }
+        uint at = cone_slot(0, key, false);
+        if (at == CONE_NO_BRICK) {
+            continue;
+        }
+        uint found = cwork.w[at + 8u];
+        if (found != CONE_NO_BRICK && found < cone_cap(0) && (cwork.w[cone_probe(0, found) + CONE_PROBE_SEATED] & CONE_FLAG_SEATED) != 0u) {
+            probe = found;
+        }
+    }
+    if (probe == CONE_NO_BRICK) {
+        return false;
+    }
+    uint theta = cone_theta(0);
+    uint dirs = cone_dirs(0);
+    vec3 sum = vec3(0.0);
+    float weight = 0.0;
+    for (uint bin = 0u; bin < dirs; bin++) {
+        float cosine = dot(cone_bin_dir(bin, theta), n);
+        if (cosine <= 0.0) {
+            continue;
+        }
+        vec3 l;
+        float th;
+        vec3 m;
+        if (cone_get(cone_record_at(0, probe, bin), l, th, m)) {
+            sum += l * cosine;
+        }
+        weight += cosine;
+    }
+    irradiance = weight > 0.0 ? sum * (CONE_PI / weight) : vec3(0.0);
+    return true;
+}
+
+// The sun's angular width (0.53 degrees), and how often a face's sun share
+// is marched again: a share of the faces each frame (push params.x, the
+// frame's count), every face when the field is new (bit 31).
+const float CONE_SUN_WIDTH = 0.0093;
+const uint CONE_SUN_SHARE = 8u;
+
+// The first sun of the lamp grid's sun list (scene_rays.glsl lamps_at), or
+// false when the scene has none.
+bool the_sun(vec3 at, out Lamp sun) {
+    LampList list = lamps_at(at);
+    for (uint k = 0u; k < list.suns.y; k++) {
+        sun = lamp_list_get(list, k);
+        if (sun.pos.w > CONE_SUN_MARK) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The share of the sun a face sees from `from`, marched toward it through the
+// field (so a leaf canopy, whose holes the field's points left out, lets the
+// share through that it should, and the sun lights what the cones read). A
+// voxel of `level` marches at its own size.
+float sun_share(vec3 from, int level) {
+    Lamp sun;
+    if (!the_sun(from, sun)) {
+        return 1.0;
+    }
+    vec3 toward = -normalize(sun.pos.xyz);
+    return 1.0 - sun_blocked(from, toward, level);
+}
+
+// The sun's light on a face at `from` facing `n`, `share` of it seen.
+vec3 sun_light(vec3 from, vec3 n, float share) {
+    Lamp sun;
+    if (share <= 0.0 || !the_sun(from, sun)) {
+        return vec3(0.0);
+    }
+    vec3 target;
+    return lamp_light(sun, from, n, false, target) * share;
+}
+
+// The light one face of a voxel sends out, its albedo's share of what
+// arrives at that face: the irradiance the probe of that face nearest it
+// gathered last frame (the lamps through the lamp hash, and the bounce;
+// nothing when no probe sat there) and the sun, `share` of it seen (the
+// field's own march, sun_share). Each side of a thin surface is lit on its
+// own side. No lamp is looked up here: a lamp costs the lamp pass's points only.
+vec3 target_light(int level, ivec3 cell, int face, vec3 albedo, float share, bool lit) {
+    vec3 seat;
+    if (dot(albedo, albedo) <= 0.0 || !cone_seat_face(level, cell, face, seat)) {
+        return vec3(0.0);
+    }
+    vec3 normal = cone_axis(face);
+    vec3 from = seat + normal * (CONE_LIFT * cone_size(CONE_FINEST));
+    vec3 probe;
+    if (!carried(level, seat, face, normal, probe) && lit) {
+        // Within the world layer's reach its probes come a share of the
+        // frames at a time: hold this face's bounce until its turn. Only a
+        // face that has light to hold: one never lit (a new field) takes the
+        // sun at once, or it stayed black until a probe reached it, and
+        // popped lit as the camera came near (Anthony, 25 Nov 2026).
+        vec3 away = abs(seat - scene.eye.xyz);
+        if (max(away.x, max(away.y, away.z)) <= CONE_WORLD_FAR_REACH) {
+            return vec3(-1.0);
+        }
+    }
+    // The pixels take the cones' irradiance with SCENE_LAMBERT and direct
+    // light over pi (cone_shade.comp); a voxel sends the same.
+    return albedo * (probe * SCENE_LAMBERT + sun_light(from, normal, share) * (1.0 / CONE_PI));
+}
+
+// Whether a face holds any light (its light words), and the field is not new.
+bool face_lit(uint rg_word, uint b_word) {
+    if ((pc.params.x & 0x80000000u) != 0u) {
+        return false;
+    }
+    vec2 rg = unpackHalf2x16(rg_word);
+    return rg.x + rg.y + unpackHalf2x16(b_word).x > 0.0;
+}
+
+// Each face's sun share: marched again this frame when `again`, else kept.
+// `words` are the record's or texel's two sun words; written when marched.
+void face_suns(int level, ivec3 cell, bool again, inout uint word0, inout uint word1, out float shares[6]) {
+    vec4 a = unpackUnorm4x8(word0);
+    vec4 b = unpackUnorm4x8(word1);
+    shares = float[6](a.x, a.y, a.z, a.w, b.x, b.y);
+    if (!again) {
+        return;
+    }
+    for (int d = 0; d < 6; d++) {
+        vec3 seat;
+        if (cone_seat_face(level, cell, d, seat)) {
+            shares[d] = sun_share(seat + cone_axis(d) * (CONE_LIFT * cone_size(CONE_FINEST)), level);
+        }
+    }
+    word0 = packUnorm4x8(vec4(shares[0], shares[1], shares[2], shares[3]));
+    word1 = packUnorm4x8(vec4(shares[4], shares[5], 0.0, 0.0));
+}
+
+// Whether this voxel's sun shares are marched again this frame.
+bool sun_turn(uint index) {
+    uint frame = pc.params.x;
+    return (frame & 0x80000000u) != 0u || cone_hash_of(index * 2654435761u + 1u) % CONE_SUN_SHARE == (frame & 0x7fffffffu) % CONE_SUN_SHARE;
+}
+
+// Write a voxel's light: its old light moved `toward` share of the way to
+// the new (push lamp.w, from the frame's time: the bounce's short history).
+void write_light(inout uint rg_word, inout uint b_word, vec3 light, float toward) {
+    vec2 b_area = unpackHalf2x16(b_word);
+    float area = b_area.y;
+    // A negative light: held this frame (target_light).
+    if (area <= 0.0 || light.x < 0.0) {
+        return;
+    }
+    // Stored as halves of light times area: keep it finite and under the
+    // half's largest value, or one voxel by a lamp would turn every cone that
+    // reads it black.
+    light = clamp(light, vec3(0.0), vec3(CONE_HALF_MAX / max(area, 1.0)));
+    if (any(isnan(light)) || any(isinf(light))) {
+        light = vec3(0.0);
+    }
+    vec3 old = vec3(unpackHalf2x16(rg_word), b_area.x) / area;
+    if (any(isnan(old)) || any(isinf(old))) {
+        old = light;
+    }
+    vec3 next = mix(old, light, toward);
+    // A step under a half's resolution would leave the light where it was,
+    // and where it stuck would follow its history: arrive instead.
+    vec3 step_ = abs(next - old);
+    vec3 grain = max(abs(old), abs(light)) * CONE_HALF_GRAIN + CONE_TINIER;
+    next = all(lessThan(step_, grain)) ? light : next;
+    rg_word = packHalf2x16(next.rg * area);
+    b_word = packHalf2x16(vec2(next.b * area, area));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint fine_threads = ctab.info.z * CONE_BRICK_VOXELS;
+    if (i < fine_threads) {
+        uint brick = i / CONE_BRICK_VOXELS;
+        uint bit = i % CONE_BRICK_VOXELS;
+        uint h = brick * CONE_HEADER;
+        uint word = bit >> 5u;
+        uint mask = 1u << (bit & 31u);
+        uint bits = cfine.fb[h + 1u + word];
+        if ((bits & mask) == 0u) {
+            return;
+        }
+        uint rec = (cfine.fb[h] + cfine.fb[h + 17u + word] + bitCount(bits & (mask - 1u))) * CONE_RECORD;
+        uint o = ctab.info.x + brick * 4u;
+        ivec3 local = ivec3(int(bit) % CONE_BRICK, (int(bit) / CONE_BRICK) % CONE_BRICK, int(bit) / (CONE_BRICK * CONE_BRICK));
+        ivec3 cell = ivec3(int(ctab.table[o]), int(ctab.table[o + 1u]), int(ctab.table[o + 2u])) * CONE_BRICK + local;
+        int level = int(ctab.table[o + 3u]);
+        vec2 rg = unpackHalf2x16(crec.fv[rec + CONE_RECORD_ALBEDO]);
+        vec3 albedo = vec3(rg, unpackHalf2x16(crec.fv[rec + CONE_RECORD_ALBEDO + 1u]).x);
+        float toward = uintBitsToFloat(pc.lamp.w);
+        float shares[6];
+        face_suns(level, cell, sun_turn(rec), crec.fv[rec + CONE_RECORD_SUN], crec.fv[rec + CONE_RECORD_SUN + 1u], shares);
+        for (int d = 0; d < 6; d++) {
+            if (unpackHalf2x16(crec.fv[rec + uint(2 * d + 1)]).y > 0.0) {
+                write_light(crec.fv[rec + uint(2 * d)], crec.fv[rec + uint(2 * d + 1)], target_light(level, cell, d, albedo, shares[d], face_lit(crec.fv[rec + uint(2 * d)], crec.fv[rec + uint(2 * d + 1)])), toward);
+            }
+        }
+        return;
+    }
+    uint j = i - fine_threads;
+    if (j >= ctab.info.w * CONE_PADDED_TEXELS) {
+        return;
+    }
+    uint slot = j / CONE_PADDED_TEXELS;
+    uint k = j % CONE_PADDED_TEXELS;
+    ivec3 local = ivec3(int(k) % CONE_PADDED, (int(k) / CONE_PADDED) % CONE_PADDED, int(k) / (CONE_PADDED * CONE_PADDED));
+    uint t = cone_coarse_texel(slot, local);
+    uint o = ctab.info.y + slot * 4u;
+    ivec3 cell = ivec3(int(ctab.table[o]), int(ctab.table[o + 1u]), int(ctab.table[o + 2u])) * CONE_BRICK + local - ivec3(1);
+    int level = int(ctab.table[o + 3u]);
+    bool any_area = false;
+    for (int d = 0; d < 6; d++) {
+        any_area = any_area || unpackHalf2x16(ccoarse.cw[t + uint(2 * d + 1)]).y > 0.0;
+    }
+    if (!any_area) {
+        return;
+    }
+    vec2 rg = unpackHalf2x16(ccoarse.cw[t + CONE_TEXEL_ALBEDO]);
+    vec3 albedo = vec3(rg, unpackHalf2x16(ccoarse.cw[t + CONE_TEXEL_ALBEDO + 1u]).x);
+    float toward = uintBitsToFloat(pc.lamp.w);
+    float shares[6];
+    face_suns(level, cell, sun_turn(j + 0x40000000u), ccoarse.cw[t + CONE_TEXEL_SUN], ccoarse.cw[t + CONE_TEXEL_SUN + 1u], shares);
+    for (int d = 0; d < 6; d++) {
+        if (unpackHalf2x16(ccoarse.cw[t + uint(2 * d + 1)]).y > 0.0) {
+            write_light(ccoarse.cw[t + uint(2 * d)], ccoarse.cw[t + uint(2 * d + 1)], target_light(level, cell, d, albedo, shares[d], face_lit(ccoarse.cw[t + uint(2 * d)], ccoarse.cw[t + uint(2 * d + 1)])), toward);
+        }
+    }
+}

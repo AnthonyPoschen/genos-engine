@@ -12,10 +12,13 @@ the program could not be driven (UNSURE, exit 2).
 
   --view hall|sponza   the view (default hall; see cone_stability_gate.py)
   --size WxH           window size (default 1280x720)
+  --pose X,Y,Z,YAW,PITCH  stand here in the view's scene in place of its pose
   --frames N           frames to time (default 120)
   --bin PATH           genos-lighting binary (default target/release/genos-lighting)
   --port N             command port (default 18799)
   --out DIR            evidence directory (default genos-debug/cone-cost/<view>-<size>)
+  --set KEY=VALUE    a lighting setting for cone mode, e.g.
+                     cone_cascades.probe_px=16 (repeatable)
   -h, --help           this text
 """
 import json
@@ -30,19 +33,26 @@ VIEWS = {
     "hall": ("lighting-stress", [14.5, 1.7, 23.5], -0.3554, 0.08),
     "sponza": ("sponza", [-13.39384, 2.12628, -4.41117], -4.62119, -0.102),
 }
-ARGS = {"view": "hall", "size": "1280x720", "frames": "120", "bin": "target/release/genos-lighting", "port": "18799", "out": ""}
+ARGS = {"pose": "", "view": "hall", "size": "1280x720", "frames": "120", "bin": "target/release/genos-lighting", "port": "18799", "out": ""}
+SETS = {}
 argv = sys.argv[1:]
 while argv:
     a = argv.pop(0)
     if a in ("-h", "--help"):
         print(__doc__)
         sys.exit(0)
-    if a.startswith("--") and a[2:] in ARGS and argv:
+    if a == "--set" and argv:
+        key, _, value = argv.pop(0).partition("=")
+        SETS[key] = value
+    elif a.startswith("--") and a[2:] in ARGS and argv:
         ARGS[a[2:]] = argv.pop(0)
     else:
         print(f"unknown argument {a}\n{__doc__}", file=sys.stderr)
         sys.exit(2)
 SCENE, POS, YAW, PITCH = VIEWS[ARGS["view"]]
+if ARGS["pose"]:
+    x, y, z, yaw, pitch = map(float, ARGS["pose"].split(","))
+    POS, YAW, PITCH = [x, y, z], yaw, pitch
 PORT = int(ARGS["port"])
 OUT = os.path.abspath(ARGS["out"] or f"genos-debug/cone-cost/{ARGS['view']}-{ARGS['size']}")
 os.makedirs(OUT, exist_ok=True)
@@ -83,7 +93,7 @@ try:
     call("camera", {"position": POS, "yaw": YAW, "pitch": PITCH})
     call("wait_settled", {"timeout_frames": 900})
     old = timed()
-    call("lighting.set_settings", {"cone_cascades": "on"})
+    call("lighting.set_settings", dict(SETS, cone_cascades="on"))
     switched = time.time()
     for _ in range(4000):
         st = call("cone_stats")["cascades"]

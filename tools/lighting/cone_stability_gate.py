@@ -12,14 +12,17 @@ paused so nothing moves but the camera, and grades cone mode
   C  stable seats: after a 5 degree yaw, and after a 10 cm step, every probe of
      cascade 0 that has the same world cell (lod and cell) at both poses keeps
      its seat within 1 mm (lighting.cone_probes)
-  D  return to pose: turn 30 degrees away and back, with exposure held fixed;
-     the picture is bit-identical (cone mode keeps no history). The old path's
+  D  return to pose: turn 30 degrees away and back, with exposure held fixed,
+     and let the bounce's short history settle (1.5 s each way); no pixel
+     differs by more than two display codes, and at most one in 10,000 by
+     two (the bounce is stored in halves: after a history its light can rest
+     a half's step from where it would have). The old path's
      count is printed for reference only: its caches carry the turn.
-  E  a lamp follows in one frame: move a point lamp 0.5 m; no pixel of the
-     frame drawn right after differs by more than one display code from the
-     frame 30 frames later (a lamp that lags changes thousands by far more;
-     a few one-code pixels come from other passes' history and are reported),
-     and the lamp hash dropped no point (lighting.cone_stats lamp_dropped)
+  E  a lamp follows in one frame: move a point lamp 0.5 m; the frame drawn
+     right after holds at least half of the change (summed luminance) the
+     picture shows a second later (its direct light does not wait; its
+     bounce, a short history, settles over a few tenths of a second), and the
+     lamp hash dropped no point (lighting.cone_stats lamp_dropped)
   F  moving camera: step the camera sideways 1 cm a frame for --steps steps,
      exposure held fixed and the suns off (a sun's hard pixel-ray shadow edge
      aliases as it slides; that is the picture's edge, not the light popping); count pixels whose second difference over three
@@ -118,7 +121,7 @@ def shot(name):
 
 
 def cells(probes):
-    return {(p["lod"], tuple(p["cell"])): p["seat"] for p in probes}
+    return {(p["lod"], p.get("face", 0), tuple(p["cell"])): p["seat"] for p in probes}
 
 
 def seat_moves(a, b):
@@ -128,29 +131,40 @@ def seat_moves(a, b):
     return len(shared), moved, worst
 
 
-def differing(path_a, path_b):
-    """Pixels that differ at all, and by more than one display code."""
+def differing(path_a, path_b, over=1):
+    """Pixels that differ at all, and by more than `over` display codes."""
     from PIL import Image, ImageChops
     a, b = Image.open(path_a).convert("RGB"), Image.open(path_b).convert("RGB")
     diff = ImageChops.difference(a, b)
     data = diff.get_flattened_data() if hasattr(diff, "get_flattened_data") else diff.getdata()
-    return sum(1 for p in data if max(p) > 0), sum(1 for p in data if max(p) > 1), a.width * a.height
+    return sum(1 for p in data if max(p) > 0), sum(1 for p in data if max(p) > over), a.width * a.height
+
+
+def settle(seconds=1.5):
+    """Draw for `seconds` of real time: the cone bounce's short history, and
+    other passes' (reflections, fog), step by frame time."""
+    started = time.time()
+    while time.time() - started < seconds:
+        call("wait", {"frames": 10})
 
 
 def turn_back_changes(label):
-    # Other passes (reflections, fog) keep a short history of their own; let
-    # the earlier gates' camera moves settle out before the first shot.
+    # Let the earlier gates' camera moves settle out before the first shot.
     pose(frames=120)
+    settle()
     before = shot(f"d-{label}-before")
     albedo_before = call("capture", {"path": f"d-{label}-albedo-before.png", "mode": "albedo"})["path"]
     pose(yaw=YAW + math.radians(30))
+    settle()
     pose(frames=60)
+    settle()
     after = shot(f"d-{label}-after")
     albedo_after = call("capture", {"path": f"d-{label}-albedo-after.png", "mode": "albedo"})["path"]
     full = os.path.join
     changed, far, total = differing(before, after)
+    _, very_far, _ = differing(before, after, over=2)
     albedo, _, _ = differing(*(p if os.path.isabs(p) else full(OUT, p) for p in (albedo_before, albedo_after)))
-    return changed, far, total, albedo
+    return changed, far, total, albedo, very_far
 
 
 def moving_pops(label):
@@ -262,10 +276,11 @@ try:
                   f"{moved} of {shared} shared cells moved their seat over 1 mm (worst {worst * 1000:.1f} mm)")
         pose()
     if "D" in ONLY:
-        changed, far, total, albedo = turn_back_changes("cone")
-        grade("D return to pose", far == 0,
-              f"{far} of {total} pixels differ by more than one code after turning away and back ({changed} at all; "
-              f"the albedo view changed {albedo}; old path {old_turn[0]})")
+        changed, far, total, albedo, very_far = turn_back_changes("cone")
+        grade("D return to pose", very_far == 0 and far * 10_000 <= total,
+              f"{far} of {total} pixels differ by more than one code after turning away and back, {very_far} by more than two "
+              f"(limits: one in 10,000, none; the bounce is stored in halves, and after a history its light can rest a half's "
+              f"step from where it would have; {changed} at all; the albedo view changed {albedo}; old path {old_turn[0]})")
     if "E" in ONLY:
         from PIL import Image, ImageChops
         lamps = [i for i, l in enumerate(call("lights")) if not l.get("directional")]
@@ -280,17 +295,21 @@ try:
             call("light", {"index": i, "position": [p[0] + 0.5, p[1], p[2]]})
             call("wait", {"frames": 1})
             first = shot("e-first")
-            call("wait", {"frames": 30})
+            # The bounce is a short history stepped by frame time: let a second pass.
+            settle(1.0)
             later = shot("e-later")
-            a, b = Image.open(first).convert("RGB"), Image.open(later).convert("RGB")
-            diff = ImageChops.difference(a, b)
-            data = diff.get_flattened_data() if hasattr(diff, "get_flattened_data") else diff.getdata()
-            changed = sum(1 for q in data if max(q) > 0)
-            far = sum(1 for q in data if max(q) > 1)
-            _, moved, _ = differing(still, first)
+            import numpy as np
+            from PIL import Image as _Image
+            def lum(path):
+                return np.asarray(_Image.open(path).convert("L"), dtype=np.float64)
+            a, b, c = lum(still), lum(first), lum(later)
+            total = np.abs(c - a).sum()
+            at_once = np.abs(b - a).sum()
+            share = at_once / total if total > 0 else 0.0
+            _, moved, _ = differing(still, later)
             dropped = call("cone_stats").get("lamp_dropped", 0)
-            grade("E lamp follows in one frame", far == 0 and dropped == 0 and moved > 0,
-                  f"{moved} pixels changed with the move; {far} differ by more than one code ({changed} at all) between the first frame after the move and 30 frames later; {dropped} lamp points dropped")
+            grade("E lamp follows in one frame", moved > 0 and share >= 0.5 and dropped == 0,
+                  f"{moved} pixels changed with the move; the first frame after it holds {share:.0%} of the change (at least half: its direct light does not wait, its bounce settles over a few tenths of a second); {dropped} lamp points dropped")
     if "F" in ONLY:
         cone_pops = moving_pops("cone")
         limit = old_pops[0] * float(ARGS["pop-ratio"])

@@ -16,21 +16,26 @@ void main() {
     }
     uint r = cone_probe(c, i);
     int lod = int(cwork.w[r + 1u]);
+    int face = cone_key_face(cwork.w[r]);
     ivec3 cell = ivec3(int(cwork.w[r + 4u]), int(cwork.w[r + 5u]), int(cwork.w[r + 6u]));
     vec3 centre = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c);
     uint probes[8];
     float weights[8];
-    if (c + 1 >= CONE_PARENT_ONLY) {
+    // A probe the field had no seat for (a mover) reads its parent alone,
+    // which it put there itself (cone_spread.comp); the trilinear read skips
+    // unseated probes, and the mover's probes read no coarser cascade.
+    bool unseated = (cwork.w[r + CONE_PROBE_SEATED] & CONE_FLAG_SEATED) == 0u;
+    if (c + 1 >= CONE_PARENT_ONLY || unseated) {
         // The parent, which this probe put there (cone_spread.comp).
         vec3 at = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c);
-        uint parent = cone_find(c + 1, cone_key(lod, ivec3(floor(at / cone_spacing(lod, c + 1))), c + 1));
+        uint parent = cone_find(c + 1, cone_key(lod, ivec3(floor(at / cone_spacing(lod, c + 1))), c + 1, face));
         for (int k = 0; k < 8; k++) {
             cwork.w[r + 20u + uint(k)] = k == 0 ? parent : CONE_NO_BRICK;
         }
         cwork.w[r + 28u] = packHalf2x16(vec2(parent == CONE_NO_BRICK ? 0.0 : 1.0, 0.0));
         return;
     }
-    cone_weights(c + 1, lod, centre, (pc.lamp.x & 1u) != 0u, cone_word3(r + 8u), CONE_NO_CELL, probes, weights);
+    cone_weights(c + 1, lod, face, centre, (pc.lamp.x & 1u) != 0u, cone_word3(r + 8u), CONE_NO_CELL, probes, weights);
     for (int k = 0; k < 8; k++) {
         cwork.w[r + 20u + uint(k)] = probes[k];
     }

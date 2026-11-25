@@ -75,15 +75,17 @@ fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Ca
 /// Draw until the field with its fine levels is built and uploaded and the
 /// cascades have run (a world's first field holds the coarse levels alone).
 fn resident(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) {
-    for _ in 0..600 {
+    // The field builds on a thread; frames keep drawing meanwhile.
+    let mut ready = false;
+    for _ in 0..3000 {
         let _ = PresentedFrame::from_draw(window, renderer, world, camera);
         let stats = renderer.cone_stats().expect("cone stats");
         if stats.first().is_some_and(|s| s.probes > 0) && renderer.cone_field_fine() {
-            return;
+            ready = true;
+            break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    panic!("the cone field never became resident");
+    assert!(ready, "the cone field never became resident");
 }
 
 /// Nothing is dropped, and a turn away and back gives the same presented
@@ -123,7 +125,7 @@ fn a_turn_of_the_head_does_not_move_a_cone_probe() {
     let mut shared = 0usize;
     let mut moved = 0usize;
     for a in &before {
-        if let Some(b) = after.iter().find(|b| b.lod == a.lod && b.cell == a.cell) {
+        if let Some(b) = after.iter().find(|b| b.lod == a.lod && b.face == a.face && b.cell == a.cell) {
             shared += 1;
             let d = (0..3).map(|k| (a.seat[k] - b.seat[k]).powi(2)).sum::<f32>().sqrt();
             if d > SEAT_HELD {
@@ -146,9 +148,25 @@ fn far_apart(a: &PresentedFrame, b: &PresentedFrame) -> usize {
         .count()
 }
 
-/// A lamp that moves is lit where it is in the next frame: that frame matches
-/// the one many frames later. Fails when `cone_lamp_follow` is knocked out
-/// (the lamps written once, as when the field held them).
+/// Draw for at least `seconds` of real time (and 30 frames): the bounce's
+/// short history steps by frame time.
+fn draw_for(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera, seconds: f32) -> PresentedFrame {
+    let start = std::time::Instant::now();
+    let mut frame = None;
+    let mut frames = 0;
+    while frames < 30 || start.elapsed().as_secs_f32() < seconds {
+        frame = Some(PresentedFrame::from_draw(window, renderer, world, camera));
+        frames += 1;
+    }
+    frame.expect("a frame")
+}
+
+/// A lamp that moves is lit where it is in the next frame: its direct light
+/// does not wait, so that frame already has nine tenths of the change (the
+/// bounce, a short history, settles over a few tenths of a second; plan
+/// section 18 step 6). A second later it matches a world built with the lamp
+/// already there. Fails when `cone_lamp_follow` is knocked out (the lamps
+/// written once, as when the field held them).
 #[test]
 fn a_moved_lamp_lights_from_its_new_place_in_the_next_frame() {
     let (_gpu, mut owner) = open();
@@ -156,20 +174,25 @@ fn a_moved_lamp_lights_from_its_new_place_in_the_next_frame() {
     let renderer = &mut *owner.device;
     let mut world = World::from_scene(scene());
     let camera = camera(0.0);
+    let moved_to = Vec3::new(-0.8, 1.2, 0.3);
     resident(window, renderer, &world, &camera);
-    let before = draw(window, renderer, &world, &camera);
-    world.scene.light_mut(0).position = Vec3::new(-0.8, 1.2, 0.3);
+    let before = draw_for(window, renderer, &world, &camera, 1.0);
+    world.scene.light_mut(0).position = moved_to;
     let next = PresentedFrame::from_draw(window, renderer, &world, &camera);
-    let mut later = None;
-    for _ in 0..30 {
-        later = Some(PresentedFrame::from_draw(window, renderer, &world, &camera));
-    }
-    let later = later.expect("a frame");
-    let far = far_apart(&next, &later);
-    let moved = far_apart(&before, &next);
+    let later = draw_for(window, renderer, &world, &camera, 1.0);
     let dropped = renderer.cone_lamp_drops().expect("lamp drops");
-    eprintln!("cone gate: {moved} pixels changed with the move; {far} apart between the next frame and 30 later; {dropped} lamp points dropped");
+    // The same scene with the lamp built where it moved to.
+    let mut placed = scene();
+    placed.light_mut(0).position = moved_to;
+    let fresh_world = World::from_scene(placed);
+    resident(window, renderer, &fresh_world, &camera);
+    let fresh = draw_for(window, renderer, &fresh_world, &camera, 1.0);
+    let moved = far_apart(&before, &later);
+    let lagging = far_apart(&next, &later);
+    let elsewhere = far_apart(&later, &fresh);
+    eprintln!("cone gate: {moved} pixels changed with the move; {lagging} of them not yet in the next frame; {elsewhere} apart from the lamp built there; {dropped} lamp points dropped");
     assert!(moved > 100, "only {moved} pixels changed when the lamp moved (guard {CONE_LAMP_FOLLOW})");
     assert_eq!(dropped, 0, "the lamp hash dropped {dropped} points (guard {CONE_LAMP_FOLLOW})");
-    assert_eq!(far, 0, "{far} pixels changed after the frame the lamp moved in (guard {CONE_LAMP_FOLLOW})");
+    assert!(lagging * 10 <= moved, "{lagging} of {moved} pixels changed after the frame the lamp moved in (guard {CONE_LAMP_FOLLOW})");
+    assert_eq!(elsewhere, 0, "{elsewhere} pixels differ from the lamp built where it moved (guard {CONE_LAMP_FOLLOW})");
 }

@@ -146,6 +146,13 @@ pixels with a path-traced reference. Prints the numbers and writes pictures.
                        cosine of the luma-weighted mean direction of the light
                        that direction holds, carried through the merge
                        (default mean)
+  --sun-check          with --eye: build the renderer's field about the eye and,
+                       in a scene without triangles, print a map of the sun
+                       share the field lets onto the ground; otherwise,
+                       over floor points within 16 m of it, compare the sun the
+                       exact ray sees (triangles, alpha holes) with the share
+                       the field's march lets through (the renderer's sun
+                       share); print the faces that block where the ray is open
   --renderer-field     build the renderer's voxel field (crates/render
                        cone_field) for the scene, print its size and build
                        time, and stop; with --eye, the field the renderer
@@ -290,6 +297,7 @@ struct Options {
     gather_width: f32,
     gpu_side: u32,
     renderer_field: bool,
+    sun_check: bool,
     field_check: bool,
     refine_cascades: usize,
     probe_px: f32,
@@ -351,6 +359,7 @@ fn parse_args() -> Result<Option<Options>, String> {
         gather_width: 0.0,
         gpu_side: gpu::SIDE,
         renderer_field: false,
+        sun_check: false,
         field_check: false,
         refine_cascades: usize::MAX,
         probe_px: 4.0,
@@ -505,6 +514,10 @@ fn parse_args() -> Result<Option<Options>, String> {
             "--descend" => o.descend = true,
             "--transfer-sweeps" => o.transfer_sweeps = num(&arg, &value()?)?,
             "--renderer-field" => o.renderer_field = true,
+            "--sun-check" => {
+                o.renderer_field = true;
+                o.sun_check = true;
+            }
             "--field-check" => {
                 o.renderer_field = true;
                 o.field_check = true;
@@ -807,6 +820,7 @@ impl Voxels {
                 voxel.light[d] = add(voxel.light[d], scale(radiance, facing));
                 voxel.at[d] = add(voxel.at[d], scale(point, facing));
                 if facing > 0.0 {
+                    #[expect(clippy::needless_range_loop, reason = "the index reads parallel arrays")]
                     for a in 0..3 {
                         voxel.lo[d][a] = voxel.lo[d][a].min(point[a]);
                         voxel.hi[d][a] = voxel.hi[d][a].max(point[a]);
@@ -1797,6 +1811,7 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                 scope.spawn(move || {
                     let mut out = Vec::new();
                     let end = (start + chunk).min(setup.pixels.len());
+                    #[expect(clippy::needless_range_loop, reason = "the index reads parallel arrays")]
                     for p in start..end {
                         let Some(pixel) = &setup.pixels[p] else { continue };
                         let origin = add(pixel.point, scale(pixel.normal, LIFT));
@@ -2883,6 +2898,7 @@ fn gpu_bench(
         }
         inside += 1;
         let at = volume_texel(local, k, side);
+        #[expect(clippy::needless_range_loop, reason = "the index reads parallel arrays")]
         for d in 0..6 {
             for c in 0..3 {
                 volumes[d][at + c] = half(voxel.light[d][c]);
@@ -3107,6 +3123,9 @@ fn run(o: &Options) -> Result<(), String> {
         scene.sky = None;
     }
     if o.renderer_field {
+        if let (Some(eye), true) = (o.eye, o.sun_check) {
+            return sun_check(&scene, gltf.as_ref().map(|g| &g.0), eye);
+        }
         if let Some(eye) = o.eye {
             let started = std::time::Instant::now();
             let coarse = genos_render::cone_field::FieldVoxels::around_eye(&scene, gltf.as_ref().map(|g| &g.0), eye, false).brick();
@@ -3121,6 +3140,14 @@ fn run(o: &Options) -> Result<(), String> {
             let started = std::time::Instant::now();
             let voxels = genos_render::cone_field::FieldVoxels::around_eye(&scene, gltf.as_ref().map(|g| &g.0), eye, true);
             let filed = started.elapsed().as_secs_f64();
+            // A world probe layer about the eye: one probe a surface face.
+            for (level, half) in [(5u8, 4.0f32), (6, 8.0), (7, 16.0), (5, 8.0), (6, 16.0), (7, 32.0)] {
+                println!(
+                    "world layer: {} m voxels within {half} m of the eye: {} faces",
+                    genos_render::cone_field::voxel_size(level),
+                    voxels.faces_within(level, eye, half)
+                );
+            }
             let field = voxels.brick();
             println!(
                 "renderer field about {eye:?}: {} points, {} voxels, {:.0} MiB; {filed:.2} s to sample and file, {:.2} s to brick",
@@ -3457,6 +3484,7 @@ fn run(o: &Options) -> Result<(), String> {
         // Mean absolute error and signed error of the mean of `take` frames.
         let mut abs = 0.0;
         let mut signed = 0.0;
+        #[expect(clippy::needless_range_loop, reason = "the index reads parallel arrays")]
         for k in 0..samples.len() {
             let got = frames[..take].iter().map(|f| got_at(f, k)).sum::<f64>() / take as f64;
             let want = f64::from(luma(reference[k]));
@@ -3506,6 +3534,7 @@ fn run(o: &Options) -> Result<(), String> {
         // Bounce gains one bounce a frame: the error after each frame alone.
         for (f, frame) in frames.iter().enumerate() {
             let (mut abs, mut signed) = (0.0, 0.0);
+            #[expect(clippy::needless_range_loop, reason = "the index reads parallel arrays")]
             for k in 0..samples.len() {
                 let got = got_at(frame, k);
                 let want = f64::from(luma(reference[k]));
@@ -3603,3 +3632,106 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// A face that blocks the sun: (level, cell, way).
+type BlockerKey = (u8, [i32; 3], usize);
+/// Per 1 m cell where a leaked ray stops: points, field cover near it, normal, distance.
+type Leak = (u32, f32, [f32; 3], f32);
+
+/// `--sun-check`: over floor points within 16 m of the eye, the sun the exact
+/// ray sees (triangles, alpha holes) against the share the field's march lets
+/// through (`ConeField::sun_blocked`, as the renderer's sun share takes it):
+/// the points it blocks wrongly and the faces that block them, and the points
+/// it leaks the sun onto and where their exact ray stops.
+fn sun_check(scene: &genos_scene::Scene, gltf: Option<&genos_render::GltfSurface>, eye: V3) -> Result<(), String> {
+    use genos_render::cone_field::{voxel_size, FieldVoxels};
+    use std::collections::HashMap;
+    let sun = (0..scene.light_len())
+        .map(|i| scene.light(i))
+        .find(|l| l.direction.x != 0.0 || l.direction.y != 0.0 || l.direction.z != 0.0)
+        .ok_or("the scene has no sun")?;
+    let toward = normalize([-sun.direction.x, -sun.direction.y, -sun.direction.z]);
+    let field = FieldVoxels::around_eye(scene, gltf, eye, true).brick();
+    let Some(model) = gltf else {
+        // No triangles to trace: a map of the share the field lets through
+        // onto the ground (y = 0) within 16 m, a row a 0.5 m step in z.
+        println!("sun toward {toward:?}; the share the field lets through onto y = 0, x across, z down, 0.5 m a character ('#' none, '+' some, '.' all)");
+        let lift = 0.75 * voxel_size(2);
+        for zi in -32..=32_i16 {
+            let z = eye[2] + 0.5 * f32::from(zi);
+            let row: String = (-32..=32)
+                .map(|xi: i16| {
+                    let x = eye[0] + 0.5 * f32::from(xi);
+                    let (blocked, _) = field.sun_blocked([x, lift, z], toward, 2, 200.0);
+                    if blocked >= 0.98 { '#' } else if blocked > 0.02 { '+' } else { '.' }
+                })
+                .collect();
+            println!("{z:7.1} {row}");
+        }
+        return Ok(());
+    };
+    let lift = 0.75 * voxel_size(2);
+    let (mut found, mut lit, mut let_through, mut shadowed, mut leaked) = (0, 0, 0, 0, 0);
+    let mut blockers: HashMap<BlockerKey, (u32, f32, f32)> = HashMap::new();
+    let mut leaks: HashMap<[i32; 3], Leak> = HashMap::new();
+    for xi in -64..=64_i16 {
+        for zi in -64..=64_i16 {
+            let (x, z) = (eye[0] + 0.25 * f32::from(xi), eye[2] + 0.25 * f32::from(zi));
+            let Some(hit) = model.trace([x, eye[1], z], [0.0, -1.0, 0.0], 4.0) else { continue };
+            if hit.normal[1] < 0.9 {
+                continue;
+            }
+            found += 1;
+            let from = [hit.point[0], hit.point[1] + lift, hit.point[2]];
+            let exact = !model.occluded(from, [from[0] + toward[0] * 80.0, from[1] + toward[1] * 80.0, from[2] + toward[2] * 80.0]);
+            let (blocked, met) = field.sun_blocked(from, toward, 2, 200.0);
+            if exact {
+                lit += 1;
+                if blocked < 0.5 {
+                    let_through += 1;
+                    continue;
+                }
+                for (t, level, cell, way, cover) in met {
+                    let e = blockers.entry((level, cell, way)).or_insert((0, 0.0, 0.0));
+                    e.0 += 1;
+                    e.1 += cover;
+                    e.2 = t;
+                }
+                continue;
+            }
+            shadowed += 1;
+            if blocked >= 0.5 {
+                continue;
+            }
+            leaked += 1;
+            if let Some(h) = model.trace(from, toward, 80.0) {
+                let t = ((h.point[0] - from[0]).powi(2) + (h.point[1] - from[1]).powi(2) + (h.point[2] - from[2]).powi(2)).sqrt();
+                let near: f32 = met.iter().filter(|m| (m.0 - t).abs() < 1.0).map(|m| m.4).sum();
+                let e = leaks.entry(h.point.map(floor_i32)).or_insert((0, 0.0, [0.0; 3], 0.0));
+                e.0 += 1;
+                e.1 += near;
+                e.2 = h.normal;
+                e.3 = t;
+            }
+        }
+    }
+    println!("sun toward {toward:?}, {found} floor points");
+    println!("  sunlit by the exact ray: {lit}; the field lets {let_through} through and blocks {}", lit - let_through);
+    println!("  shadowed by the exact ray: {shadowed}; the field leaks the sun onto {leaked}");
+    let mut list: Vec<_> = blockers.into_iter().collect();
+    list.sort_by_key(|e| std::cmp::Reverse(e.1 .0));
+    println!("faces that block sunlit points:");
+    for ((level, cell, way), (n, cover, t)) in list.into_iter().take(12) {
+        let size = voxel_size(level);
+        let at = cell.map(|c| (f64::from(c) + 0.5) * f64::from(size));
+        println!("  level {level} ({size} m) cell {cell:?} at {at:?} way {way}: blocks {n} points, mean cover {:.2}, {t:.1} m along the ray", f64::from(cover) / f64::from(n));
+    }
+    let mut list: Vec<_> = leaks.into_iter().collect();
+    list.sort_by_key(|e| std::cmp::Reverse(e.1 .0));
+    println!("where the exact ray stops for leaked points (1 m cells):");
+    for (cell, (n, near, normal, t)) in list.into_iter().take(12) {
+        println!("  {cell:?}: {n} points, {t:.1} m up the ray, normal {normal:.2?}, field cover within 1 m of it {:.2}", f64::from(near) / f64::from(n));
+    }
+    Ok(())
+}
+

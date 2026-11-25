@@ -21,22 +21,47 @@ void main() {
     vec3 centre = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c - 1);
     float s = cone_spacing(lod, c);
     ivec3 own = ivec3(floor(centre / s));
-    // A probe the field had no seat for does not spread: whether it is there
-    // follows what is on screen (cone_weights).
-    if (cwork.w[r + CONE_PROBE_SEATED] == 0u) {
+    // A probe the field had no seat for (a mover, left out of the field)
+    // puts in its parent alone, whether or not the field has a surface there:
+    // without one it had no coarser cascade, its light ended at cascade 0's
+    // reach, and a moving box went black (Anthony, 25 Nov 2026). It spreads
+    // to no neighbour: whether it is there follows what is on screen.
+    uint flags = cwork.w[r + CONE_PROBE_SEATED];
+    if ((flags & CONE_FLAG_SEATED) == 0u) {
+        if (lod + c <= CONE_COARSEST) {
+            uint slot = cone_insert_probe(c, lod, own, cone_key_face(cwork.w[r]));
+            if (slot != CONE_NO_BRICK) {
+                atomicAdd(cwork.w[slot + 1u], cwork.w[r + 7u]);
+                atomicAdd(cwork.w[slot + CONE_HASH_SCREEN], 1u);
+            }
+        }
         return;
     }
-    if (cone_probe_wanted(lod, c, own)) {
-        uint slot = cone_insert_probe(c, lod, own);
+    // A world probe is traced on CONE_WORLD_CASCADES cascades only, and no
+    // probe has a cascade coarser than the field's coarsest voxel: past it a
+    // cone reads 8 m voxels whatever its spacing (cone_trace.comp makes the
+    // last one there the probe's last).
+    bool world = (flags & CONE_FLAG_WORLD) != 0u;
+    if ((world && c >= CONE_WORLD_CASCADES) || lod + c > CONE_COARSEST) {
+        return;
+    }
+    uint screen = world ? 0u : 1u;
+    int face = cone_key_face(cwork.w[r]);
+    if (cone_probe_wanted(lod, c, own, face)) {
+        uint slot = cone_insert_probe(c, lod, own, face);
         if (slot != CONE_NO_BRICK) {
             atomicAdd(cwork.w[slot + 1u], cwork.w[r + 7u]);
+            atomicAdd(cwork.w[slot + CONE_HASH_SCREEN], screen);
         }
     }
     ivec3 base = cone_trilinear_base(centre, s);
     for (int k = 0; k < 8 && c < CONE_PARENT_ONLY; k++) {
         ivec3 near = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
-        if (near != own && cone_probe_wanted(lod, c, near)) {
-            cone_insert_probe(c, lod, near);
+        if (near != own && cone_probe_wanted(lod, c, near, face)) {
+            uint slot_near = cone_insert_probe(c, lod, near, face);
+            if (slot_near != CONE_NO_BRICK) {
+                atomicAdd(cwork.w[slot_near + CONE_HASH_SCREEN], screen);
+            }
         }
     }
 }

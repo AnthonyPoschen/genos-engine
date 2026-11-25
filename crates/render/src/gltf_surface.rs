@@ -190,6 +190,16 @@ impl GltfSurface {
             .is_some_and(|m| m.cutoff > 0.0 && m.pbr.base_color_texture.is_some())
     }
 
+    /// The diffuse albedo of `tri` (one of [`GltfSurface::triangles`]) at
+    /// barycentric `u`, `v`: its material's base colour, with its texture read
+    /// at the first TEXCOORD set. No ray: the voxel field's points take their
+    /// albedo from here.
+    #[must_use]
+    pub fn albedo_on(&self, tri: &MeshTriangle, u: f32, v: f32) -> [f32; 3] {
+        let material = &self.materials[usize::try_from(tri.material).unwrap_or(0).min(self.materials.len() - 1)];
+        shade_sets(&material.pbr, &self.images, &[Some(tri.uv_at(u, v))]).diffuse_albedo()
+    }
+
     /// Every triangle stops a ray from both sides either way.
     #[must_use]
     pub fn double_sided(&self, material: u32) -> bool {

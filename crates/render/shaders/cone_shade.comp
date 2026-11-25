@@ -3,7 +3,7 @@
 // sum of the merged cascade-0 cones of the voxel-layer probes around it, each
 // weighted by the share that passes from the pixel to its seat (lamp.x bit 1).
 // The pixel's light, its emission plus its albedo's share of that and of the
-// suns (one exact ray a pixel each, cone_sun), goes in
+// suns (their share from the field, cone_sun), goes in
 // the G-buffer word compose reads as emitted light (the direct pass does not
 // run in this mode).
 #extension GL_GOOGLE_include_directive : require
@@ -17,7 +17,7 @@ vec3 level_irradiance(int lod, vec3 pos, vec3 n) {
     uint probes[8];
     float weights[8];
     ivec3 own = cone_cell(pos, n, cone_spacing(lod, 0));
-    int count = cone_weights(0, lod, pos, (pc.lamp.x & 2u) != 0u, pos + n * CONE_SURFACE_LIFT, own, probes, weights);
+    int count = cone_weights(0, lod, cone_face(n), pos, (pc.lamp.x & 2u) != 0u, pos + n * CONE_SURFACE_LIFT, own, probes, weights);
     uint theta = cone_theta(0);
     uint dirs = cone_dirs(0);
     vec3 sum = vec3(0.0);
@@ -60,22 +60,69 @@ vec3 level_irradiance(int lod, vec3 pos, vec3 n) {
     return weight > 0.0 ? sum * (CONE_PI / weight) : vec3(0.0);
 }
 
-// The suns, one exact shadow ray a pixel each (plan section 3's fallback for
-// the sun): a cone cascade reads the sky only past its coarsest interval, so
-// the sun came through in probe-sized blocks. Point lamps stay in the cones.
-// Lit as the old direct pass lights a pixel (lamp_light, albedo over pi).
+// The share of the sun the field holds for the pixel's side at `pos`:
+// the sun shares the light pass marched for the voxel faces around it
+// (cone_light.comp), trilinear over the finest level the field holds there,
+// the faces turned the way the pixel's normal is. So the sun on a pixel is the
+// sun the field's voxels see and send on as bounce (Anthony, 25 Nov 2026: the
+// sun has to be in the field). Up a level where none of the eight has a face.
+float field_sun(vec3 pos, vec3 n) {
+    int face = cone_face(n);
+    for (int level = cone_held_level(CONE_FINEST, pos); level <= CONE_COARSEST; level++) {
+        float s = cone_size(level);
+        vec3 g = (pos - n * (CONE_BEHIND * min(s, CONE_BEHIND))) / s - CONE_HALF;
+        vec3 base = floor(g);
+        vec3 f = g - base;
+        float sum = 0.0;
+        float weight = 0.0;
+        for (int k = 0; k < 8; k++) {
+            ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            vec3 wv = mix(vec3(1.0) - f, f, vec3(o));
+            float wt = wv.x * wv.y * wv.z;
+            float share = wt > 0.0 ? cone_face_sun(level, ivec3(base) + o, face) : -1.0;
+            if (share >= 0.0) {
+                sum += wt * share;
+                weight += wt;
+            }
+        }
+        if (weight > 0.0) {
+            return sum / weight;
+        }
+    }
+    return 1.0;
+}
+
+// A sun share this close to 0 or 1 is taken as it is; between, the pixel
+// marches its own ray.
+const float CONE_SUN_EDGE = 0.02;
+
+// The sun's light on the pixel: its share from the field (field_sun), lit
+// as the old direct pass lights a pixel (lamp_light, albedo over pi).
 vec3 cone_sun(vec3 pos, vec3 n, bool two_sided) {
     vec3 from = pos + n * CONE_SURFACE_LIFT;
+    LampList list = lamps_at(from);
     vec3 sum = vec3(0.0);
-    for (uint i = 0u; i < scene.lamp_count; i++) {
-        Lamp lamp = scene_lamp(i);
-        if (lamp.pos.w <= 0.5) {
+    float share = -1.0;
+    for (uint k = 0u; k < list.suns.y; k++) {
+        Lamp lamp = lamp_list_get(list, k);
+        if (lamp.pos.w <= CONE_SUN_MARK) {
             continue;
         }
         vec3 target;
         vec3 light = lamp_light(lamp, from, n, two_sided, target);
-        if (light.r + light.g + light.b > 0.0 && !trace_occluded(from, target)) {
-            sum += light;
+        if (light.r + light.g + light.b > 0.0) {
+            if (share < 0.0) {
+                share = field_sun(pos, n);
+                // The voxels around the pixel see part of the sun: a shadow
+                // edge crosses them. The pixel marches its own thin ray
+                // through the field's finest levels for a crisp edge
+                // (Anthony, 25 Nov 2026); fully lit and fully shadowed pixels
+                // keep the voxels' share, and the bounce always does.
+                if (share > CONE_SUN_EDGE && share < 1.0 - CONE_SUN_EDGE) {
+                    share = 1.0 - sun_blocked(from, -normalize(lamp.pos.xyz), CONE_FINEST);
+                }
+            }
+            sum += light * share;
         }
     }
     return sum;
@@ -94,7 +141,14 @@ void main() {
         return;
     }
     uint pixel = p.y * pc.dims.x + p.x;
-    vec3 irradiance = level_irradiance(cone_pixel_lod(pos), pos, n);
+    int lo;
+    int hi;
+    float w_hi;
+    cone_pixel_levels(pos, lo, hi, w_hi);
+    vec3 irradiance = level_irradiance(hi, pos, n);
+    if (lo != hi && w_hi < 1.0) {
+        irradiance = mix(level_irradiance(lo, pos, n), irradiance, w_hi);
+    }
     uint emitted = gbuf_word(pixel, 3u);
     vec3 glow = emitted == ~0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
     gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(glow + albedo * SCENE_LAMBERT * irradiance + albedo * (1.0 / CONE_PI) * cone_sun(pos, n, two_sided));

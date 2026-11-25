@@ -28,8 +28,9 @@ void main() {
     }
     cwork.w[at + 8u] = index;
     uint count = cwork.w[at + 1u];
-    int lod = int((key >> 27u) & 15u);
-    ivec3 rel = ivec3(int((key >> 18u) & 511u), int((key >> 9u) & 511u), int(key & 511u)) - ivec3(CONE_KEY_SPAN);
+    int lod = cone_key_lod(key);
+    int face = cone_key_face(key);
+    ivec3 rel = cone_key_rel(key);
     ivec3 cell = rel + ivec3(floor(scene.eye.xyz / cone_spacing(lod, c)));
     vec3 mean;
     vec3 normal;
@@ -44,11 +45,19 @@ void main() {
         normal = length(nsum) > 0.0 ? normalize(nsum) : vec3(0.0, 1.0, 0.0);
     }
     uint seated = 1u;
-    if ((pc.lamp.x & CONE_PIXEL_SEAT) == 0u && !cone_seat(lod + c, cell, mean, normal, held)) {
-        mean = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c);
-        atomicAdd(cwork.w[CONE_SEAT_FALLBACK + uint(c)], 1u);
-        // Past the field's coarsest level no cell has a seat; those count as seated.
-        seated = lod + c > CONE_COARSEST ? 1u : 0u;
+    if ((pc.lamp.x & CONE_PIXEL_SEAT) == 0u) {
+        // On its face's own surface, lifted off it along the face's axis: each
+        // side of a thin surface has its own probe, on its own side.
+        normal = cone_axis(face);
+        held = 1.0;
+        if (!cone_seat_face(lod + c, cell, face, mean)) {
+            // The voxel's centre, not its pixels' mean: that moves with the
+            // view, and the light on it popped as the camera moved (gate C).
+            mean = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c);
+            atomicAdd(cwork.w[CONE_SEAT_FALLBACK + uint(c)], 1u);
+            // Past the field's coarsest level no cell has a seat; those count as seated.
+            seated = lod + c > CONE_COARSEST ? 1u : 0u;
+        }
     }
     vec3 seat = mean + (held > CONE_SEAT_HELD ? normal * CONE_LIFT * cone_size(CONE_FINEST) : vec3(0.0));
     uint r = cone_probe(c, index);
@@ -60,7 +69,9 @@ void main() {
     cwork.w[r + 5u] = uint(cell.y);
     cwork.w[r + 6u] = uint(cell.z);
     cwork.w[r + 7u] = count;
-    cwork.w[r + CONE_PROBE_SEATED] = seated;
+    // No pixel and no pixel-placed probe below put it there: a world probe.
+    uint world = cwork.w[at + CONE_HASH_SCREEN] == 0u ? CONE_FLAG_WORLD : 0u;
+    cwork.w[r + CONE_PROBE_SEATED] = seated * CONE_FLAG_SEATED | world;
     cone_put3(r + 8u, seat);
     cone_put3(r + 12u, mean);
     cone_put3(r + 16u, normal);

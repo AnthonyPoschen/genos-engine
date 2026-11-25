@@ -400,11 +400,38 @@ pub struct ConeCascadeSettings {
     pub count: u32,
     /// A point lamp's glowing sphere, in metres (0.02..=1).
     pub lamp_radius: f32,
+    /// The finest voxel-layer probe, in metres: 0.0625, 0.125, 0.25, 0.5 or 1
+    /// (key `cone_cascades.finest_probe`). Each step up has four times fewer
+    /// probes on a surface, and so cones in every cascade.
+    pub finest_probe: f32,
+}
+
+impl ConeCascadeSettings {
+    /// The field level of the finest probe (2 is 6.25 cm, 4 is 25 cm).
+    #[must_use]
+    pub fn finest_probe_level(&self) -> u32 {
+        let mut level = 2;
+        let mut size = 0.0625_f32;
+        while level < 6 && self.finest_probe >= size * 1.5 {
+            level += 1;
+            size *= 2.0;
+        }
+        level
+    }
+}
+
+/// A finest probe size snapped to one the field has: 0.0625 to 1 m, doubling.
+fn probe_metres(value: f32) -> f32 {
+    let mut size = 0.0625_f32;
+    while size < 1.0 && value >= size * 1.5 {
+        size *= 2.0;
+    }
+    size
 }
 
 impl Default for ConeCascadeSettings {
     fn default() -> Self {
-        Self { enabled: false, probe_px: 12, theta: 4, count: 5, lamp_radius: 0.1 }
+        Self { enabled: false, probe_px: 12, theta: 2, count: 5, lamp_radius: 0.1, finest_probe: 0.0625 }
     }
 }
 
@@ -1022,6 +1049,7 @@ impl LightingSettings {
         self.cone.probe_px = self.cone.probe_px.clamp(4, 64);
         self.cone.theta = self.cone.theta.clamp(2, 8);
         self.cone.count = self.cone.count.clamp(1, 5);
+        self.cone.finest_probe = probe_metres(self.cone.finest_probe);
         self.cone.lamp_radius = if self.cone.lamp_radius.is_finite() { self.cone.lamp_radius.clamp(0.02, 1.0) } else { 0.1 };
         self.surface_cache.firefly_sigma = if self.surface_cache.firefly_sigma.is_finite() {
             self.surface_cache.firefly_sigma.max(0.0)
@@ -1359,6 +1387,7 @@ impl LightingSettings {
         let _ = writeln!(out, "cone_cascades.theta={}", self.cone.theta);
         let _ = writeln!(out, "cone_cascades.count={}", self.cone.count);
         let _ = writeln!(out, "cone_cascades.lamp_radius={}", num_text(self.cone.lamp_radius));
+        let _ = writeln!(out, "cone_cascades.finest_probe={}", num_text(self.cone.finest_probe));
         let _ = writeln!(
             out,
             "surface_cache.attach_movers={}",
@@ -1618,6 +1647,7 @@ impl LightingSettings {
             "cone_cascades.theta" => self.cone.theta = num_u32(value)?.clamp(2, 8),
             "cone_cascades.count" => self.cone.count = num_u32(value)?.clamp(1, 5),
             "cone_cascades.lamp_radius" => self.cone.lamp_radius = num_f32(value)?.clamp(0.02, 1.0),
+            "cone_cascades.finest_probe" => self.cone.finest_probe = probe_metres(num_f32(value)?),
             "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
             "surface_cache.mover_texels" => self.surface_cache.mover_texels = num_u32(value)?,
             "surface_cache.blend" => {
