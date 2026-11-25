@@ -47,9 +47,16 @@ pub struct HdrSettings {
     pub shutter: f64,
     pub adapt_down: f64,
     pub adapt_up: f64,
-    /// How far auto exposure follows the metered average when the frame is
-    /// darker than its highlight key: 1 follows it fully, 0 holds the key.
+    /// How far auto exposure follows the metered average away from its anchor
+    /// (the metered average over `adapt_anchor_seconds`): 1 follows it fully,
+    /// 0 holds the anchor.
     pub adapt_strength: f64,
+    /// Seconds the anchor takes to settle on where the eye stays (0 follows
+    /// the meter at once, as before the anchor).
+    pub adapt_anchor_seconds: f64,
+    /// Stops of difference from the anchor at which exposure follows half of
+    /// `adapt_strength`: under it, little; past it, most (0: a flat share).
+    pub adapt_knee_stops: f64,
     /// The share of metered pixels under the highlight luminance (0.5..=1).
     pub highlight_percentile: f64,
     /// Stops above mid-grey that the highlight luminance may sit (the key).
@@ -80,6 +87,8 @@ pub struct HdrCli {
     pub adapt_down: Option<f64>,
     pub adapt_up: Option<f64>,
     pub adapt_strength: Option<f64>,
+    pub adapt_anchor_seconds: Option<f64>,
+    pub adapt_knee_stops: Option<f64>,
     pub highlight_percentile: Option<f64>,
     pub highlight_stops: Option<f64>,
     pub display: Option<DisplayTransform>,
@@ -92,7 +101,7 @@ pub struct HdrCli {
 
 /// Environment mirrors of the design-table keys, then `GENOS_HDR_OUT` for `--out`.
 /// The argument wins. The variable applies only when that argument was omitted.
-pub const HDR_ENV_MIRRORS: [&str; 18] = [
+pub const HDR_ENV_MIRRORS: [&str; 20] = [
     "GENOS_HDR_EXPOSURE_MODE",
     "GENOS_HDR_EV100",
     "GENOS_HDR_COMPENSATION",
@@ -102,6 +111,8 @@ pub const HDR_ENV_MIRRORS: [&str; 18] = [
     "GENOS_HDR_ADAPT_DOWN",
     "GENOS_HDR_ADAPT_UP",
     "GENOS_HDR_ADAPT_STRENGTH",
+    "GENOS_HDR_ADAPT_ANCHOR_SECONDS",
+    "GENOS_HDR_ADAPT_KNEE_STOPS",
     "GENOS_HDR_HIGHLIGHT_PERCENTILE",
     "GENOS_HDR_HIGHLIGHT_STOPS",
     "GENOS_HDR_DISPLAY",
@@ -132,6 +143,8 @@ impl HdrSettings {
             adapt_down: 0.40,
             adapt_up: 0.80,
             adapt_strength: 1.0,
+            adapt_anchor_seconds: 0.0,
+            adapt_knee_stops: 0.0,
             highlight_percentile: HIGHLIGHT_PERCENTILE,
             highlight_stops: HIGHLIGHT_STOPS,
             histogram_bins: 256,
@@ -159,6 +172,8 @@ impl HdrSettings {
             0.05
         };
         settings.adapt_strength = ADAPT_STRENGTH;
+        settings.adapt_anchor_seconds = ADAPT_ANCHOR_SECONDS;
+        settings.adapt_knee_stops = ADAPT_KNEE_STOPS;
         match preset {
             LightingPreset::Fallback => {
                 settings.exposure_mode = ExposureMode::Fixed;
@@ -237,6 +252,12 @@ impl HdrSettings {
                 "--adapt-strength" => {
                     cli.adapt_strength = Some(parse_share("adapt_strength", &take(&mut index)?)?);
                 }
+                "--adapt-knee-stops" => {
+                    cli.adapt_knee_stops = Some(parse_seconds("adapt_knee_stops", &take(&mut index)?)?);
+                }
+                "--adapt-anchor-seconds" => {
+                    cli.adapt_anchor_seconds = Some(parse_seconds("adapt_anchor_seconds", &take(&mut index)?)?);
+                }
                 "--highlight-percentile" => {
                     cli.highlight_percentile =
                         Some(parse_percentile(&take(&mut index)?)?);
@@ -288,6 +309,8 @@ impl HdrSettings {
             adapt_down: env("GENOS_HDR_ADAPT_DOWN"),
             adapt_up: env("GENOS_HDR_ADAPT_UP"),
             adapt_strength: env("GENOS_HDR_ADAPT_STRENGTH"),
+            adapt_anchor_seconds: env("GENOS_HDR_ADAPT_ANCHOR_SECONDS"),
+            adapt_knee_stops: env("GENOS_HDR_ADAPT_KNEE_STOPS"),
             highlight_percentile: env("GENOS_HDR_HIGHLIGHT_PERCENTILE"),
             highlight_stops: env("GENOS_HDR_HIGHLIGHT_STOPS"),
             display: env("GENOS_HDR_DISPLAY"),
@@ -338,38 +361,7 @@ impl HdrSettings {
             out.shutter = value;
             out.legacy_bytes = false;
         }
-        if let Some(value) = cli
-            .adapt_down
-            .or_else(|| parse_opt_f64(env.adapt_down.as_deref()))
-        {
-            out.adapt_down = value;
-        }
-        if let Some(value) = cli
-            .adapt_up
-            .or_else(|| parse_opt_f64(env.adapt_up.as_deref()))
-        {
-            out.adapt_up = value;
-        }
-        if let Some(value) = cli.adapt_strength.or_else(|| {
-            env.adapt_strength
-                .as_deref()
-                .and_then(|v| parse_share("adapt_strength", v).ok())
-        }) {
-            out.adapt_strength = value;
-        }
-        if let Some(value) = cli.highlight_percentile.or_else(|| {
-            env.highlight_percentile
-                .as_deref()
-                .and_then(|v| parse_percentile(v).ok())
-        }) {
-            out.highlight_percentile = value;
-        }
-        if let Some(value) = cli
-            .highlight_stops
-            .or_else(|| env.highlight_stops.as_deref().and_then(|v| parse_stops(v).ok()))
-        {
-            out.highlight_stops = value;
-        }
+        out.resolve_adapt(cli, env);
         if let Some(value) = cli
             .display
             .or_else(|| env.display.as_deref().and_then(|v| parse_display(v).ok()))
@@ -410,9 +402,60 @@ impl HdrSettings {
         out
     }
 
+    /// The auto exposure keys of [`Self::resolve`]: adaptation and the highlight key.
+    fn resolve_adapt(&mut self, cli: &HdrCli, env: &HdrEnv) {
+        let out = self;
+        if let Some(value) = cli
+            .adapt_down
+            .or_else(|| parse_opt_f64(env.adapt_down.as_deref()))
+        {
+            out.adapt_down = value;
+        }
+        if let Some(value) = cli
+            .adapt_up
+            .or_else(|| parse_opt_f64(env.adapt_up.as_deref()))
+        {
+            out.adapt_up = value;
+        }
+        if let Some(value) = cli.adapt_strength.or_else(|| {
+            env.adapt_strength
+                .as_deref()
+                .and_then(|v| parse_share("adapt_strength", v).ok())
+        }) {
+            out.adapt_strength = value;
+        }
+        if let Some(value) = cli.adapt_anchor_seconds.or_else(|| {
+            env.adapt_anchor_seconds
+                .as_deref()
+                .and_then(|v| parse_seconds("adapt_anchor_seconds", v).ok())
+        }) {
+            out.adapt_anchor_seconds = value;
+        }
+        if let Some(value) = cli.adapt_knee_stops.or_else(|| {
+            env.adapt_knee_stops
+                .as_deref()
+                .and_then(|v| parse_seconds("adapt_knee_stops", v).ok())
+        }) {
+            out.adapt_knee_stops = value;
+        }
+        if let Some(value) = cli.highlight_percentile.or_else(|| {
+            env.highlight_percentile
+                .as_deref()
+                .and_then(|v| parse_percentile(v).ok())
+        }) {
+            out.highlight_percentile = value;
+        }
+        if let Some(value) = cli
+            .highlight_stops
+            .or_else(|| env.highlight_stops.as_deref().and_then(|v| parse_stops(v).ok()))
+        {
+            out.highlight_stops = value;
+        }
+    }
+
     pub fn to_text(&self) -> String {
         format!(
-            "exposure_mode={}\nev100={}\ncompensation={}\niso={}\naperture={}\nshutter={}\nadapt_down={}\nadapt_up={}\nadapt_strength={}\nhighlight_percentile={}\nhighlight_stops={}\nhistogram_bins={}\ndisplay={}\nbloom={}\nbloom_intensity={}\nbloom_levels={}\noutput={}\ntransition={}\nlegacy_bytes={}\n",
+            "exposure_mode={}\nev100={}\ncompensation={}\niso={}\naperture={}\nshutter={}\nadapt_down={}\nadapt_up={}\nadapt_strength={}\nadapt_anchor_seconds={}\nadapt_knee_stops={}\nhighlight_percentile={}\nhighlight_stops={}\nhistogram_bins={}\ndisplay={}\nbloom={}\nbloom_intensity={}\nbloom_levels={}\noutput={}\ntransition={}\nlegacy_bytes={}\n",
             exposure_name(self.exposure_mode),
             self.ev100,
             self.compensation,
@@ -422,6 +465,8 @@ impl HdrSettings {
             self.adapt_down,
             self.adapt_up,
             self.adapt_strength,
+            self.adapt_anchor_seconds,
+            self.adapt_knee_stops,
             self.highlight_percentile,
             self.highlight_stops,
             self.histogram_bins,
@@ -467,6 +512,8 @@ impl HdrSettings {
             "adapt_down" => self.adapt_down = parse_f64("adapt_down", value)?,
             "adapt_up" => self.adapt_up = parse_f64("adapt_up", value)?,
             "adapt_strength" => self.adapt_strength = parse_share("adapt_strength", value)?,
+            "adapt_anchor_seconds" => self.adapt_anchor_seconds = parse_seconds("adapt_anchor_seconds", value)?,
+            "adapt_knee_stops" => self.adapt_knee_stops = parse_seconds("adapt_knee_stops", value)?,
             "highlight_percentile" => self.highlight_percentile = parse_percentile(value)?,
             "highlight_stops" => self.highlight_stops = parse_stops(value)?,
             "histogram_bins" => self.histogram_bins = parse_u32("histogram_bins", value)?,
@@ -486,7 +533,7 @@ impl HdrSettings {
 /// The keys a scene file stores as its look, in the order they are written.
 /// `output` is the machine's choice. `histogram_bins` follows the preset.
 /// `legacy_bytes` is internal.
-pub const HDR_LOOK_KEYS: [&str; 16] = [
+pub const HDR_LOOK_KEYS: [&str; 18] = [
     "exposure_mode",
     "ev100",
     "compensation",
@@ -496,6 +543,8 @@ pub const HDR_LOOK_KEYS: [&str; 16] = [
     "adapt_down",
     "adapt_up",
     "adapt_strength",
+    "adapt_anchor_seconds",
+    "adapt_knee_stops",
     "highlight_percentile",
     "highlight_stops",
     "display",
@@ -535,6 +584,8 @@ pub struct HdrEnv {
     pub adapt_down: Option<String>,
     pub adapt_up: Option<String>,
     pub adapt_strength: Option<String>,
+    pub adapt_anchor_seconds: Option<String>,
+    pub adapt_knee_stops: Option<String>,
     pub highlight_percentile: Option<String>,
     pub highlight_stops: Option<String>,
     pub display: Option<String>,
@@ -576,11 +627,19 @@ fn parse_f64(name: &str, value: &str) -> Result<f64, String> {
 }
 
 /// Auto exposure's default strength in the auto presets (`adapt_strength`).
-pub const ADAPT_STRENGTH: f64 = 0.15;
+pub const ADAPT_STRENGTH: f64 = 0.7;
+/// The default knee (`adapt_knee_stops`): 2 stops (shade beside sun) move
+/// exposure 0.28 stops, 7 (a black room looking out) 3.7.
+pub const ADAPT_KNEE_STOPS: f64 = 4.0;
 /// The default highlight percentile (`highlight_percentile`).
 pub const HIGHLIGHT_PERCENTILE: f64 = 0.98;
-/// The default highlight key in stops above mid-grey (`highlight_stops`).
-pub const HIGHLIGHT_STOPS: f64 = 3.0;
+/// The default highlight key in stops above mid-grey (`highlight_stops`):
+/// 3 clipped the brightest areas into a glow (Anthony, 25 Nov 2026).
+pub const HIGHLIGHT_STOPS: f64 = 2.0;
+/// Seconds auto exposure's anchor takes to settle where the eye stays
+/// (`adapt_anchor_seconds`): a step into shade or a look at the sun moves
+/// exposure only `adapt_strength` of the way, and the anchor follows slowly.
+pub const ADAPT_ANCHOR_SECONDS: f64 = 60.0;
 
 /// A share from 0 to 1.
 fn parse_share(name: &str, value: &str) -> Result<f64, String> {
@@ -795,7 +854,7 @@ mod tests {
         );
         assert_eq!(from_cli.adapt_down.to_bits(), 0.90_f64.to_bits());
         assert_eq!(from_cli.adapt_up.to_bits(), 1.25_f64.to_bits());
-        assert_eq!(HDR_ENV_MIRRORS.len(), 18);
+        assert_eq!(HDR_ENV_MIRRORS.len(), 20);
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_DOWN"));
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_ADAPT_UP"));
         assert!(HDR_ENV_MIRRORS.contains(&"GENOS_HDR_OUT"));

@@ -1341,6 +1341,16 @@ kind = "mirror"
 detail = "--adapt-strength"
 
 [[var]]
+name = "GENOS_HDR_ADAPT_ANCHOR_SECONDS"
+kind = "mirror"
+detail = "--adapt-anchor-seconds"
+
+[[var]]
+name = "GENOS_HDR_ADAPT_KNEE_STOPS"
+kind = "mirror"
+detail = "--adapt-knee-stops"
+
+[[var]]
 name = "GENOS_HDR_HIGHLIGHT_PERCENTILE"
 kind = "mirror"
 detail = "--highlight-percentile"

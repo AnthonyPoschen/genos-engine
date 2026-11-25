@@ -111,6 +111,8 @@ Output | - | - | open | hdr_shutter
 Output | - | - | open | hdr_adapt_down
 Output | - | - | open | hdr_adapt_up
 Output | - | - | open | hdr_adapt_strength
+Output | - | - | open | hdr_adapt_anchor_seconds
+Output | - | - | open | hdr_adapt_knee_stops
 Output | - | - | open | hdr_highlight_percentile
 Output | - | - | open | hdr_highlight_stops
 Output | - | - | open | hdr_transition

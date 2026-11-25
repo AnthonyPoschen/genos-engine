@@ -259,7 +259,7 @@ fn hdr_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "set_hdr_settings",
-            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, adapt_strength, highlight_percentile, highlight_stops, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, transition, legacy_bytes). transition is the seconds a change of ev100, compensation, or the bloom intensity takes to reach the picture; 0 applies it on the next frame. A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
+            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, adapt_strength, adapt_anchor_seconds, adapt_knee_stops, highlight_percentile, highlight_stops, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, transition, legacy_bytes). transition is the seconds a change of ev100, compensation, or the bloom intensity takes to reach the picture; 0 applies it on the next frame. A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
         ),
         spec(
             "save_hdr_to_scene",

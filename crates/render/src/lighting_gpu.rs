@@ -298,6 +298,9 @@ pub(crate) struct Lighting {
     bloom_probe: bool,
     /// EV100 from the last GPU histogram. Empty until a frame had samples.
     meter_ev: Option<f64>,
+    /// Auto exposure's anchor (`adapt_anchor_seconds`) and when it last moved.
+    meter_anchor: Option<f64>,
+    meter_anchor_at: Option<std::time::Instant>,
     /// The camera position auto exposure last saw, to find a cut.
     pub(crate) exposure_eye: Option<[f32; 3]>,
     /// Frames auto exposure still waits after a camera cut, and the scale
@@ -787,6 +790,8 @@ impl Default for Lighting {
             budget_hdr10_listed: false,
             bloom_probe: false,
             meter_ev: None,
+            meter_anchor: None,
+            meter_anchor_at: None,
             exposure_eye: None,
             exposure_cut: 0,
             exposure_cut_from: 0.0,
@@ -1756,6 +1761,7 @@ impl Gpu {
         self.lighting.meter_has_prev = [false, false];
         self.lighting.meter_ping = [0, 0];
         self.lighting.meter_ev = None;
+        self.lighting.meter_anchor = None;
         self.lighting.still_pop = 0.0;
         self.lighting.histogram_counts.clear();
         let mut lamp_res = std::mem::replace(&mut self.lighting.lamp_res, Buffer::empty());
@@ -3638,11 +3644,21 @@ impl Gpu {
             return;
         }
         let hdr = &self.lighting.hdr;
-        self.lighting.meter_ev = Some(crate::hdr_output::auto_ev100(
+        // The anchor: the metered EV averaged over adapt_anchor_seconds of real
+        // time; exposure moves adapt_strength of the way from it to the meter.
+        let metered = crate::hdr_output::histogram_ev100_from_counts(&counts);
+        let now = std::time::Instant::now();
+        let dt = self.lighting.meter_anchor_at.map_or(0.0, |t| now.duration_since(t).as_secs_f64().min(1.0));
+        let anchor = self.lighting.meter_anchor.map_or(metered, |a| crate::hdr_output::step_anchor(a, metered, dt, hdr.adapt_anchor_seconds));
+        self.lighting.meter_anchor = Some(anchor);
+        self.lighting.meter_anchor_at = Some(now);
+        self.lighting.meter_ev = Some(crate::hdr_output::auto_ev100_anchored(
             &counts,
             hdr.adapt_strength,
+            hdr.adapt_knee_stops,
             hdr.highlight_percentile,
             hdr.highlight_stops,
+            anchor,
         ));
         self.write_histogram_dump(&counts);
         self.lighting.histogram_counts = counts;

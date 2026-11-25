@@ -533,19 +533,59 @@ pub fn histogram_ev100_from_counts(counts: &[u32]) -> f64 {
 pub fn histogram_percentile_log2(counts: &[u32], share: f64) -> Option<f64> {
     let bins = counts.len().min(4096);
     let counts = &counts[..bins];
-    let total: u64 = counts.iter().map(|c| u64::from(*c)).sum();
-    if total == 0 {
+    // Counted in f64: whole counts up to 2^53 add exactly.
+    let total: f64 = counts.iter().map(|c| f64::from(*c)).sum();
+    if total <= 0.0 {
         return None;
     }
-    let want = (share.clamp(0.0, 1.0) * total as f64).ceil().max(1.0) as u64;
-    let mut seen = 0_u64;
+    let want = (share.clamp(0.0, 1.0) * total).ceil().max(1.0);
+    let mut seen = 0.0_f64;
     for (index, count) in counts.iter().enumerate() {
-        seen += u64::from(*count);
+        seen += f64::from(*count);
         if seen >= want {
             return Some(bin_center(index, bins));
         }
     }
     Some(bin_center(bins - 1, bins))
+}
+
+/// Auto exposure about a slow anchor: the target moves `adapt_share` of the
+/// way from `anchor` (the metered EV averaged over seconds, the caller's) to
+/// this frame's metered EV, in either direction, and never opens past the
+/// highlight key (the EV that puts the `percentile` luminance `stops` above
+/// mid-grey). So a step into shade or a look into the light changes exposure
+/// by a share of the difference, and the bright areas do not clip.
+#[must_use]
+pub fn auto_ev100_anchored(counts: &[u32], strength: f64, knee: f64, percentile: f64, stops: f64, anchor: f64) -> f64 {
+    let metered = histogram_ev100_from_counts(counts);
+    let target = anchor + adapt_share(metered - anchor, strength, knee) * (metered - anchor);
+    match histogram_percentile_log2(counts, percentile) {
+        Some(high) => target.max(high + 8.0_f64.log2() - stops),
+        None => target,
+    }
+}
+
+/// The share of a difference of `delta` stops from the anchor that exposure
+/// follows: `strength` times delta² / (delta² + knee²). A small difference
+/// (shade beside sun) moves exposure little, a large one (a black room
+/// looking out) most of `strength` (Anthony, 25 Nov 2026). A knee of 0 is a
+/// flat `strength`.
+#[must_use]
+pub fn adapt_share(delta: f64, strength: f64, knee: f64) -> f64 {
+    let d2 = delta * delta;
+    let k2 = knee * knee;
+    let curve = if d2 + k2 > 0.0 { d2 / (d2 + k2) } else { 1.0 };
+    strength.clamp(0.0, 1.0) * curve
+}
+
+/// The anchor moved toward `metered` over `dt` seconds with time constant
+/// `seconds` (0: at once).
+#[must_use]
+pub fn step_anchor(anchor: f64, metered: f64, dt: f64, seconds: f64) -> f64 {
+    if seconds <= 0.0 {
+        return metered;
+    }
+    anchor + (metered - anchor) * (1.0 - (-dt.max(0.0) / seconds).exp())
 }
 
 /// Auto exposure's EV100 for one histogram. The meter's EV places the mean
@@ -2336,6 +2376,28 @@ mod tests {
         let metered = histogram_ev100_from_counts(&counts);
         assert!((auto_ev100(&counts, 0.7, 0.98, 3.0) - metered).abs() < 1.0e-12);
         assert_eq!(auto_ev100(&[], 0.7, 0.98, 3.0), 0.0);
+    }
+
+    /// Stepping from the anchor's light into shade a few stops darker moves
+    /// exposure only `strength` of the way; the anchor follows by time, not
+    /// at once; and the highlight key still caps how far exposure opens.
+    #[test]
+    fn auto_exposure_moves_a_share_of_the_way_from_its_slow_anchor() {
+        let shade = split_counts(900, 0.002, 100, 0.004);
+        let metered = histogram_ev100_from_counts(&shade);
+        let anchor = metered + 3.0;
+        let ev = auto_ev100_anchored(&shade, 0.15, 0.0, 0.98, 100.0, anchor);
+        assert!((ev - (anchor - 0.15 * 3.0)).abs() < 1.0e-9, "ev {ev}, anchor {anchor}, metered {metered}");
+        // With a knee, a small difference moves exposure far less than a large one.
+        assert!(adapt_share(1.0, 0.7, 4.0) < 0.05 && adapt_share(7.0, 0.7, 4.0) > 0.5);
+        // A tenth of the time constant moves the anchor about a tenth of the way.
+        let moved = step_anchor(anchor, metered, 2.0, 20.0);
+        assert!((anchor - moved - 3.0 * (1.0 - (-0.1_f64).exp())).abs() < 1.0e-9);
+        assert_eq!(step_anchor(anchor, metered, 2.0, 0.0), metered);
+        // With the key 2 stops above mid-grey, exposure opens no further than it.
+        let key_capped = auto_ev100_anchored(&shade, 1.0, 0.0, 0.98, 2.0, metered - 10.0);
+        let high = histogram_percentile_log2(&shade, 0.98).unwrap_or(f64::NAN);
+        assert!((key_capped - metered.max(high + 1.0)).abs() < 1.0e-9, "{key_capped} {metered} {high}");
     }
 
     #[test]

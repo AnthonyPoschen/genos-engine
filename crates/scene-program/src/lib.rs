@@ -134,9 +134,16 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          only when this is omitted
   --adapt-up F           seconds for exposure to rise. GENOS_HDR_ADAPT_UP applies
                          only when this is omitted
-  --adapt-strength F     0..1, how far auto exposure follows the metered mean when
-                         the frame is darker than its highlight key (1 fully).
+  --adapt-strength F     0..1, how far auto exposure follows the metered mean away
+                         from its anchor (1 fully).
                          GENOS_HDR_ADAPT_STRENGTH applies only when this is omitted
+  --adapt-anchor-seconds F
+                         seconds auto exposure's anchor takes to settle where the
+                         eye stays (0 follows the meter at once).
+                         GENOS_HDR_ADAPT_ANCHOR_SECONDS applies only when this is omitted
+  --adapt-knee-stops F   stops from the anchor at which exposure follows half of
+                         the strength: under it little, past it most (0: flat).
+                         GENOS_HDR_ADAPT_KNEE_STOPS applies only when this is omitted
   --highlight-percentile F
                          0.5..1, the luminance share that sets the highlight key.
                          GENOS_HDR_HIGHLIGHT_PERCENTILE applies only when this is omitted
@@ -335,6 +342,8 @@ const ID_HDR_TRANSITION: u32 = 5109;
 const ID_HDR_ADAPT_STRENGTH: u32 = 5110;
 const ID_HDR_HIGHLIGHT_PERCENTILE: u32 = 5111;
 const ID_HDR_HIGHLIGHT_STOPS: u32 = 5112;
+const ID_HDR_ADAPT_ANCHOR: u32 = 5113;
+const ID_HDR_ADAPT_KNEE: u32 = 5114;
 const ID_HDR_BLOOM: u32 = 5200;
 /// The "Save look to scene" button of the Output page.
 const ID_HDR_SAVE: u32 = 5300;
@@ -3604,6 +3613,28 @@ fn setting_piece(
                 0.05,
             )))
         }
+        "hdr_adapt_anchor_seconds" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt anchor seconds",
+                ID_HDR_ADAPT_ANCHOR,
+                hdr.adapt_anchor_seconds,
+                0.0,
+                60.0,
+                1.0,
+            )))
+        }
+        "hdr_adapt_knee_stops" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt knee stops",
+                ID_HDR_ADAPT_KNEE,
+                hdr.adapt_knee_stops,
+                0.0,
+                10.0,
+                0.25,
+            )))
+        }
         "hdr_highlight_percentile" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(number_row(
@@ -4070,6 +4101,14 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
         app.scene()
             .hdr
             .set_key("adapt_strength", &format!("{}", value.clamp(0.0, 1.0)))?;
+    } else if id == ID_HDR_ADAPT_KNEE {
+        app.scene()
+            .hdr
+            .set_key("adapt_knee_stops", &format!("{}", value.clamp(0.0, 10.0)))?;
+    } else if id == ID_HDR_ADAPT_ANCHOR {
+        app.scene()
+            .hdr
+            .set_key("adapt_anchor_seconds", &format!("{}", value.clamp(0.0, 60.0)))?;
     } else if id == ID_HDR_HIGHLIGHT_PERCENTILE {
         app.scene()
             .hdr
