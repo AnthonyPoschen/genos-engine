@@ -52,7 +52,10 @@ void main() {
         uint key = cone_key(level, cell, 0, face);
         // A share of the world probes each frame (push lamp.w, the frame's
         // count): the light pass holds the others' voxels' bounce meanwhile.
-        if (key == CONE_EMPTY || (cone_hash_of(key ^ 0x9e3779b9u) % CONE_WORLD_SHARE) != pc.lamp.w % CONE_WORLD_SHARE) {
+        // All of them on the last frame before a new field takes over
+        // (push params.x): its voxels take their light from this frame's probes.
+        bool turn = pc.params.x != 0u || (cone_hash_of(key ^ 0x9e3779b9u) % CONE_WORLD_SHARE) == pc.lamp.w % CONE_WORLD_SHARE;
+        if (key == CONE_EMPTY || !turn) {
             continue;
         }
         // A face pixels cover in part still gets one: its voxels off the

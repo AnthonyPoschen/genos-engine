@@ -61,6 +61,12 @@ void main() {
     float width = sqrt(CONE_SPHERE / (CONE_HALVES * theta0 * theta0)) / float(1 << c);
     float covered = 0.0;
     vec3 light = vec3(0.0);
+    // A cone that leaves its probe's surface is not covered by what lies
+    // behind that surface (cone_common.glsl cone_horizon_on).
+    vec3 way = cone_word3(r + 16u);
+    cone_horizon_on = dot(dir, way) > 0.0;
+    cone_horizon_at = cone_word3(r + 12u);
+    cone_horizon_n = way;
     cone_march(start, dir, width, from, end, covered, light);
     float through = 1.0 - covered;
     if (last) {

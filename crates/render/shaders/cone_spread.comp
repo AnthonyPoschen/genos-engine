@@ -32,7 +32,7 @@ void main() {
             uint slot = cone_insert_probe(c, lod, own, cone_key_face(cwork.w[r]));
             if (slot != CONE_NO_BRICK) {
                 atomicAdd(cwork.w[slot + 1u], cwork.w[r + 7u]);
-                atomicAdd(cwork.w[slot + CONE_HASH_SCREEN], 1u);
+                cone_mark_screen(slot);
             }
         }
         return;
@@ -51,7 +51,9 @@ void main() {
         uint slot = cone_insert_probe(c, lod, own, face);
         if (slot != CONE_NO_BRICK) {
             atomicAdd(cwork.w[slot + 1u], cwork.w[r + 7u]);
-            atomicAdd(cwork.w[slot + CONE_HASH_SCREEN], screen);
+            if (screen != 0u) {
+                cone_mark_screen(slot);
+            }
         }
     }
     ivec3 base = cone_trilinear_base(centre, s);
@@ -59,8 +61,8 @@ void main() {
         ivec3 near = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
         if (near != own && cone_probe_wanted(lod, c, near, face)) {
             uint slot_near = cone_insert_probe(c, lod, near, face);
-            if (slot_near != CONE_NO_BRICK) {
-                atomicAdd(cwork.w[slot_near + CONE_HASH_SCREEN], screen);
+            if (slot_near != CONE_NO_BRICK && screen != 0u) {
+                cone_mark_screen(slot_near);
             }
         }
     }

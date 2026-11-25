@@ -50,7 +50,7 @@ pub use lighting::{
     check_lighting_arg, lighting_arg_time_of_day,
     lighting_env, lighting_env_flag, lighting_env_os, lighting_flag_needs_value,
     parse_lighting_toggles, AmbientMode, AmbientSettings, BounceSettings, DenoiserSettings,
-    ConeCascadeSettings, DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings,
+    ConeCascadeSettings, ConeView, DirectSettings, GiSettings, GpuBuckets, LampPickMode, LampPickSettings,
     LightingExperimentSettings, LightingPreset, LightingSettings, ProbeSettings, ShadowFilter,
     ShadowSettings, SurfaceCacheBlend, SurfaceCacheSettings, WorldCacheSettings,
     LAMP_PICK_CANDIDATES_HIGH, LAMP_PICK_CANDIDATES_LOW, LAMP_PICK_CANDIDATES_MEDIUM,

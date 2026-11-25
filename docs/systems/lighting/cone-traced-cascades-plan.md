@@ -472,3 +472,46 @@ Gates: E now asks that the frame right after a lamp moves holds at least half of
 
 Open: small black notches down the curtain's folds (probe light: they stay with the sun off); grey cell-sized blocks on the curtain with the sun off (likely the lamp behind it leaking through the cloth at the coarse cascades); on Anthony's walk from pose A to B cone mode pops about twice as many pixels a step as the old path (19,000 to 9,500), peaking mid-walk and not at the clip rebuilds; gate D at Sponza 1262x1376 (3 pixels over two codes) and G there (a one-frame dip at a rebuild, older); the hall still darker than the old path (0.083 against 0.17; to grade), and a regrade of all four views.
 
+## 19. Unlit patches and the frame's cost, 26 Nov 2026
+
+**Probes first.** `lighting.cone_stats` gained `pass_ms` (GPU timestamps about each stage of the cone passes), and two probes answer "why is this pixel dark": `lighting.cone_pick {x, y}` (the probes a pixel reads, what passes to each, how much light each holds and how much of its own cones pass on) and `cone_cascades.view` (`coverage`, `dark`). `tools/lighting/cone_view.py` runs one view headless and prints them (`debug-standard.md`, "Cone-traced cascades probes").
+
+**Three causes of unlit pixels**, each shown by `cone_pick` before its fix:
+
+| What was seen | What the probe showed | Fix |
+|---|---|---|
+| Black notches down a curtain's folds; dark blotches on the curtains at pose B | Four lit, seated probes about the pixel, each `passed` 0: the pixel read no probe. The same in the merge: a probe whose every parent was blocked read no coarser cascade. | **Pass floor**: a probe in the hash is weighed by at least a thousandth of its trilinear weight. |
+| A curtain black from 8 m off, lit when close | Seated probes with a hundredth of their neighbours' light; their own cones passed 2% to 15% on (50% is a flat wall's). The dark began where the 12.5 cm clip volume ends. | **Cone horizon**: past the fine levels a voxel is read by the area facing the cone, wherever in the voxel it is; a voxel whose mean surface point is behind the plane the cone starts from, within two voxels of it, gives no cover. For cones, sun rays and the passing test. |
+| The same curtain's pleats | The seat (the way's mean plane) lay inside the pleats. | **Field seat** at the front of its way's surface in the voxel (a spare half in a fine record; three more words in a coarse texel, now 26). The light pass keys its probe lookup from a point kept inside the voxel. |
+
+The "grey cell-sized blocks on the curtain with the sun off" of section 18 are the curtain's own emblem before its texture has loaded, not light through the cloth.
+
+**Cost.** Sponza, Anthony's editor pose (11.35, 1.8, -0.98, yaw -1.435, pitch -0.153), 2526x1376, RTX 4070 with nothing else on it, `cone_view.py`:
+
+| | Frame | Cone passes | light | traces | weights | shade | sun | insert |
+|---|---|---|---|---|---|---|---|---|
+| Before (`655547f6`) | 41.8 ms | about 37.8 ms | | | | | | |
+| Now | 30.7 ms | 24.5 ms | 1.6 | 9.2 | 2.3 | 7.5 | 2.8 | 0.6 |
+
+What changed, in the order of what it saved:
+
+- **The sun shares are kept.** A share depends on the field and the sun's direction alone. The light pass marched an eighth of the faces again every frame (20 of its 23 ms on a shared GPU); now every face when a field becomes resident, and an eighth a frame for eight frames after a sun turns.
+- **The refine walk reads no lamps.** A covered coarse step is walked again at finer levels for its cover; each of those reads also made eight lamp-hash lookups and dropped the result.
+- **The sun pass.** The pixels on a shadow edge (12% of this view) are listed by the shade and marched in their own pass. **Clear run**: a thin ray crosses clear space in one stride (the coarse levels' occupancy), and stops at the scene's box; 24 M steps a frame became 11 M. **Block mask**: a bit a fine voxel says the eight voxels the crossing test reads about a point hold nothing.
+- **Inserts read before they swap.** Most hash inserts find their key there; a read costs far less than a compare-and-swap. **Lamp presence** is kept at the level read (the base voxel of a trilinear read), and the light pass looks a face's probe up at the levels a probe can be at there, not at all twenty-one.
+
+Tried and dropped: a crossing test that reads only the voxels the segment can cross (two to four a way in place of sixteen). The picture was the same; the merge weights were 15% faster and the shade and the sun pass 15% slower, so the sixteen stay.
+
+**Gate G** (no dip at a clip rebuild) failed at 1262x1376 before this section and at 1920x1080 once frames were faster. On the frame a new field takes over, its voxels take their light at once from last frame's probes, and three quarters of the world layer's faces had none that frame. The frame before the swap now traces every world probe. G passes at all four views.
+
+**Gates now** (`tools/lighting/cone_stability_gate.py`, four views): A, B, C, F and G pass everywhere. F's walk now waits for the suns' bounce to fade before its first step (at 9 ms a frame the first step counted the fade as pops). Open:
+
+- **D** in Sponza: 42 pixels of 2 million over one code and 1 over two at 1920x1080; 506 and 10 at 1262x1376 (the limit is one in 10,000 and none; before this section 27 and 3 there). The worst is three codes.
+- **E** in the hall: the frame after a lamp moves holds 43% to 45% of the change, under the gate's half. The direct light does arrive in that frame; the rest of the change is bounce, which follows by real time, and a 9 ms frame brings less of it than a 20 ms one did. The gate's line needs stating without the frame time; Anthony's call.
+
+**Not done.** Three times the frame rate needs the cone passes near 9 ms; they are 24.5. The shade's passing test (about 6 ms) and the traces (9 ms) are what is left, and neither gets much cheaper without changing what is computed: tracing the bounce part of the cones less often than the lamps, or fewer probes. The frame a new field takes over still marches every face's sun share at once.
+
+**The horizon at the fine levels too.** A voxel of a curved or folded surface holds planes of several ways, and a cone that left one crossed another of the same voxel; the crossing test skips a record behind the horizon as the coarse read does. `crates/render/tests/cone_stability.rs` now settles by real time (2 s), not three frames: on faster frames three were not enough for the bounce's history, and the turn-back test read 29 to 52 changed pixels.
+
+**Open, and the next thing to fix: the light depends on the probe's size.** Anthony's walk from A (-13.306, 1.8, -4.490, yaw 1.6008) to B (6.400, 1.8, -4.592, yaw 1.5708) and back (`genos-debug/pops2/`): at the same place and view, the picture with the fine clip volumes still behind the eye is up to 1.5 times as bright as with them about it, and standing still at B it darkens 18% when the new field arrives. The cause is not the field: a pixel near a clip volume's edge reads a coarser probe level (`cone_level_at`), and at the same moment on the same wall a 50 cm probe holds 4.5 times the outward light of a 25 cm one (`cone_pick`, `outward_luma`). Still at B, fixed exposure, mean display code: `finest_probe` 0.25: 24.6; 0.5: 38.4; 1: 51.7. With one or two cascades the sizes agree (about 50); the third cascade halves the 25 cm probes' light. Chain closure off raises 24.6 to 29.0 only, so it is a part, not the cause. `compare` against the CPU reference there (96 px wide, 8 spp, noise 0.08, not well converged): 0.25 m is 55% dark, 0.5 m 14% bright, 1 m 84% bright; the old path 15% dark. Until the cascades give the same light at every probe size, a walk pops wherever a pixel changes level.
+

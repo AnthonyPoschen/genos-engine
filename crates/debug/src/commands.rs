@@ -123,8 +123,6 @@ fn plain_specs() -> Vec<CommandSpec> {
             "light",
             "Edit a light: add (position, color, intensity), or index with on, color, intensity, position, path [[x,y,z],..] + frames (+ loop), remove, reset, solo; solo_off clears a solo and does not need an index.",
         ),
-        spec("cone_stats", "The cone-traced cascades' counts from the last frame, one entry per cascade: probes the hash held, cap (the probe table size), dropped_compact (probes past the cap, never traced), dropped_insert (pixels whose probe found no hash slot), cones_traced, cones_closed, seat_fallbacks (probes whose voxel the field had no surface for, seated at the cell centre); lamp_dropped, the lamp points the per-frame lamp hash had no slot for; and field, the resident voxel field (points, voxels, bricks, MiB, build seconds; its fine levels are clip volumes about the eye, built again when it moves 2 m). Empty when cone mode has not run. Waits for that frame."),
-        spec("cone_probes", "One cascade's probes from the last frame (cascade, default 0): key, lod, cell, pixels, seat. around [x,y,z] and radius (default 2 m) keep the probes whose seat is that near. Waits for that frame. Reply only; writes no file."),
         spec("level0_voxels", "Level-0 cascade voxels within radius (default 0.75 m) of around [x,y,z]: cell, level, axis, position, radiance, filled ring slots, and the four parent cells at twice the size (found, position, weight, radiance). Reply only; writes no file."),
         spec("objects", "Every solid: index, position, yaw, size, colour, edited."),
         spec("object", "Edit solid index: position, yaw, spin (rad/s), freeze (true/false), path [[x,y,z],..] + frames (+ loop), roughness and metallic (0-1, reference trace only until the specular pass lands), reset. Unknown fields are an error."),
@@ -206,6 +204,7 @@ fn plain_specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(cone_specs())
     .chain(under_trusted_specs())
     .chain(reflection_specs())
     .chain(hdr_specs())
@@ -215,6 +214,15 @@ fn plain_specs() -> Vec<CommandSpec> {
     .chain(host_specs())
     .chain(material_specs())
     .collect()
+}
+
+/// The cone-traced cascades' probes (`debug-standard.md`, "Cone-traced cascades probes").
+fn cone_specs() -> Vec<CommandSpec> {
+    vec![
+        spec("cone_stats", "The cone-traced cascades' counts from the last frame, one entry per cascade: probes the hash held, cap (the probe table size), dropped_compact (probes past the cap, never traced), dropped_insert (pixels whose probe found no hash slot), cones_traced, cones_closed, seat_fallbacks (probes whose voxel the field had no surface for, seated at the cell centre); lamp_dropped, the lamp points the per-frame lamp hash had no slot for; and field, the resident voxel field (points, voxels, bricks, MiB, build seconds; its fine levels are clip volumes about the eye, built again when it moves 2 m). Empty when cone mode has not run. Waits for that frame."),
+        spec("cone_pick", "What the pixel at x, y read in the cone shade: lo and hi (its probe levels), hi_weight, position, normal, face (the axis way it faces), field_sun (the sun share of the voxels about it), irradiance, and for each level the eight probes about it: in_hash, seated (on its face's surface, not the cell centre), own (the pixel's own cell), surface (the field has a surface that way there), weight (trilinear), passed (the share that passes from the pixel to the seat; -1 when not tested), dark_dirs and lit_dirs (its directions without and with light), mean_luma, outward_luma (the mean luma of the directions that leave its surface), mean_open (the mean share its own cones passed on to the next cascade; 0 when every cone met a surface inside cascade 0's reach), seat. kept is the probes the pixel read. The first call for a pixel replies pending: true; call again after a frame. Reply only; writes no file. The views cone_cascades.view=coverage and =dark show the same over the whole picture."),
+        spec("cone_probes", "One cascade's probes from the last frame (cascade, default 0): key, lod, cell, pixels, seat. around [x,y,z] and radius (default 2 m) keep the probes whose seat is that near. Waits for that frame. Reply only; writes no file."),
+    ]
 }
 
 fn under_trusted_specs() -> Vec<CommandSpec> {

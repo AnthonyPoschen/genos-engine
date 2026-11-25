@@ -20,7 +20,7 @@ void put_level(int lod, vec3 pos, vec3 n, bool counted) {
     int face = cone_face(n);
     uint slot = cone_insert_probe(0, lod, own, face);
     if (slot != CONE_NO_BRICK) {
-        atomicAdd(cwork.w[slot + CONE_HASH_SCREEN], 1u);
+        cone_mark_screen(slot);
     }
     if (slot != CONE_NO_BRICK && counted) {
         atomicAdd(cwork.w[slot + 1u], 1u);
@@ -42,7 +42,7 @@ void put_level(int lod, vec3 pos, vec3 n, bool counted) {
         if (cell != own && cone_probe_wanted(lod, 0, cell, face)) {
             uint near = cone_insert_probe(0, lod, cell, face);
             if (near != CONE_NO_BRICK) {
-                atomicAdd(cwork.w[near + CONE_HASH_SCREEN], 1u);
+                cone_mark_screen(near);
             }
         }
     }

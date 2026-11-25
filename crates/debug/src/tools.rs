@@ -1631,10 +1631,66 @@ impl Tools {
                     })
                     .collect();
                 let lamp_dropped = ctx.renderer.cone_lamp_drops()?;
+                let passes = ctx.renderer.cone_pass_ms();
+                let total: f64 = passes.iter().map(|(_, ms)| ms).sum();
+                let mut pass_ms: Vec<(&str, Value)> = passes.iter().map(|(name, ms)| (*name, num(*ms))).collect();
+                pass_ms.push(("total", num(total)));
                 reply(obj(vec![
                     ("cascades", list(items)),
+                    ("pass_ms", obj(pass_ms)),
                     ("lamp_dropped", num(f64::from(lamp_dropped))),
                     ("field", text(ctx.renderer.cone_field_report())),
+                ]))
+            }
+            "cone_pick" => {
+                let x = args.u32("x")?.ok_or("cone_pick needs x")?;
+                let y = args.u32("y")?.ok_or("cone_pick needs y")?;
+                let Some(pick) = ctx.renderer.cone_pick(x, y)? else {
+                    return reply(obj(vec![("pending", Value::Bool(true))]));
+                };
+                let f3 = |v: [f32; 3]| list(v.iter().map(|c| num(f64::from(*c))).collect());
+                let levels = pick
+                    .levels
+                    .iter()
+                    .map(|l| {
+                        let probes = l
+                            .probes
+                            .iter()
+                            .map(|p| {
+                                obj(vec![
+                                    ("in_hash", Value::Bool(p.state != genos_render::ConePickState::Absent)),
+                                    ("seated", Value::Bool(p.state == genos_render::ConePickState::Seated)),
+                                    ("own", Value::Bool(p.own)),
+                                    ("surface", Value::Bool(p.surface)),
+                                    ("weight", num(f64::from(p.weight))),
+                                    ("passed", num(f64::from(p.passed))),
+                                    ("dark_dirs", num(f64::from(p.dark_dirs))),
+                                    ("lit_dirs", num(f64::from(p.lit_dirs))),
+                                    ("mean_luma", num(f64::from(p.mean_luma))),
+                                    ("mean_open", num(f64::from(p.mean_open))),
+                                    ("outward_luma", num(f64::from(p.outward_luma))),
+                                    ("seat", f3(p.seat)),
+                                ])
+                            })
+                            .collect();
+                        obj(vec![
+                            ("lod", num(f64::from(l.lod))),
+                            ("kept", num(f64::from(l.kept))),
+                            ("own", list(l.own.iter().map(|v| num(f64::from(*v))).collect())),
+                            ("probes", list(probes)),
+                        ])
+                    })
+                    .collect();
+                reply(obj(vec![
+                    ("lo", num(f64::from(pick.lo))),
+                    ("hi", num(f64::from(pick.hi))),
+                    ("hi_weight", num(f64::from(pick.hi_weight))),
+                    ("position", f3(pick.position)),
+                    ("normal", f3(pick.normal)),
+                    ("face", num(f64::from(pick.face))),
+                    ("field_sun", num(f64::from(pick.field_sun))),
+                    ("irradiance", f3(pick.irradiance)),
+                    ("levels", list(levels)),
                 ]))
             }
             "cone_probes" => {

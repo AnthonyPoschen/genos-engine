@@ -1619,6 +1619,22 @@ impl Renderer {
         self.gpu.cone_stats()
     }
 
+    /// Milliseconds each stage of the last frame's cone passes took on the
+    /// GPU (light, lamps, insert, world, compact, chain, trace0..trace4,
+    /// weights, merge, shade). Waits for that frame. Empty when cone mode has
+    /// not run or the device has no timestamps.
+    pub fn cone_pass_ms(&mut self) -> Vec<(&'static str, f64)> {
+        self.gpu.cone_pass_ms()
+    }
+
+    /// What the pixel at `x`, `y` read in the cone shade: its probe levels
+    /// and the eight probes about it at each (in the hash, seated, the share
+    /// that passed, dark directions). The first call sets the pixel; the
+    /// record is `None` until a frame has drawn with it.
+    pub fn cone_pick(&mut self, x: u32, y: u32) -> Result<Option<crate::ConePick>, String> {
+        self.gpu.cone_pick(x, y)
+    }
+
     /// Lamp points the cone cascades' lamp hash had no slot for last frame.
     pub fn cone_lamp_drops(&mut self) -> Result<u32, String> {
         self.gpu.cone_lamp_drops()

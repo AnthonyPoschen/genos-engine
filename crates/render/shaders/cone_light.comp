@@ -21,6 +21,8 @@ layout(local_size_x = 64) in;
 #include "cone_common.glsl"
 
 const uint CONE_BRICK_VOXELS = 512u;
+// How far inside its voxel a seat is taken for the probe lookup, in voxels.
+const float CONE_KEY_INSET = 0.01;
 // Under the largest half float (65504), with room for the sum of a few.
 const float CONE_HALF_MAX = 16384.0;
 // Twice a half float's relative resolution (2^-10).
@@ -39,10 +41,19 @@ bool carried(int level, vec3 seat, int face, vec3 n, out vec3 irradiance) {
     }
     vec3 eye = vec3(uintBitsToFloat(cwork.w[CONE_PREV_EYE]), uintBitsToFloat(cwork.w[CONE_PREV_EYE + 1u]), uintBitsToFloat(cwork.w[CONE_PREV_EYE + 2u]));
     uint probe = CONE_NO_BRICK;
+    // The levels a probe can be at here: the two a pixel at the seat reads
+    // (cone_pixel_levels, from last frame's eye) and one either side, for a
+    // pixel a cell away whose level differs, and the world layer's two. The
+    // others are not looked up: a face no probe sat on (most of the field)
+    // paid a lookup at each of twenty-one levels.
+    int about = int(ceil(max(cone_level_from(seat, eye), float(cone_finest_probe()))));
     for (int step_ = 0; step_ <= 2 * (CONE_MAX_LOD - CONE_FINEST) && probe == CONE_NO_BRICK; step_++) {
         // level, level - 1, level + 1, level - 2, ...
         int lod = level + ((step_ & 1) == 0 ? step_ / 2 : -(step_ + 1) / 2);
         if (lod < CONE_FINEST || lod > CONE_MAX_LOD) {
+            continue;
+        }
+        if ((lod < about - 2 || lod > about + 1) && lod != CONE_WORLD_NEAR && lod != CONE_WORLD_FAR) {
             continue;
         }
         uint key = cone_key_from(lod, ivec3(floor(seat / cone_size(lod))), 0, face, eye);
@@ -82,9 +93,8 @@ bool carried(int level, vec3 seat, int face, vec3 n, out vec3 irradiance) {
     return true;
 }
 
-// The sun's angular width (0.53 degrees), and how often a face's sun share
-// is marched again: a share of the faces each frame (push params.x, the
-// frame's count), every face when the field is new (bit 31).
+// The sun's angular width (0.53 degrees), and the share of the faces whose
+// sun share is marched again each frame after the sun turned (sun_turn).
 const float CONE_SUN_WIDTH = 0.0093;
 const uint CONE_SUN_SHARE = 8u;
 
@@ -138,7 +148,11 @@ vec3 target_light(int level, ivec3 cell, int face, vec3 albedo, float share, boo
     vec3 normal = cone_axis(face);
     vec3 from = seat + normal * (CONE_LIFT * cone_size(CONE_FINEST));
     vec3 probe;
-    if (!carried(level, seat, face, normal, probe) && lit) {
+    // The probe is keyed by the voxel: a seat at the front of its surface can
+    // lie just past the voxel's side, so the lookup's point is kept inside.
+    float size = cone_size(level);
+    vec3 inside = clamp(seat, (vec3(cell) + CONE_KEY_INSET) * size, (vec3(cell) + 1.0 - CONE_KEY_INSET) * size);
+    if (!carried(level, inside, face, normal, probe) && lit) {
         // Within the world layer's reach its probes come a share of the
         // frames at a time: hold this face's bounce until its turn. Only a
         // face that has light to hold: one never lit (a new field) takes the
@@ -175,17 +189,33 @@ void face_suns(int level, ivec3 cell, bool again, inout uint word0, inout uint w
     for (int d = 0; d < 6; d++) {
         vec3 seat;
         if (cone_seat_face(level, cell, d, seat)) {
+            // Not shadowed by the surface the face is on (cone_horizon_on).
+            cone_horizon_on = true;
+            cone_horizon_at = seat;
+            cone_horizon_n = cone_axis(d);
             shares[d] = sun_share(seat + cone_axis(d) * (CONE_LIFT * cone_size(CONE_FINEST)), level);
+            cone_horizon_on = false;
         }
     }
     word0 = packUnorm4x8(vec4(shares[0], shares[1], shares[2], shares[3]));
     word1 = packUnorm4x8(vec4(shares[4], shares[5], 0.0, 0.0));
 }
 
-// Whether this voxel's sun shares are marched again this frame.
+// Whether this voxel's sun shares are marched again this frame: every face
+// of a new field (bit 31), and after the sun turned (bit 30) a
+// CONE_SUN_SHARE of the faces a frame, by the frame's count. A share depends
+// on the field and the sun's direction alone, so while neither changes it is
+// kept, not marched again (the march of an eighth of the faces was 20 of the
+// light pass's 23 ms in Sponza).
 bool sun_turn(uint index) {
     uint frame = pc.params.x;
-    return (frame & 0x80000000u) != 0u || cone_hash_of(index * 2654435761u + 1u) % CONE_SUN_SHARE == (frame & 0x7fffffffu) % CONE_SUN_SHARE;
+    if ((frame & 0x80000000u) != 0u) {
+        return true;
+    }
+    if ((frame & 0x40000000u) == 0u) {
+        return false;
+    }
+    return cone_hash_of(index * 2654435761u + 1u) % CONE_SUN_SHARE == (frame & 0x3fffffffu) % CONE_SUN_SHARE;
 }
 
 // Write a voxel's light: its old light moved `toward` share of the way to

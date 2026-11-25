@@ -25,7 +25,8 @@ layout(std430, set = 0, binding = 1) readonly buffer ConeTable {
     uvec4 info;
     uint table[];
 } ctab;
-// 33 words a fine brick: first record, 16 mask words, 16 counts before.
+// 49 words a fine brick: first record, 16 mask words, 16 counts before,
+// 16 block-mask words (CONE_BLOCKS).
 layout(std430, set = 0, binding = 2) readonly buffer ConeFine {
     uint fb[];
 } cfine;
@@ -36,7 +37,7 @@ layout(std430, set = 0, binding = 2) readonly buffer ConeFine {
 layout(std430, set = 0, binding = 3) buffer ConeRecords {
     uint fv[];
 } crec;
-// 23 words a coarse texel: light and area for each way and the lamps
+// 26 words a coarse texel (the last three each way's front along its axis): light and area for each way and the lamps
 // (2 words each, 7 of them), then the occupancy word, the seat word, the
 // albedo (2 words), each way's surface along its axis (3 words), each way's
 // sun share (2 words). The light and the sun share are written by the light
@@ -62,7 +63,11 @@ const int CONE_BRICK = 8;
 const int CONE_PADDED = 10;
 const uint CONE_ATLAS_BRICKS = 32u;
 const uint CONE_NO_BRICK = 0xffffffffu;
-const uint CONE_HEADER = 33u;
+const uint CONE_HEADER = 49u;
+// A fine brick's block masks (cone_field.rs FINE_BLOCKS): bit x + 8y + 64z is
+// set when any of the eight voxels from that one to the next on each axis
+// holds a record.
+const uint CONE_BLOCKS = 33u;
 const uint CONE_RECORD = 37u;
 const uint CONE_RECORD_SUN = 35u;  // unorm8 a way: the sun share each way sees (cone_light.comp)
 const uint CONE_RECORD_ALBEDO = 33u;
@@ -72,6 +77,7 @@ const uint CONE_SEAT_WORD = 32u;
 const uint CONE_TEXEL_SEAT = 15u;
 const uint CONE_TEXEL_ALBEDO = 16u;
 const uint CONE_TEXEL_SUN = 21u;    // unorm8 a way: the sun share each way sees
+const uint CONE_TEXEL_FRONTS = 23u; // half2 a pair of ways: each way's front along its axis, in voxels
 const uint CONE_TEXEL_PLANES = 18u; // half2 a pair of ways: each way's surface along its axis, in voxels
 // A level is chosen when its voxel is at least this share of the wanted
 // size: the nearest level in log2, as the rounding before had it.
@@ -82,7 +88,7 @@ const float CONE_BEHIND = 0.25;
 // The knockout's pixel sums: points relative to the eye in 1/256 m.
 const float CONE_FIXED = 256.0;
 const uint CONE_PIXEL_SEAT = 4u;
-const uint CONE_TEXEL = 23u;
+const uint CONE_TEXEL = 26u;
 const float CONE_REACH = 200.0;
 const float CONE_FULL = 0.98;
 const float CONE_GROWTH = 4.0;
@@ -117,10 +123,25 @@ const uint CONE_CLOSED = 24u;   // cones the chain closed, per cascade
 const uint CONE_SEAT_FALLBACK = 40u; // probes the field had no seat for (seated at the cell centre)
 const uint CONE_LAMP_DROPPED = 48u; // lamp points that found no lamp-hash slot
 const uint CONE_LAMP_LAYOUT = 89u;  // the lamp hash's size and word offset
+const uint CONE_SUN_COUNT = 50u;    // pixels listed for the sun pass (cone_sun.comp)
+const uint CONE_SUN_LAYOUT = 91u;   // the sun list's word offset: a pixel index a word
 const uint CONE_LAYOUT = 64u;   // per cascade 5 words: hash size, cap, hash, probes, cones (cone_gpu.rs)
 const uint CONE_CLEARED = 64u;  // header words cleared every frame
 const uint CONE_INSERT_DROPPED = 32u; // pixels whose probe found no hash slot, per cascade
-const uint CONE_HEADER_WORDS = 256u;
+const uint CONE_HEADER_WORDS = 512u;
+// The pixel pick's record (cone_shade.comp writes it for the pixel in push
+// dims.w; cone_gpu.rs cone_pick reads it): 16 words of the pixel, then a
+// CONE_PICK_LEVEL block for each level it reads (8 words, then
+// CONE_PICK_PROBE words for each of the 8 probes about it).
+const uint CONE_PICK = 256u;
+const uint CONE_PICK_HEAD = 16u;
+const uint CONE_PICK_LEVEL = 104u;
+const uint CONE_PICK_PROBE = 12u;
+// Push lamp.x bits 4 and 5: the debug view (cone_cascades.view): 1 the
+// probe coverage, 2 the dark directions.
+const uint CONE_VIEW_SHIFT = 4u;
+const uint CONE_VIEW_COVERAGE = 1u;
+const uint CONE_VIEW_DARK = 2u;
 const uint CONE_PREV_EYE = 92u;   // last frame's eye (float bits xyz), then 1 when its probes are in the buffer
 const uint CONE_HASH_WORDS = 10u;  // key, count, sum xyz, normal sum xyz, probe, screen references
 const uint CONE_PROBE_WORDS = 32u; // see cone_probe_* below
@@ -245,7 +266,13 @@ uint cone_slot(int c, uint key, bool insert) {
     uint h = cone_hash_of(key) & (size - 1u);
     for (uint k = 0u; k < CONE_HASH_PROBES; k++) {
         uint at = base + ((h + k) & (size - 1u)) * CONE_HASH_WORDS;
-        uint seen = insert ? atomicCompSwap(cwork.w[at], CONE_EMPTY, key) : cwork.w[at];
+        // Read first: most inserts find their key there already (the pixels
+        // of a probe's square all put the same nine), and a read costs far
+        // less than a compare-and-swap.
+        uint seen = cwork.w[at];
+        if (insert && seen == CONE_EMPTY) {
+            seen = atomicCompSwap(cwork.w[at], CONE_EMPTY, key);
+        }
         if (seen == key || (insert && seen == CONE_EMPTY)) {
             return at;
         }
@@ -284,10 +311,10 @@ const int CONE_PARENT_ONLY = 3;
 // CONE_CLIP_FADE voxels inside it) and is at least that past it. From where
 // the eye is each frame, so a turn of the head changes nothing.
 const float CONE_CLIP_FADE = 16.0;
-float cone_level_at(vec3 pos) {
+float cone_level_from(vec3 pos, vec3 eye) {
     float per_pixel = CONE_HALVES * scene.view_right.w / float(pc.dims.y);
     float px = float(pc.params.w);
-    float reach = max(length(pos - scene.eye.xyz), CONE_TINY);
+    float reach = max(length(pos - eye), CONE_TINY);
     float level = log2(CONE_NEAREST * px * per_pixel * reach / CONE_BASE);
     for (int k = CONE_FINEST; k < CONE_WHOLE_FINEST; k++) {
         ivec4 c = ctab.clip[k - CONE_FINEST];
@@ -303,6 +330,9 @@ float cone_level_at(vec3 pos) {
         level = max(level, float(k) + 1.0 - clamp(inside / CONE_CLIP_FADE, 0.0, 1.0));
     }
     return level;
+}
+float cone_level_at(vec3 pos) {
+    return cone_level_from(pos, scene.eye.xyz);
 }
 // The two probe levels a pixel reads and the upper one's weight: level `hi`
 // = ceil of the continuous level and, in the first CONE_BLEND of that octave,
@@ -366,6 +396,10 @@ const float CONE_SUN_MARK = 0.5;
 uint cone_lamp_size() {
     return cwork.w[CONE_LAMP_LAYOUT];
 }
+// The sun list (cone_shade.comp fills it, cone_sun.comp reads it).
+uint cone_sun_at() {
+    return cwork.w[CONE_SUN_LAYOUT];
+}
 uint cone_lamp_at() {
     return cwork.w[CONE_LAMP_LAYOUT + 1u];
 }
@@ -398,7 +432,10 @@ uint cone_lamp_slot(uint key, bool insert) {
     uint h = cone_hash_of(key) & (size - 1u);
     for (uint k = 0u; k < CONE_HASH_PROBES; k++) {
         uint at = cone_lamp_at() + ((h + k) & (size - 1u)) * CONE_LAMP_WORDS;
-        uint seen = insert ? atomicCompSwap(cwork.w[at], CONE_EMPTY, key) : cwork.w[at];
+        uint seen = cwork.w[at];
+        if (insert && seen == CONE_EMPTY) {
+            seen = atomicCompSwap(cwork.w[at], CONE_EMPTY, key);
+        }
         if (seen == key || (insert && seen == CONE_EMPTY)) {
             return at;
         }
@@ -408,19 +445,16 @@ uint cone_lamp_slot(uint key, bool insert) {
     }
     return CONE_NO_BRICK;
 }
-// Lamp presence: each lamp also claims the cells of the coarsest level within
-// CONE_LAMP_NEAR of the one its centre is in (area 0, so a read there is
-// unchanged), so a coarse step far from every lamp skips its eight lamp reads
-// after one lookup. Two cells: a level-9 step's corners reach one cell past
-// its own, and a sphere of at most 1 m one past its centre's.
-const int CONE_LAMP_NEAR_LEVEL = CONE_COARSEST;
-const int CONE_LAMP_NEAR = 2;
-uint cone_lamp_near_key(ivec3 cell) {
-    return cone_lamp_key(CONE_LAMP_NEAR_LEVEL, cell);
-}
-bool cone_lamp_near(vec3 at) {
-    uint key = cone_lamp_near_key(ivec3(floor(at / cone_size(CONE_LAMP_NEAR_LEVEL))));
-    return key != CONE_EMPTY && cone_lamp_slot(key, false) != CONE_NO_BRICK;
+// Lamp presence: at each coarse level a lamp point also claims, with no
+// area, the seven voxels before its own on each axis (cone_lamps.comp). A
+// trilinear read takes the eight voxels from a base voxel on, so the base has
+// an entry whenever any of the eight holds lamp light: one lookup says the
+// eight hold none. (Before, a lamp claimed the 16 m voxels about it, and
+// every coarse step within tens of metres of a lamp paid eight lookups.)
+// A base past the key's span has no key: then the eight are read.
+bool cone_lamp_about(int level, ivec3 base) {
+    uint key = cone_lamp_key(level, base);
+    return key == CONE_EMPTY || cone_lamp_slot(key, false) != CONE_NO_BRICK;
 }
 // The lamps' area and light in the voxel at `level` and `cell`.
 bool cone_lamp_get(int level, ivec3 cell, out float area, out vec3 light) {
@@ -469,9 +503,34 @@ uint cone_entry(int level, ivec3 cell) {
     }
     return ctab.table[uint(o.w) + uint((rel.z * dims.y + rel.y) * dims.x + rel.x)];
 }
+// The last fine brick looked up (cone_record) and its table entry: a march's
+// crossing test reads sixteen voxels a step, nearly all in one or two bricks,
+// and each lookup read the level's box and the table again.
+ivec4 cone_brick_last = ivec4(0x7fffffff);
+uint cone_brick_last_entry = CONE_NO_BRICK;
+uint cone_fine_brick(int level, ivec3 cell) {
+    ivec4 which = ivec4(cell >> 3, level);
+    if (which != cone_brick_last) {
+        cone_brick_last = which;
+        cone_brick_last_entry = cone_entry(level, cell);
+    }
+    return cone_brick_last_entry;
+}
+// Whether none of the eight fine voxels from `base` to the next on each axis
+// holds a record (the brick's block mask; a block with a record has a brick
+// at its base).
+bool cone_block_empty(int level, ivec3 base) {
+    uint brick = cone_fine_brick(level, base);
+    if (brick == CONE_NO_BRICK) {
+        return true;
+    }
+    ivec3 l = base & ivec3(CONE_BRICK - 1);
+    uint bit = uint(l.x + CONE_BRICK * l.y + CONE_BRICK * CONE_BRICK * l.z);
+    return (cfine.fb[brick * CONE_HEADER + CONE_BLOCKS + (bit >> 5u)] & (1u << (bit & 31u))) == 0u;
+}
 // A fine voxel's record (first word), or CONE_NO_BRICK.
 uint cone_record(int level, ivec3 cell) {
-    uint brick = cone_entry(level, cell);
+    uint brick = cone_fine_brick(level, cell);
     if (brick == CONE_NO_BRICK) {
         return CONE_NO_BRICK;
     }
@@ -592,9 +651,12 @@ float cone_face_sun(int level, ivec3 cell, int face) {
 }
 
 // Where the probe of `face` on the field voxel at `level` and `cell` sits, on
-// that side's own surface: at a fine level the middle of that way's plane (its
-// centroid along the axis, the middle of its points' box across it), at a
-// coarse level the voxel's seat moved along the axis onto that way's surface.
+// that side's own surface, at its front: along the axis the point of that
+// way's surface furthest the way it faces (on the mean plane of a pleated
+// curtain the probe sat inside the pleats, its cones met the cloth at once
+// and the curtain was black; cone_pick showed seated probes with a hundredth
+// of their neighbours' light); across it, at a fine level the middle of its
+// points' box, at a coarse level the voxel's seat.
 // The caller lifts it along the face's axis.
 // False where the voxel has no surface facing that way.
 bool cone_seat_face(int level, ivec3 cell, int face, out vec3 at) {
@@ -613,7 +675,7 @@ bool cone_seat_face(int level, ivec3 cell, int face, out vec3 at) {
         int u = (ax + 1) % 3;
         int v = (ax + 2) % 3;
         vec3 low = vec3(cell) * size;
-        at[ax] = low[ax] + p0.x * size;
+        at[ax] = low[ax] + p2.y * size;
         at[u] = low[u] + clamp(CONE_HALF * (p0.y + p1.x), 0.0, 1.0) * size;
         at[v] = low[v] + clamp(CONE_HALF * (p1.y + p2.x), 0.0, 1.0) * size;
         return true;
@@ -627,10 +689,18 @@ bool cone_seat_face(int level, ivec3 cell, int face, out vec3 at) {
     // surface: the underside of a slab, not its middle.
     uint slot = cone_entry(level, cell);
     uint t = cone_coarse_texel(slot, (cell & ivec3(CONE_BRICK - 1)) + ivec3(1));
-    vec2 pair = unpackHalf2x16(ccoarse.cw[t + CONE_TEXEL_PLANES + uint(face / 2)]);
+    vec2 pair = unpackHalf2x16(ccoarse.cw[t + CONE_TEXEL_FRONTS + uint(face / 2)]);
     int ax = face / 2;
     at[ax] = (float(cell[ax]) + ((face & 1) == 0 ? pair.x : pair.y)) * size;
     return true;
+}
+
+// Mark a hash entry as put there from the screen (a pixel, or a probe the
+// pixels placed): compact reads only whether the word is 0.
+void cone_mark_screen(uint slot) {
+    if (cwork.w[slot + CONE_HASH_SCREEN] == 0u) {
+        atomicOr(cwork.w[slot + CONE_HASH_SCREEN], 1u);
+    }
 }
 
 // Whether cascade c's probe at `lod`, `cell` and `face` is wanted as a
@@ -657,6 +727,25 @@ ivec3 cone_trilinear_base(vec3 at, float s) {
     return ivec3(floor(at / s - CONE_HALF));
 }
 
+// The horizon of the cone being marched: the point on its probe's own
+// surface it starts from and that surface's way (cone_trace.comp sets them
+// for a cone that leaves the surface; `on` false: no horizon). A coarse
+// voxel is read by the area that faces the cone, wherever in the voxel that
+// area is: on a pleated curtain or a thin two-sided wall the probe's own
+// voxels hold area that faces its outward cones (pleat sides, the back
+// face), and past the 12.5 cm clip volume, where no crossing test tells in
+// front from behind, those cones closed on the cloth they started from and
+// the curtain was black from 8 m off (Anthony, 25 Nov 2026; cone_pick showed
+// seated probes whose own cones passed 2% to 15% on, against 50%). A voxel
+// whose surface (its mean point) is not in front of the horizon, and is
+// within CONE_HORIZON_NEAR voxels of it, cannot cover a cone that starts on
+// it and leaves: the surface the cone starts from, not something far off
+// that a grazing cone does reach. The same holds for the thin rays of the
+// sun march and of what passes between a reader and a probe.
+const float CONE_HORIZON_NEAR = 2.0;
+bool cone_horizon_on = false;
+vec3 cone_horizon_at = vec3(0.0);
+vec3 cone_horizon_n = vec3(0.0);
 float cone_reads = 0.0;
 
 struct ConeMet {
@@ -677,6 +766,10 @@ int cone_crossed(int level, vec3 from, vec3 to, vec3 dir) {
     for (int e = 0; e < 2; e++) {
         vec3 p = e == 0 ? from : to;
         ivec3 base = ivec3(floor(p / size - CONE_HALF));
+        // Most steps are through air: one bit says the eight hold nothing.
+        if (cone_block_empty(level, base)) {
+            continue;
+        }
         for (int k = 0; k < 8; k++) {
             ivec3 cell = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
             if (e == 1 && all(greaterThanEqual(cell, first)) && all(lessThanEqual(cell, first + ivec3(1)))) {
@@ -686,6 +779,18 @@ int cone_crossed(int level, vec3 from, vec3 to, vec3 dir) {
             cone_reads += 1.0;
             if (r == CONE_NO_BRICK) {
                 continue;
+            }
+            // Behind the horizon of what is being marched (cone_horizon_on):
+            // the surface it starts from. A voxel of a curved or folded
+            // surface holds planes of several ways, and a cone that left one
+            // of them crossed another of the same voxel.
+            if (cone_horizon_on) {
+                uint word = crec.fv[r + CONE_SEAT_WORD];
+                uvec3 q = uvec3(word, word >> 10u, word >> 20u) & uvec3(1023u);
+                vec3 away = (vec3(cell) + vec3(q) * CONE_SEAT_STEP - CONE_HALF) * size - cone_horizon_at;
+                if ((word & 0x80000000u) != 0u && dot(away, cone_horizon_n) <= 0.0 && dot(away, away) <= CONE_HORIZON_NEAR * CONE_HORIZON_NEAR * size * size) {
+                    continue;
+                }
             }
             for (int d = 0; d < 6; d++) {
                 vec3 axis = cone_axis(d);
@@ -758,11 +863,26 @@ void cone_fine_lamp(int level, vec3 at, out float cover, out vec3 light) {
     }
 }
 
+bool cone_past_horizon(uint t, ivec3 cell, float size) {
+    if (!cone_horizon_on) {
+        return true;
+    }
+    uint word = ccoarse.cw[t + CONE_TEXEL_SEAT];
+    if ((word & 0x80000000u) == 0u) {
+        return true;
+    }
+    uvec3 q = uvec3(word, word >> 10u, word >> 20u) & uvec3(1023u);
+    vec3 mean = (vec3(cell) + vec3(q) * CONE_SEAT_STEP - CONE_HALF) * size;
+    vec3 away = mean - cone_horizon_at;
+    return dot(away, cone_horizon_n) > 0.0 || dot(away, away) > CONE_HORIZON_NEAR * CONE_HORIZON_NEAR * size * size;
+}
+
 // The filtered read of a coarse level at `at`: the cross-section's cover by
 // the areas that face the cone and by the lamps, and their light. Trilinear
 // over the eight voxels around the point, all in the padded brick that holds
-// the point's voxel.
-void cone_coarse(int level, vec3 at, vec3 dir, out float cover, out vec3 light, out float lamp_cover, out vec3 lamp_light) {
+// the point's voxel. The lamps are read only when `lamps`: a caller that
+// takes the cover alone does not pay for their eight lookups.
+void cone_coarse(int level, vec3 at, vec3 dir, bool lamps, out float cover, out vec3 light, out float lamp_cover, out vec3 lamp_light) {
     cover = 0.0;
     light = vec3(0.0);
     lamp_cover = 0.0;
@@ -776,7 +896,7 @@ void cone_coarse(int level, vec3 at, vec3 dir, out float cover, out vec3 light, 
     // The lamps, trilinear about `at`, wherever the field has a brick or not.
     float lamp_a = 0.0;
     vec3 lamp_s = vec3(0.0);
-    bool near = cone_lamp_near(at);
+    bool near = lamps && cone_lamp_about(level, base);
     for (int k = 0; k < 8 && near; k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
         vec3 wv = mix(vec3(1.0) - f, f, vec3(o));
@@ -808,6 +928,9 @@ void cone_coarse(int level, vec3 at, vec3 dir, out float cover, out vec3 light, 
         }
         uint t = cone_coarse_texel(slot, base + o - origin + ivec3(1));
         cone_reads += 1.0;
+        if (!cone_past_horizon(t, base + o, size)) {
+            continue;
+        }
         for (int d = 0; d < 6; d++) {
             float toward = -dot(dir, cone_axis(d));
             if (toward <= 0.0) {
@@ -845,6 +968,67 @@ bool cone_occupied(int level, vec3 start, vec3 dir, float a, float b) {
         }
     }
     return false;
+}
+
+// Whether the field holds no surface in the voxel of whole level `level`
+// (CONE_WHOLE_FINEST or coarser) that holds `at`, nor in the 26 beside it:
+// the voxel has no brick, or its occupancy (a surface in it or beside it,
+// cone_field.rs) is clear. A point is filed at every level within 6.25 cm of
+// where it is, so no finer level holds a surface in that voxel either.
+bool cone_clear(int level, vec3 at) {
+    ivec3 cell = ivec3(floor(at / cone_size(level)));
+    uint slot = cone_entry(level, cell);
+    if (slot == CONE_NO_BRICK) {
+        return true;
+    }
+    return ccoarse.cw[cone_coarse_texel(slot, (cell & ivec3(CONE_BRICK - 1)) + ivec3(1)) + 14u] == 0u;
+}
+// How far a ray from `at` along `dir` goes before it leaves the voxel of
+// side `size` that holds `at`.
+float cone_cell_exit(vec3 at, vec3 dir, float size) {
+    vec3 low = floor(at / size) * size;
+    vec3 edge = low + step(vec3(0.0), dir) * size;
+    vec3 t = mix((edge - at) / dir, vec3(CONE_FAR), lessThan(abs(dir), vec3(CONE_TINY)));
+    return max(min(t.x, min(t.y, t.z)), 0.0);
+}
+// The finest level a thin ray skips clear space at (25 cm, where its clip
+// volume holds the point), and the margin kept from the far side of the
+// clear voxels beside the one left: the fine crossing test reads the voxels
+// a step and a half (under 19 cm) about its segment.
+const int CONE_SKIP_NEAR = 4;
+const float CONE_SKIP_MARGIN = 0.25;
+const float CONE_SKIP_PAST = 0.001;
+// How far a thin ray at `at`, stepping at `level`, can go on with no surface
+// to cross: 0 when the space about it is not clear. The voxel it is in and
+// those beside it are clear (cone_clear) at the coarsest level that is so,
+// from the ray's own step level up: a coarse face's plane spans its whole
+// voxel, so a finer level's clear voxel says nothing of it. The ray leaves
+// its voxel and, at a whole level, crosses most of the next (clear too); at
+// the 25 cm level it stops at the voxel's side, where the clip volume may end.
+float cone_clear_run(int level, vec3 at, vec3 dir) {
+    int x = max(level, CONE_SKIP_NEAR);
+    if (x < CONE_WHOLE_FINEST && !cone_held(x, ivec3(floor(at / cone_size(x))))) {
+        x = CONE_WHOLE_FINEST;
+    }
+    if (x > CONE_COARSEST || !cone_clear(x, at)) {
+        return 0.0;
+    }
+    while (x < CONE_COARSEST && cone_clear(x + 1, at)) {
+        x++;
+    }
+    float size = cone_size(x);
+    return cone_cell_exit(at, dir, size) + (x >= CONE_WHOLE_FINEST ? size - CONE_SKIP_MARGIN : 0.0) + CONE_SKIP_PAST;
+}
+// How far a ray from `from` along `dir` goes before it leaves the box of the
+// finest whole level's bricks: every surface of the scene is inside it.
+float cone_field_exit(vec3 from, vec3 dir) {
+    int k = CONE_WHOLE_FINEST - CONE_FINEST;
+    float side = cone_size(CONE_WHOLE_FINEST) * float(CONE_BRICK);
+    vec3 low = vec3(ctab.lv[2 * k].xyz) * side;
+    vec3 high = low + vec3(ctab.lv[2 * k + 1].xyz) * side;
+    vec3 edge = mix(low, high, step(vec3(0.0), dir));
+    vec3 t = mix((edge - from) / dir, vec3(CONE_FAR), lessThan(abs(dir), vec3(CONE_TINY)));
+    return max(min(t.x, min(t.y, t.z)), 0.0);
 }
 
 void cone_take(inout float covered, inout vec3 light, ConeMet m) {
@@ -897,7 +1081,7 @@ void cone_march_least(vec3 start, vec3 dir, float width, float least, float done
         vec3 li;
         float lc;
         vec3 ll;
-        cone_coarse(level, start + dir * (from + CONE_HALF * step), dir, cov, li, lc, ll);
+        cone_coarse(level, start + dir * (from + CONE_HALF * step), dir, true, cov, li, lc, ll);
         if (lc > 0.0) {
             light += ll * min(lc, 1.0 - covered);
         }
@@ -927,7 +1111,7 @@ void cone_march_least(vec3 start, vec3 dir, float width, float least, float done
                     vec3 fl;
                     float flc;
                     vec3 fll;
-                    cone_coarse(l, start + dir * (CONE_HALF * (u + next)), dir, fc, fl, flc, fll);
+                    cone_coarse(l, start + dir * (CONE_HALF * (u + next)), dir, false, fc, fl, flc, fll);
                     float seen = min(fc, 1.0 - covered);
                     if (seen > 0.0) {
                         light += fl * seen;
@@ -968,7 +1152,7 @@ float cone_passing(vec3 from, vec3 to) {
             vec3 li;
             float lc;
             vec3 ll;
-            cone_coarse(level, from + dir * (CONE_HALF * (u + next)), dir, cov, li, lc, ll);
+            cone_coarse(level, from + dir * (CONE_HALF * (u + next)), dir, false, cov, li, lc, ll);
             blocked += cov;
         }
         u = next;
@@ -1002,6 +1186,16 @@ uint cone_record_at(int c, uint probe, uint bin) {
 // A probe the field had no seat for (seated at its cell's centre: a pixel on
 // something the field does not hold) is read only as the cell `own`: whether
 // it exists follows what is on screen, so no other probe or pixel leans on it.
+// The least share a probe in the hash is weighed by, whatever passes to it.
+// In a fold of cloth every probe about a pixel can lie past another layer:
+// each passed 0, the pixel read no probe and was black, and it popped as the
+// camera changed the level it read (Anthony, 25 Nov 2026: the notches down
+// Sponza's curtains; cone_pick showed four lit, seated probes, each passed
+// 0). With the floor such a pixel reads them by their trilinear weights
+// alone; where any probe passes, a blocked one adds a thousandth of its light.
+const float CONE_PASS_FLOOR = 0.001;
+// Where cone_weights writes the pixel pick's level block (0: no pick).
+uint cone_pick_at = 0u;
 int cone_weights(int c, int lod, int face, vec3 at, bool see, vec3 from, ivec3 own, out uint probes[8], out float weights[8]) {
     float s = cone_spacing(lod, c);
     vec3 g = at / s - CONE_HALF;
@@ -1012,6 +1206,11 @@ int cone_weights(int c, int lod, int face, vec3 at, bool see, vec3 from, ivec3 o
         probes[k] = CONE_NO_BRICK;
         weights[k] = 0.0;
     }
+    // What passes to a probe is not blocked by the surface the reader stands
+    // on (cone_horizon_on): its way is the probes' own.
+    cone_horizon_on = see;
+    cone_horizon_at = from;
+    cone_horizon_n = cone_axis(face);
     for (int k = 0; k < 8; k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
         vec3 wv = mix(vec3(1.0) - f, f, vec3(o));
@@ -1021,14 +1220,33 @@ int cone_weights(int c, int lod, int face, vec3 at, bool see, vec3 from, ivec3 o
         }
         ivec3 cell = ivec3(base) + o;
         uint probe = cone_find(c, cone_key(lod, cell, c, face));
+        // The pick's record of this candidate: flags (1 in the hash, 2
+        // seated, 4 the pixel's own cell, 8 the field has a surface that
+        // way), the probe, its trilinear weight, the share that passed.
+        uint pick = cone_pick_at == 0u ? 0u : cone_pick_at + 8u + uint(k) * CONE_PICK_PROBE;
+        if (pick != 0u) {
+            cwork.w[pick] = (probe != CONE_NO_BRICK ? 1u : 0u) | (cell == own ? 4u : 0u) | (cone_probe_wanted(lod, c, cell, face) ? 8u : 0u);
+            cwork.w[pick + 1u] = probe;
+            cwork.w[pick + 2u] = floatBitsToUint(wt);
+            cwork.w[pick + 3u] = floatBitsToUint(-1.0);
+        }
         if (probe == CONE_NO_BRICK) {
             continue;
         }
-        if ((cwork.w[cone_probe(c, probe) + CONE_PROBE_SEATED] & CONE_FLAG_SEATED) == 0u && cell != own) {
+        bool seated_probe = (cwork.w[cone_probe(c, probe) + CONE_PROBE_SEATED] & CONE_FLAG_SEATED) != 0u;
+        if (pick != 0u) {
+            cwork.w[pick] |= seated_probe ? 2u : 0u;
+            cone_put3(pick + 6u, cone_word3(cone_probe(c, probe) + 8u));
+        }
+        if (!seated_probe && cell != own) {
             continue;
         }
         if (see) {
-            wt *= cone_passing(from, cone_word3(cone_probe(c, probe) + 8u));
+            float passed = cone_passing(from, cone_word3(cone_probe(c, probe) + 8u));
+            if (pick != 0u) {
+                cwork.w[pick + 3u] = floatBitsToUint(passed);
+            }
+            wt *= max(passed, CONE_PASS_FLOOR);
         }
         if (wt > 0.0) {
             probes[n] = probe;
@@ -1036,6 +1254,7 @@ int cone_weights(int c, int lod, int face, vec3 at, bool see, vec3 from, ivec3 o
             n++;
         }
     }
+    cone_horizon_on = false;
     // The own probe unseated while seated ones stand about it: read those.
     // A fold of a curtain turns a pixel a way the field filed no surface for
     // in its own voxel; that probe sat at the voxel's centre, in or behind
@@ -1084,7 +1303,9 @@ float sun_blocked(vec3 from, vec3 dir, int level) {
     float covered = 0.0;
     float done = 0.0;
     float least = cone_size(level);
-    while (done < CONE_REACH && covered < CONE_FULL) {
+    // Past the scene's box there is nothing to cross.
+    float reach = min(CONE_REACH, cone_field_exit(from, dir));
+    while (done < reach && covered < CONE_FULL) {
         // Inside the clip volumes the ray keeps to the finest level held
         // (planes with their points' box at 6.25 and 12.5 cm, each face's
         // plane at 25 cm): the step grows only past them, where only the
@@ -1097,6 +1318,14 @@ float sun_blocked(vec3 from, vec3 dir, int level) {
         }
         float step_ = cone_size(l);
         vec3 a = from + dir * done;
+        // Clear space is crossed in one stride: no plane is in it to cross,
+        // so the cover is the same and a ray through open air costs a few
+        // lookups a metre in place of sixteen records a 6.25 cm step.
+        float clear = cone_clear_run(l, a, dir);
+        if (clear > 0.0) {
+            done += clear;
+            continue;
+        }
         vec3 b = from + dir * (done + step_);
         if (l <= CONE_REFINE) {
             int n = cone_crossed(l, a, b, dir);
@@ -1138,6 +1367,9 @@ float coarse_crossed(int level, vec3 a, vec3 b, vec3 dir) {
             continue;
         }
         uint t = cone_coarse_texel(slot, (cell & ivec3(CONE_BRICK - 1)) + ivec3(1));
+        if (!cone_past_horizon(t, cell, size)) {
+            continue;
+        }
         for (int d = 0; d < 6; d++) {
             vec3 axis = cone_axis(d);
             if (-dot(dir, axis) <= CONE_TOWARD_MIN) {
@@ -1167,4 +1399,85 @@ float coarse_crossed(int level, vec3 a, vec3 b, vec3 dir) {
     return cover;
 }
 
+// The share of the sun the field holds for the pixel's side at `pos`:
+// the sun shares the light pass marched for the voxel faces around it
+// (cone_light.comp), trilinear over the finest level the field holds there,
+// the faces turned the way the pixel's normal is. So the sun on a pixel is the
+// sun the field's voxels see and send on as bounce (Anthony, 25 Nov 2026: the
+// sun has to be in the field). Up a level where none of the eight has a face.
+float field_sun(vec3 pos, vec3 n) {
+    int face = cone_face(n);
+    for (int level = cone_held_level(CONE_FINEST, pos); level <= CONE_COARSEST; level++) {
+        float s = cone_size(level);
+        vec3 g = (pos - n * (CONE_BEHIND * min(s, CONE_BEHIND))) / s - CONE_HALF;
+        vec3 base = floor(g);
+        vec3 f = g - base;
+        float sum = 0.0;
+        float weight = 0.0;
+        for (int k = 0; k < 8; k++) {
+            ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+            vec3 wv = mix(vec3(1.0) - f, f, vec3(o));
+            float wt = wv.x * wv.y * wv.z;
+            float share = wt > 0.0 ? cone_face_sun(level, ivec3(base) + o, face) : -1.0;
+            if (share >= 0.0) {
+                sum += wt * share;
+                weight += wt;
+            }
+        }
+        if (weight > 0.0) {
+            return sum / weight;
+        }
+    }
+    return 1.0;
+}
 
+// A sun share this close to 0 or 1 is taken as it is; between, the pixel
+// marches its own ray.
+const float CONE_SUN_EDGE = 0.02;
+
+// The sun's light on the pixel: its share from the field (field_sun), lit
+// as the old direct pass lights a pixel (lamp_light, albedo over pi).
+// `edge` is set when a shadow edge crosses the voxels about the pixel (they
+// see part of the sun); then, when `march`, the pixel's own ray gives the
+// share. The shade pass (march false) lists such a pixel and the sun pass
+// (cone_sun.comp, march true) marches it: a few pixels in a hundred march,
+// and scattered among the others they held every thread beside them for the
+// length of their march (13 of the shade's 29 ms in Sponza).
+vec3 cone_sun(vec3 pos, vec3 n, bool two_sided, bool march, out bool edge) {
+    edge = false;
+    vec3 from = pos + n * CONE_SURFACE_LIFT;
+    LampList list = lamps_at(from);
+    vec3 sum = vec3(0.0);
+    float share = -1.0;
+    for (uint k = 0u; k < list.suns.y; k++) {
+        Lamp lamp = lamp_list_get(list, k);
+        if (lamp.pos.w <= CONE_SUN_MARK) {
+            continue;
+        }
+        vec3 target;
+        vec3 light = lamp_light(lamp, from, n, two_sided, target);
+        if (light.r + light.g + light.b > 0.0) {
+            if (share < 0.0) {
+                share = field_sun(pos, n);
+                // The voxels around the pixel see part of the sun: a shadow
+                // edge crosses them. The pixel marches its own thin ray
+                // through the field's finest levels for a crisp edge
+                // (Anthony, 25 Nov 2026); fully lit and fully shadowed pixels
+                // keep the voxels' share, and the bounce always does.
+                if (share > CONE_SUN_EDGE && share < 1.0 - CONE_SUN_EDGE) {
+                    edge = true;
+                    if (march) {
+                        // Not shadowed by the surface the pixel is on.
+                        cone_horizon_on = true;
+                        cone_horizon_at = pos;
+                        cone_horizon_n = n;
+                        share = 1.0 - sun_blocked(from, -normalize(lamp.pos.xyz), CONE_FINEST);
+                        cone_horizon_on = false;
+                    }
+                }
+            }
+            sum += light * share;
+        }
+    }
+    return sum;
+}

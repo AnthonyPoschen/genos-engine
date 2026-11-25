@@ -8,9 +8,9 @@
 
 /// Words a coarse texel holds on the GPU (`cone_common.glsl` CONE_TEXEL): the
 /// six ways' and the lamps' light and area, occupancy, seat, albedo, each
-/// way's surface along its axis, and each way's sun share (kept by the light
-/// pass; 0 here).
-const CONE_TEXEL_WORDS: usize = 23;
+/// way's surface along its axis, each way's sun share (kept by the light
+/// pass; 0 here), and each way's front along its axis.
+const CONE_TEXEL_WORDS: usize = 26;
 /// Bytes of the field uploaded each frame.
 const CONE_UPLOAD_STEP: usize = 64 << 20;
 /// The first interval's reach in cascade-0 probe spacings.
@@ -25,7 +25,14 @@ const CONE_PIXEL_SEAT: u32 = 4;
 /// ([`crate::gate::CONE_TABLE_CAP`]).
 const CONE_KNOCKOUT_SHARE: u64 = 16;
 /// Work-buffer layout, as `cone_common.glsl` has it.
-const CONE_HEADER_WORDS: u64 = 256;
+const CONE_HEADER_WORDS: u64 = 512;
+/// The pixel pick's record in the header (`cone_common.glsl` CONE_PICK).
+const CONE_PICK_AT: u64 = 256;
+const CONE_PICK_HEAD: usize = 16;
+const CONE_PICK_LEVEL: usize = 104;
+const CONE_PICK_PROBE: usize = 12;
+/// Push flag bits of the debug view (`cone_common.glsl` CONE_VIEW_SHIFT).
+const CONE_VIEW_SHIFT: u32 = 4;
 const CONE_HASH_WORDS: u64 = 10;
 const CONE_PROBE_WORDS: u64 = 32;
 const CONE_CONE_WORDS: u64 = 4;
@@ -45,7 +52,7 @@ const CONE_WORLD_CAP: u64 = 16_384;
 /// Header words cleared each frame; the layout follows them.
 const CONE_CLEARED: u64 = 64;
 const CONE_LAYOUT_AT: u64 = 64;
-const CONE_PIPES: usize = 11;
+const CONE_PIPES: usize = 12;
 const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-insert",
     "cone-compact",
@@ -58,7 +65,16 @@ const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-spread",
     "cone-light",
     "cone-world",
+    "cone-sun",
 ];
+/// GPU timestamps a frame's cone passes write: one before the first pass and
+/// one after each stage in [`CONE_STAGE_NAMES`].
+const CONE_STAGES: usize = 15;
+const CONE_STAMPS: u32 = 16;
+/// The stages `cone_pass_ms` times, in frame order. `trace0`..`trace4` are
+/// the cascades' traces; `sun` is the shadow-edge pixels' own sun rays.
+pub(crate) const CONE_STAGE_NAMES: [&str; CONE_STAGES] =
+    ["light", "lamps", "insert", "world", "compact", "chain", "trace0", "trace1", "trace2", "trace3", "trace4", "weights", "merge", "shade", "sun"];
 /// Header words of last frame's eye and whether its probes are in the work
 /// buffer (`cone_common.glsl` CONE_PREV_EYE), for the light pass.
 const CONE_PREV_EYE_AT: u64 = 92;
@@ -94,10 +110,12 @@ struct ConeLayout {
     /// The lamp hash: entries (a power of two) and word offset.
     lamp_hash: u64,
     lamp_at: u64,
+    /// The sun list (`cone_sun.comp`): a word a screen pixel.
+    sun_at: u64,
     words: u64,
 }
 
-fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32, lamps: u64) -> ConeLayout {
+fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32, lamps: u64, screen: u64) -> ConeLayout {
     let px = u64::from(probe_px.max(1));
     let base = pixels.div_ceil(px * px).max(1) * CONE_PROBE_SLACK;
     let count = count.min(5);
@@ -120,6 +138,8 @@ fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32, lamps: u64) -
     l.lamp_hash = (2 * lamps.max(1) * CONE_LAMP_ENTRIES).next_power_of_two();
     l.lamp_at = at;
     at += l.lamp_hash * CONE_LAMP_WORDS;
+    l.sun_at = at;
+    at += screen;
     l.words = at;
     l
 }
@@ -130,7 +150,7 @@ impl ConeLayout {
         let w = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
         (0..5)
             .flat_map(|c| [w(self.hash[c]), w(self.cap[c]), w(self.hash_at[c]), w(self.probes_at[c]), w(self.cones_at[c])])
-            .chain([w(self.lamp_hash), w(self.lamp_at)])
+            .chain([w(self.lamp_hash), w(self.lamp_at), w(self.sun_at)])
             .collect()
     }
 }
@@ -188,6 +208,16 @@ struct ConeGpu {
     /// The solids left out of the field in use, and of the one building.
     field_movers: std::collections::BTreeSet<usize>,
     building_movers: std::collections::BTreeSet<usize>,
+    /// The pixel the shade records what it reads for ([`Gpu::cone_pick`]).
+    pick: Option<[u32; 2]>,
+    /// The suns' directions the faces' sun shares were marched for, and the
+    /// frames of the re-march still to run after they changed.
+    sun_key: u64,
+    sun_turns: u32,
+    /// The passes' timestamp pool ([`CONE_STAMPS`] a flight), and the flight
+    /// the last recorded frame stamped.
+    time_pool: Handle,
+    time_flight: Option<usize>,
 }
 
 impl ConeGpu {
@@ -223,6 +253,11 @@ impl ConeGpu {
             movers: std::collections::BTreeMap::new(),
             field_movers: std::collections::BTreeSet::new(),
             building_movers: std::collections::BTreeSet::new(),
+            pick: None,
+            sun_key: 0,
+            sun_turns: 0,
+            time_pool: std::ptr::null_mut(),
+            time_flight: None,
         }
     }
 }
@@ -246,6 +281,27 @@ fn cone_point_lamps(scene: &genos_scene::Scene) -> u64 {
             d.x == 0.0 && d.y == 0.0 && d.z == 0.0
         })
         .count() as u64
+}
+
+/// The share of the faces whose sun share the light pass marches again each
+/// frame after a sun turned (`cone_light.comp` CONE_SUN_SHARE): the re-march
+/// runs over this many frames.
+const CONE_SUN_SHARE: u32 = 8;
+
+/// What the faces' sun shares depend on besides the field: each sun's
+/// direction and whether it shines.
+fn cone_sun_key(scene: &genos_scene::Scene) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for i in 0..scene.light_len() {
+        let light = scene.light(i);
+        let d = light.direction;
+        if d.x != 0.0 || d.y != 0.0 || d.z != 0.0 {
+            [d.x.to_bits(), d.y.to_bits(), d.z.to_bits()].hash(&mut h);
+            light.color.iter().any(|c| *c > 0.0).hash(&mut h);
+        }
+    }
+    h.finish()
 }
 
 fn cone_bytes(words: &[u32]) -> Vec<u8> {
@@ -293,6 +349,10 @@ fn cone_field_bytes(field: &crate::cone_field::ConeField) -> [Vec<u8>; 4] {
         let f = &field.coarse_planes[i * 6..i * 6 + 6];
         for k in 0..3 {
             coarse[i * w + 18 + k] = u32::from(f[2 * k]) | (u32::from(f[2 * k + 1]) << 16);
+        }
+        let f = &field.coarse_fronts[i * 6..i * 6 + 6];
+        for k in 0..3 {
+            coarse[i * w + 23 + k] = u32::from(f[2 * k]) | (u32::from(f[2 * k + 1]) << 16);
         }
     }
     [cone_bytes(&table), cone_bytes(&field.fine_bricks), cone_bytes(&field.fine_voxels), cone_bytes(&coarse)]
@@ -439,10 +499,15 @@ impl Gpu {
         // Room for at least 16 lamps, so lamps added in play rarely resize it.
         let lamps = cone_point_lamps(&world.scene).max(16).next_power_of_two();
         self.cone.scene_lights = u32::try_from(world.scene.light_len()).unwrap_or(u32::MAX);
+        let sun_key = cone_sun_key(&world.scene);
+        if sun_key != self.cone.sun_key {
+            self.cone.sun_key = sun_key;
+            self.cone.sun_turns = CONE_SUN_SHARE;
+        }
         let shape = (cone.theta, cone.count, pixels, cone.probe_px, lamps);
         if pixels > 0 && (self.cone.work_shape != shape || self.cone.work.buffer.is_null()) {
             let sized = if crate::gate::guard(crate::gate::CONE_TABLE_CAP) { pixels } else { pixels / CONE_KNOCKOUT_SHARE };
-            let layout = cone_layout(cone.theta, cone.count, sized, cone.probe_px, lamps);
+            let layout = cone_layout(cone.theta, cone.count, sized, cone.probe_px, lamps, pixels);
             let words = layout.words;
             self.idle_device();
             let mut old = std::mem::replace(&mut self.cone.work, Buffer::empty());
@@ -456,8 +521,11 @@ impl Gpu {
                 self.write_lighting_sets()?;
             }
         }
+        if self.cone.time_pool.is_null() && self.timestamp_period > 0.0 {
+            self.cone.time_pool = self.make_query_pool_n(2 * CONE_STAMPS)?;
+        }
         if self.cone.pipes[0].is_null() && self.lighting.ready {
-            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV, CONE_LIGHT_SPV, CONE_WORLD_SPV];
+            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV, CONE_LIGHT_SPV, CONE_WORLD_SPV, CONE_SUN_SPV];
             for (k, code) in codes.iter().enumerate() {
                 self.cone.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, CONE_PIPE_NAMES[k])?;
             }
@@ -589,20 +657,82 @@ impl Gpu {
         }
     }
 
+    /// Write cone timestamp `index` of this frame (0 resets the frame's set).
+    fn cone_stamp(&self, index: u32) {
+        if self.cone.time_pool.is_null() {
+            return;
+        }
+        let first = u32::try_from(self.flight).unwrap_or(0) * CONE_STAMPS;
+        unsafe {
+            if index == 0 {
+                (self.fns.cmd_reset_query)(self.cmd, self.cone.time_pool, first, CONE_STAMPS);
+            }
+            // After every earlier command has finished (the bottom of the pipe).
+            (self.fns.cmd_write_timestamp)(self.cmd, 0x2000, self.cone.time_pool, first + index);
+        }
+    }
+
+    /// Milliseconds each stage of the last recorded frame's cone passes took
+    /// on the GPU, by [`CONE_STAGE_NAMES`]. Waits for that frame. Empty when
+    /// cone mode has not run or the device has no timestamps.
+    pub(crate) fn cone_pass_ms(&mut self) -> Vec<(&'static str, f64)> {
+        let Some(flight) = self.cone.time_flight else {
+            return Vec::new();
+        };
+        if self.cone.time_pool.is_null() {
+            return Vec::new();
+        }
+        self.idle_device();
+        let mut raw = [0u64; CONE_STAGES + 1];
+        let got = unsafe {
+            (self.fns.get_query_results)(
+                self.device,
+                self.cone.time_pool,
+                u32::try_from(flight).unwrap_or(0) * CONE_STAMPS,
+                CONE_STAMPS,
+                std::mem::size_of_val(&raw),
+                raw.as_mut_ptr().cast::<c_void>(),
+                8,
+                0x1,
+            )
+        };
+        if got != 0 {
+            return Vec::new();
+        }
+        CONE_STAGE_NAMES
+            .iter()
+            .enumerate()
+            .map(|(k, name)| {
+                // A stage is well under the 4 s of ticks a u32 holds.
+                let ticks = u32::try_from(tick_delta(raw[k], raw[k + 1], self.timestamp_bits)).unwrap_or(u32::MAX);
+                (*name, f64::from(ticks) * f64::from(self.timestamp_period) * 1.0e-6)
+            })
+            .collect()
+    }
+
     /// The cascades for this frame, before compose: probes, chains, cones,
     /// merge and shade. Does nothing until the field is resident.
     fn record_cone(&mut self) {
         let cone = self.lighting.settings.cone;
         if !cone.enabled || !self.cone.ready || self.cone.pipes[0].is_null() || self.cone.work.buffer.is_null() || self.cone.work_shape.0 != cone.theta || self.cone.work_shape.1 != cone.count || self.cone.work_shape.3 != cone.probe_px {
             self.cone.prev_eye = None;
+            self.cone.time_flight = None;
             return;
         }
+        self.cone.time_flight = Some(self.flight);
+        self.cone_stamp(0);
         let (w, h) = (self.lighting.dims[0], self.lighting.dims[1]);
         let (theta, count) = (cone.theta, cone.count);
         let seat = if crate::gate::guard(crate::gate::CONE_FIELD_SEAT) { 0 } else { CONE_PIXEL_SEAT };
         let flags = CONE_SEE_MERGE | CONE_SEE_SHADE | seat;
         let radius = cone.lamp_radius.to_bits();
         let finest = cone.finest_probe_level();
+        let view = match cone.view {
+            genos_scene::ConeView::Light => 0,
+            genos_scene::ConeView::Coverage => 1,
+            genos_scene::ConeView::Dark => 2,
+        };
+        let flags = flags | (view << CONE_VIEW_SHIFT);
         let push = |c: u32| [w, h, finest, 0, c, theta, count, cone.probe_px, flags, CONE_T0.to_bits(), radius, 0];
         // Knockout only: the lamps written once and kept, as when the field held them.
         let write_lamps = crate::gate::guard(crate::gate::CONE_LAMP_FOLLOW) || !self.cone.lamps_frozen;
@@ -632,9 +762,13 @@ impl Gpu {
         let mut light_push = push(0);
         light_push[11] = toward.to_bits();
         // The frame's count for the sun shares' turns; bit 31 marches every
-        // face (a new field).
-        light_push[4] = (self.cone.frames & 0x7fff_ffff) | if fresh { 0x8000_0000 } else { 0 };
+        // face (a new field), bit 30 this frame's share of them (a sun
+        // turned within the last CONE_SUN_SHARE frames).
+        let turning = self.cone.sun_turns > 0;
+        self.cone.sun_turns = if fresh { 0 } else { self.cone.sun_turns.saturating_sub(1) };
+        light_push[4] = (self.cone.frames & 0x3fff_ffff) | if fresh { 0x8000_0000 } else { 0 } | if turning { 0x4000_0000 } else { 0 };
         self.cone_dispatch(9, light_push, line(fine_bricks * CONE_BRICK_VOXELS + coarse_bricks * CONE_PADDED_TEXELS));
+        self.cone_stamp(1);
         // The clears below are transfers: order them after every compute read
         // and write of the work buffer before them, the light pass's included;
         // the field's new light is read by the passes after them.
@@ -663,16 +797,25 @@ impl Gpu {
             compute(self);
             self.cone.lamps_frozen = true;
         }
+        self.cone_stamp(2);
         // Cascade 0 from the pixels, then each cascade from the one below it
         // (its compact first, so its probes are numbered).
         self.cone_dispatch(0, push(0), pixels);
         compute(self);
+        self.cone_stamp(3);
         // The world layer: probes on the surfaces around the eye no pixel covers.
         let mut world_push = push(0);
         world_push[11] = self.cone.frames;
+        // The last frame before a new field takes over: every world probe,
+        // not this frame's share. The new field's voxels take their light at
+        // once from this frame's probes, and a face with none took the sun
+        // alone: three quarters of the faces off screen lost their bounce
+        // for that frame and the picture dipped (gate G).
+        world_push[4] = u32::from(self.cone.next_full);
         self.cone.frames = self.cone.frames.wrapping_add(1);
         self.cone_dispatch(10, world_push, line(coarse_bricks * CONE_PADDED_TEXELS));
         compute(self);
+        self.cone_stamp(4);
         for c in 0..count {
             if c > 0 {
                 self.cone_dispatch(8, push(c), line(layout.cap[c as usize - 1]));
@@ -681,24 +824,38 @@ impl Gpu {
             self.cone_dispatch(1, push(c), line(layout.hash[c as usize]));
             compute(self);
         }
+        self.cone_stamp(5);
         for c in 1..count {
             self.cone_dispatch(2, push(c), line(layout.cap[c as usize]));
             compute(self);
         }
-        for c in 0..count {
-            self.cone_dispatch(3, push(c), line(layout.cap[c as usize] * layout.dirs[c as usize]));
-            compute(self);
+        self.cone_stamp(6);
+        for c in 0..5 {
+            if c < count {
+                self.cone_dispatch(3, push(c), line(layout.cap[c as usize] * layout.dirs[c as usize]));
+                compute(self);
+            }
+            self.cone_stamp(7 + c);
         }
         for c in 0..count.saturating_sub(1) {
             self.cone_dispatch(4, push(c), line(layout.cap[c as usize]));
         }
         compute(self);
+        self.cone_stamp(12);
         for c in (0..count.saturating_sub(1)).rev() {
             self.cone_dispatch(5, push(c), line(layout.cap[c as usize] * layout.dirs[c as usize]));
             compute(self);
         }
-        self.cone_dispatch(6, push(0), pixels);
+        self.cone_stamp(13);
+        let mut shade_push = push(0);
+        shade_push[3] = self.cone.pick.filter(|p| p[0] < w && p[1] < h).map_or(0, |p| p[1] * w + p[0] + 1);
+        self.cone_dispatch(6, shade_push, pixels);
         compute(self);
+        self.cone_stamp(14);
+        // The shadow-edge pixels the shade listed: their own sun rays.
+        self.cone_dispatch(11, push(0), line(u64::from(w) * u64::from(h)));
+        compute(self);
+        self.cone_stamp(15);
         self.cone.prev_eye = Some(self.cone.eye);
     }
 
@@ -730,6 +887,66 @@ impl Gpu {
                 }
             })
             .collect())
+    }
+
+    /// What the pixel at `x`, `y` read in the last frame's shade: its levels
+    /// and, for each, the eight probes about it. The first call for a pixel
+    /// sets it; the record is there after the next frame (`None` until then).
+    pub(crate) fn cone_pick(&mut self, x: u32, y: u32) -> Result<Option<crate::ConePick>, String> {
+        self.cone.pick = Some([x, y]);
+        if self.cone.work.buffer.is_null() {
+            return Ok(None);
+        }
+        self.idle_device();
+        let words = CONE_PICK_HEAD + 2 * CONE_PICK_LEVEL;
+        let w = u32_words(&self.copy_device_range(self.cone.work.buffer, CONE_PICK_AT * 4, u64::try_from(words * 4).unwrap_or(0))?);
+        let pixel = y * self.lighting.dims[0] + x + 1;
+        if w.len() < words || w[0] != pixel {
+            return Ok(None);
+        }
+        let f = |i: usize| f32::from_bits(w[i]);
+        let f3 = |i: usize| [f(i), f(i + 1), f(i + 2)];
+        let levels = (0..2)
+            .map(|l| CONE_PICK_HEAD + l * CONE_PICK_LEVEL)
+            .filter(|&at| w[at + 6] != 0)
+            .map(|at| crate::ConePickLevel {
+                lod: w[at],
+                kept: w[at + 1],
+                own: [w[at + 2].cast_signed(), w[at + 3].cast_signed(), w[at + 4].cast_signed()],
+                probes: (0..8)
+                    .map(|k| at + 8 + k * CONE_PICK_PROBE)
+                    .map(|r| crate::ConePickProbe {
+                        state: match (w[r] & 1 != 0, w[r] & 2 != 0) {
+                            (false, _) => crate::ConePickState::Absent,
+                            (true, false) => crate::ConePickState::Unseated,
+                            (true, true) => crate::ConePickState::Seated,
+                        },
+                        own: w[r] & 4 != 0,
+                        surface: w[r] & 8 != 0,
+                        probe: w[r + 1],
+                        weight: f(r + 2),
+                        passed: f(r + 3),
+                        dark_dirs: w[r + 4],
+                        lit_dirs: w[r + 9],
+                        mean_luma: f(r + 5),
+                        mean_open: f(r + 10),
+                        outward_luma: f(r + 11),
+                        seat: f3(r + 6),
+                    })
+                    .collect(),
+            })
+            .collect();
+        Ok(Some(crate::ConePick {
+            lo: w[1],
+            hi: w[2],
+            hi_weight: f(3),
+            position: f3(4),
+            normal: f3(7),
+            face: w[10],
+            field_sun: f(11),
+            irradiance: f3(12),
+            levels,
+        }))
     }
 
     /// Lamp points that found no lamp-hash slot last frame. Waits for that frame.
@@ -793,6 +1010,11 @@ impl Gpu {
         let mut next = std::mem::take(&mut self.cone.next);
         for buffer in &mut next {
             self.destroy_buffer(buffer);
+        }
+        if !self.cone.time_pool.is_null() {
+            unsafe { (self.fns.destroy_query_pool)(self.device, self.cone.time_pool, std::ptr::null()) };
+            self.cone.time_pool = std::ptr::null_mut();
+            self.cone.time_flight = None;
         }
         self.cone.next_full = false;
         self.cone.ready = false;

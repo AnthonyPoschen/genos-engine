@@ -15,8 +15,12 @@ use genos_render::{Renderer, World, CONE_FIELD_SEAT, CONE_LAMP_FOLLOW, CONE_TABL
 use genos_scene::{Camera, Floor, LightingPreset, LightingSettings, Light, Scene, Vec3, Wall};
 use genos_window::Window;
 
-/// Frames drawn at a pose before it is read.
+/// Frames drawn at a pose before it is read, and the least real time they
+/// take: the bounce keeps a short history that steps by frame time
+/// (`cone_gpu.rs` `CONE_BOUNCE_SECONDS`), so a count of fast frames alone left
+/// the light still arriving when the frame was read.
 const SETTLE: u32 = 3;
+const SETTLE_SECONDS: f32 = 2.0;
 /// A seat that moves more than this has moved (metres).
 const SEAT_HELD: f32 = 0.001;
 
@@ -66,8 +70,11 @@ fn camera(yaw: f32) -> Camera {
 
 fn draw(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera) -> PresentedFrame {
     let mut frame = None;
-    for _ in 0..SETTLE {
+    let started = std::time::Instant::now();
+    let mut drawn = 0;
+    while drawn < SETTLE || started.elapsed().as_secs_f32() < SETTLE_SECONDS {
         frame = Some(PresentedFrame::from_draw(window, renderer, world, camera));
+        drawn += 1;
     }
     frame.expect("a frame")
 }

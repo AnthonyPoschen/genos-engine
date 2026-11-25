@@ -177,6 +177,10 @@ def moving_pops(label):
     suns = [i for i, l in enumerate(call("lights")) if l.get("directional") and l.get("on", True)]
     for i in suns:
         call("light", {"index": i, "on": False})
+    # The suns' bounce fades over the bounce's history, in real time: let it
+    # go before the walk, or the first step counts the fade as pops (a frame
+    # of 9 ms left the walk's first frames still darkening, 25 Nov 2026).
+    settle()
     right = [math.cos(YAW), 0.0, math.sin(YAW)]
     frames = []
     for i in range(int(ARGS["steps"])):
