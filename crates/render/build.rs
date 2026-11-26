@@ -194,6 +194,10 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         ("CONE_LIGHT_SPV", "cone_light.comp"),
         ("CONE_WORLD_SPV", "cone_world.comp"),
         ("CONE_SUN_SPV", "cone_sun.comp"),
+        ("CONE_RESOLVE_SPV", "cone_resolve.comp"),
+        ("CONE_FILL_SPV", "cone_fill.comp"),
+        ("CONE_TARGETS_SPV", "cone_targets.comp"),
+        ("CONE_LAMP_SPV", "cone_lamp.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -340,6 +344,7 @@ fn reflection_shaders(out: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
 fn rerun_shader_pieces() {
     for piece in [
         "cone_common.glsl",
+        "cone_gather.glsl",
         "lighting_common.glsl",
         "lighting_screen_probe.glsl",
         "lighting_pack.glsl",

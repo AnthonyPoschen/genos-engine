@@ -52,7 +52,7 @@ const CONE_WORLD_CAP: u64 = 16_384;
 /// Header words cleared each frame; the layout follows them.
 const CONE_CLEARED: u64 = 64;
 const CONE_LAYOUT_AT: u64 = 64;
-const CONE_PIPES: usize = 12;
+const CONE_PIPES: usize = 16;
 const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-insert",
     "cone-compact",
@@ -66,15 +66,35 @@ const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-light",
     "cone-world",
     "cone-sun",
+    "cone-resolve",
+    "cone-fill",
+    "cone-targets",
+    "cone-lamp",
 ];
 /// GPU timestamps a frame's cone passes write: one before the first pass and
 /// one after each stage in [`CONE_STAGE_NAMES`].
-const CONE_STAGES: usize = 15;
-const CONE_STAMPS: u32 = 16;
+const CONE_STAGES: usize = 18;
+const CONE_STAMPS: u32 = 19;
 /// The stages `cone_pass_ms` times, in frame order. `trace0`..`trace4` are
-/// the cascades' traces; `sun` is the shadow-edge pixels' own sun rays.
+/// the cascades' traces; `lamp_rays` is each cascade-0 probe's rays at its
+/// lamp targets; `shade` gathers the probes' light at one pixel of
+/// each square, `resolve` spreads it to every pixel, `fill` gathers for the
+/// pixels with no match; `sun` is the shadow-edge pixels' own sun rays.
 pub(crate) const CONE_STAGE_NAMES: [&str; CONE_STAGES] =
-    ["light", "lamps", "insert", "world", "compact", "chain", "trace0", "trace1", "trace2", "trace3", "trace4", "weights", "merge", "shade", "sun"];
+    ["light", "lamps", "insert", "world", "compact", "chain", "trace0", "trace1", "trace2", "trace3", "trace4", "weights", "merge", "lamp_rays", "shade", "resolve", "fill", "sun"];
+/// Header words of last frame's tables (`cone_common.glsl` CONE_PREV_LAYOUT).
+const CONE_PREV_LAYOUT_AT: u64 = 112;
+/// Header words of the merged cones' offsets, one a cascade
+/// (`cone_common.glsl` CONE_MERGED_LAYOUT): the other half's cone tables.
+const CONE_MERGED_LAYOUT_AT: u64 = 137;
+/// The most frames a probe keeps its cones before it traces them again. The
+/// period is the bounce's history over the frame's time, so the cones lag
+/// the bounce by about what it already lags: four frames when three fit in
+/// the history, three when two do, and two otherwise.
+const CONE_KEEP_FRAMES: u32 = 4;
+/// Header words of the gather grid's and the fill list's offsets
+/// (`cone_common.glsl` CONE_GATHER_LAYOUT).
+const CONE_GATHER_LAYOUT_AT: u64 = 96;
 /// Header words of last frame's eye and whether its probes are in the work
 /// buffer (`cone_common.glsl` CONE_PREV_EYE), for the light pass.
 const CONE_PREV_EYE_AT: u64 = 92;
@@ -90,7 +110,14 @@ const CONE_PADDED_TEXELS: u64 = 1000;
 /// is written at: the most lamp-hash entries one lamp can fill.
 const CONE_LAMP_POINTS: u64 = 256;
 const CONE_LAMP_ENTRIES: u64 = CONE_LAMP_POINTS * 8;
-const CONE_LAMP_WORDS: u64 = 5;
+const CONE_LAMP_WORDS: u64 = 9;
+/// Lamps a probe's target list holds (`cone_common.glsl` CONE_TARGETS), and
+/// the header words of the lists' offsets, one a cascade.
+const CONE_TARGETS: u64 = 16;
+const CONE_TARGET_LAYOUT_AT: u64 = 98;
+/// Words a gathered pixel holds: its light, and the lamps it carries
+/// (`cone_common.glsl` CONE_GATHER_WORDS). The grid has room for every pixel.
+const CONE_GATHER_WORDS: u64 = 5;
 
 fn cone_dirs(theta: u32, c: u32) -> u64 {
     let t = u64::from(theta) << c;
@@ -112,16 +139,26 @@ struct ConeLayout {
     lamp_at: u64,
     /// The sun list (`cone_sun.comp`): a word a screen pixel.
     sun_at: u64,
+    /// The gather grid (`cone_shade.comp`) and the fill list
+    /// (`cone_fill.comp`): a word a screen pixel each.
+    gather_at: u64,
+    fill_at: u64,
+    /// Each cascade's lamp target lists ([`CONE_TARGETS`] words a probe).
+    targets_at: [u64; 5],
+    /// What cascade 0's probes' rays saw of their targets.
+    seen_at: u64,
     words: u64,
 }
 
-fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32, lamps: u64, screen: u64) -> ConeLayout {
+/// `world` is cascade 0's room for the world layer's probes
+/// ([`CONE_WORLD_CAP`]; none under the table-cap knockout).
+fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32, lamps: u64, screen: u64, world: u64) -> ConeLayout {
     let px = u64::from(probe_px.max(1));
     let base = pixels.div_ceil(px * px).max(1) * CONE_PROBE_SLACK;
     let count = count.min(5);
     let mut l = ConeLayout { count, ..ConeLayout::default() };
     let mut at = CONE_HEADER_WORDS;
-    let mut cap = base + CONE_WORLD_CAP;
+    let mut cap = base + world;
     for c in 0..count as usize {
         let k = u32::try_from(c).unwrap_or(0);
         l.cap[c] = cap.max(CONE_MIN_CAP);
@@ -140,11 +177,47 @@ fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32, lamps: u64, s
     at += l.lamp_hash * CONE_LAMP_WORDS;
     l.sun_at = at;
     at += screen;
+    l.gather_at = at;
+    at += screen * CONE_GATHER_WORDS;
+    l.fill_at = at;
+    at += screen;
+    for c in 0..count as usize {
+        l.targets_at[c] = at;
+        at += l.cap[c] * CONE_TARGETS;
+    }
+    l.seen_at = at;
+    at += l.cap[0] * CONE_TARGETS;
     l.words = at;
     l
 }
 
 impl ConeLayout {
+    /// The same layout `by` words further on: the other of the work buffer's
+    /// two halves.
+    fn shifted(&self, by: u64) -> Self {
+        let mut l = *self;
+        for at in l.hash_at.iter_mut().chain(&mut l.probes_at).chain(&mut l.cones_at).chain(&mut l.targets_at) {
+            *at += by;
+        }
+        for at in [&mut l.lamp_at, &mut l.sun_at, &mut l.gather_at, &mut l.fill_at, &mut l.seen_at] {
+            *at += by;
+        }
+        l
+    }
+
+    /// The words one half holds (everything past the header).
+    fn half_words(&self) -> u64 {
+        self.words - CONE_HEADER_WORDS
+    }
+
+    /// Last frame's tables as the shaders read them (`cone_common.glsl`
+    /// CONE_PREV_LAYOUT): for each cascade its hash size, hash, cap, cones
+    /// and target lists.
+    fn prev_header(&self) -> Vec<u32> {
+        let w = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+        (0..5).flat_map(|c| [w(self.hash[c]), w(self.hash_at[c]), w(self.cap[c]), w(self.cones_at[c]), w(self.targets_at[c])]).collect()
+    }
+
     /// The header words the shaders read it from (`cone_common.glsl`).
     fn header(&self) -> Vec<u32> {
         let w = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
@@ -191,6 +264,11 @@ struct ConeGpu {
     /// Frames recorded: which share of the world layer is traced this frame.
     frames: u32,
     ready: bool,
+    /// Which half of the work buffer this frame's cascades are in (the other
+    /// holds last frame's, whose cones a probe keeps until its turn), and
+    /// the layout the last recorded frame used.
+    half: u64,
+    last_layout: ConeLayout,
     /// The work buffer's shape (theta, cascades, pixels, probe_px, lamps) and layout.
     work_shape: (u32, u32, u64, u32, u64),
     /// Knockout only ([`crate::gate::CONE_LAMP_FOLLOW`]): the lamps were
@@ -208,6 +286,14 @@ struct ConeGpu {
     /// The solids left out of the field in use, and of the one building.
     field_movers: std::collections::BTreeSet<usize>,
     building_movers: std::collections::BTreeSet<usize>,
+    /// The eye's velocity (metres a second, smoothed), when it was last
+    /// read, and how long the last field took from the start of its build
+    /// until it was resident: a walker's next field is built about where the
+    /// eye will be when it arrives.
+    eye_velocity: [f32; 3],
+    eye_seen: Option<([f32; 3], std::time::Instant)>,
+    build_started: Option<std::time::Instant>,
+    build_seconds: f32,
     /// The pixel the shade records what it reads for ([`Gpu::cone_pick`]).
     pick: Option<[u32; 2]>,
     /// The suns' directions the faces' sun shares were marched for, and the
@@ -244,6 +330,8 @@ impl ConeGpu {
             fresh: true,
             frames: 0,
             ready: false,
+            half: 0,
+            last_layout: ConeLayout::default(),
             work_shape: (0, 0, 0, 0, 0),
             lamps_frozen: false,
             scene_lights: 0,
@@ -253,6 +341,10 @@ impl ConeGpu {
             movers: std::collections::BTreeMap::new(),
             field_movers: std::collections::BTreeSet::new(),
             building_movers: std::collections::BTreeSet::new(),
+            eye_velocity: [0.0; 3],
+            eye_seen: None,
+            build_started: None,
+            build_seconds: CONE_BUILD_SECONDS,
             pick: None,
             sun_key: 0,
             sun_turns: 0,
@@ -402,6 +494,38 @@ struct ConeBuilt {
     bricks: (u64, u64),
 }
 
+/// A field's build and upload time before one has been measured (seconds).
+const CONE_BUILD_SECONDS: f32 = 1.5;
+/// The furthest ahead of the eye a field is centred (metres): the finest
+/// clip volume's width, so a walker who stops is still at its edge.
+const CONE_LEAD_MOST: f32 = 8.0;
+/// A field is in use from when it arrives until the next does, a build's
+/// time later: its middle is where the eye is halfway through that.
+const CONE_LEAD_BUILDS: f32 = 1.5;
+/// A step over this in one frame is a jump of the camera, not a walk: it
+/// says nothing of where the eye goes next.
+const CONE_JUMP: f32 = 1.0;
+/// The share of a frame's measured velocity taken into the smoothed one a
+/// tenth of a second (by frame time).
+const CONE_VELOCITY_SECONDS: f32 = 0.1;
+
+/// Where the eye will be in the middle of the time a field whose build
+/// starts now is in use: the eye moved on by its velocity over
+/// [`CONE_LEAD_BUILDS`] of the last build's time, at most [`CONE_LEAD_MOST`]
+/// an axis. A walker outran the field: built about where
+/// the eye was, it arrived 1.4 s later with the eye metres past its middle,
+/// near surfaces read coarser probes until the next one, and the light on
+/// them changed with each field (Anthony's walk, 26 Nov 2026).
+fn cone_eye_ahead(eye: [f32; 3], velocity: [f32; 3], seconds: f32) -> [f32; 3] {
+    std::array::from_fn(|a| eye[a] + (velocity[a] * seconds * CONE_LEAD_BUILDS).clamp(-CONE_LEAD_MOST, CONE_LEAD_MOST))
+}
+
+/// The pixel that gathers for the square of `scale` pixels holding `pixel`:
+/// the square's middle (`cone_common.glsl` `cone_gather_pixel`).
+fn cone_gather_pixel(pixel: [u32; 2], scale: u32, dims: [u32; 2]) -> [u32; 2] {
+    std::array::from_fn(|a| ((pixel[a] / scale) * scale + scale / 2).min(dims[a].saturating_sub(1)))
+}
+
 /// Whether the eye has moved far enough from the clip volumes' centre that
 /// they are built again around it.
 fn cone_clip_stale(built: [f32; 3], eye: [f32; 3]) -> bool {
@@ -473,8 +597,28 @@ impl Gpu {
         // that starts to move builds the field again without it.
         let movers = self.note_cone_movers(&world.scene);
         let mover_held = !movers.is_subset(&self.cone.field_movers);
-        let stale = new_world || mover_held || !self.cone.has_fine || cone_clip_stale(self.cone.clip_eye, eye);
+        // The eye's velocity, by frame time; a jump of the camera is not one.
+        let now = std::time::Instant::now();
+        if let Some((last, at)) = self.cone.eye_seen {
+            let dt = now.duration_since(at).as_secs_f32();
+            let step: [f32; 3] = std::array::from_fn(|a| eye[a] - last[a]);
+            if dt > 0.0 {
+                let jumped = step.iter().any(|s| s.abs() > CONE_JUMP);
+                let share = 1.0 - (-dt / CONE_VELOCITY_SECONDS).exp();
+                for a in 0..3 {
+                    let measured = if jumped { 0.0 } else { step[a] / dt };
+                    self.cone.eye_velocity[a] += (measured - self.cone.eye_velocity[a]) * if jumped { 1.0 } else { share };
+                }
+            }
+        }
+        self.cone.eye_seen = Some((eye, now));
+        // The field is built about where the eye will be when it arrives,
+        // and built again when that place leaves the middle of the volumes.
+        let ahead = cone_eye_ahead(eye, self.cone.eye_velocity, self.cone.build_seconds);
+        let stale = new_world || mover_held || !self.cone.has_fine || cone_clip_stale(self.cone.clip_eye, ahead);
+        let eye = ahead;
         if stale && self.cone.building.is_none() {
+            self.cone.build_started = Some(now);
             let scene = cone_without_solids(&world.scene, &movers);
             self.cone.building_movers = movers;
             let gltf = world.gltf_surface.clone();
@@ -506,9 +650,14 @@ impl Gpu {
         }
         let shape = (cone.theta, cone.count, pixels, cone.probe_px, lamps);
         if pixels > 0 && (self.cone.work_shape != shape || self.cone.work.buffer.is_null()) {
-            let sized = if crate::gate::guard(crate::gate::CONE_TABLE_CAP) { pixels } else { pixels / CONE_KNOCKOUT_SHARE };
-            let layout = cone_layout(cone.theta, cone.count, sized, cone.probe_px, lamps, pixels);
-            let words = layout.words;
+            // Knockout only: tables for a share of the screen and no room for
+            // the world layer (its room alone held a small scene's probes,
+            // and the knocked-out gate stayed green).
+            let guarded = crate::gate::guard(crate::gate::CONE_TABLE_CAP);
+            let sized = if guarded { pixels } else { pixels / CONE_KNOCKOUT_SHARE };
+            let layout = cone_layout(cone.theta, cone.count, sized, cone.probe_px, lamps, pixels, if guarded { CONE_WORLD_CAP } else { 0 });
+            // Two halves: this frame's cascades and last frame's.
+            let words = CONE_HEADER_WORDS + 2 * layout.half_words();
             self.idle_device();
             let mut old = std::mem::replace(&mut self.cone.work, Buffer::empty());
             self.destroy_buffer(&mut old);
@@ -525,7 +674,7 @@ impl Gpu {
             self.cone.time_pool = self.make_query_pool_n(2 * CONE_STAMPS)?;
         }
         if self.cone.pipes[0].is_null() && self.lighting.ready {
-            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV, CONE_LIGHT_SPV, CONE_WORLD_SPV, CONE_SUN_SPV];
+            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV, CONE_LIGHT_SPV, CONE_WORLD_SPV, CONE_SUN_SPV, CONE_RESOLVE_SPV, CONE_FILL_SPV, CONE_TARGETS_SPV, CONE_LAMP_SPV];
             for (k, code) in codes.iter().enumerate() {
                 self.cone.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, CONE_PIPE_NAMES[k])?;
             }
@@ -616,6 +765,9 @@ impl Gpu {
                 self.cone.ready = true;
             } else {
                 self.cone.next_full = true;
+            }
+            if let Some(started) = self.cone.build_started.take() {
+                self.cone.build_seconds = started.elapsed().as_secs_f32().clamp(0.1, 5.0);
             }
         }
         Ok(())
@@ -736,8 +888,14 @@ impl Gpu {
         let push = |c: u32| [w, h, finest, 0, c, theta, count, cone.probe_px, flags, CONE_T0.to_bits(), radius, 0];
         // Knockout only: the lamps written once and kept, as when the field held them.
         let write_lamps = crate::gate::guard(crate::gate::CONE_LAMP_FOLLOW) || !self.cone.lamps_frozen;
-        let layout = self.cone.layout;
+        // This frame's half of the work buffer, and last frame's.
+        let base = self.cone.layout;
+        let layout = base.shifted(self.cone.half * base.half_words());
+        let before = base.shifted((1 - self.cone.half) * base.half_words());
+        self.cone.half = 1 - self.cone.half;
+        self.cone.last_layout = layout;
         let header = layout.header();
+        let prev_header = before.prev_header();
         let line = |n: u64| -> (u32, u32) {
             let groups = n.div_ceil(64);
             let x = groups.min(65_535);
@@ -756,6 +914,23 @@ impl Gpu {
         let now = std::time::Instant::now();
         let dt = self.cone.lit_at.map_or(1.0, |t| now.duration_since(t).as_secs_f32().min(1.0));
         let fresh = self.cone.fresh;
+        // A probe traces its cones one frame in `period` and keeps them the
+        // others (cone_trace.comp): every frame while a field is new or no
+        // last frame is in the buffer. (The light pass stays every frame: a
+        // voxel lit one frame in a few fell out of step with the world
+        // layer's turns, some never met their probe, and the picture after
+        // a turn away and back differed in 110,000 pixels.) At least every second frame even when
+        // frames are long: with a period of one a slow frame did all the
+        // work and stayed slow.
+        let period: u32 = if fresh || prev[3] != 1 {
+            1
+        } else if dt * 3.0 <= CONE_BOUNCE_SECONDS {
+            CONE_KEEP_FRAMES
+        } else if dt * 2.0 <= CONE_BOUNCE_SECONDS {
+            3
+        } else {
+            2
+        };
         let toward = if fresh { 1.0 } else { 1.0 - (-dt / CONE_BOUNCE_SECONDS).exp() };
         self.cone.lit_at = Some(now);
         self.cone.fresh = false;
@@ -782,21 +957,34 @@ impl Gpu {
                 (header.len() * 4) as u64,
                 header.as_ptr().cast::<c_void>(),
             );
+            (self.fns.cmd_update_buffer)(
+                self.cmd,
+                self.cone.work.buffer,
+                CONE_PREV_LAYOUT_AT * 4,
+                (prev_header.len() * 4) as u64,
+                prev_header.as_ptr().cast::<c_void>(),
+            );
+            let merged = before.cones_at.map(|at| u32::try_from(at).unwrap_or(u32::MAX));
+            (self.fns.cmd_update_buffer)(self.cmd, self.cone.work.buffer, CONE_MERGED_LAYOUT_AT * 4, 20, merged.as_ptr().cast::<c_void>());
+            let gather = [u32::try_from(layout.gather_at).unwrap_or(u32::MAX), u32::try_from(layout.fill_at).unwrap_or(u32::MAX)];
+            (self.fns.cmd_update_buffer)(self.cmd, self.cone.work.buffer, CONE_GATHER_LAYOUT_AT * 4, 8, gather.as_ptr().cast::<c_void>());
+            let mut targets = [0u32; 6];
+            for (word, at) in targets.iter_mut().zip(layout.targets_at.iter().chain(std::iter::once(&layout.seen_at))) {
+                *word = u32::try_from(*at).unwrap_or(u32::MAX);
+            }
+            (self.fns.cmd_update_buffer)(self.cmd, self.cone.work.buffer, CONE_TARGET_LAYOUT_AT * 4, 24, targets.as_ptr().cast::<c_void>());
+            (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, layout.seen_at * 4, layout.cap[0] * CONE_TARGETS * 4, 0);
             for c in 0..count as usize {
                 (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, layout.hash_at[c] * 4, layout.hash[c] * CONE_HASH_WORDS * 4, 0);
+                (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, layout.targets_at[c] * 4, layout.cap[c] * CONE_TARGETS * 4, 0);
             }
-            if write_lamps {
-                (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, layout.lamp_at * 4, layout.lamp_hash * CONE_LAMP_WORDS * 4, 0);
-            }
+
         }
         let compute = |gpu: &Self| gpu.memory_barrier(0x800, 0x800, 0x40, 0x20 | 0x40);
         self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
         let pixels = (w.div_ceil(8), h.div_ceil(8));
-        if write_lamps {
-            self.cone_dispatch(7, push(0), line(u64::from(self.cone.scene_lights) * CONE_LAMP_POINTS));
-            compute(self);
-            self.cone.lamps_frozen = true;
-        }
+        // (The lamps are not written into the field's hash: the cascade-0
+        // probes take them from the light grid, cone_lamp.comp.)
         self.cone_stamp(2);
         // Cascade 0 from the pixels, then each cascade from the one below it
         // (its compact first, so its probes are numbered).
@@ -832,7 +1020,10 @@ impl Gpu {
         self.cone_stamp(6);
         for c in 0..5 {
             if c < count {
-                self.cone_dispatch(3, push(c), line(layout.cap[c as usize] * layout.dirs[c as usize]));
+                let mut trace_push = push(c);
+                trace_push[3] = self.cone.frames;
+                trace_push[11] = period;
+                self.cone_dispatch(3, trace_push, line(layout.cap[c as usize] * layout.dirs[c as usize]));
                 compute(self);
             }
             self.cone_stamp(7 + c);
@@ -842,20 +1033,47 @@ impl Gpu {
         }
         compute(self);
         self.cone_stamp(12);
-        for c in (0..count.saturating_sub(1)).rev() {
+        // Every cascade's merged records, from the coarsest down (its own
+        // are its merged ones), into the other half of the buffer: the
+        // trace has kept what it keeps of last frame's records there.
+        for c in (0..count).rev() {
             self.cone_dispatch(5, push(c), line(layout.cap[c as usize] * layout.dirs[c as usize]));
             compute(self);
         }
         self.cone_stamp(13);
-        let mut shade_push = push(0);
-        shade_push[3] = self.cone.pick.filter(|p| p[0] < w && p[1] < h).map_or(0, |p| p[1] * w + p[0] + 1);
-        self.cone_dispatch(6, shade_push, pixels);
-        compute(self);
+        // Each cascade-0 probe's rays at its lamp targets. Knockout only
+        // ([`crate::gate::CONE_LAMP_FOLLOW`]): once, then never again.
+        if write_lamps {
+            self.cone_dispatch(15, push(0), line(layout.cap[0]));
+            compute(self);
+            self.cone.lamps_frozen = true;
+        }
         self.cone_stamp(14);
-        // The shadow-edge pixels the shade listed: their own sun rays.
-        self.cone_dispatch(11, push(0), line(u64::from(w) * u64::from(h)));
+        // The gather at one pixel of each square of `scale`, the resolve to
+        // every pixel, the fill for the pixels with no match, then the
+        // shadow-edge pixels' own sun rays.
+        let scale = cone.shade_scale.clamp(1, 4);
+        let pick = self.cone.pick.filter(|p| p[0] < w && p[1] < h).map_or(0, |p| {
+            let [x, y] = cone_gather_pixel(p, scale, [w, h]);
+            y * w + x + 1
+        });
+        let mut shade_push = push(0);
+        shade_push[3] = pick;
+        shade_push[11] = scale;
+        self.cone_dispatch(6, shade_push, (w.div_ceil(scale).div_ceil(8), h.div_ceil(scale).div_ceil(8)));
         compute(self);
         self.cone_stamp(15);
+        let mut spread_push = push(0);
+        spread_push[11] = scale;
+        self.cone_dispatch(12, spread_push, pixels);
+        compute(self);
+        self.cone_stamp(16);
+        self.cone_dispatch(13, spread_push, line(u64::from(w) * u64::from(h)));
+        compute(self);
+        self.cone_stamp(17);
+        self.cone_dispatch(11, push(0), line(u64::from(w) * u64::from(h)));
+        compute(self);
+        self.cone_stamp(18);
         self.cone.prev_eye = Some(self.cone.eye);
     }
 
@@ -868,7 +1086,7 @@ impl Gpu {
             return Ok(Vec::new());
         }
         self.idle_device();
-        let raw = self.copy_device_range(self.cone.work.buffer, 0, 48 * 4)?;
+        let raw = self.copy_device_range(self.cone.work.buffer, 0, 64 * 4)?;
         let w = u32_words(&raw);
         let at = |i: usize| w.get(i).copied().unwrap_or(0);
         Ok((0..count)
@@ -883,6 +1101,7 @@ impl Gpu {
                     dropped_insert: at(32 + i),
                     cones_traced: at(16 + i),
                     cones_closed: at(24 + i),
+                    cones_kept: at(56 + i),
                     seat_fallbacks: at(40 + i),
                 }
             })
@@ -900,7 +1119,10 @@ impl Gpu {
         self.idle_device();
         let words = CONE_PICK_HEAD + 2 * CONE_PICK_LEVEL;
         let w = u32_words(&self.copy_device_range(self.cone.work.buffer, CONE_PICK_AT * 4, u64::try_from(words * 4).unwrap_or(0))?);
-        let pixel = y * self.lighting.dims[0] + x + 1;
+        // The pick is of the pixel that gathers for this one's square.
+        let dims = [self.lighting.dims[0], self.lighting.dims[1]];
+        let [x, y] = cone_gather_pixel([x, y], self.lighting.settings.cone.shade_scale.clamp(1, 4), dims);
+        let pixel = y * dims[0] + x + 1;
         if w.len() < words || w[0] != pixel {
             return Ok(None);
         }
@@ -971,7 +1193,7 @@ impl Gpu {
         if kept == 0 {
             return Ok(Vec::new());
         }
-        let at = layout.probes_at[c as usize];
+        let at = self.cone.last_layout.probes_at[c as usize];
         let raw = self.copy_device_range(self.cone.work.buffer, at * 4, kept * CONE_PROBE_WORDS * 4)?;
         let w = u32_words(&raw);
         let stride = usize::try_from(CONE_PROBE_WORDS).unwrap_or(32);

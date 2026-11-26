@@ -124,7 +124,7 @@ Add GPU timestamp queries around each cone pass. Expose them in `timing` (`gpu_m
 | Light pass over every face, every frame | 377k voxels x 6 at Anthony's pose. | Update the faces within the world reach every frame, and the rest a share a frame. The bounce already has a 0.1 s history. | Yes. Bounce history only. |
 | Cascade traces | About 620k cones a frame at Anthony's pose. | Trace cascades 2+ every 2nd or 4th frame (bounce, not direct). Fewer cascade-0 probes: `finest_probe` 0.125 (Anthony earlier saw no visual change; confirm the setting applies) or a larger `probe_px` at 3.5 MP. | Direct light must stay every frame: check that lamps through cones are not delayed (gate E). |
 | World layer | About 1-4 ms in Sponza. | 1/8 a frame instead of 1/4, or one cascade. | Yes. |
-| Insert and shade at 3.5 MP | Per pixel; insert does 9 hash inserts a pixel. | Insert at half resolution, or once per probe tile. | Check gates C and F. |
+| Insert and shade at 3.5 MP | Per pixel; insert does 9 hash inserts a pixel. | Insert at half resolution, or once per `probe_px` square. | Check gates C and F. |
 | `cones_closed` greater than `cones_traced` on cascades 3-4 | Possibly wasted work, or a counting bug. | Find out first. | — |
 
 Report each change's ms in the plan's section 18, as earlier steps did.

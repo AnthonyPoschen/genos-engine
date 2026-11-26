@@ -180,11 +180,11 @@ fn plain_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "get_debug_settings",
-            "The debug output directory in force (text form) and whether captures keep the UI. --out wins over GENOS_UNFILLED_DIR, which wins over the scene value. The default directory is genos-debug/unfilled under the working directory. ui defaults to false: a capture leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
+            "The debug output directory in force (text form) whether captures keep the UI, and light_gizmos (wire circles at the lights). --out wins over GENOS_UNFILLED_DIR, which wins over the scene value. The default directory is genos-debug/unfilled under the working directory. ui defaults to false: a capture leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
         ),
         spec(
             "set_debug_settings",
-            "Partial debug-output update. Key out is the unfilled directory. Key ui is on or off (default off) and is the capture default. A capture command's ui argument overrides it for that shot. A text field overlays key=value lines. Writes the scene. --out and GENOS_UNFILLED_DIR still overlay the directory used for the next save. --ui forces ui on.",
+            "Partial debug-output update. Key out is the unfilled directory. Key ui is on or off (default off) and is the capture default. Key light_gizmos is on or off (default off): a wire circle at every light, in its colour, and a line the way a sun's rays travel; the debug menu's FPS row has the same switch (Lights). A capture command's ui argument overrides it for that shot. A text field overlays key=value lines. Writes the scene. --out and GENOS_UNFILLED_DIR still overlay the directory used for the next save. --ui forces ui on.",
         ),
         spec(
             "get_fps_counter",

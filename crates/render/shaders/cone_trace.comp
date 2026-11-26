@@ -22,6 +22,37 @@ void main() {
     uint r = cone_probe(c, probe);
     vec3 dir = cone_bin_dir(bin, cone_theta(c));
     uint at = cone_record_at(c, probe, bin);
+    // A probe that stood here last frame keeps its cones until its turn: one
+    // frame in `period` (push lamp.w, from the frame's time: the cones carry
+    // the bounce, which has a short history, and the sky; the lamps are
+    // steered every frame). What is kept is the cone's own record; the merge
+    // is done again every frame. The probe's lamp targets are kept with it
+    // (its cones are what find them).
+    if (cone_keeps(r)) {
+        uint before = cone_prev_find(c, int(cwork.w[r + 1u]), ivec3(int(cwork.w[r + 4u]), int(cwork.w[r + 5u]), int(cwork.w[r + 6u])), cone_key_face(cwork.w[r]));
+        if (before != CONE_NO_BRICK) {
+            uint from_ = cone_prev_cones_at(c) + (before * dirs + bin) * CONE_CONE_WORDS;
+            if (unpackHalf2x16(cwork.w[from_ + 3u]).y > CONE_HALF) {
+                cwork.w[at] = cwork.w[from_];
+                cwork.w[at + 1u] = cwork.w[from_ + 1u];
+                cwork.w[at + 2u] = cwork.w[from_ + 2u];
+                cwork.w[at + 3u] = cwork.w[from_ + 3u];
+                if (bin == 0u) {
+                    uint theirs = cone_prev_targets_of(c, before);
+                    uint own = cone_targets_of(c, probe);
+                    for (uint k = 0u; k < CONE_TARGETS; k++) {
+                        uint id = cwork.w[theirs + k];
+                        if (id == 0u) {
+                            break;
+                        }
+                        cone_target_add(own, id);
+                    }
+                }
+                atomicAdd(cwork.w[CONE_KEPT + uint(c)], 1u);
+                return;
+            }
+        }
+    }
     float open = 1.0;
     uint t = cwork.w[r + 2u];
     int k = c;
@@ -67,6 +98,9 @@ void main() {
     cone_horizon_on = dot(dir, way) > 0.0;
     cone_horizon_at = cone_word3(r + 12u);
     cone_horizon_n = way;
+    // No voxel coarser than CONE_MOST_OVER levels over this cascade's probe
+    // spacing (cone_common.glsl cone_most_level).
+    cone_most_level = clamp(probe_lod + c + CONE_MOST_OVER, CONE_FINEST, CONE_COARSEST);
     cone_march(start, dir, width, from, end, covered, light);
     float through = 1.0 - covered;
     if (last) {

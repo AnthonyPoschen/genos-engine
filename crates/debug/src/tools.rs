@@ -175,6 +175,10 @@ impl Path {
 #[derive(Clone, Debug, Default)]
 struct LightEdit {
     off: bool,
+    /// The colour the light had when it was turned off. A scene that keeps
+    /// its lights from frame to frame (a still scene) has no other record of
+    /// it: turned on again, the lamp stayed black.
+    was: Option<[f32; 3]>,
     color: Option<[f32; 3]>,
     intensity: Option<f32>,
     position: Option<Vec3>,
@@ -182,7 +186,14 @@ struct LightEdit {
 }
 
 impl LightEdit {
-    fn apply(&self, light: &mut Light, frame: u64) {
+    fn apply(&mut self, light: &mut Light, frame: u64) {
+        if !self.off {
+            if let Some(was) = self.was.take() {
+                if light.color.iter().all(|c| *c == 0.0) {
+                    light.color = was;
+                }
+            }
+        }
         if let Some(path) = &self.path {
             light.position = path.at(frame);
         } else if let Some(p) = self.position {
@@ -195,6 +206,9 @@ impl LightEdit {
             light.color = light.color.map(|c| c * k);
         }
         if self.off {
+            if light.color.iter().any(|c| *c != 0.0) {
+                self.was = Some(light.color);
+            }
             light.color = [0.0; 3];
         }
     }
@@ -921,14 +935,15 @@ impl Tools {
 
     fn apply_edits(&mut self, scene: &mut Scene) {
         self.base_lights = scene.light_len();
-        for (index, edit) in &self.lights {
+        let frame = self.frame;
+        for (index, edit) in &mut self.lights {
             if let Some(light) = scene.light_at_mut(*index) {
-                edit.apply(light, self.frame);
+                edit.apply(light, frame);
             }
         }
-        for (light, edit) in &self.added {
+        for (light, edit) in &mut self.added {
             let mut light = light.clone();
-            edit.apply(&mut light, self.frame);
+            edit.apply(&mut light, frame);
             scene.push_light(light);
         }
         if let Some(keep) = self.solo {
@@ -1626,6 +1641,7 @@ impl Tools {
                             ("dropped_insert", num(f64::from(s.dropped_insert))),
                             ("cones_traced", num(f64::from(s.cones_traced))),
                             ("cones_closed", num(f64::from(s.cones_closed))),
+                            ("cones_kept", num(f64::from(s.cones_kept))),
                             ("seat_fallbacks", num(f64::from(s.seat_fallbacks))),
                         ])
                     })

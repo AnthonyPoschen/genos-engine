@@ -1535,6 +1535,8 @@ pub struct ConeCascadeStats {
     pub dropped_insert: u32,
     pub cones_traced: u32,
     pub cones_closed: u32,
+    /// Cones kept from last frame (their probe traces one frame in a few).
+    pub cones_kept: u32,
     /// Probes whose voxel the field had no surface for, seated at the cell's
     /// centre (a mover, or a level past the field's coarsest).
     pub seat_fallbacks: u32,

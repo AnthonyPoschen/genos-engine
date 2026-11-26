@@ -1,208 +1,39 @@
 #version 450
-// Cone-traced cascades, pass 7: a pixel's irradiance is the cosine-weighted
-// sum of the merged cascade-0 cones of the voxel-layer probes around it, each
-// weighted by the share that passes from the pixel to its seat (lamp.x bit 1).
-// The pixel's light, its emission plus its albedo's share of that and of the
-// suns (their share from the field, cone_sun), goes in
-// the G-buffer word compose reads as emitted light (the direct pass does not
-// run in this mode). A pixel on a shadow edge is listed for the sun pass
-// (cone_sun.comp), which adds its sun.
+// Cone-traced cascades, pass 7: the gather. One pixel of each square of
+// `scale` by `scale` pixels (push lamp.w: cone_cascades.shade_scale; the
+// square's middle pixel) gathers its probe light (cone_gather.glsl): the
+// cosine-weighted sum of the merged cascade-0 cones of the voxel-layer
+// probes around it, each weighted by the share that passes from the pixel
+// to its seat. It goes to the gather grid in the work buffer, which the
+// resolve pass (cone_resolve.comp) spreads to every pixel. The probes are
+// `probe_px` pixels apart, so their light changes slowly over a few pixels;
+// gathered at every pixel it was a third of the frame at 3406x1376.
 #extension GL_GOOGLE_include_directive : require
 layout(local_size_x = 8, local_size_y = 8) in;
 #include "lighting_common.glsl"
 #include "cone_common.glsl"
-
-// The irradiance a pixel at `pos` facing `n` reads from the voxel-layer
-// probes of level `lod` around it.
-// The debug views' red and grey.
-const float CONE_VIEW_RED = 4.0;
-const float CONE_VIEW_GREY = 0.25;
-
-// What the last level_irradiance read, for the debug views: its probes'
-// total weight, and the share of the directions facing the pixel that held
-// no light.
-float shade_weight = 0.0;
-float shade_dark = 0.0;
-
-// The pick's record of the probes of one level: for each candidate in the
-// hash, its directions with no light, its lit ones and its mean radiance.
-void pick_probes(uint at, int lod, ivec3 own, int count) {
-    cwork.w[at] = uint(lod);
-    cwork.w[at + 1u] = uint(count);
-    cwork.w[at + 2u] = uint(own.x);
-    cwork.w[at + 3u] = uint(own.y);
-    cwork.w[at + 4u] = uint(own.z);
-    cwork.w[at + 6u] = 1u;
-    uint dirs = cone_dirs(0);
-    for (uint k = 0u; k < 8u; k++) {
-        uint r = at + 8u + k * CONE_PICK_PROBE;
-        uint probe = cwork.w[r + 1u];
-        if ((cwork.w[r] & 1u) == 0u || probe >= cone_cap(0)) {
-            continue;
-        }
-        uint dark = 0u;
-        uint lit = 0u;
-        float luma = 0.0;
-        float open = 0.0;
-        float out_luma = 0.0;
-        float out_dirs = 0.0;
-        vec3 way = cone_axis(cone_key_face(cwork.w[cone_probe(0, probe)]));
-        for (uint bin = 0u; bin < dirs; bin++) {
-            vec3 l;
-            float th;
-            vec3 m;
-            bool filled = cone_get(cone_record_at(0, probe, bin), l, th, m);
-            float y = dot(l, CONE_LUMA);
-            open += filled ? th : 0.0;
-            if (dot(cone_bin_dir(bin, cone_theta(0)), way) > 0.0) {
-                out_luma += filled ? y : 0.0;
-                out_dirs += 1.0;
-            }
-            if (filled && y > 0.0) {
-                lit++;
-                luma += y;
-            } else {
-                dark++;
-            }
-        }
-        cwork.w[r + 4u] = dark;
-        cwork.w[r + 5u] = floatBitsToUint(luma / float(dirs));
-        cwork.w[r + 9u] = lit;
-        cwork.w[r + 10u] = floatBitsToUint(open / float(dirs));
-        cwork.w[r + 11u] = floatBitsToUint(out_luma / max(out_dirs, 1.0));
-    }
-}
-
-vec3 level_irradiance(int lod, vec3 pos, vec3 n) {
-    uint probes[8];
-    float weights[8];
-    ivec3 own = cone_cell(pos, n, cone_spacing(lod, 0));
-    int count = cone_weights(0, lod, cone_face(n), pos, (pc.lamp.x & 2u) != 0u, pos + n * CONE_SURFACE_LIFT, own, probes, weights);
-    if (cone_pick_at != 0u) {
-        pick_probes(cone_pick_at, lod, own, count);
-    }
-    shade_weight = 0.0;
-    for (int k = 0; k < count; k++) {
-        shade_weight += weights[k];
-    }
-    float faced = 0.0;
-    float unlit = 0.0;
-    uint theta = cone_theta(0);
-    uint dirs = cone_dirs(0);
-    vec3 sum = vec3(0.0);
-    float weight = 0.0;
-    for (uint bin = 0u; bin < dirs; bin++) {
-        vec3 d = cone_bin_dir(bin, theta);
-        float cosine = dot(d, n);
-        if (cosine <= 0.0) {
-            continue;
-        }
-        vec3 v = vec3(0.0);
-        vec3 m = vec3(0.0);
-        float wsum = 0.0;
-        for (int k = 0; k < count; k++) {
-            vec3 l;
-            float th;
-            vec3 mm;
-            if (cone_get(cone_record_at(0, probes[k], bin), l, th, mm)) {
-                v += l * weights[k];
-                m += mm * weights[k];
-                wsum += weights[k];
-            }
-        }
-        faced += 1.0;
-        if (wsum <= 0.0 || dot(v, CONE_LUMA) <= 0.0) {
-            unlit += 1.0;
-        }
-        if (wsum <= 0.0) {
-            continue;
-        }
-        v /= wsum;
-        m /= wsum;
-        // The light's own cosine when it is known (the bin mean cosine).
-        float held = length(m);
-        float y = dot(v, CONE_LUMA);
-        float lit = cosine;
-        if (held > CONE_TINIER && y > CONE_TINIER) {
-            float spread = min(held / y, 1.0);
-            lit = max(dot(m / held, n), 0.0) * spread + cosine * (1.0 - spread);
-        }
-        sum += v * lit;
-        weight += cosine;
-    }
-    shade_dark = faced > 0.0 ? unlit / faced : 1.0;
-    return weight > 0.0 ? sum * (CONE_PI / weight) : vec3(0.0);
-}
+#include "cone_gather.glsl"
 
 void main() {
-    uvec2 p = gl_GlobalInvocationID.xy;
-    if (any(greaterThanEqual(p, pc.dims.xy))) {
+    uint scale = max(pc.lamp.w, 1u);
+    uvec2 cells = cone_gather_cells(scale);
+    uvec2 cell = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(cell, cells))) {
         return;
     }
+    uvec2 p = cone_gather_pixel(cell, scale);
+    uint slot = cone_gather_at() + (cell.y * cells.x + cell.x) * CONE_GATHER_WORDS;
     vec3 pos;
     vec3 n;
     vec3 albedo;
     bool two_sided;
     if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+        cwork.w[slot] = CONE_GATHER_NONE;
         return;
     }
-    uint pixel = p.y * pc.dims.x + p.x;
-    int lo;
-    int hi;
-    float w_hi;
-    cone_pixel_levels(pos, lo, hi, w_hi);
-    // The pixel pick (push dims.w, the pixel's index plus one): what this
-    // pixel reads goes to the work buffer for cone_pick.
-    bool picked = pc.dims.w != 0u && pixel + 1u == pc.dims.w;
-    if (picked) {
-        for (uint k = 1u; k < CONE_PICK_HEAD + 2u * CONE_PICK_LEVEL; k++) {
-            cwork.w[CONE_PICK + k] = 0u;
-        }
-        cwork.w[CONE_PICK + 1u] = uint(lo);
-        cwork.w[CONE_PICK + 2u] = uint(hi);
-        cwork.w[CONE_PICK + 3u] = floatBitsToUint(w_hi);
-        cone_put3(CONE_PICK + 4u, pos);
-        cone_put3(CONE_PICK + 7u, n);
-        cwork.w[CONE_PICK + 10u] = uint(cone_face(n));
-        cone_pick_at = CONE_PICK + CONE_PICK_HEAD;
+    uint word = lighting_pack_rgb9e5(cone_pixel_gather(p.y * pc.dims.x + p.x, pos, n, true));
+    cwork.w[slot] = word == CONE_GATHER_NONE ? word - 1u : word;
+    for (uint k = 0u; k < CONE_PIXEL_LAMPS; k++) {
+        cwork.w[slot + 1u + k] = cone_lamp_word(gather_lamp[k], gather_seen[k]);
     }
-    vec3 irradiance = level_irradiance(hi, pos, n);
-    float read_weight = shade_weight;
-    float least_weight = shade_weight;
-    float dark = shade_dark;
-    if (lo != hi && w_hi < 1.0) {
-        if (picked) {
-            cone_pick_at = CONE_PICK + CONE_PICK_HEAD + CONE_PICK_LEVEL;
-        }
-        irradiance = mix(level_irradiance(lo, pos, n), irradiance, w_hi);
-        read_weight = mix(shade_weight, read_weight, w_hi);
-        least_weight = min(least_weight, shade_weight);
-        dark = mix(shade_dark, dark, w_hi);
-    }
-    cone_pick_at = 0u;
-    if (picked) {
-        cone_put3(CONE_PICK + 12u, irradiance);
-        cwork.w[CONE_PICK + 11u] = floatBitsToUint(field_sun(pos, n));
-        cwork.w[CONE_PICK] = pixel + 1u;
-    }
-    uint view = (pc.lamp.x >> CONE_VIEW_SHIFT) & 3u;
-    if (view != 0u) {
-        // The debug views (cone_cascades.view), in place of the light.
-        vec3 shown = view == CONE_VIEW_COVERAGE
-            ? (least_weight <= 0.0 ? vec3(CONE_VIEW_RED, 0.0, 0.0) : (least_weight <= CONE_PASS_FLOOR ? vec3(CONE_VIEW_RED, CONE_VIEW_RED, 0.0) : vec3(read_weight)))
-            : mix(vec3(CONE_VIEW_GREY), vec3(CONE_VIEW_RED, 0.0, 0.0), dark);
-        gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(shown);
-        return;
-    }
-    uint emitted = gbuf_word(pixel, 3u);
-    vec3 glow = emitted == ~0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
-    bool edge;
-    vec3 sun = cone_sun(pos, n, two_sided, false, edge);
-    if (edge) {
-        // A shadow edge crosses the voxels about the pixel: the sun pass
-        // (cone_sun.comp) marches its ray and adds its sun.
-        sun = vec3(0.0);
-        cwork.w[cone_sun_at() + atomicAdd(cwork.w[CONE_SUN_COUNT], 1u)] = pixel;
-    }
-    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(glow + albedo * SCENE_LAMBERT * irradiance + albedo * (1.0 / CONE_PI) * sun);
 }

@@ -305,6 +305,7 @@ const ID_VIEW: u32 = 2400;
 const ID_DROP: u32 = 2600;
 const ID_FPS: u32 = 2800;
 const ID_FPS_HZ: u32 = 2801;
+const ID_LIGHT_GIZMOS: u32 = 2802;
 const ID_REFL_ENABLED: u32 = 2900;
 const ID_REFL_WATER: u32 = 2901;
 const ID_REFL_ROUGH: u32 = 2902;
@@ -1154,12 +1155,20 @@ fn run() -> Result<i32, String> {
                 color: mesh_view::OVERLAY_COLOR,
             })
             .collect();
+        // The light gizmos (`DebugSettings::light_gizmos`), with the mesh
+        // viewer's lines when it is open.
+        #[cfg_attr(not(feature = "mesh"), expect(unused_mut, reason = "only the mesh viewer adds to it"))]
+        let mut lines = if app.scene_ref().debug.light_gizmos && !loading {
+            light_gizmo_lines(app.scene_ref(), &camera, [size.0 as f32, size.1 as f32])
+        } else {
+            Vec::new()
+        };
         #[cfg(feature = "mesh")]
         if app.mesh.is_some() {
-            let mut lines = gizmo_lines;
+            lines.extend(gizmo_lines);
             lines.extend(dragged);
-            renderer.set_overlay_lines(&lines);
         }
+        renderer.set_overlay_lines(&lines);
         if want_read && !tools.show_capture_overlay(capture_ui) {
             overlay.clear();
             renderer.set_overlay_lines(&[]);
@@ -1388,6 +1397,9 @@ struct App {
     load: Option<LoadJob>,
     /// What the last "Save look to scene" did. The Output page shows it.
     look_note: String,
+    /// How fast a still scene's suns turn (knob `sun_speed`): 0 keeps them
+    /// where the scene put them; 1 is a full turn in [`STILL_DAY_SECONDS`].
+    still_sun_speed: f64,
     /// Set while a mesh scene is open: the workspace file being followed.
     #[cfg(feature = "mesh")]
     mesh: Option<mesh_view::MeshView>,
@@ -1590,6 +1602,7 @@ impl App {
             log,
             load: None,
             look_note: String::new(),
+            still_sun_speed: 0.0,
             #[cfg(feature = "mesh")]
             mesh: None,
             #[cfg(feature = "mesh")]
@@ -1637,8 +1650,9 @@ impl App {
     }
 
     fn advance(&mut self, dt: f32) {
-        if let Show::Stress(stage) = &mut self.show {
-            stage.advance(dt);
+        match &mut self.show {
+            Show::Stress(stage) => stage.advance(dt),
+            Show::Still(world) => turn_still_suns(&mut world.scene, self.still_sun_speed * f64::from(dt)),
         }
         self.follow_mesh();
     }
@@ -2317,6 +2331,17 @@ impl Host for App {
                         text: view.pick_mode.clone(),
                     });
                 }
+                // A still scene's suns stand where the scene put them until
+                // this is raised (the stress scene has its own day clock).
+                let has_sun = (0..world.scene.light_len()).any(|i| {
+                    let d = world.scene.light(i).direction;
+                    d.x != 0.0 || d.y != 0.0 || d.z != 0.0
+                });
+                if has_sun {
+                    let mut speed = Knob::number("sun_speed", "Sun speed", self.still_sun_speed, (0.0, 64.0), 0.5, "");
+                    speed.text = format!("x{}", self.still_sun_speed);
+                    knobs.push(speed);
+                }
                 knobs
             }
         }
@@ -2461,6 +2486,10 @@ impl Host for App {
         match &mut self.show {
             Show::Stress(stage) => Host::set_knob(stage, name, value),
             Show::Still(world) => {
+                if name == "sun_speed" {
+                    self.still_sun_speed = value.clamp(0.0, 64.0);
+                    return Ok(());
+                }
                 if apply_particle_knob(&mut world.scene.particles, name, value)?
                     || apply_fog_knob(&mut world.scene.fog, name, value)?
                     || apply_lighting_knob(&mut world.scene.lighting, name, value)?
@@ -3368,7 +3397,7 @@ fn setting_piece(
             VIEWS.iter().map(|name| (*name).to_string()).collect(),
         )
         .map(Piece::Row),
-        "fps" => Some(Piece::Row(fps_row(fps))),
+        "fps" => Some(Piece::Row(fps_row(fps, app.scene_ref().debug.light_gizmos))),
         "enabled" => Some(Piece::Row(reflection_check(
             "enabled",
             ID_REFL_ENABLED,
@@ -3996,7 +4025,7 @@ fn reflection_slider(label: &str, id: u32, value: f64, min: f64, max: f64, step:
     }
 }
 
-fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
+fn fps_row(fps: &FpsCounterSettings, light_gizmos: bool) -> PanelRow {
     PanelRow {
         label: "FPS".into(),
         buttons: Vec::new(),
@@ -4009,12 +4038,103 @@ fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
             format!("{:.0} Hz", fps.rate_hz),
         )),
         dropdown: None,
-        checks: vec![PanelCheck {
-            id: ID_FPS,
-            text: "Show".into(),
-            on: fps.enabled,
-        }],
+        checks: vec![
+            PanelCheck {
+                id: ID_FPS,
+                text: "Show".into(),
+                on: fps.enabled,
+            },
+            // The light gizmos (`DebugSettings::light_gizmos`).
+            PanelCheck {
+                id: ID_LIGHT_GIZMOS,
+                text: "Lights".into(),
+                on: light_gizmos,
+            },
+        ],
     }
+}
+
+/// Seconds a still scene's sun takes to go once round at `sun_speed` 1: the
+/// stress scene's default day.
+const STILL_DAY_SECONDS: f64 = 120.0;
+
+/// Turn each sun of a still scene by `seconds` of its day: about the level
+/// axis square to the way its rays travel, so it rises and sets along the
+/// line it already points down. A sun that points straight down turns about
+/// the x axis.
+fn turn_still_suns(scene: &mut genos_scene::Scene, seconds: f64) {
+    if seconds == 0.0 {
+        return;
+    }
+    let angle = seconds / STILL_DAY_SECONDS * std::f64::consts::TAU;
+    // The turn of one frame, as the lights' own f32.
+    let (sin, cos) = (format!("{}", angle.sin()).parse::<f32>().unwrap_or(0.0), format!("{}", angle.cos()).parse::<f32>().unwrap_or(1.0));
+    for i in 0..scene.light_len() {
+        let rays = scene.light(i).direction;
+        if rays.x == 0.0 && rays.y == 0.0 && rays.z == 0.0 {
+            continue;
+        }
+        let level = (rays.x * rays.x + rays.z * rays.z).sqrt();
+        // The level axis square to the rays: (z, 0, -x) over its length.
+        let axis = if level > 1.0e-4 { [rays.z / level, 0.0, -rays.x / level] } else { [1.0, 0.0, 0.0] };
+        // Rodrigues: v cos + (k x v) sin + k (k.v)(1 - cos).
+        let way = [rays.x, rays.y, rays.z];
+        let cross = [axis[1] * way[2] - axis[2] * way[1], axis[2] * way[0] - axis[0] * way[2], axis[0] * way[1] - axis[1] * way[0]];
+        let along = axis[0] * way[0] + axis[1] * way[1] + axis[2] * way[2];
+        let turned: [f32; 3] = std::array::from_fn(|at| way[at] * cos + cross[at] * sin + axis[at] * along * (1.0 - cos));
+        scene.light_mut(i).direction = Vec3::new(turned[0], turned[1], turned[2]);
+    }
+}
+
+/// Segments of a light gizmo's ring, its radius in metres, and the least it
+/// is drawn at in pixels.
+const LIGHT_RING_SEGMENTS: f32 = 24.0;
+const LIGHT_RING_METRES: f32 = 0.25;
+const LIGHT_RING_LEAST_PX: f32 = 6.0;
+/// How far a sun's gizmo line runs the way its rays travel (metres).
+const SUN_LINE_METRES: f32 = 1.5;
+
+/// A wire ring at every light of `scene` that is before the camera, in the
+/// light's colour (its brightest channel at full), with a cross at its
+/// middle; a sun also gets a line the way its rays travel. In window pixels.
+fn light_gizmo_lines(scene: &genos_scene::Scene, camera: &Camera, size: [f32; 2]) -> Vec<genos_render::ScreenLine> {
+    let matrix = genos_scene::view_proj(camera, size[0] / size[1].max(1.0));
+    // Window x, y and the clip w (the distance along the view) of a point.
+    let project = |point: [f32; 3]| -> Option<[f32; 3]> {
+        let row = |r: usize| matrix[r] * point[0] + matrix[4 + r] * point[1] + matrix[8 + r] * point[2] + matrix[12 + r];
+        let depth = row(3);
+        (depth > 1.0e-3).then(|| [f32::midpoint(row(0) / depth, 1.0) * size[0], f32::midpoint(row(1) / depth, 1.0) * size[1], depth])
+    };
+    let turn = std::f32::consts::TAU / LIGHT_RING_SEGMENTS;
+    let mut lines = Vec::new();
+    for i in 0..scene.light_len() {
+        let light = scene.light(i);
+        let at = [light.position.x, light.position.y, light.position.z];
+        let Some([mid_x, mid_y, depth]) = project(at) else { continue };
+        let peak = light.color.iter().copied().fold(0.0_f32, f32::max);
+        let color = if peak > 0.0 { light.color.map(|c| c / peak) } else { [0.5; 3] };
+        // A ring of LIGHT_RING_METRES at the light's distance (m[5] is the
+        // projection's vertical scale).
+        let radius = (LIGHT_RING_METRES * matrix[5].abs() / depth * size[1] * 0.5).max(LIGHT_RING_LEAST_PX);
+        let on_ring = |angle: f32| [mid_x + radius * angle.cos(), mid_y + radius * angle.sin()];
+        let mut angle = 0.0;
+        while angle < std::f32::consts::TAU - 0.5 * turn {
+            lines.push(genos_render::ScreenLine { a: on_ring(angle), b: on_ring(angle + turn), width: 2.0, color });
+            angle += turn;
+        }
+        let arm = radius * 0.35;
+        lines.push(genos_render::ScreenLine { a: [mid_x - arm, mid_y], b: [mid_x + arm, mid_y], width: 1.5, color });
+        lines.push(genos_render::ScreenLine { a: [mid_x, mid_y - arm], b: [mid_x, mid_y + arm], width: 1.5, color });
+        let rays = light.direction;
+        let long = (rays.x * rays.x + rays.y * rays.y + rays.z * rays.z).sqrt();
+        if long > 0.0 {
+            let scale = SUN_LINE_METRES / long;
+            if let Some([end_x, end_y, _]) = project([at[0] + rays.x * scale, at[1] + rays.y * scale, at[2] + rays.z * scale]) {
+                lines.push(genos_render::ScreenLine { a: [mid_x, mid_y], b: [end_x, end_y], width: 2.0, color });
+            }
+        }
+    }
+    lines
 }
 
 /// The words on the Output page's save button.
@@ -4242,6 +4362,10 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
         app.scene()
             .fps_counter
             .set_key("enabled", if on { "1" } else { "0" })?;
+        return Ok(());
+    }
+    if id == ID_LIGHT_GIZMOS {
+        app.scene().debug.light_gizmos = on;
         return Ok(());
     }
     if id == ID_REFL_ENABLED || id == ID_REFL_WATER {

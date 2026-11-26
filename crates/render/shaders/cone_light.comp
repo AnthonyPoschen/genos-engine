@@ -43,17 +43,26 @@ bool carried(int level, vec3 seat, int face, vec3 n, out vec3 irradiance) {
     uint probe = CONE_NO_BRICK;
     // The levels a probe can be at here: the two a pixel at the seat reads
     // (cone_pixel_levels, from last frame's eye) and one either side, for a
-    // pixel a cell away whose level differs, and the world layer's two. The
+    // pixel a cell away whose level differs, and the world layer's one. The
     // others are not looked up: a face no probe sat on (most of the field)
     // paid a lookup at each of twenty-one levels.
     int about = int(ceil(max(cone_level_from(seat, eye), float(cone_finest_probe()))));
+    // The one world level a face is lit from: the 2 m voxel that holds it
+    // when the world layer put a probe there (its middle within the near
+    // reach of last frame's eye, cone_world.comp), else the 4 m one. Either
+    // one that happened to be there, a face took the 2 m probe's light one
+    // frame and the 4 m probe's another (each comes a frame in four), and a
+    // still picture flickered.
+    float fine_side = cone_size(CONE_WORLD_NEAR);
+    vec3 off = abs((floor(seat / fine_side) + CONE_HALF) * fine_side - eye);
+    int world = max(off.x, max(off.y, off.z)) <= CONE_WORLD_NEAR_REACH ? CONE_WORLD_NEAR : CONE_WORLD_FAR;
     for (int step_ = 0; step_ <= 2 * (CONE_MAX_LOD - CONE_FINEST) && probe == CONE_NO_BRICK; step_++) {
         // level, level - 1, level + 1, level - 2, ...
         int lod = level + ((step_ & 1) == 0 ? step_ / 2 : -(step_ + 1) / 2);
         if (lod < CONE_FINEST || lod > CONE_MAX_LOD) {
             continue;
         }
-        if ((lod < about - 2 || lod > about + 1) && lod != CONE_WORLD_NEAR && lod != CONE_WORLD_FAR) {
+        if ((lod < about - 2 || lod > about + 1) && lod != world) {
             continue;
         }
         uint key = cone_key_from(lod, ivec3(floor(seat / cone_size(lod))), 0, face, eye);
@@ -84,12 +93,28 @@ bool carried(int level, vec3 seat, int face, vec3 n, out vec3 irradiance) {
         vec3 l;
         float th;
         vec3 m;
-        if (cone_get(cone_record_at(0, probe, bin), l, th, m)) {
+        if (cone_get(cone_merged_at(0, probe, bin), l, th, m)) {
             sum += l * cosine;
         }
         weight += cosine;
     }
     irradiance = weight > 0.0 ? sum * (CONE_PI / weight) : vec3(0.0);
+    // The lamps the probe aimed at last frame (its targets, and the share of
+    // each its ray saw: cone_lamp.comp), as they light this face.
+    uint list = cone_targets_of(0, probe);
+    uint seen = cone_seen_of(probe);
+    vec3 from = seat + n * (CONE_LIFT * cone_size(CONE_FINEST));
+    for (uint k = 0u; k < CONE_TARGETS; k++) {
+        uint id = cwork.w[list + k];
+        if (id == 0u) {
+            break;
+        }
+        float share = uintBitsToFloat(cwork.w[seen + k]);
+        if (share > 0.0) {
+            vec3 target;
+            irradiance += lamp_light(scene_lamp(id - 1u), from, n, false, target) * share;
+        }
+    }
     return true;
 }
 
@@ -158,7 +183,11 @@ vec3 target_light(int level, ivec3 cell, int face, vec3 albedo, float share, boo
         // face that has light to hold: one never lit (a new field) takes the
         // sun at once, or it stayed black until a probe reached it, and
         // popped lit as the camera came near (Anthony, 25 Nov 2026).
-        vec3 away = abs(seat - scene.eye.xyz);
+        // The world layer's own test (cone_world.comp): the middle of the
+        // 4 m voxel that holds the face, so a face holds only where a world
+        // probe will come for it.
+        float wide = cone_size(CONE_WORLD_FAR);
+        vec3 away = abs((floor(inside / wide) + CONE_HALF) * wide - scene.eye.xyz);
         if (max(away.x, max(away.y, away.z)) <= CONE_WORLD_FAR_REACH) {
             return vec3(-1.0);
         }

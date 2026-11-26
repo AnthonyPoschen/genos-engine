@@ -40,8 +40,14 @@ void main() {
     float size = cone_size(level);
     vec3 away = abs((vec3(cell) + CONE_HALF) * size - scene.eye.xyz);
     float reach = max(away.x, max(away.y, away.z));
-    // 2 m voxels near the eye, 4 m ones past them.
-    if (level == CONE_WORLD_NEAR ? reach > CONE_WORLD_NEAR_REACH : (reach <= CONE_WORLD_NEAR_REACH || reach > CONE_WORLD_FAR_REACH)) {
+    // 2 m voxels near the eye, and every 4 m one out to the far reach: the
+    // near ones too. A face is lit from the probe of the 2 m or the 4 m
+    // voxel that holds it, and holds its light while it has neither
+    // (cone_light.comp); with the 4 m voxels left out near the eye, a face
+    // whose 2 m voxel's middle lay past the near reach and whose 4 m
+    // voxel's lay inside it had no probe and held for ever what it had when
+    // last on screen (gate D: two pictures for one view).
+    if (reach > (level == CONE_WORLD_NEAR ? CONE_WORLD_NEAR_REACH : CONE_WORLD_FAR_REACH)) {
         return;
     }
     uint t = cone_coarse_texel(slot, local);

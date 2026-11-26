@@ -19,10 +19,17 @@ void main() {
         return;
     }
     uint at = cone_record_at(c, probe, bin);
+    uint out_ = cone_merged_at(c, probe, bin);
     vec3 light;
     float beta;
     vec3 moment;
-    if (!cone_get(at, light, beta, moment) || beta <= 0.0) {
+    // The coarsest cascade has nothing past it, and a cone that passed
+    // nothing on takes nothing: its merged record is its own.
+    if (c + 1 >= int(pc.params.z) || !cone_get(at, light, beta, moment) || beta <= 0.0) {
+        cwork.w[out_] = cwork.w[at];
+        cwork.w[out_ + 1u] = cwork.w[at + 1u];
+        cwork.w[out_ + 2u] = cwork.w[at + 2u];
+        cwork.w[out_ + 3u] = cwork.w[at + 3u];
         return;
     }
     uint r = cone_probe(c, probe);
@@ -48,7 +55,7 @@ void main() {
             vec3 l;
             float th;
             vec3 m;
-            if (w > 0.0 && cone_get(cone_record_at(c + 1, q, child), l, th, m)) {
+            if (w > 0.0 && cone_get(cone_merged_at(c + 1, q, child), l, th, m)) {
                 sum += l * w;
                 msum += m * w;
                 weight += w;
@@ -64,5 +71,5 @@ void main() {
         light += far * (beta / found);
         moment += far_moment * (beta / found);
     }
-    cone_put(at, light, beta, moment);
+    cone_put(out_, light, beta, moment);
 }

@@ -25,7 +25,12 @@ void main() {
     // which it put there itself (cone_spread.comp); the trilinear read skips
     // unseated probes, and the mover's probes read no coarser cascade.
     bool unseated = (cwork.w[r + CONE_PROBE_SEATED] & CONE_FLAG_SEATED) == 0u;
-    if (c + 1 >= CONE_PARENT_ONLY || unseated) {
+    // A world probe too: its coarser probes are metres off, the test to
+    // each walks all that way at the fine levels, and it comes one frame in
+    // four. The pass ran as long as the few world probes' tests took: 2.3 ms
+    // with them, 1.5 without.
+    bool world = (cwork.w[r + CONE_PROBE_SEATED] & CONE_FLAG_WORLD) != 0u;
+    if (c + 1 >= CONE_PARENT_ONLY || unseated || world) {
         // The parent, which this probe put there (cone_spread.comp).
         vec3 at = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c);
         uint parent = cone_find(c + 1, cone_key(lod, ivec3(floor(at / cone_spacing(lod, c + 1))), c + 1, face));

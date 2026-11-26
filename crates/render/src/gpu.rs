@@ -1621,7 +1621,7 @@ impl Renderer {
 
     /// Milliseconds each stage of the last frame's cone passes took on the
     /// GPU (light, lamps, insert, world, compact, chain, trace0..trace4,
-    /// weights, merge, shade). Waits for that frame. Empty when cone mode has
+    /// weights, merge, shade, resolve, fill, sun). Waits for that frame. Empty when cone mode has
     /// not run or the device has no timestamps.
     pub fn cone_pass_ms(&mut self) -> Vec<(&'static str, f64)> {
         self.gpu.cone_pass_ms()

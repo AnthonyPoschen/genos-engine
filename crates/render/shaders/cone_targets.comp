@@ -1,0 +1,38 @@
+#version 450
+// Cone-traced cascades, pass 6a, before cascade params.x merges: lamp
+// steering's hand-down. A probe of cascade params.x takes the lamp targets
+// (cone_common.glsl CONE_TARGETS) of the probes of the next cascade it
+// merges, which have theirs complete (the cascades run from the coarsest
+// down), into its own: a lamp one of its coarser probes' cones found is a
+// lamp it will aim at.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+void main() {
+    int c = int(pc.params.x);
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (i >= min(cwork.w[CONE_COUNTS + uint(c)], cone_cap(c))) {
+        return;
+    }
+    uint r = cone_probe(c, i);
+    uint own = cone_targets_of(c, i);
+    for (uint j = 0u; j < 8u; j++) {
+        uint parent = cwork.w[r + 20u + j];
+        if (parent == CONE_NO_BRICK) {
+            break;
+        }
+        if (parent >= cone_cap(c + 1)) {
+            continue;
+        }
+        uint theirs = cone_targets_of(c + 1, parent);
+        for (uint k = 0u; k < CONE_TARGETS; k++) {
+            uint id = cwork.w[theirs + k];
+            if (id == 0u) {
+                break;
+            }
+            cone_target_add(own, id);
+        }
+    }
+}

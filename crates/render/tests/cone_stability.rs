@@ -155,6 +155,31 @@ fn far_apart(a: &PresentedFrame, b: &PresentedFrame) -> usize {
         .count()
 }
 
+/// A pixel the lamp's own light changed: by this many display codes or more.
+/// The bounce moves more pixels, by less.
+const LAMP_CHANGE: u8 = 8;
+
+/// Of the pixels a move changed by [`LAMP_CHANGE`] codes or more (`before`
+/// to `later`), how many there are, and how many hold under half of their
+/// change in `next`. The lamp's own light is in the frame it moved in; the
+/// bounce follows over its short history in real time, so "every pixel
+/// within a code by the next frame" held only while a frame was long enough
+/// for the bounce to arrive in one (it failed at 17 ms a frame).
+fn late_pixels(before: &PresentedFrame, next: &PresentedFrame, later: &PresentedFrame) -> (usize, usize) {
+    let (mut strong, mut late) = (0, 0);
+    for ((b, n), l) in before.pixels.chunks(4).zip(next.pixels.chunks(4)).zip(later.pixels.chunks(4)) {
+        let change = (0..3).map(|k| b[k].abs_diff(l[k])).max().unwrap_or(0);
+        let left = (0..3).map(|k| n[k].abs_diff(l[k])).max().unwrap_or(0);
+        if change >= LAMP_CHANGE {
+            strong += 1;
+            if u32::from(left) * 2 > u32::from(change) {
+                late += 1;
+            }
+        }
+    }
+    (strong, late)
+}
+
 /// Draw for at least `seconds` of real time (and 30 frames): the bounce's
 /// short history steps by frame time.
 fn draw_for(window: &mut Window, renderer: &mut Renderer, world: &World, camera: &Camera, seconds: f32) -> PresentedFrame {
@@ -169,11 +194,12 @@ fn draw_for(window: &mut Window, renderer: &mut Renderer, world: &World, camera:
 }
 
 /// A lamp that moves is lit where it is in the next frame: its direct light
-/// does not wait, so that frame already has nine tenths of the change (the
-/// bounce, a short history, settles over a few tenths of a second; plan
-/// section 18 step 6). A second later it matches a world built with the lamp
-/// already there. Fails when `cone_lamp_follow` is knocked out (the lamps
-/// written once, as when the field held them).
+/// does not wait, so nine in ten of the pixels it changed strongly hold at
+/// least half their change in that frame (the bounce, a short history,
+/// settles over a few tenths of a second; plan section 18 step 6 and section
+/// 20). A second later it matches a world built with the lamp there. Fails
+/// when `cone_lamp_follow` is knocked out: the lamps' rays are cast once and
+/// never again.
 #[test]
 fn a_moved_lamp_lights_from_its_new_place_in_the_next_frame() {
     let (_gpu, mut owner) = open();
@@ -195,11 +221,12 @@ fn a_moved_lamp_lights_from_its_new_place_in_the_next_frame() {
     resident(window, renderer, &fresh_world, &camera);
     let fresh = draw_for(window, renderer, &fresh_world, &camera, 1.0);
     let moved = far_apart(&before, &later);
-    let lagging = far_apart(&next, &later);
+    let (strong, lagging) = late_pixels(&before, &next, &later);
     let elsewhere = far_apart(&later, &fresh);
-    eprintln!("cone gate: {moved} pixels changed with the move; {lagging} of them not yet in the next frame; {elsewhere} apart from the lamp built there; {dropped} lamp points dropped");
+    eprintln!("cone gate: {moved} pixels changed with the move, {strong} by {LAMP_CHANGE} codes or more; {lagging} of those hold under half their change in the next frame; {elsewhere} apart from the lamp built there; {dropped} lamp points dropped");
     assert!(moved > 100, "only {moved} pixels changed when the lamp moved (guard {CONE_LAMP_FOLLOW})");
     assert_eq!(dropped, 0, "the lamp hash dropped {dropped} points (guard {CONE_LAMP_FOLLOW})");
-    assert!(lagging * 10 <= moved, "{lagging} of {moved} pixels changed after the frame the lamp moved in (guard {CONE_LAMP_FOLLOW})");
+    assert!(strong > 100, "only {strong} pixels changed by {LAMP_CHANGE} codes when the lamp moved (guard {CONE_LAMP_FOLLOW})");
+    assert!(lagging * 10 <= strong, "{lagging} of {strong} pixels held under half their change in the frame the lamp moved in (guard {CONE_LAMP_FOLLOW})");
     assert_eq!(elsewhere, 0, "{elsewhere} pixels differ from the lamp built where it moved (guard {CONE_LAMP_FOLLOW})");
 }

@@ -129,6 +129,7 @@ try:
     print("  probes " + " ".join(f"c{s['cascade']}={s['probes']}" for s in stats["cascades"])
           + "  traced " + " ".join(str(s["cones_traced"]) for s in stats["cascades"])
           + "  closed " + " ".join(str(s["cones_closed"]) for s in stats["cascades"])
+          + "  kept " + " ".join(str(s.get("cones_kept", 0)) for s in stats["cascades"])
           + "  seat fallbacks " + " ".join(str(s["seat_fallbacks"]) for s in stats["cascades"]))
     print(f"  field: {stats.get('field', '')}")
     print(f"  ev100: {call('get_hdr').get('ev100')}")

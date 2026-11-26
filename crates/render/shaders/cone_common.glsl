@@ -125,6 +125,50 @@ const uint CONE_LAMP_DROPPED = 48u; // lamp points that found no lamp-hash slot
 const uint CONE_LAMP_LAYOUT = 89u;  // the lamp hash's size and word offset
 const uint CONE_SUN_COUNT = 50u;    // pixels listed for the sun pass (cone_sun.comp)
 const uint CONE_SUN_LAYOUT = 91u;   // the sun list's word offset: a pixel index a word
+const uint CONE_FILL_COUNT = 51u;   // pixels listed for the fill pass (cone_fill.comp)
+const uint CONE_KEPT = 56u;     // cones kept from last frame, per cascade (cone_trace.comp)
+// Last frame's tables. The work buffer holds two frames' cascades, this
+// frame's and last frame's, in turn; for each cascade, last frame's hash
+// size, hash, probe cap, cones and target lists (word offsets). A probe
+// that stands where it stood last frame is not traced again every frame:
+// its cones are kept until its turn (cone_trace.comp).
+const uint CONE_PREV_LAYOUT = 112u;
+const uint CONE_TARGET_DROPPED = 52u; // lamps a probe's target list had no room for
+// Lamp steering. A cone that meets a voxel holding one lamp's light does not
+// take that light: it puts the lamp in its probe's target list. The lists
+// pass down the cascades (cone_targets.comp), and each cascade-0 probe casts
+// its own thin ray at each of its targets (cone_lamp.comp). A lamp is small
+// at any distance, so its shadow does not widen as the cascades assume:
+// gathered by a cascade whose probes are a metre apart, the patch of light a
+// lamp threw through an arch was blurred over a metre or two and lost its
+// edge (Anthony, 26 Nov 2026). The cones find the lamp; the finest probes
+// aim at it.
+// A probe's list: CONE_TARGETS lamp indices plus one (0: empty). The lists'
+// word offsets, one a cascade, are in the header at CONE_TARGET_LAYOUT.
+const uint CONE_TARGETS = 16u;
+const uint CONE_TARGET_LAYOUT = 98u;
+// What each cascade-0 probe's ray saw of each of its targets (a float a
+// target, beside its list): the share of the lamp the probe sees. A pixel
+// computes a lamp's light itself, from its own distance and angle to the
+// lamp, and takes only this share from the probes about it, blended as
+// their light is. Between a probe that sees the lamp and one that does not
+// the blend runs from 1 to 0; the shadow's edge is drawn where it crosses a
+// half (cone_lamp_share), a smooth line through the probes' grid with no ray
+// from the pixel. Decided once a probe, the edge followed the grid in steps
+// (Anthony, 26 Nov 2026).
+const uint CONE_SEEN_LAYOUT = 103u;
+// The lamps a gathered pixel carries: each a word, the lamp's index plus one
+// in the low half and the share of it seen in the high half.
+const uint CONE_PIXEL_LAMPS = 4u;
+const uint CONE_GATHER_WORDS = 5u;
+// Half the width of a lamp's shadow edge, as a share of the blend from a
+// probe that sees the lamp to one that does not.
+const float CONE_LAMP_EDGE = 0.5;
+// The gather grid's and the fill list's word offsets (cone_gpu.rs writes
+// them each frame): the grid holds a packed light for each gathered pixel
+// (cone_shade.comp), the list a pixel index a word.
+const uint CONE_GATHER_LAYOUT = 96u;
+const uint CONE_GATHER_NONE = 0xffffffffu; // a gathered pixel with no surface
 const uint CONE_LAYOUT = 64u;   // per cascade 5 words: hash size, cap, hash, probes, cones (cone_gpu.rs)
 const uint CONE_CLEARED = 64u;  // header words cleared every frame
 const uint CONE_INSERT_DROPPED = 32u; // pixels whose probe found no hash slot, per cascade
@@ -382,7 +426,17 @@ const uint CONE_LAMP_POINTS = 256u;
 const float CONE_LAMP_UNIT = 72.0;
 const float CONE_LAMP_AREA_Q = 1.0e-8;
 const float CONE_LAMP_LIGHT_Q = 1.0e-4;
-const uint CONE_LAMP_WORDS = 5u;
+const uint CONE_LAMP_WORDS = 9u;
+// A lamp entry's lamps: the index in the scene's lamp list, plus one, of
+// each of the first CONE_LAMP_IDS lamps with points in the voxel, and
+// whether there are more (CONE_LAMP_MORE: those are steered only where a
+// finer voxel holds them apart). No lamp's light travels in the cones: when
+// a coarse voxel of two lamps kept its light in them, a probe that also had
+// those lamps steered from a finer voxel counted them twice, and its patch
+// of floor was brighter than its neighbours' (Anthony, 26 Nov 2026).
+const uint CONE_LAMP_ID = 5u;
+const uint CONE_LAMP_IDS = 3u;
+const uint CONE_LAMP_MORE = 8u;
 // A lamp key holds the cell relative to the eye's cell at that level: 10 bits
 // across, 9 up (about 32 m and 16 m at 6.25 cm, more at the coarser levels).
 const int CONE_LAMP_SPAN_XZ = 512;
@@ -396,7 +450,21 @@ const float CONE_SUN_MARK = 0.5;
 uint cone_lamp_size() {
     return cwork.w[CONE_LAMP_LAYOUT];
 }
-// The sun list (cone_shade.comp fills it, cone_sun.comp reads it).
+uint cone_gather_at() {
+    return cwork.w[CONE_GATHER_LAYOUT];
+}
+uint cone_fill_at() {
+    return cwork.w[CONE_GATHER_LAYOUT + 1u];
+}
+// The gather grid: one gathered pixel for each square of `scale` pixels.
+uvec2 cone_gather_cells(uint scale) {
+    return (pc.dims.xy + scale - 1u) / scale;
+}
+// The pixel a grid cell gathers at: the middle of its square.
+uvec2 cone_gather_pixel(uvec2 cell, uint scale) {
+    return min(cell * scale + scale / 2u, pc.dims.xy - 1u);
+}
+// The sun list (cone_resolve.comp fills it, cone_sun.comp reads it).
 uint cone_sun_at() {
     return cwork.w[CONE_SUN_LAYOUT];
 }
@@ -456,7 +524,112 @@ bool cone_lamp_about(int level, ivec3 base) {
     uint key = cone_lamp_key(level, base);
     return key == CONE_EMPTY || cone_lamp_slot(key, false) != CONE_NO_BRICK;
 }
-// The lamps' area and light in the voxel at `level` and `cell`.
+// Where cascade 0's probe keeps what its rays saw of its targets.
+uint cone_seen_of(uint probe) {
+    return cwork.w[CONE_SEEN_LAYOUT] + probe * CONE_TARGETS;
+}
+// The share of a lamp a pixel is lit by, from the blended share its probes
+// see: the edge where the blend crosses a half, CONE_LAMP_EDGE either side.
+float cone_lamp_share(float blended) {
+    return smoothstep(CONE_HALF - CONE_LAMP_EDGE, CONE_HALF + CONE_LAMP_EDGE, blended);
+}
+// A gathered pixel's lamp word, and its parts.
+const uint CONE_LAMP_WORD_ID = 0xffffu;
+const uint CONE_LAMP_WORD_SHIFT = 16u;
+const float CONE_LAMP_WORD_STEPS = 65535.0;
+uint cone_lamp_word(uint id, float seen) {
+    return (id & CONE_LAMP_WORD_ID) | (uint(clamp(seen, 0.0, 1.0) * CONE_LAMP_WORD_STEPS + CONE_HALF) << CONE_LAMP_WORD_SHIFT);
+}
+uint cone_lamp_word_id(uint word) {
+    return word & CONE_LAMP_WORD_ID;
+}
+float cone_lamp_word_seen(uint word) {
+    return float(word >> CONE_LAMP_WORD_SHIFT) / CONE_LAMP_WORD_STEPS;
+}
+// Last frame's probe of cascade c at `lod`, `cell` and `face` (its index in
+// last frame's tables), or CONE_NO_BRICK: keyed from last frame's eye.
+uint cone_prev_find(int c, int lod, ivec3 cell, int face) {
+    if (cwork.w[CONE_PREV_EYE + 3u] == 0u) {
+        return CONE_NO_BRICK;
+    }
+    vec3 eye = vec3(uintBitsToFloat(cwork.w[CONE_PREV_EYE]), uintBitsToFloat(cwork.w[CONE_PREV_EYE + 1u]), uintBitsToFloat(cwork.w[CONE_PREV_EYE + 2u]));
+    uint key = cone_key_from(lod, cell, c, face, eye);
+    if (key == CONE_EMPTY) {
+        return CONE_NO_BRICK;
+    }
+    uint layout_ = CONE_PREV_LAYOUT + 5u * uint(c);
+    uint size = cwork.w[layout_];
+    uint base = cwork.w[layout_ + 1u];
+    if (size == 0u) {
+        return CONE_NO_BRICK;
+    }
+    uint h = cone_hash_of(key) & (size - 1u);
+    for (uint k = 0u; k < CONE_HASH_PROBES; k++) {
+        uint at = base + ((h + k) & (size - 1u)) * CONE_HASH_WORDS;
+        uint seen = cwork.w[at];
+        if (seen == key) {
+            uint index = cwork.w[at + 8u];
+            return index < cwork.w[layout_ + 2u] ? index : CONE_NO_BRICK;
+        }
+        if (seen == CONE_EMPTY) {
+            return CONE_NO_BRICK;
+        }
+    }
+    return CONE_NO_BRICK;
+}
+// The key's bits above the cell: its level and face.
+const uint CONE_TURN_KIND = 24u;
+// A number for a probe that is the same every frame it stands in the same
+// world cell (its key holds its cell relative to the eye's, which moves):
+// which frame of the period is its turn.
+uint cone_turn_of(uint r) {
+    uint h = cone_hash_of(cwork.w[r] >> CONE_TURN_KIND);
+    h = cone_hash_of(h + cwork.w[r + 4u]);
+    h = cone_hash_of(h + cwork.w[r + 5u]);
+    return cone_hash_of(h + cwork.w[r + 6u]);
+}
+// Whether the probe at `r` keeps what it traced last frame, this frame: not
+// its turn (one frame in the period, push lamp.w, counted by push dims.w).
+// By the probe's world cell, so every probe has a turn each period whatever
+// its number does. (Turns by blocks of probe numbers and by a kept age were
+// tried, to have the threads that trace side by side all trace or all keep:
+// faster, but the picture after a turn away and back then differed from run
+// to run by up to 2% of its pixels, and the cause was not found.)
+bool cone_keeps(uint r) {
+    uint period = pc.lamp.w;
+    return period > 1u && (cone_turn_of(r) + pc.dims.w) % period != 0u;
+}
+uint cone_prev_cones_at(int c) {
+    return cwork.w[CONE_PREV_LAYOUT + 5u * uint(c) + 3u];
+}
+uint cone_prev_targets_of(int c, uint probe) {
+    return cwork.w[CONE_PREV_LAYOUT + 5u * uint(c) + 4u] + probe * CONE_TARGETS;
+}
+// The target list of cascade c's probe (word offset).
+uint cone_targets_of(int c, uint probe) {
+    return cwork.w[CONE_TARGET_LAYOUT + uint(c)] + probe * CONE_TARGETS;
+}
+// Put lamp `id` (index plus one) in the list at `list`, once. Counted when
+// the list is full: that lamp's light is then missing at that probe.
+void cone_target_add(uint list, uint id) {
+    for (uint k = 0u; k < CONE_TARGETS; k++) {
+        uint seen = cwork.w[list + k];
+        if (seen == 0u) {
+            seen = atomicCompSwap(cwork.w[list + k], 0u, id);
+        }
+        if (seen == 0u || seen == id) {
+            return;
+        }
+    }
+    atomicAdd(cwork.w[CONE_TARGET_DROPPED], 1u);
+}
+// The target list the cone being marched steers lamps into (word offset;
+// 0: none, the lamps' light is taken as it is met).
+uint cone_steer_list = 0u;
+// The lamps' area and light in the voxel at `level` and `cell`. A voxel that
+// holds one lamp is steered when a cone is being marched for a probe
+// (cone_steer_list): the lamp goes in the probe's targets and no light is
+// returned here.
 bool cone_lamp_get(int level, ivec3 cell, out float area, out vec3 light) {
     area = 0.0;
     light = vec3(0.0);
@@ -469,8 +642,20 @@ bool cone_lamp_get(int level, ivec3 cell, out float area, out vec3 light) {
         return false;
     }
     area = float(cwork.w[at + 1u]) * CONE_LAMP_AREA_Q;
-    light = vec3(cwork.w[at + 2u], cwork.w[at + 3u], cwork.w[at + 4u]) * CONE_LAMP_LIGHT_Q;
-    return area > 0.0;
+    if (area <= 0.0) {
+        return false;
+    }
+    // The lamps are steered, never lit through the cone: each goes in the
+    // marched cone's probe's targets (a march for no probe takes nothing).
+    for (uint k = 0u; k < CONE_LAMP_IDS && cone_steer_list != 0u; k++) {
+        uint id = cwork.w[at + CONE_LAMP_ID + k];
+        if (id == 0u) {
+            break;
+        }
+        cone_target_add(cone_steer_list, id);
+    }
+    area = 0.0;
+    return false;
 }
 
 // ---- The field ----
@@ -1045,6 +1230,18 @@ float cone_steps = 0.0;
 // `width` a metre out. Adds the light met to `light` and the cover to
 // `covered`; with the crossing test at the fine levels and, at a coarse
 // level, a covered step walked front to back from its coarsest half down.
+// The coarsest level the cone being marched reads (cone_trace.comp sets it:
+// CONE_MOST_OVER levels over its cascade's probe spacing). A cone's level
+// follows its width, and with eight directions cascade 0's cones are 72
+// degrees wide: a 50 cm probe read 2 m and 4 m voxels a few probe spacings
+// out, a voxel that size holds sunlit and shaded floor as one light, and the
+// coarser a probe the brighter the same wall (at Anthony's pose B, 25 cm,
+// 50 cm and 1 m probes: display 25, 38 and 50; capped: 27, 25 and 34). The
+// light then changed wherever a pixel changed probe level, on every field
+// rebuild of a walk. A cone wider than the voxels it reads samples its
+// middle, as it does at the fine levels.
+const int CONE_MOST_OVER = 1;
+int cone_most_level = CONE_COARSEST;
 void cone_march_least(vec3 start, vec3 dir, float width, float least, float done, float end, inout float covered, inout vec3 light);
 void cone_march(vec3 start, vec3 dir, float width, float done, float end, inout float covered, inout vec3 light) {
     cone_march_least(start, dir, width, cone_size(CONE_FINEST), done, end, covered, light);
@@ -1055,7 +1252,7 @@ void cone_march_least(vec3 start, vec3 dir, float width, float least, float done
     float finest = least;
     while (done < end && covered < CONE_FULL) {
         float wide = max(width * done, finest);
-        int level = clamp(int(ceil(log2(wide / CONE_BASE))), CONE_FINEST, CONE_COARSEST);
+        int level = clamp(int(ceil(log2(wide / CONE_BASE))), CONE_FINEST, cone_most_level);
         if (level < CONE_WHOLE_FINEST) {
             level = cone_held_level(level, start + dir * done);
         }
@@ -1065,12 +1262,6 @@ void cone_march_least(vec3 start, vec3 dir, float width, float least, float done
         cone_steps += 1.0;
         if (level <= CONE_REFINE) {
             int n = cone_crossed(level, start + dir * from, start + dir * to, dir);
-            float lc;
-            vec3 ll;
-            cone_fine_lamp(level, start + dir * (from + CONE_HALF * step), lc, ll);
-            if (lc > 0.0) {
-                light += ll * min(lc, 1.0 - covered);
-            }
             for (int i = 0; i < n && covered < CONE_FULL; i++) {
                 cone_take(covered, light, cone_met[i]);
             }
@@ -1081,7 +1272,8 @@ void cone_march_least(vec3 start, vec3 dir, float width, float least, float done
         vec3 li;
         float lc;
         vec3 ll;
-        cone_coarse(level, start + dir * (from + CONE_HALF * step), dir, true, cov, li, lc, ll);
+        // No lamps: the cascade-0 probes aim at them (cone_lamp.comp).
+        cone_coarse(level, start + dir * (from + CONE_HALF * step), dir, false, cov, li, lc, ll);
         if (lc > 0.0) {
             light += ll * min(lc, 1.0 - covered);
         }
@@ -1126,6 +1318,7 @@ void cone_march_least(vec3 start, vec3 dir, float width, float least, float done
     }
 }
 
+const float CONE_PASS_STEPS = 16.0;
 // The share of light that passes from `from` to `to` at the refine level,
 // stopping one step short of `to`.
 float cone_passing(vec3 from, vec3 to) {
@@ -1138,9 +1331,14 @@ float cone_passing(vec3 from, vec3 to) {
     float end = max(length_ - cone_size(CONE_REFINE), 0.0);
     float blocked = 0.0;
     float u = 0.0;
+    // About CONE_PASS_STEPS steps at most: a test over many metres (a coarse
+    // probe to a coarser one) reads a level coarse enough for that. At
+    // 12.5 cm a step whatever the length, the few longest tests set how long
+    // the whole pass ran.
+    int least = clamp(int(ceil(log2(length_ / (CONE_PASS_STEPS * CONE_BASE)))), CONE_REFINE, CONE_COARSEST);
     while (u < end && blocked < 1.0) {
         // Past the refine level's clip volume, the finest whole level's cover.
-        int level = cone_held_level(CONE_REFINE, from + dir * u);
+        int level = cone_held_level(least, from + dir * u);
         float next = min(u + cone_size(level), end);
         if (level <= CONE_REFINE) {
             int n = cone_crossed(CONE_REFINE, from + dir * u, from + dir * next, dir);
@@ -1176,6 +1374,20 @@ bool cone_get(uint at, out vec3 light, out float through, out vec3 moment) {
     through = b.y;
     moment = vec3(m, z.x);
     return z.y > CONE_HALF;
+}
+// A cone has two records. Its own (cone_record_at): what its own interval
+// gathered, which the trace writes and a probe keeps from frame to frame
+// until its turn. Its merged one (cone_merged_at): its own plus what the
+// coarser cascades bring it, written by the merge for every cone every
+// frame, and what the pixels, the lamp pass and the light pass read. The
+// merged records lie in the other half of the work buffer, where last
+// frame's own records were until the trace had kept what it keeps
+// (CONE_MERGED_LAYOUT: their word offset, one a cascade). Kept with the
+// merge in it, a cone's light reached the pixels a round of turns late at
+// each cascade.
+const uint CONE_MERGED_LAYOUT = 137u;
+uint cone_merged_at(int c, uint probe, uint bin) {
+    return cwork.w[CONE_MERGED_LAYOUT + uint(c)] + (probe * cone_dirs(c) + bin) * CONE_CONE_WORDS;
 }
 uint cone_record_at(int c, uint probe, uint bin) {
     return cone_cones_at(c) + (probe * cone_dirs(c) + bin) * CONE_CONE_WORDS;
@@ -1299,12 +1511,29 @@ const float CONE_SUN_STEP = 0.1;
 // voxel of `level` (at the finest the field holds there) and, past the fine
 // clip volumes, grow to a tenth of the distance gone.
 float coarse_crossed(int level, vec3 a, vec3 b, vec3 dir);
+float ray_blocked(vec3 from, vec3 dir, int level, float most);
 float sun_blocked(vec3 from, vec3 dir, int level) {
+    return ray_blocked(from, dir, level, CONE_REACH);
+}
+// How much of a thin ray from `from` to `to` the field blocks, stopping a
+// finest voxel short of `to` (a lamp's own sphere is not in the field, but
+// what it hangs from is beside it), reading no level finer than `level`.
+float cone_ray_blocked(vec3 from, vec3 to, int level) {
+    vec3 way = to - from;
+    float length_ = length(way);
+    float most = length_ - cone_size(CONE_FINEST);
+    if (most <= 0.0) {
+        return 0.0;
+    }
+    return ray_blocked(from, way / length_, level, most);
+}
+// As sun_blocked, for at most `most` metres.
+float ray_blocked(vec3 from, vec3 dir, int level, float most) {
     float covered = 0.0;
     float done = 0.0;
     float least = cone_size(level);
     // Past the scene's box there is nothing to cross.
-    float reach = min(CONE_REACH, cone_field_exit(from, dir));
+    float reach = min(most, cone_field_exit(from, dir));
     while (done < reach && covered < CONE_FULL) {
         // Inside the clip volumes the ray keeps to the finest level held
         // (planes with their points' box at 6.25 and 12.5 cm, each face's
@@ -1326,7 +1555,8 @@ float sun_blocked(vec3 from, vec3 dir, int level) {
             done += clear;
             continue;
         }
-        vec3 b = from + dir * (done + step_);
+        // Not past the ray's end: what is behind a lamp does not block it.
+        vec3 b = from + dir * min(done + step_, reach);
         if (l <= CONE_REFINE) {
             int n = cone_crossed(l, a, b, dir);
             for (int i = 0; i < n; i++) {

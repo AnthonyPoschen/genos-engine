@@ -43,6 +43,19 @@ void main() {
         atomicAdd(cwork.w[slot + 2u], light_q.x);
         atomicAdd(cwork.w[slot + 3u], light_q.y);
         atomicAdd(cwork.w[slot + 4u], light_q.z);
+        // Whose light it is, for steering (cone_common.glsl CONE_LAMP_ID):
+        // the first lamps to write the voxel, and whether more did too.
+        bool held = false;
+        for (uint k = 0u; k < CONE_LAMP_IDS && !held; k++) {
+            uint seen = cwork.w[slot + CONE_LAMP_ID + k];
+            if (seen == 0u) {
+                seen = atomicCompSwap(cwork.w[slot + CONE_LAMP_ID + k], 0u, lamp_i + 1u);
+            }
+            held = seen == 0u || seen == lamp_i + 1u;
+        }
+        if (!held) {
+            cwork.w[slot + CONE_LAMP_MORE] = 1u;
+        }
         if (level <= CONE_REFINE) {
             continue;
         }
