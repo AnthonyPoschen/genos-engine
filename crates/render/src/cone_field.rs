@@ -1312,8 +1312,8 @@ fn seat_word(voxel: &Voxel, cell: [i32; 3], size: f32) -> u32 {
         return 0;
     }
     let mut mean = [0.0f32; 3];
-    for d in 0..6 {
-        mean = add(mean, voxel.at[d]);
+    for at in voxel.at {
+        mean = add(mean, at);
     }
     seat_word_of(scale(mean, 1.0 / total), cell, size)
 }
