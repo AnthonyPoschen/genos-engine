@@ -200,6 +200,7 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         ("CONE_LAMP_SPV", "cone_lamp.comp"),
         ("CONE_MAP_LIST_SPV", "cone_map_list.comp"),
         ("CONE_MAP_TRACE_SPV", "cone_map_trace.comp"),
+        ("CONE_SPECULAR_SPV", "cone_specular.comp"),
     ]
     .iter()
     .map(|(name, file)| {
@@ -347,6 +348,7 @@ fn rerun_shader_pieces() {
     for piece in [
         "cone_common.glsl",
         "cone_gather.glsl",
+        "cone_specular.glsl",
         "lighting_common.glsl",
         "lighting_screen_probe.glsl",
         "lighting_pack.glsl",

@@ -54,6 +54,13 @@ pub const CONE_FIELD_SEAT: &str = "cone_field_seat";
 /// that moves leaves its light where it was.
 pub const CONE_LAMP_FOLLOW: &str = "cone_lamp_follow";
 
+/// The cone-traced cascades give a metal its specular light: the sun's and
+/// the lamps' highlights and the specular cone (`cone_cascades.specular`).
+///
+/// Knocking this out draws a metal with its diffuse albedo alone, base
+/// colour times (1 - metallic), as before: a full metal is black.
+pub const CONE_SPECULAR: &str = "cone_specular";
+
 /// True when the named production guard is in force.
 #[must_use]
 #[inline]
@@ -104,6 +111,7 @@ mod tests {
         assert!(super::guard(super::CONE_TABLE_CAP));
         assert!(super::guard(super::CONE_FIELD_SEAT));
         assert!(super::guard(super::CONE_LAMP_FOLLOW));
+        assert!(super::guard(super::CONE_SPECULAR));
         assert!(super::guard("unknown_guard"));
     }
 }

@@ -4097,6 +4097,7 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_gi" => "GI",
         "lighting_emissive" => "Emissive",
         "lighting_cone_cascades" => "Cone-traced cascades",
+        "lighting_cone_specular" => "Cone specular",
         "lighting_compose_reuse" => "Compose reuse",
         "lighting_full_effort" => "Full effort",
         _ => fallback,

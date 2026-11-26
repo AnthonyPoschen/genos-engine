@@ -1646,6 +1646,12 @@ impl Renderer {
         self.gpu.cone_map_tiles()
     }
 
+    /// Pixels with metal the cone cascades marched a specular cone for last
+    /// frame (`cone_cascades.specular`).
+    pub fn cone_specular_pixels(&mut self) -> Result<u32, String> {
+        self.gpu.cone_specular_pixels()
+    }
+
     /// The resident cone field: its points, voxels, bricks, bytes and build
     /// seconds. Empty before the first one is built.
     #[must_use]

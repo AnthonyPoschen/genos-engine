@@ -9,6 +9,7 @@ layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 #include "cone_common.glsl"
 #include "cone_gather.glsl"
+#include "cone_specular.glsl"
 
 void main() {
     uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
@@ -25,14 +26,23 @@ void main() {
         return;
     }
     vec3 irradiance = cone_pixel_gather(pixel, pos, n, false);
+    // Its metal's specular light, as the resolve adds it.
+    ConeMetal metal;
+    bool shiny = cone_metal(p, n, two_sided, metal);
+    vec3 specular = shiny ? cone_metal_gathered(metal, irradiance) : vec3(0.0);
     // Its lamps, as the resolve lights them.
     vec3 from = pos + n * CONE_SURFACE_LIFT;
-    for (uint k = 0u; k < CONE_PIXEL_LAMPS && ((pc.lamp.x >> CONE_VIEW_SHIFT) & 3u) == 0u; k++) {
+    for (uint k = 0u; k < CONE_PIXEL_LAMPS && !cone_probe_view(); k++) {
         if (gather_lamp[k] == 0u) {
             break;
         }
-        irradiance += cone_lamp_on(gather_lamp[k] - 1u, from, n, two_sided, cone_lamp_share(gather_seen[k]));
+        uint id = gather_lamp[k] - 1u;
+        vec3 lamp = cone_lamp_on(id, from, n, two_sided, cone_lamp_share(gather_seen[k]));
+        irradiance += lamp;
+        if (shiny) {
+            specular += cone_metal_direct(metal, normalize(scene_lamp(id).pos.xyz - from), lamp);
+        }
     }
     vec3 lit = lighting_unpack_rgb9e5(gbuf_word(pixel, 3u));
-    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(lit + albedo * SCENE_LAMBERT * irradiance);
+    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(lit + (cone_specular_view() ? specular : albedo * SCENE_LAMBERT * irradiance + specular));
 }

@@ -23,7 +23,7 @@ exits 0 unless the program could not be driven (UNSURE, exit 2).
   --frames N           frames `timing` averages (default 120)
   --capture MODE       capture this mode to --out/<MODE>.png (repeatable;
                        full, albedo, depth, or any `capture` mode)
-  --view NAME          also capture this cone_cascades.view (coverage, dark)
+  --view NAME          also capture this cone_cascades.view (coverage, dark, specular)
                        to --out/view-<NAME>.png (repeatable)
   --pick X,Y           print `cone_pick` for this pixel (repeatable)
   --bin PATH           genos-lighting binary (default target/release/genos-lighting)

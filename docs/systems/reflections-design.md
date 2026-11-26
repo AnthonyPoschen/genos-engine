@@ -147,7 +147,7 @@ Each pass is a compute or a raster with one trace site, the GI rule. A cheap che
 2. **Hi-Z.** Min-depth pyramid when the classify is non-zero.
 3. **Mirror and portal views.** Near the camera first, up to the view cap. Each view is a G-buffer and the existing lighting into the reused target. The oblique near plane rejects geometry behind the plane (`portal_leak` = 0). A requested view past the cap is not drawn.
 4. **Screen march.** One direction, half resolution, step cap 16 / 32 / 48 (Low / Medium / High). Thickness is one cache cell, 25 cm in world space, converted to view depth, so a hit behind a thin wall is rejected. McGuire and Mara (JCGT 2014) march until the ray leaves the frustum. We stop at the step cap and fall through to the cache.
-5. **Cache fallback.** A cone read of finished cache entries along the miss direction. No new ray. This is the Low fallback and the colour of a view the cap refused.
+5. **Cache fallback.** A cone read of finished cache entries along the miss direction. No new ray. This is the Low fallback and the colour of a view the cap refused. Cone mode (`cone_cascades`) builds this pass for metals as the specular cone through its voxel field ([cone-traced cascades plan](lighting/cone-traced-cascades-plan.md) section 22); it has no cap yet.
 6. **Reflection rays.** Medium up to 32 k, High up to 128 k, Fallback and Low zero. Software SDF, or `VK_KHR_ray_query` when the device has it. The interface is the GI tracer. Misses stay on the cache value.
 7. **Shade.** Read the cache at the hit. Metals tint by base colour. Dielectrics apply `F`.
 8. **Spatial filter.** One à-trous iteration on a budgeted list (4 k / 8 k / 16 k items). Variance already under the threshold skips the item.

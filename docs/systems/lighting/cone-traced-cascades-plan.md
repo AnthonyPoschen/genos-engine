@@ -153,7 +153,7 @@ Made by Anthony on 24 Nov 2026:
 3. **A preset without the memory for the field.** GI is off. The old software path is not kept alive for it, and phase 6 deletes it.
 4. **The level-0 long mean of PR #322.** Not part of this plan. That work has stopped.
 
-Still open: what specular and reflections read for a sharp lamp highlight once the direct pass is gone (E14).
+Specular (E14) was answered on 26 Nov 2026 for metals (section 22): a lamp's sharp highlight is the metal lobe on the pixel's own lamp light, with the share of the lamp the probes see; the surroundings come from a specular cone through the field. Still open: what the planar reflection views read, and a dielectric's lobe.
 
 ## 10. What stays from the session of 23 Nov
 
@@ -603,3 +603,33 @@ At that pose the lower edge is a straight line and the arches are clean curves. 
 
 At the three poses the streaks and triangles are gone and the edges are straight. Left: teeth a texel long where the near surface touches the far one (a capital against its wall, a column's foot on the floor: no gap in the distances there, so those texels hold one surface), and under a curtain's wavy hem. Tried and taken out, each drew an arch's shadow in teeth or patches: telling near from far by the plane of the nearest or the furthest ray's hit; taking rays on one plane as one surface; a smaller least gap (4 cm and 0.4% of the distance).
 
+## 22. Metals: the specular light, 26 Nov 2026
+
+**The fault.** Anthony: the metal surfaces in Sponza are not drawn. The G-buffer's diffuse albedo is base colour times (1 - metallic) (ADR 0014), and cone mode had no specular term, so a full metal took no light at all: Sponza's flagpoles, hanging vases and chains were black, and the gold thread of the curtains was dark. The old path's `direct_specular` lives in the direct pass, which cone mode does not run (E14).
+
+**What is built** (`cone_cascades.specular`, default on; `cone_specular.glsl`). Only the metal share of a pixel is drawn, each part times its metallic; a dielectric keeps its Lambert picture.
+
+- The sun's and the lamps' highlights: glTF 2.0 Appendix B's metal lobe `F(base) D V` (`pbr_brdf.glsl`, as `direct_specular` uses it) on the light the pixel already takes, so the shadow is the diffuse light's (the sun's share from the field or the sun pass, a lamp's share from the probes). In the resolve, the fill and the sun pass.
+- The **specular cone** (`cone_specular.comp`, the last cone pass): the resolve lists each pixel with metal whose roughness is under 0.6; one thread a listed pixel marches one cone through the field along the mirror direction, from the pixel's surface with the cone horizon, and takes the sky past what covers it. Its width a metre out is `2 tan(min(2 atan(alpha), 45 degrees))`, `alpha` the roughness squared: the half vector's angle at half the GGX distribution is `atan(alpha)` and the mirrored direction turns by twice that. The field holds the voxels' diffuse light (the sun and the bounce), so a metal reflects lit walls, floor and sky; the lamps are not in the field and are the highlights above.
+- At roughness 0.6 and over the gathered probe light stands in for the cone (the mean radiance `E / pi`); the cone fades out from 0.45 so a roughness texture does not draw a line.
+- The surroundings' light is weighted by the split-sum environment term with F0 the base colour, in Karis's analytic fit.
+
+This is ADR 0019's stack where cone mode can already serve it: one specular direction a pixel, fixed by the normal and the view; a cone read of finished stored light (its pass 5, the cache fallback); no radiance history; the rough band is the diffuse gather. The screen march, the reflection rays and the spatial filter are not built.
+
+**Departures.** Named here and in the lighting record's deviations.
+
+- Crassin et al. 2011 trace the specular cone through a filtered voxel octree with a view-dependent emission; the field here stores diffuse light a face, so a metal's reflection of another metal is that metal's diffuse light (black for a full metal), and a reflection is no sharper than the 6.25 cm voxels.
+- Appendix B: the dielectric lobe (F0 0.04) is left out of cone mode. A roughness floor of 0.1 on the highlights and the cone (Appendix B and ADR 0025 have none): at roughness 0 the GGX term is a point, a lamp is a sphere and the voxels are 6.25 cm.
+- Karis 2013 integrates the environment term against a prefiltered map; here it weighs one cone's light, and the gathered irradiance in the rough band.
+- ADR 0019 budgets reflections by preset (work past a cap waits). The specular cone has no cap yet: every listed pixel marches. Its cost is below.
+- The bounce stays Lambert: a metal sends no light on to the field.
+
+**Probes.** `lighting.cone_stats` returns `specular_pixels` (the pixels listed) and the `specular` stage's milliseconds. `cone_cascades.view=specular` draws the specular light alone. `cone_cascades.specular=off` (debug-menu switch "Cone specular") is the picture without it. Failure modes: a metal still black (the specular view is black there: no metal reached the G-buffer, or the cone is covered at its start); a metal that flashes (the field's light under it changes; gate D); cost (the stage time).
+
+**Gate.** `crates/render/tests/cone_specular.rs`, in `scripts/ci-gate-knockout.sh`: a full-metal panel in the test room. On lavapipe the specular light brightens 4,800 pixels of the 320 by 180 frame and 4,800 cones are marched; with `cone_specular` knocked out, 0 and 0, and the test goes red. `cone_stability_gate.py --view sponza`, 1280x720: A, B, C, E, F and G pass with the specular light on. Gate D (turn away and back) fails there with and without it, and its count changes from run to run: pixels over one code were 9, 11, 1,076, 387 and 10 with `cone_cascades.specular=off`, and 9, 209, 2,214, 2,352, 12 and 2,789 with it on (over two codes: 0 to 84 off, 1 to 532 on). In the three worst runs with it on, 2,149 of 2,214, 2,306 of 2,352 and 2,752 of 2,789 of those pixels have no specular light (stone near the eye: the bounce), and 65, 46 and 37 have some (the pixels with specular light are 17% of that frame). So the spread is the bounce's, as section 20 records for D in Sponza; six runs each way do not show whether the specular light adds to it, and the cone does read the same voxel light. Open with D.
+
+**Cost** (a correctness fix; recorded for the performance passes). Sponza, Anthony's fullscreen pose (-13.30, 1.8, -1.23, yaw 1.502), 3406x1376, `cone_view.py`, the mean of 20 samples, on a GPU another session was using (so the stages keep their proportions, not their size): the `specular` stage 0.08 ms; the resolve 2.33 ms against 1.76 with the specular light off; the sun pass 2.60 against 1.69 (it shades the metal lobe for its listed pixels; part of that gap is the other session); the frame 23.92 ms against 23.90. At a close view of a hanging vase and a flagpole (1920x1080) the `specular` stage is 0.02 ms: Sponza's metal covers few pixels, and the curtains' thread is most of them. A pixel with metal pays one cone; a pixel with none pays one G-buffer word read in the resolve. A cheaper way to look for later: march at the gather grid's scale and spread as the resolve does, or cap the listed pixels by preset as ADR 0019 budgets reflections.
+
+**Not graded.** `picture_metal` (pbr-materials-design) stays unimplemented: no path-traced reference was run for this change. The pictures were looked at (`genos-debug/`, not committed): the atrium, the arcade and two close views, before and after.
+
+**Networking.** Replicated state: none (roughness and metallic are material state, with the scene's). Authority: the machine that shades. Prediction / rollback: none; nothing is kept over frames. Determinism: a function of the G-buffer, the field's light and the eye. Headless server: does not shade, so the specular light is not computed.

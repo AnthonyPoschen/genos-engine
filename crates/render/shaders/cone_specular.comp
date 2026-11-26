@@ -1,0 +1,50 @@
+#version 450
+// Cone-traced cascades, pass 9, last: the specular cone. The resolve pass
+// (cone_resolve.comp) lists each pixel with metal whose roughness is under
+// the rough band (cone_specular.glsl); here one thread a listed pixel
+// marches one cone through the field along its mirror direction, as wide as
+// its GGX lobe, takes the sky past what covers it, and adds the metal's
+// share of that light to the pixel's light. The field holds the voxels'
+// diffuse light (the sun and the bounce); the lamps' and the sun's own
+// highlights are the resolve's. Nothing is kept over frames.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+#include "cone_specular.glsl"
+
+void main() {
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (i >= min(cwork.w[CONE_SPECULAR_COUNT], pc.dims.x * pc.dims.y)) {
+        return;
+    }
+    uint pixel = cwork.w[cone_specular_at() + i];
+    uvec2 p = uvec2(pixel % pc.dims.x, pixel / pc.dims.x);
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+        return;
+    }
+    ConeMetal m;
+    if (!cone_metal(p, n, two_sided, m)) {
+        return;
+    }
+    vec3 dir;
+    float width;
+    cone_specular_cone(m, dir, width);
+    float finest = cone_size(CONE_FINEST);
+    // Not covered by the surface the cone leaves (cone_common.glsl
+    // cone_horizon_on), and begun off it as a probe's cones are.
+    cone_horizon_on = true;
+    cone_horizon_at = pos;
+    cone_horizon_n = m.n;
+    float covered = 0.0;
+    vec3 light = vec3(0.0);
+    cone_march(pos + m.n * (CONE_LIFT * finest), dir, width, CONE_START_GAP * finest, CONE_REACH, covered, light);
+    cone_horizon_on = false;
+    light += scene.sky.rgb * (1.0 - covered);
+    vec3 lit = lighting_unpack_rgb9e5(gbuf_word(pixel, 3u));
+    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(lit + cone_metal_env(m) * cone_specular_share(m.rough) * light);
+}
