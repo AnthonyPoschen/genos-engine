@@ -1,0 +1,71 @@
+#version 450
+// Cone-traced cascades, pass 1: every pixel puts in cascade 0's hash the
+// probes it reads in the shade (pass 7): at each of its levels (two in a
+// blend band, cone_pixel_levels), the eight cells around its point that
+// have a surface in the field facing the way the pixel does (its face,
+// cone_face: each side of a thin surface has its own probes), and always the
+// field voxel its surface was filed in, which it counts itself in. So the
+// probes a pixel reads are there whatever else is on screen, and the light
+// does not change when a neighbour comes into or out of view. The pixel
+// chooses which voxels have probes, never where a probe sits. The coarser
+// cascades are put in by pass 1b (cone_spread.comp) from the cascade below.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+void put_level(int lod, vec3 pos, vec3 n, bool counted) {
+    float s = cone_spacing(lod, 0);
+    ivec3 own = cone_cell(pos, n, s);
+    int face = cone_face(n);
+    uint slot = cone_insert_probe(0, lod, own, face);
+    if (slot != CONE_NO_BRICK) {
+        cone_mark_screen(slot);
+    }
+    if (slot != CONE_NO_BRICK && counted) {
+        atomicAdd(cwork.w[slot + 1u], 1u);
+        if ((pc.lamp.x & CONE_PIXEL_SEAT) != 0u) {
+            // Gate knockout only (gate.rs CONE_FIELD_SEAT): the stage-2 seat.
+            ivec3 at = ivec3(round((pos - scene.eye.xyz) * CONE_FIXED));
+            ivec3 normal = ivec3(round(n * CONE_FIXED));
+            atomicAdd(cwork.w[slot + 2u], uint(at.x));
+            atomicAdd(cwork.w[slot + 3u], uint(at.y));
+            atomicAdd(cwork.w[slot + 4u], uint(at.z));
+            atomicAdd(cwork.w[slot + 5u], uint(normal.x));
+            atomicAdd(cwork.w[slot + 6u], uint(normal.y));
+            atomicAdd(cwork.w[slot + 7u], uint(normal.z));
+        }
+    }
+    ivec3 base = cone_trilinear_base(pos, s);
+    for (int k = 0; k < 8; k++) {
+        ivec3 cell = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        if (cell != own && cone_probe_wanted(lod, 0, cell, face)) {
+            uint near = cone_insert_probe(0, lod, cell, face);
+            if (near != CONE_NO_BRICK) {
+                cone_mark_screen(near);
+            }
+        }
+    }
+}
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, pc.dims.xy))) {
+        return;
+    }
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+        return;
+    }
+    int lo;
+    int hi;
+    float w_hi;
+    cone_pixel_levels(pos, lo, hi, w_hi);
+    put_level(hi, pos, n, true);
+    if (lo != hi && w_hi < 1.0) {
+        put_level(lo, pos, n, false);
+    }
+}

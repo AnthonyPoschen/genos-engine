@@ -90,7 +90,7 @@ crates/scene-program/src/mesh_view.rs 12
 crates/workbench/src/lib.rs 4
 debug/scene-lib/src/lib.rs 2
 # owner: Anthony — offline prototype; float to voxel and pixel index math has no TryFrom
-debug/single-frame-cascade/src/main.rs 26
+debug/single-frame-cascade/src/main.rs 23
 examples/camera/src/main.rs 7
 examples/stress/src/bench.rs 2
 examples/stress/src/building.rs 4

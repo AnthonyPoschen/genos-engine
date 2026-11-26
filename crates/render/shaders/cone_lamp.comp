@@ -1,0 +1,122 @@
+#version 450
+// Cone-traced cascades, pass 6b, after the merge: the lamps of each
+// cascade-0 probe. Run twice. First (push dims.w 0) the probe takes its
+// targets (cone_common.glsl CONE_TARGETS: the scene's point lamps that
+// reach it) and asks for the tiles of each one's map about its place
+// (cone_common.glsl, Lamp maps). After the tiles are traced
+// (cone_map_trace.comp), the second run (dims.w 1) keeps the share of each
+// lamp the probe's place gets (CONE_SEEN_LAYOUT), which the light pass
+// (cone_light.comp) adds to the bounce. The pixels read the maps
+// themselves (cone_resolve.comp). A lamp past the mapped ones gets one thin
+// ray through the field from the probe, and the pixels blend those shares.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+// A lamp this far behind a probe's way (the cosine to it) can still light a
+// pixel that reads the probe: a pixel's normal is within 55 degrees of its way.
+const float CONE_LAMP_BEHIND = -0.6;
+// A probe's own share of a lamp is read this many map levels up.
+const int CONE_MAP_PROBE_UP = 2;
+// The least share of the lamps' light a lamp is counted at: three levels.
+const float CONE_MAP_SHARE_LEAST = 0.015625;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (i >= min(cwork.w[CONE_COUNTS], cone_cap(0))) {
+        return;
+    }
+    uint r = cone_probe(0, i);
+    vec3 seat = cone_word3(r + 12u);
+    vec3 way = cone_word3(r + 16u);
+    vec3 start = seat + way * (CONE_LIFT * cone_size(CONE_FINEST));
+    int lod = int(cwork.w[r + 1u]);
+    uint list = cone_targets_of(0, i);
+    // The probe's targets: the scene's point lamps that reach it, this
+    // frame's (a sun has no range; lamp_light leaves out a lamp past its
+    // own). Found by the cones alone, a lamp that moved into view of a probe
+    // waited for that probe's cones' turn; taken from the light grid's lists,
+    // which follow the view, the lamps a place was lit by differed after a
+    // turn of the camera away and back (gate D).
+    for (uint k = 0u; k < scene.lamp_count && pc.dims.w == 0u; k++) {
+        Lamp each = scene_lamp(k);
+        if (each.color.w > 0.0 && lamp_reaches(each, start)) {
+            cone_target_add(list, k + 1u);
+        }
+    }
+    // Each lamp's share of the lamps' light here: a lamp that gives little
+    // of it casts a faint shadow, whose edge may be softer.
+    uint mapped = cone_map_lamps();
+    bool seeing = pc.dims.w == 1u;
+    float all = 0.0;
+    for (uint k = 0u; k < CONE_TARGETS && !seeing; k++) {
+        uint id = cwork.w[list + k];
+        if (id == 0u) {
+            break;
+        }
+        Lamp lamp = scene_lamp(id - 1u);
+        vec3 toward = lamp.pos.xyz - start;
+        vec3 target;
+        all += dot(lamp_light(lamp, start, normalize(toward), false, target), CONE_LUMA);
+    }
+    uint frame = cwork.w[CONE_MAP_HEAD + 3u];
+    for (uint k = 0u; k < CONE_TARGETS; k++) {
+        uint id = cwork.w[list + k];
+        if (id == 0u) {
+            break;
+        }
+        Lamp lamp = scene_lamp(id - 1u);
+        vec3 toward = lamp.pos.xyz - start;
+        float far = length(toward);
+        if (far <= CONE_TINY) {
+            continue;
+        }
+        vec3 dir = toward / far;
+        if (dot(dir, way) <= CONE_LAMP_BEHIND) {
+            continue;
+        }
+        // What a surface facing the lamp squarely gets, as the old direct
+        // pass lights it; a pixel turns it by its own normal.
+        vec3 target;
+        vec3 arrives = lamp_light(lamp, start, dir, false, target);
+        if (arrives.r + arrives.g + arrives.b <= 0.0) {
+            continue;
+        }
+        int level = cone_map_level(far, start);
+        if (id - 1u < mapped) {
+            if (seeing) {
+                // The share the probe's own place gets, for the bounce
+                // (cone_light.comp): two levels up, a probe's width of map.
+                float seen = cone_lamp_lit(id - 1u, lamp.pos.xyz, start, false, max(level - CONE_MAP_PROBE_UP, 0), 1.0);
+                cwork.w[cone_seen_of(i) + k] = floatBitsToUint(seen);
+                continue;
+            }
+            // Ask for the lamp's map here: the tiles about the probe's place
+            // in it, at the level its distance wants less a level for each
+            // quarter its share of the light falls short of all of it.
+            float share = clamp(dot(arrives, CONE_LUMA) / max(all, CONE_TINY), CONE_MAP_SHARE_LEAST, 1.0);
+            level = max(level - int(floor(-CONE_HALF * log2(share))), 0);
+            int side = int(CONE_MAP_SIDE << uint(level));
+            ivec2 at = ivec2(cone_oct(-dir) * float(side));
+            for (int e = 0; e < 4; e++) {
+                ivec2 t = cone_map_wrap(at + (ivec2(e & 1, e >> 1) * 2 - 1) * int(CONE_MAP_TILE / 2u), side);
+                cwork.w[cone_map_tile(id - 1u, level, t / int(CONE_MAP_TILE)) + 2u] = frame;
+            }
+            continue;
+        }
+        if (seeing) {
+            continue;
+        }
+        // A lamp past the mapped ones: a ray from the probe.
+        // Not shadowed by the surface the probe is on (cone_horizon_on).
+        cone_horizon_on = dot(dir, way) > 0.0;
+        cone_horizon_at = seat;
+        cone_horizon_n = way;
+        // A level under the probe's own size: its light is spread over that
+        // much, and at its own size (25 cm voxels for most probes, read by
+        // their faces' planes alone) an arch's shadow lost its edge.
+        float seen = 1.0 - cone_ray_blocked(start, lamp.pos.xyz, clamp(lod - 1, CONE_FINEST, CONE_COARSEST));
+        cwork.w[cone_seen_of(i) + k] = floatBitsToUint(seen);
+    }
+}

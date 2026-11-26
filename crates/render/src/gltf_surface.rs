@@ -179,6 +179,38 @@ impl GltfSurface {
         }
     }
 
+    /// Whether the material a triangle names is `doubleSided` in the file.
+    /// The material can have holes: a texel alpha under its cutoff lets a ray
+    /// through (MASK or BLEND with a base-colour texture).
+    #[must_use]
+    pub fn holed(&self, material: u32) -> bool {
+        usize::try_from(material)
+            .ok()
+            .and_then(|i| self.materials.get(i))
+            .is_some_and(|m| m.cutoff > 0.0 && m.pbr.base_color_texture.is_some())
+    }
+
+    /// The diffuse albedo of `tri` (one of [`GltfSurface::triangles`]) at
+    /// barycentric `u`, `v`: its material's base colour, with its texture read
+    /// at the first TEXCOORD set. No ray: the voxel field's points take their
+    /// albedo from here.
+    #[must_use]
+    pub fn albedo_on(&self, tri: &MeshTriangle, u: f32, v: f32) -> [f32; 3] {
+        let material = &self.materials[usize::try_from(tri.material).unwrap_or(0).min(self.materials.len() - 1)];
+        shade_sets(&material.pbr, &self.images, &[Some(tri.uv_at(u, v))]).diffuse_albedo()
+    }
+
+    /// Every triangle stops a ray from both sides either way.
+    #[must_use]
+    pub fn double_sided(&self, material: u32) -> bool {
+        usize::try_from(material).ok().and_then(|i| self.materials.get(i)).is_some_and(|m| m.pbr.double_sided)
+    }
+
+    /// Every triangle in world space, solid ones first.
+    pub fn triangles(&self) -> impl Iterator<Item = &MeshTriangle> {
+        self.solid.triangles.iter().chain(&self.holed.triangles)
+    }
+
     #[must_use]
     pub fn triangle_count(&self) -> usize {
         self.solid.triangles.len() + self.holed.triangles.len()

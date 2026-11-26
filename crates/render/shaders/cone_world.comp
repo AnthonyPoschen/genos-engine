@@ -1,0 +1,76 @@
+#version 450
+// Cone-traced cascades, pass 1a, after the pixels' insert: the world layer.
+// The screen's voxel layer stays the probes the pixels read; this adds a
+// coarse probe on each surface face about the eye (2 m
+// voxels within CONE_WORLD_NEAR_REACH of the eye, 4 m ones out to
+// CONE_WORLD_FAR_REACH, a CONE_WORLD_SHARE of them each frame), so the light pass (cone_light.comp) has light for
+// the surfaces the camera does not see: the floor behind it, the walls
+// beside it, the far side of a ceiling, and the voxels of a face the screen
+// covers in part that lie off it. Their bounce then reaches the
+// picture (Anthony, 25 Nov 2026: unseen surfaces' bounce was missing, and
+// enclosed rooms graded 40% to 85% too dark). A face a probe already holds
+// (a pixel's at that level) is left alone. World probes are
+// traced on CONE_WORLD_CASCADES cascades and nothing on screen reads them.
+// One thread a coarse texel of the field's bricks.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+const uint CONE_PADDED_TEXELS = 1000u;
+
+void main() {
+    uint j = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (j >= ctab.info.w * CONE_PADDED_TEXELS) {
+        return;
+    }
+    uint slot = j / CONE_PADDED_TEXELS;
+    uint k = j % CONE_PADDED_TEXELS;
+    ivec3 local = ivec3(int(k) % CONE_PADDED, (int(k) / CONE_PADDED) % CONE_PADDED, int(k) / (CONE_PADDED * CONE_PADDED));
+    // The brick's own voxels: the apron belongs to the brick beside it.
+    if (any(lessThan(local, ivec3(1))) || any(greaterThan(local, ivec3(CONE_BRICK)))) {
+        return;
+    }
+    uint o = ctab.info.y + slot * 4u;
+    int level = int(ctab.table[o + 3u]);
+    if (level != CONE_WORLD_NEAR && level != CONE_WORLD_FAR) {
+        return;
+    }
+    ivec3 cell = ivec3(int(ctab.table[o]), int(ctab.table[o + 1u]), int(ctab.table[o + 2u])) * CONE_BRICK + local - ivec3(1);
+    float size = cone_size(level);
+    vec3 away = abs((vec3(cell) + CONE_HALF) * size - scene.eye.xyz);
+    float reach = max(away.x, max(away.y, away.z));
+    // 2 m voxels near the eye, and every 4 m one out to the far reach: the
+    // near ones too. A face is lit from the probe of the 2 m or the 4 m
+    // voxel that holds it, and holds its light while it has neither
+    // (cone_light.comp); with the 4 m voxels left out near the eye, a face
+    // whose 2 m voxel's middle lay past the near reach and whose 4 m
+    // voxel's lay inside it had no probe and held for ever what it had when
+    // last on screen (gate D: two pictures for one view).
+    if (reach > (level == CONE_WORLD_NEAR ? CONE_WORLD_NEAR_REACH : CONE_WORLD_FAR_REACH)) {
+        return;
+    }
+    uint t = cone_coarse_texel(slot, local);
+    for (int face = 0; face < 6; face++) {
+        if (unpackHalf2x16(ccoarse.cw[t + uint(2 * face + 1)]).y <= 0.0) {
+            continue;
+        }
+        uint key = cone_key(level, cell, 0, face);
+        // A share of the world probes each frame (push lamp.w, the frame's
+        // count): the light pass holds the others' voxels' bounce meanwhile.
+        // All of them on the last frame before a new field takes over
+        // (push params.x): its voxels take their light from this frame's probes.
+        bool turn = pc.params.x != 0u || (cone_hash_of(key ^ 0x9e3779b9u) % CONE_WORLD_SHARE) == pc.lamp.w % CONE_WORLD_SHARE;
+        if (key == CONE_EMPTY || !turn) {
+            continue;
+        }
+        // A face pixels cover in part still gets one: its voxels off the
+        // screen (the floor beside and behind the eye) have no other probe,
+        // and held the light they had when last seen, so the picture after
+        // turning away and back was brighter than before (gate D).
+        if (cone_slot(0, key, false) != CONE_NO_BRICK) {
+            continue;
+        }
+        cone_insert_probe(0, level, cell, face);
+    }
+}

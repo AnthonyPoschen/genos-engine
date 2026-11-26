@@ -16,7 +16,7 @@ One frame, as the paper's Algorithm 1 and Algorithm 3:
 3. `--spp` rays per pixel from the visible point, on the R2 sequence, with probes under one coarser probe taking a contiguous run.
 4. Each ray is split: the cascade whose interval holds the hit takes its radiance, and every cascade under it records that the way was clear.
 5. The cascades merge from the last one down, with sparse trilinear reads.
-6. A pixel's bounce irradiance is the cosine-weighted sum of the cascade-0 directions around it.
+6. A pixel's bounce irradiance is the cosine-weighted sum of the cascade-0 directions around it. With `--bin-cosine mean` (the default) each direction is weighed by the cosine of the luma-weighted mean direction of the light it holds, not of its centre (see Phase 0 below).
 
 Two modes:
 
@@ -27,7 +27,26 @@ The reference is 1024 cosine rays per compared pixel, shaded the same way as a c
 
 ## Arguments
 
-`genos-single-frame-cascade --help` lists them. It reads no environment variable. It writes `frame.png`, `mean.png`, `grid-reference.png` and `grid-frame.png` under `./genos-debug/single-frame-cascade/`, or under `--out DIR`.
+`genos-single-frame-cascade --help` lists them. It reads no environment variable. It writes `frame.png`, `mean.png`, `grid-reference.png` and `grid-frame.png` under `./genos-debug/single-frame-cascade/`, or under `--out DIR`. `--dump` adds `samples.csv`, one row per compared block (pixel, point, normal, level of detail, distance, reference, frame).
+
+`--scene` takes a `kind stress` scene or a `kind gltf` scene (`sponza`), the second with the ray tracer only. `--block B` compares B x B pixel means, as `capture.compare` grades (default 4); the reference's `--ref-samples` rays are split over the block's pixels.
+
+## Phase 0, 24 Nov 2026
+
+The baseline the cone tracer is graded against. Ray tracer, one frame, 8 px probe, 4x4 blocks, 16,384 reference rays a block (1,024 left the dark corner's reference itself 9% noisy):
+
+| View | Gate | `--bin-cosine centre` (the paper) | `--bin-cosine mean` |
+|---|---|---|---|
+| Room no lamp lights | under 10% | 29.5%, bias +10.7% | 5.3%, bias −2.6% |
+| Hall | under 7% | 5.7% | 5.5% |
+| Sponza atrium | under 10% | 5.6% | 5.5% |
+| Sponza dark corner | under 10% | 9.4% | 6.1% |
+
+The cause of the room's 30% was not the three gaps listed below. With one cascade and rays to 200 m (no merge), and with one-pixel probes and 64 rays a pixel (no spatial sharing), the floor was still 50 to 69% too bright and the wall facing the camera 18 to 23% too dark. The room's light comes from a few bright patches. A cascade-0 direction is one of 32, and the shade weighed the light in it by the cosine of the direction's centre. A patch near the floor's horizon fell in a direction whose centre is well above it, so the floor took too much of it; a wall facing the patch took too little. Four times the directions halved it.
+
+The fix keeps, for each direction, the sum of each deposit's luma times its direction, merges that sum as the cone is merged, and shades with the cosine of its mean direction, blended toward the centre's cosine as the light in the direction spreads out. The weight that normalises the sum is still the centre's cosine. Cost: three numbers more per direction. This is a departure from the paper (section 4, equation 2 with the direction's centre).
+
+Not done, and not needed for the gate: the blend across the level-of-detail seam, and depth-aware weights in the sparse trilinear read.
 
 ## Results, 23 Nov 2026
 
@@ -117,3 +136,34 @@ What the numbers say:
 - The software tracer is not timed.
 
 Not measured: Sponza or any glTF scene (the prototype takes a `kind stress` scene only), the cost of the deposit, merge and shade steps on a GPU, and the software tracer's rays per millisecond. The offline hardware path tracer (`crates/gpuref`) traced at least 400,000 rays per millisecond in this building on an RTX 4070, a lower bound.
+
+## Phase 1, 24 Nov 2026
+
+The cone tracer against the leak into the room no lamp lights, then on Sponza. Passed: room 7.45%, hall 5.64%, Sponza atrium 6.74%, dark corner 6.47% (the plan's section 11 has the table, the six fixes in order, and what was tried and taken out). Arguments added for it:
+
+- `--voxel-order none|front` (default `front`): an area shows to a cone only when the cone starts on the side it faces.
+- `--refine-level L` (default 3): a coarser step that meets cover is walked again at level L.
+- `--fine-walk sample|cross` (default `cross`), `--cross-full F` (default 0.5), `--box-margin M` (default 0.031), `--cover-mix add|multiply` (default `add`): how a fine step counts the planes it crosses.
+- `--max-level L`: the coarsest level a cone reads.
+- `--probe-pixel X,Y`: one pixel's ray and cone in 1024 cosine directions, and the directions where they differ most, both ways.
+- `--voxel-check`: the finest voxels' stored light over the exact direct light of the pixels in them, by orientation.
+
+The cone tracer also voxelises `kind gltf` scenes: points on every triangle's front (both sides for a `doubleSided` material), each point's albedo read by a short ray into the surface.
+
+## Phase 2 (in progress), 24 Nov 2026
+
+`--mode full`: every light an emitter and every bounce each frame; see the plan's section 12 for how and for the numbers. Arguments added: `--mode full`, `--gather-cones N` (default 16), `--patch-check` (the solved light of 40 patches in view against a path-traced reference there), `--sky on|off`. In full mode the per-frame error is printed after each frame, and the noise is over the frames after the first.
+
+## Cones from the voxel layer, 24 Nov 2026
+
+The cone tracer no longer starts a cone at a pixel. Every probe of every cascade traces one cone per direction; a coarse probe's cones start at the voxel-layer probe nearest its seat and are split into that probe's cascades. Arguments: `--cone-start voxel|probe` (default `voxel`), `--cone-voxel nearest|random` (default `nearest`), `--combine-visibility none|merge|shade|both` (default `both`). The plan's section 13 has the numbers. `--spp` and `--frames` jitter now only drive the ray tracer.
+
+## Phase 2b, 24 Nov 2026
+
+`--sun on|off` (default off), `--sun-path sky|voxel` (default `voxel`), `--no-lamps`. See the plan's section 14.
+
+## Phase 3, 24 Nov 2026
+
+`--gpu-bench` (with `--tracer cone`) lists one frame's voxel-layer cones on the CPU and times their march on the GPU (`shaders/cascade.comp`); `--gpu-own-interval` marches each cone over its own cascade's interval only. See the plan's section 15.
+
+`--own-interval`, `--near-check off|filtered|fine|chain`, `--refine-cascades N`, `--seat-at-start`: the cost cuts in the plan's section 16. `--gpu-bench` follows `--own-interval` and `--refine-cascades`, and times the cones the chain leaves.

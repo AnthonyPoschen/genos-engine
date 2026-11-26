@@ -1,0 +1,383 @@
+#version 450
+// Cone-traced cascades: the lamp maps' rays (cone_common.glsl, Lamp maps).
+// A thread a texel of a listed tile (cone_map_list.comp): sixteen rays from
+// the lamp through the old path's tracer (trace_ray: the analytic shapes
+// and the mesh distance fields). Where they meet two surfaces, more rays
+// find the line in the texel where the near one's silhouette runs
+// (cone_common.glsl, cone_map_shows).
+// Through the cone field the shadow's edge had the voxels' steps and light
+// came through cloth and leaves; this tracer is also twenty times quicker. The tile's first thread writes the
+// tile's state.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+const uint CONE_MAP_LIST_LAMP = 16u;
+const uint CONE_MAP_LIST_TILE = 0xffffu;
+const uint CONE_MAP_TILE_TEXELS = CONE_MAP_TILE * CONE_MAP_TILE;
+// The rays of a texel: one at each corner, then the rest spread
+// inside. A straight silhouette that crosses a texel parts its corners, so
+// the corner rays find every such texel, and two texels side by side agree
+// at the corner they share. (Without them a silhouette that cut a corner
+// between the rays was missed, and the corner was a tooth on the edge.)
+const int CONE_MAP_CORNERS = 4;
+const int CONE_MAP_RAYS = 20;
+// The widest gap in a texel's distances parts two surfaces when it is this
+// many times the next widest.
+const float CONE_MAP_GAP = 3.0;
+// The inside rays: a grid of this many a side, each ray at a place in its
+// cell so that no two share a row or a column of the finer grid.
+const int CONE_MAP_GRID = 4;
+const int CONE_MAP_INSIDE = 16;
+// The halvings that find where the silhouette crosses a line between a ray
+// the near surface stopped and one it did not: to a 32nd of their distance.
+const int CONE_MAP_HALVINGS = 5;
+// The ring about a point of the silhouette: its rays, its radius in
+// texels, and the halvings that find each change on it (fewer for a lamp
+// on the move).
+const int CONE_MAP_RING = 8;
+const float CONE_MAP_RING_WIDE = 0.3;
+const int CONE_MAP_HALVINGS_MOVING = 2;
+
+Lamp map_lamp;
+ivec2 map_texel;
+int map_side;
+float map_lift;
+float map_reach;
+// Rays that go less than this far are the near surface's.
+float map_split;
+// How far the lamp's ray through `at` (in the texel, 0 to 1) goes.
+float map_ray(vec2 at) {
+    vec3 dir = cone_oct_dir((vec2(map_texel) + at) / float(map_side));
+    SceneHit hit;
+    // From a finest voxel out: what the lamp hangs from is beside it.
+    return trace_ray(map_lamp.pos.xyz, dir, map_lift, map_reach, hit) ? min(hit.t, CONE_MAP_OPEN) : CONE_MAP_OPEN;
+}
+// The furthest any ray the near surface stopped has gone.
+float map_near_most;
+// The nearest any ray the far surface stopped has gone.
+float map_far_least = CONE_MAP_OPEN;
+bool map_near(vec2 at) {
+    float depth = map_ray(at);
+    if (depth < map_split) {
+        map_near_most = max(map_near_most, depth);
+    } else {
+        map_far_least = min(map_far_least, depth);
+    }
+    return depth < map_split;
+}
+
+// The rays of the texel, and which side of a split each is on, for
+// map_plane.
+float map_depths[CONE_MAP_RAYS];
+vec2 map_places[CONE_MAP_RAYS];
+bool map_side_of[CONE_MAP_RAYS];
+// A plane takes this many rays at least.
+const int CONE_MAP_PLANE_RAYS = 3;
+// The plane through the inverse distances of the rays on side `side`
+// (least squares): how they change across the texel, the distance at the
+// texel's middle, and (returned) the furthest any of those rays lies from
+// it; CONE_FAR where no plane fits (a ray into open air, rays in a row).
+float map_plane(int rays, bool side, out vec2 slope, out float middle) {
+    vec2 mid_at = vec2(0.0);
+    float mid_inv = 0.0;
+    float count = 0.0;
+    slope = vec2(0.0);
+    middle = CONE_MAP_OPEN;
+    for (int k = 0; k < rays; k++) {
+        if (map_side_of[k] == side) {
+            if (map_depths[k] >= CONE_MAP_OPEN) {
+                return CONE_FAR;
+            }
+            mid_at += map_places[k];
+            mid_inv += 1.0 / map_depths[k];
+            count += 1.0;
+        }
+    }
+    if (count < float(CONE_MAP_PLANE_RAYS)) {
+        return CONE_FAR;
+    }
+    mid_at /= count;
+    mid_inv /= count;
+    vec3 spread = vec3(0.0);
+    vec2 leans = vec2(0.0);
+    for (int k = 0; k < rays; k++) {
+        if (map_side_of[k] == side) {
+            vec2 d = map_places[k] - mid_at;
+            spread += vec3(d.x * d.x, d.x * d.y, d.y * d.y);
+            leans += d * (1.0 / map_depths[k] - mid_inv);
+        }
+    }
+    float det = spread.x * spread.z - spread.y * spread.y;
+    if (det <= CONE_TINY) {
+        return CONE_FAR;
+    }
+    slope = vec2(spread.z * leans.x - spread.y * leans.y, spread.x * leans.y - spread.y * leans.x) / det;
+    middle = 1.0 / max(mid_inv + dot(slope, vec2(CONE_HALF) - mid_at), 1.0 / CONE_MAP_OPEN);
+    float worst = 0.0;
+    for (int k = 0; k < rays; k++) {
+        if (map_side_of[k] == side) {
+            worst = max(worst, abs(1.0 / max(mid_inv + dot(slope, map_places[k] - mid_at), 1.0 / CONE_MAP_OPEN) - map_depths[k]));
+        }
+    }
+    return worst;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint entry = i / CONE_MAP_TILE_TEXELS;
+    uint word = i % CONE_MAP_TILE_TEXELS;
+    if (entry >= min(cwork.w[CONE_MAP_COUNT], cwork.w[CONE_MAP_HEAD + 7u])) {
+        return;
+    }
+    uint listed = cwork.w[cwork.w[CONE_MAP_HEAD + 6u] + entry];
+    uint lamp = listed >> CONE_MAP_LIST_LAMP;
+    uint t = listed & CONE_MAP_LIST_TILE;
+    int level = 0;
+    while (level + 1 < CONE_MAP_LEVELS && t >= cone_map_before(level + 1, CONE_MAP_TILES_FIRST)) {
+        level++;
+    }
+    uint within = t - cone_map_before(level, CONE_MAP_TILES_FIRST);
+    uint tiles = CONE_MAP_TILES_SIDE << uint(level);
+    ivec2 tile = ivec2(within % tiles, within / tiles);
+    map_side = int(CONE_MAP_SIDE << uint(level));
+    map_texel = tile * int(CONE_MAP_TILE) + ivec2(int(word % CONE_MAP_TILE), int(word / CONE_MAP_TILE));
+    map_lamp = scene_lamp(lamp);
+    map_lift = cone_size(CONE_FINEST);
+    map_reach = map_lamp.color.w > 0.0 ? map_lamp.color.w : CONE_REACH;
+    // A lamp on the move (it moved this frame or the last): the corner
+    // rays alone, and the silhouette found once. Its tiles are traced in full once it stands still (the
+    // tile's field number is left at none, so the list takes it again as
+    // room allows).
+    uint frame = cwork.w[CONE_MAP_HEAD + 3u];
+    bool moving = cwork.w[cone_map_lamp(lamp) + CONE_MAP_LAMP_MOVED] + 1u >= frame;
+    int rays = moving ? CONE_MAP_CORNERS : CONE_MAP_RAYS;
+    float depths[CONE_MAP_RAYS];
+    float sorted[CONE_MAP_RAYS];
+    vec2 places[CONE_MAP_RAYS];
+    float near = CONE_MAP_OPEN;
+    float far = 0.0;
+    for (int k = 0; k < rays; k++) {
+        places[k] = k < CONE_MAP_CORNERS
+            ? vec2(k & 1, k >> 1)
+            : (vec2((k - CONE_MAP_CORNERS) % CONE_MAP_GRID, (k - CONE_MAP_CORNERS) / CONE_MAP_GRID)
+                + (vec2(((k - CONE_MAP_CORNERS) * 5) % CONE_MAP_INSIDE, ((k - CONE_MAP_CORNERS) * 11) % CONE_MAP_INSIDE) + CONE_HALF) / float(CONE_MAP_INSIDE)) / float(CONE_MAP_GRID);
+        depths[k] = map_ray(places[k]);
+        near = min(near, depths[k]);
+        far = max(far, depths[k]);
+        // Kept in order, nearest first.
+        int at = k;
+        while (at > 0 && sorted[at - 1] > depths[k]) {
+            sorted[at] = sorted[at - 1];
+            at--;
+        }
+        sorted[at] = depths[k];
+    }
+    // Two surfaces where the distances, in order, leave a gap: the widest
+    // one, when it is wide enough (cone_map_apart) and CONE_MAP_GAP times
+    // the next widest. A wall the lamp lights at a low angle spreads its
+    // rays' distances evenly and leaves none. (Telling the far surface by
+    // the plane of the furthest ray's hit, to catch a gap among spread
+    // distances, drew an arch's shadow in teeth.)
+    float widest = 0.0;
+    float next = 0.0;
+    float before = near;
+    float after = far;
+    for (int k = 1; k < rays; k++) {
+        float gap = sorted[k] - sorted[k - 1];
+        if (gap > widest) {
+            next = widest;
+            widest = gap;
+            before = sorted[k - 1];
+            after = sorted[k];
+        } else {
+            next = max(next, gap);
+        }
+    }
+    // One surface: the plane through the rays' inverse distances (least
+    // squares) and the furthest any ray lies from it.
+    for (int k = 0; k < rays; k++) {
+        map_depths[k] = depths[k];
+        map_places[k] = places[k];
+        map_side_of[k] = true;
+    }
+    vec2 slope;
+    float middle;
+    float worst = map_plane(rays, true, slope, middle);
+    float det = worst < CONE_FAR ? 1.0 : 0.0;
+    bool flat_ = far < CONE_MAP_OPEN && det > CONE_TINY;
+    uint one = flat_ ? cone_map_pack_plane(middle, worst) : cone_map_pack_one(near, far);
+    uint one_more = flat_ ? packHalf2x16(slope) : 0u;
+    uint packed = one;
+    bool two = false;
+    // Or the gap parts the rays into two flat surfaces, three rays or more
+    // each: a column's side that runs back steeply to the wall behind it
+    // spreads its own distances wider than its gap to the wall.
+    bool planes = false;
+    if (widest > cone_map_apart(before) && widest <= CONE_MAP_GAP * next) {
+        int stopped_ = 0;
+        for (int k = 0; k < rays; k++) {
+            map_side_of[k] = depths[k] < CONE_HALF * (before + after);
+            stopped_ += map_side_of[k] ? 1 : 0;
+        }
+        vec2 slope_;
+        float middle_;
+        float flat_tol = CONE_HALF * cone_map_apart(near);
+        planes = stopped_ >= CONE_MAP_PLANE_RAYS && rays - stopped_ >= CONE_MAP_PLANE_RAYS
+            && map_plane(rays, true, slope_, middle_) < flat_tol && map_plane(rays, false, slope_, middle_) < flat_tol;
+    }
+    if (widest > cone_map_apart(before) && (widest > CONE_MAP_GAP * next || planes)) {
+        map_split = CONE_HALF * (before + after);
+        bool nears[CONE_MAP_RAYS];
+        float stopped = 0.0;
+        for (int k = 0; k < rays; k++) {
+            nears[k] = depths[k] < map_split;
+            stopped += nears[k] ? 1.0 : 0.0;
+        }
+        map_near_most = before;
+        map_far_least = after;
+        // Two surfaces. The line between them runs across the way from
+        // the near rays' middle to the far rays'.
+        vec2 near_at = vec2(0.0);
+        vec2 far_at = vec2(0.0);
+        for (int k = 0; k < rays; k++) {
+            near_at += nears[k] ? places[k] : vec2(0.0);
+            far_at += nears[k] ? vec2(0.0) : places[k];
+        }
+        near_at /= stopped;
+        far_at /= float(rays) - stopped;
+        vec2 across = far_at - near_at;
+        // The texel holds the near surface's furthest distance: the
+        // furthest a ray it stopped went (the rays that find the line
+        // among them, which run to its rim); its second word, the far
+        // surface's furthest. All that is hidden
+        // behind the near surface is past it. (Holding the far surface's
+        // nearest distance, or the middle of the gap, lit what lay behind
+        // the near surface and nearer than that: triangles a strip past
+        // a shadow's edge on a floor, combs on a wall behind a column.)
+        packed = cone_map_pack_covered(before, stopped / float(rays));
+        two = true;
+        if (length(across) > CONE_TINY) {
+            across = normalize(across);
+            // The near ray and the far ray that stand closest: the
+            // silhouette runs between them. (Asking that one line part all
+            // the rays left out the texels where a ray along the near
+            // surface's rim read between the two depths: along an arch's
+            // shadow one texel in five held a covered share, a bump.)
+            vec2 last_near = near_at;
+            vec2 first_far = far_at;
+            float near_depth = before;
+            float far_depth = after;
+            float least = CONE_FAR;
+            for (int k = 0; k < rays; k++) {
+                for (int m = 0; m < rays; m++) {
+                    vec2 between = places[k] - places[m];
+                    float apart = dot(between, between);
+                    if (nears[k] && !nears[m] && apart < least) {
+                        least = apart;
+                        last_near = places[k];
+                        first_far = places[m];
+                        near_depth = depths[k];
+                        far_depth = depths[m];
+                    }
+                }
+            }
+            {
+                for (int h = 0; h < CONE_MAP_HALVINGS; h++) {
+                    vec2 mid = CONE_HALF * (last_near + first_far);
+                    float depth = map_ray(mid);
+                    if (depth < map_split) {
+                        last_near = mid;
+                        near_depth = depth;
+                        map_near_most = max(map_near_most, depth);
+                    } else {
+                        first_far = mid;
+                        far_depth = depth;
+                        map_far_least = min(map_far_least, depth);
+                    }
+                }
+                // A silhouette keeps its step in distance however close
+                // the two rays stand; one surface that runs away from the
+                // lamp at a low angle does not, and the texel is all one
+                // surface.
+                bool parted = far_depth - near_depth > cone_map_apart(near_depth);
+                vec2 through = CONE_HALF * (last_near + first_far);
+                // The silhouette's turn: on a ring about that point, the
+                // two places where the near surface's rays give way to the
+                // far one's and back, each found by halving; the line runs
+                // through both. A ring that changes more or less than twice
+                // (a corner, something thin) leaves the texel its covered
+                // share.
+                bool ring[CONE_MAP_RING];
+                int changes = 0;
+                int rises = 0;
+                int falls = 0;
+                for (int k = 0; k < CONE_MAP_RING; k++) {
+                    ring[k] = map_near(through + CONE_MAP_RING_WIDE * cone_map_angle(uint(k) * CONE_MAP_ANGLES / uint(CONE_MAP_RING)));
+                }
+                for (int k = 0; k < CONE_MAP_RING; k++) {
+                    int next = (k + 1) % CONE_MAP_RING;
+                    if (ring[k] != ring[next]) {
+                        changes++;
+                        // A rise: near gives way to far.
+                        if (ring[k]) {
+                            rises = k;
+                        } else {
+                            falls = k;
+                        }
+                    }
+                }
+                if (!parted) {
+                    packed = one;
+                    two = false;
+                } else if (changes == 2) {
+                    vec2 ends[2];
+                    float turn = CONE_MAP_TURN / float(CONE_MAP_RING);
+                    for (int s = 0; s < 2; s++) {
+                        // From a ray of the first kind to the next, of the other.
+                        float a = float(s == 0 ? rises : falls) * turn;
+                        float b = a + turn;
+                        for (int h = 0; h < (moving ? CONE_MAP_HALVINGS_MOVING : CONE_MAP_HALVINGS); h++) {
+                            float m = CONE_HALF * (a + b);
+                            bool is_near = map_near(through + CONE_MAP_RING_WIDE * vec2(cos(m), sin(m)));
+                            if (is_near == (s == 0)) {
+                                a = m;
+                            } else {
+                                b = m;
+                            }
+                        }
+                        float at = CONE_HALF * (a + b);
+                        ends[s] = through + CONE_MAP_RING_WIDE * vec2(cos(at), sin(at));
+                    }
+                    // The far side: the ring from the rise round to the fall.
+                    float from_ = (float(rises) + CONE_HALF) * turn;
+                    float to = (float(falls) + CONE_HALF) * turn;
+                    float middle = CONE_HALF * (from_ + (to < from_ ? to + CONE_MAP_TURN : to));
+                    vec2 run = normalize(ends[1] - ends[0]);
+                    across = vec2(run.y, -run.x);
+                    if (dot(across, vec2(cos(middle), sin(middle))) < 0.0) {
+                        across = -across;
+                    }
+                    through = CONE_HALF * (ends[0] + ends[1]);
+                    packed = cone_map_pack_edge(map_near_most, across, through);
+                }
+            }
+        }
+    }
+    uint out_at = cone_map_texels(lamp, level) + CONE_MAP_WORDS * uint(map_texel.y * map_side + map_texel.x);
+    cwork.w[out_at] = packed;
+    cwork.w[out_at + 1u] = two ? packHalf2x16(vec2(map_far_least, sorted[rays - 1])) : one_more;
+    if (word == 0u) {
+        uint at = cone_map_tile(lamp, level, tile);
+        uint version = cwork.w[cone_map_lamp(lamp)];
+        // Kept current: traced at this version before, or traced last frame.
+        bool kept = cwork.w[at] != 0u && (cwork.w[at] == version || cwork.w[at + 4u] + 1u == frame);
+        cwork.w[at] = version;
+        if (!kept) {
+            cwork.w[at + 1u] = cwork.w[CONE_MAP_HEAD + 2u];
+        }
+        cwork.w[at + 3u] = moving ? 0u : cwork.w[CONE_MAP_HEAD + 4u];
+        cwork.w[at + 4u] = frame;
+    }
+}

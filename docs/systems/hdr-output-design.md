@@ -199,12 +199,30 @@ The upsample is a 3×3 tent: 0.25 at the centre, 0.125 on the edges, 0.0625 on t
 | `shutter` | seconds | 1/60 |
 | `adapt_down` | seconds, exposure falling (scene got brighter) | 0.40 |
 | `adapt_up` | seconds, exposure rising (scene got darker) | 0.80 |
+| `adapt_strength` | 0..1, the most auto exposure follows the meter away from its neutral point (see "Highlight key") | 0.7 on the auto presets; 1 on legacy bytes |
+| `adapt_anchor_seconds` | deprecated, does nothing (auto exposure once moved from a slow anchor); accepted so old settings load, with a warning | - |
+| `adapt_knee_stops` | stops from the neutral point at which exposure follows half of `adapt_strength`; under it little, past it most; 0 is a flat share | 4 on the auto presets; 0 on legacy bytes |
+| `adapt_neutral_ev100` | the neutral point: the EV100 at which the scene's dark places look dark and its bright places bright; auto exposure moves from it | 1 on the auto presets; 0 on legacy bytes |
+| `adapt_dark_stops` | the most stops auto exposure opens under the neutral point in a dark place; 0 is no limit | 0.5 on the auto presets; 0 on legacy bytes |
+| `adapt_bright_stops` | the most stops auto exposure closes over the neutral point in a bright place; 0 is no limit | 0.25 on the auto presets; 0 on legacy bytes |
+| `highlight_percentile` | 0.5..1, the luminance share that sets the highlight key | 0.98 |
+| `highlight_stops` | 0.5..10, stops above mid-grey the highlight key places that luminance | 3 |
 | `display` | `agx`, `aces`, `legacy` | `agx`. `aces` presents the legacy shoulder until `aces2_rec709` is the Academy CTL |
 | `bloom` | `off`, `on` | `on` from phase 4; `off` on Fallback |
 | `bloom_intensity` | float, scales the pyramid add | 0.05 (0 on Fallback) |
 | `bloom_levels` | 0..6 | 6 on High, 5 Medium, 4 Low, 0 Fallback |
 | `output` | `auto`, `sdr`, `hdr10`, `scrgb` | `auto` on Medium and High; forced `sdr` on Fallback and Low |
 | `transition` | seconds, 0 or more. The look transition | 0 on every preset |
+
+### Highlight key
+
+The meter puts the mean of the middle 80% of pixels at mid-grey. Standing in shadow with sunlight in view, that mean is the shadow, so exposure opened until the sunlit floor clipped: in Sponza, at the arcade pose of `tools/lighting/exposure_gate.py`, 3.8% of pixels clipped and exposure swung 3.6 stops between the arcade and the courtyard (25 Nov 2026).
+
+Auto exposure (`auto_ev100_neutral` in `crates/render/src/hdr_output.rs`) has a fixed neutral point, `adapt_neutral_ev100`: the exposure at which the scene's dark places look dark and its bright places bright. Each frame's target moves from the neutral point toward this frame's meter by `adapt_share`: `adapt_strength` × Δ² / (Δ² + `adapt_knee_stops`²) of the difference Δ, in either direction, never opens past the highlight key, and is then held within `adapt_dark_stops` under the neutral point and `adapt_bright_stops` over it. So a darker place still feels darker however long the eye stays there. How fast the picture reaches the target is still `adapt_down` and `adapt_up`.
+
+Before 26 Nov 2026 the target moved from an anchor, the metered EV averaged over `adapt_anchor_seconds` (a minute). Standing in a dark place for a minute brought the anchor there, and the place was exposed as any other: in Sponza the far wall of the upper gallery, 4 stops under the court, looked black from the court's end and ordinary from beside it (Anthony: too drastic; a darker place should still feel darker; no moving anchor, a neutral point with a least and a most). Sponza, cone mode, with the neutral point at 1: the meter and the highlight key alone would settle at -2.1 by the gallery's far wall, 1.2 in the arcade looking out, 1.7 in the court and 2.1 in the gallery looking along it. With limits of 2 and 2 the gallery's two ends were still exposed 3 stops apart and looked alike once the eye had settled at each; limits of 1 under and half a stop over still let the eye adjust too much to the darker end; the limits are half a stop under and a quarter over, so the ends are exposed 0.75 stops apart at most. `genos-debug/exp.py` captures each place at each of those exposures.
+
+HDR10 and scRGB output (`hdr_agx.comp`, `nits_of_colour`) scale a display colour into nits by the factor its brightest channel takes, so the stretch above graphics white keeps the colour's hue. Stretching each channel apart turned a bright warm light's red toward the peak while its blue stayed under white, and the lamp glowed orange-red on an HDR display (Anthony, 25 Nov 2026).
 
 ### Camera cut
 
@@ -378,7 +396,7 @@ The §7 ceilings are not rows. They are not measured, and comparing them to them
 
 HDR output is a renderer pass, not a new system. It does not add `debug/hdr/`. The lighting binary (`debug/lighting`) gains an Output page when phase 1 lands. The page is the shared scaffolding: the scene picker, checkpoints, reset, replay, screenshots, sliders, the guided-review panel, and the headless CLI. No new binary.
 
-The menu draws glossary terms. Exposure mode, display, and output are dropdowns. EV100, compensation, ISO, aperture, shutter, adapt down (0.05 to 5 s), adapt up (0.05 to 5 s), look transition (0 to 5 s), bloom intensity, and bloom levels are sliders. `Save look to scene` is the page's one button. Its row then reads `Saved to <file>` or `Not saved: <reason>`. The menu layout names are `hdr_adapt_down`, `hdr_adapt_up`, `hdr_transition`, and `hdr_save`. There is no description string and no tooltip. The exposure phase draws this page and serves `get_hdr`. The surface list is the swapchain pair in use. Swapchain selection fills that list. The output row is labeled `SDR output` because that is the glossary headword for the swapchain image; the choices are `auto`, `sdr`, `hdr10`, and `scrgb`.
+The menu draws glossary terms. Exposure mode, display, and output are dropdowns. EV100, compensation, ISO, aperture, shutter, adapt down (0.05 to 5 s), adapt up (0.05 to 5 s), adapt strength (0 to 1), highlight percentile (0.5 to 1), highlight stops (0.5 to 10), look transition (0 to 5 s), bloom intensity, and bloom levels are sliders. `Save look to scene` is the page's one button. Its row then reads `Saved to <file>` or `Not saved: <reason>`. The menu layout names are `hdr_adapt_down`, `hdr_adapt_up`, `hdr_transition`, and `hdr_save`. There is no description string and no tooltip. The exposure phase draws this page and serves `get_hdr`. The surface list is the swapchain pair in use. Swapchain selection fills that list. The output row is labeled `SDR output` because that is the glossary headword for the swapchain image; the choices are `auto`, `sdr`, `hdr10`, and `scrgb`.
 
 Probes, one per failure mode. They land with the phase that can fail that way. Names are the MCP catalogue in `crates/debug/src/commands.rs`, so MCP, `POST /cmd`, and Rhai share the JSON.
 
@@ -404,6 +422,9 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 --shutter F
 --adapt-down F
 --adapt-up F
+--adapt-strength F
+--highlight-percentile F
+--highlight-stops F
 --hdr-display agx|aces|legacy
 --display agx|aces|legacy   (only when the value is one of those three; otherwise it is the Wayland display name)
 --bloom on|off
@@ -414,7 +435,7 @@ Probes, one per failure mode. They land with the phase that can fail that way. N
 --out DIR
 ```
 
-`GENOS_HDR_EXPOSURE_MODE`, `GENOS_HDR_EV100`, `GENOS_HDR_COMPENSATION`, `GENOS_HDR_ISO`, `GENOS_HDR_APERTURE`, `GENOS_HDR_SHUTTER`, `GENOS_HDR_ADAPT_DOWN`, `GENOS_HDR_ADAPT_UP`, `GENOS_HDR_DISPLAY`, `GENOS_HDR_BLOOM`, `GENOS_HDR_BLOOM_INTENSITY`, `GENOS_HDR_BLOOM_LEVELS`, `GENOS_HDR_OUTPUT`, `GENOS_HDR_TRANSITION`, and `GENOS_HDR_OUT` mirror those arguments. The fourteen design-table keys are the first fourteen. `GENOS_HDR_OUT` mirrors `--out`. The argument wins. The variable applies only when the argument was omitted. `--help` lists each one. The debug menu does not. `get_hdr` and the lighting stats return `hdr_ms`, `post_ms_device`, `hdr_vram_bytes`, and `post_vram_device`. `post_ms_device` is `hdr_ms`: bloom plus the display pass, one frame behind, zero when the device has no timestamps. `post_vram_device` is the post buffers in MiB. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p. The gate applies it on a hardware device. A software rasterizer prints a finite positive timestamp and is not that score. The allocation ceiling is the preset row in §7. There is no 96 MiB ceiling.
+`GENOS_HDR_EXPOSURE_MODE`, `GENOS_HDR_EV100`, `GENOS_HDR_COMPENSATION`, `GENOS_HDR_ISO`, `GENOS_HDR_APERTURE`, `GENOS_HDR_SHUTTER`, `GENOS_HDR_ADAPT_DOWN`, `GENOS_HDR_ADAPT_UP`, `GENOS_HDR_ADAPT_STRENGTH`, `GENOS_HDR_HIGHLIGHT_PERCENTILE`, `GENOS_HDR_HIGHLIGHT_STOPS`, `GENOS_HDR_DISPLAY`, `GENOS_HDR_BLOOM`, `GENOS_HDR_BLOOM_INTENSITY`, `GENOS_HDR_BLOOM_LEVELS`, `GENOS_HDR_OUTPUT`, `GENOS_HDR_TRANSITION`, and `GENOS_HDR_OUT` mirror those arguments. The fourteen design-table keys are the first fourteen. `GENOS_HDR_OUT` mirrors `--out`. The argument wins. The variable applies only when the argument was omitted. `--help` lists each one. The debug menu does not. `get_hdr` and the lighting stats return `hdr_ms`, `post_ms_device`, `hdr_vram_bytes`, and `post_vram_device`. `post_ms_device` is `hdr_ms`: bloom plus the display pass, one frame behind, zero when the device has no timestamps. `post_vram_device` is the post buffers in MiB. The 1.50 ms ceiling is the 4070 at 1440p and the Deck at 800p. The gate applies it on a hardware device. A software rasterizer prints a finite positive timestamp and is not that score. The allocation ceiling is the preset row in §7. There is no 96 MiB ceiling.
 
 Screenshots and the histogram dump go to `./genos-debug/hdr-output/` unless `--out` is set. Nothing is written under `$HOME`.
 

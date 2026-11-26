@@ -1,0 +1,169 @@
+#version 450
+// Cone-traced cascades, pass 7b: the resolve. Every pixel takes its probe
+// light from the gather grid (cone_shade.comp): the four gathered pixels
+// about it, each weighted by how near it is and by how well its surface
+// matches this one's (the same plane, facing the same way), so light does
+// not cross an edge. A pixel none of the four matches (a thin edge, a leaf)
+// is listed for the fill pass (cone_fill.comp), which gathers for it alone.
+// The pixel's light, its emission plus its albedo's share of the probe
+// light and of the suns (their share from the field, cone_sun), goes in the
+// G-buffer word compose reads as emitted light. A pixel on a shadow edge is
+// listed for the sun pass (cone_sun.comp), which adds its sun. The lamps'
+// light is the pixel's own (its distance and angle to each lamp) by the
+// share of the lamp the gathered pixels' probes see. A pixel with metal
+// takes its specular light too (cone_specular.glsl): the lamps' and the
+// sun's highlights and the rough band's gathered light here, and it is
+// listed for the specular pass (cone_specular.comp), which adds its cone.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+#include "cone_specular.glsl"
+
+// A gathered pixel matches when its normal is within about 25 degrees of
+// this pixel's (full weight within 18) and it lies within this share of the
+// view distance of this pixel's plane (and at least CONE_MATCH_NEAR metres).
+const float CONE_MATCH_FACING = 0.9;
+const float CONE_MATCH_FACING_FULL = 0.95;
+const float CONE_MATCH_PLANE = 0.01;
+const float CONE_MATCH_NEAR = 0.03;
+// The lamps a pixel takes from the gathered pixels about it.
+const int CONE_RESOLVE_LAMPS = 8;
+// Under this total weight the pixel has no match and gathers for itself.
+const float CONE_MATCH_LEAST = 0.05;
+
+void main() {
+    uvec2 p = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(p, pc.dims.xy))) {
+        return;
+    }
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+        return;
+    }
+    uint pixel = p.y * pc.dims.x + p.x;
+    uint scale = max(pc.lamp.w, 1u);
+    uvec2 cells = cone_gather_cells(scale);
+    vec3 light = vec3(0.0);
+    float weight = 0.0;
+    // The lamps of the gathered pixels matched, and each one's share seen.
+    uint lamps[CONE_RESOLVE_LAMPS];
+    float seen[CONE_RESOLVE_LAMPS];
+    for (int k = 0; k < CONE_RESOLVE_LAMPS; k++) {
+        lamps[k] = 0u;
+        seen[k] = 0.0;
+    }
+    if (scale == 1u) {
+        uint slot = cone_gather_at() + pixel * CONE_GATHER_WORDS;
+        uint word = cwork.w[slot];
+        if (word != CONE_GATHER_NONE) {
+            light = lighting_unpack_rgb9e5(word);
+            weight = 1.0;
+            for (uint t = 0u; t < CONE_PIXEL_LAMPS; t++) {
+                lamps[t] = cone_lamp_word_id(cwork.w[slot + 1u + t]);
+                seen[t] = cone_lamp_word_seen(cwork.w[slot + 1u + t]);
+            }
+        }
+    } else {
+        // Where the pixel lies among the gathered pixels (each in the middle
+        // of its square).
+        vec2 at = (vec2(p) - float(scale / 2u)) / float(scale);
+        ivec2 base = ivec2(floor(at));
+        vec2 f = at - vec2(base);
+        float tolerance = max(CONE_MATCH_NEAR, CONE_MATCH_PLANE * length(pos - scene.eye.xyz));
+        for (int k = 0; k < 4; k++) {
+            ivec2 cell = base + ivec2(k & 1, k >> 1);
+            if (any(lessThan(cell, ivec2(0))) || any(greaterThanEqual(cell, ivec2(cells)))) {
+                continue;
+            }
+            uint slot = cone_gather_at() + (uint(cell.y) * cells.x + uint(cell.x)) * CONE_GATHER_WORDS;
+            uint word = cwork.w[slot];
+            if (word == CONE_GATHER_NONE) {
+                continue;
+            }
+            vec3 other;
+            vec3 other_n;
+            vec3 other_albedo;
+            bool other_two;
+            if (!lighting_surface(cone_gather_pixel(uvec2(cell), scale), other, other_n, other_albedo, other_two)) {
+                continue;
+            }
+            vec2 near = mix(vec2(1.0) - f, f, vec2(k & 1, k >> 1));
+            float facing = smoothstep(CONE_MATCH_FACING, CONE_MATCH_FACING_FULL, dot(n, other_n));
+            float plane = 1.0 - clamp(abs(dot(other - pos, n)) / tolerance, 0.0, 1.0);
+            // A little of each match even at the far corner, so one good
+            // match beats none.
+            float w = (near.x * near.y + CONE_MATCH_LEAST) * facing * plane;
+            light += lighting_unpack_rgb9e5(word) * w;
+            weight += w;
+            for (uint t = 0u; t < CONE_PIXEL_LAMPS && w > 0.0; t++) {
+                uint id = cone_lamp_word_id(cwork.w[slot + 1u + t]);
+                for (int e = 0; e < CONE_RESOLVE_LAMPS && id != 0u; e++) {
+                    if (lamps[e] == 0u || lamps[e] == id) {
+                        lamps[e] = id;
+                        seen[e] += w * cone_lamp_word_seen(cwork.w[slot + 1u + t]);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (cone_probe_view()) {
+        // A debug view (cone_cascades.view): its colour, in place of the light.
+        gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(weight > 0.0 ? light / weight : vec3(0.0));
+        return;
+    }
+    ConeMetal metal;
+    bool shiny = cone_metal(p, n, two_sided, metal);
+    vec3 specular = vec3(0.0);
+    vec3 irradiance = vec3(0.0);
+    if (weight >= CONE_MATCH_LEAST) {
+        irradiance = light / weight;
+        if (shiny) {
+            specular += cone_metal_gathered(metal, irradiance);
+        }
+        // The lamps: each one's light on this pixel, from its own distance
+        // and angle to the lamp, by the share of it the probes see
+        // (cone_lamp_share: no ray from the pixel).
+        vec3 from = pos + n * CONE_SURFACE_LIFT;
+        for (int e = 0; e < CONE_RESOLVE_LAMPS; e++) {
+            if (lamps[e] == 0u) {
+                break;
+            }
+            uint id = lamps[e] - 1u;
+            vec3 lamp = cone_lamp_on(id, from, n, two_sided, cone_lamp_share(seen[e] / weight));
+            irradiance += lamp;
+            if (shiny) {
+                specular += cone_metal_direct(metal, normalize(scene_lamp(id).pos.xyz - from), lamp);
+            }
+        }
+    } else {
+        // No gathered pixel is on this surface: the fill pass gathers here.
+        cwork.w[cone_fill_at() + atomicAdd(cwork.w[CONE_FILL_COUNT], 1u)] = pixel;
+    }
+    uint emitted = gbuf_word(pixel, 3u);
+    vec3 glow = emitted == ~0u ? vec3(0.0) : lighting_unpack_rgb9e5(emitted);
+    bool edge;
+    vec3 sun = cone_sun(pos, n, two_sided, false, edge);
+    if (edge) {
+        // A shadow edge crosses the voxels about the pixel: the sun pass
+        // (cone_sun.comp) marches its ray and adds its sun.
+        sun = vec3(0.0);
+        cwork.w[cone_sun_at() + atomicAdd(cwork.w[CONE_SUN_COUNT], 1u)] = pixel;
+    }
+    if (shiny) {
+        vec3 toward;
+        if (cone_sun_toward(pos + n * CONE_SURFACE_LIFT, toward)) {
+            specular += cone_metal_direct(metal, toward, sun);
+        }
+        if (cone_specular_share(metal.rough) > 0.0) {
+            // The specular pass (cone_specular.comp) adds its cone.
+            cwork.w[cone_specular_at() + atomicAdd(cwork.w[CONE_SPECULAR_COUNT], 1u)] = pixel;
+        }
+    }
+    vec3 diffuse = glow + albedo * SCENE_LAMBERT * irradiance + albedo * (1.0 / CONE_PI) * sun;
+    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(cone_specular_view() ? specular : diffuse + specular);
+}

@@ -342,9 +342,8 @@ fn build_node(
     }
     // Binned SAH over the widest useful axes.
     let mut best: Option<(f32, usize, f32)> = None;
-    for axis in 0..3 {
-        let lo = box_c.min[axis];
-        let extent = box_c.max[axis] - lo;
+    for (axis, (&lo, &hi)) in box_c.min.iter().zip(&box_c.max).enumerate() {
+        let extent = hi - lo;
         if extent <= 0.0 {
             continue;
         }

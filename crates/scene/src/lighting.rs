@@ -384,6 +384,127 @@ impl SurfaceCacheBlend {
     }
 }
 
+/// The cone-traced cascades: experimental, off in every preset
+/// (`docs/systems/lighting/cone-traced-cascades-plan.md`). On, every point lamp
+/// is an emitter in a voxel field built when the scene loads, and a pixel's
+/// light is what the cascades bring it: the direct pass, its shadows, the GI
+/// passes and the ambient fill do not run.
+/// What cone mode draws (key `cone_cascades.view`): the light, or a probe of
+/// what each pixel read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConeView {
+    /// The lit picture.
+    #[default]
+    Light,
+    /// Each pixel's total probe weight as grey (white: the whole trilinear
+    /// weight passed); yellow where nothing passed to any probe of a level it
+    /// reads (it takes them by the floor weight); red where a level gave it
+    /// no probe at all.
+    Coverage,
+    /// The share of the directions a pixel reads that hold no light, as red
+    /// over grey.
+    Dark,
+    /// The specular light alone (key `cone_cascades.specular`): what a
+    /// metal reflects, with no diffuse light and no emission. Black where a
+    /// surface has no metal.
+    Specular,
+}
+
+impl ConeView {
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Coverage => "coverage",
+            Self::Dark => "dark",
+            Self::Specular => "specular",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "light" | "off" | "0" => Some(Self::Light),
+            "coverage" => Some(Self::Coverage),
+            "dark" => Some(Self::Dark),
+            "specular" => Some(Self::Specular),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConeCascadeSettings {
+    pub enabled: bool,
+    /// A voxel-layer probe's size, in pixels on screen (4..=64).
+    pub probe_px: u32,
+    /// Directions at cascade 0 are `2 theta^2`; each cascade doubles theta (2..=8).
+    pub theta: u32,
+    /// Cascades (1..=5).
+    pub count: u32,
+    /// A point lamp's glowing sphere, in metres (0.02..=1).
+    pub lamp_radius: f32,
+    /// The finest voxel-layer probe, in metres: 0.0625, 0.125, 0.25, 0.5 or 1
+    /// (key `cone_cascades.finest_probe`). Each step up has four times fewer
+    /// probes on a surface, and so cones in every cascade.
+    pub finest_probe: f32,
+    /// What the shade draws: the light, or a debug view of the probes read.
+    pub view: ConeView,
+    /// The side, in pixels, of the square one pixel gathers the probes'
+    /// light for (key `cone_cascades.shade_scale`: 1, 2 or 4). The other
+    /// pixels of the square take it from the gathered pixels about them
+    /// that lie on their surface; a pixel with none gathers for itself.
+    pub shade_scale: u32,
+    /// The most tiles of the lamp maps a frame traces past each lamp's
+    /// coarsest level (key `cone_cascades.lamp_map_tiles`; a tile is 64
+    /// rays). 0: no lamp maps, each probe casts a ray at each lamp and the
+    /// pixels blend the probes' shares.
+    pub lamp_map_tiles: u32,
+    /// A metal's specular light (key `cone_cascades.specular`): the sun's
+    /// and the lamps' highlights, and a specular cone through the field
+    /// along the mirror direction. Off leaves a metal its diffuse albedo
+    /// alone, which is black for a full metal.
+    pub specular: bool,
+}
+
+impl ConeCascadeSettings {
+    /// The field level of the finest probe (2 is 6.25 cm, 4 is 25 cm).
+    #[must_use]
+    pub fn finest_probe_level(&self) -> u32 {
+        let mut level = 2;
+        let mut size = 0.0625_f32;
+        while level < 6 && self.finest_probe >= size * 1.5 {
+            level += 1;
+            size *= 2.0;
+        }
+        level
+    }
+}
+
+/// A shade scale snapped to one the gather has: 1, 2 or 4.
+fn shade_scale(value: u32) -> u32 {
+    match value {
+        0 | 1 => 1,
+        2 | 3 => 2,
+        _ => 4,
+    }
+}
+
+/// A finest probe size snapped to one the field has: 0.0625 to 1 m, doubling.
+fn probe_metres(value: f32) -> f32 {
+    let mut size = 0.0625_f32;
+    while size < 1.0 && value >= size * 1.5 {
+        size *= 2.0;
+    }
+    size
+}
+
+impl Default for ConeCascadeSettings {
+    fn default() -> Self {
+        Self { enabled: false, probe_px: 12, theta: 2, count: 5, lamp_radius: 0.1, finest_probe: 0.0625, view: ConeView::Light, shade_scale: 2, lamp_map_tiles: 1024, specular: true }
+    }
+}
+
 /// Global illumination as a whole. Off skips every GI pass and the GI buffers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GiSettings {
@@ -720,6 +841,8 @@ pub struct LightingSettings {
     pub direct: DirectSettings,
     pub shadows: ShadowSettings,
     pub gi: GiSettings,
+    /// The cone-traced cascades (experimental).
+    pub cone: ConeCascadeSettings,
     pub surface_cache: SurfaceCacheSettings,
     pub bounce: BounceSettings,
     pub probes: ProbeSettings,
@@ -910,6 +1033,7 @@ impl LightingSettings {
                 budget_shift: 0,
                 world_mode: None,
             },
+            cone: ConeCascadeSettings::default(),
             surface_cache: SurfaceCacheSettings {
                 attach_movers: true,
                 mover_texels: 32_768,
@@ -992,6 +1116,12 @@ impl LightingSettings {
         self.shadows.cell_metres = self.shadows.cell_metres.clamp(0.05, 2.0);
         self.gi.refresh_frames = self.gi.refresh_frames.max(1);
         self.gi.budget_shift = self.gi.budget_shift.min(7);
+        self.cone.probe_px = self.cone.probe_px.clamp(4, 64);
+        self.cone.theta = self.cone.theta.clamp(2, 8);
+        self.cone.count = self.cone.count.clamp(1, 5);
+        self.cone.finest_probe = probe_metres(self.cone.finest_probe);
+        self.cone.shade_scale = shade_scale(self.cone.shade_scale);
+        self.cone.lamp_radius = if self.cone.lamp_radius.is_finite() { self.cone.lamp_radius.clamp(0.02, 1.0) } else { 0.1 };
         self.surface_cache.firefly_sigma = if self.surface_cache.firefly_sigma.is_finite() {
             self.surface_cache.firefly_sigma.max(0.0)
         } else {
@@ -1323,6 +1453,16 @@ impl LightingSettings {
         let _ = writeln!(out, "gi={}", bit(self.gi.enabled));
         let _ = writeln!(out, "gi_refresh={}", self.gi.refresh_frames);
         let _ = writeln!(out, "budget_shift={}", self.gi.budget_shift);
+        let _ = writeln!(out, "cone_cascades={}", bit(self.cone.enabled));
+        let _ = writeln!(out, "cone_cascades.probe_px={}", self.cone.probe_px);
+        let _ = writeln!(out, "cone_cascades.theta={}", self.cone.theta);
+        let _ = writeln!(out, "cone_cascades.count={}", self.cone.count);
+        let _ = writeln!(out, "cone_cascades.lamp_radius={}", num_text(self.cone.lamp_radius));
+        let _ = writeln!(out, "cone_cascades.finest_probe={}", num_text(self.cone.finest_probe));
+        let _ = writeln!(out, "cone_cascades.view={}", self.cone.view.name());
+        let _ = writeln!(out, "cone_cascades.shade_scale={}", self.cone.shade_scale);
+        let _ = writeln!(out, "cone_cascades.lamp_map_tiles={}", self.cone.lamp_map_tiles);
+        let _ = writeln!(out, "cone_cascades.specular={}", bit(self.cone.specular));
         let _ = writeln!(
             out,
             "surface_cache.attach_movers={}",
@@ -1577,6 +1717,18 @@ impl LightingSettings {
             "gi" => self.gi.enabled = on(value)?,
             "gi_refresh" => self.gi.refresh_frames = num_u32(value)?.max(1),
             "budget_shift" => self.gi.budget_shift = num_u32(value)?.min(7),
+            "cone_cascades" => self.cone.enabled = on(value)?,
+            "cone_cascades.probe_px" => self.cone.probe_px = num_u32(value)?.clamp(4, 64),
+            "cone_cascades.theta" => self.cone.theta = num_u32(value)?.clamp(2, 8),
+            "cone_cascades.count" => self.cone.count = num_u32(value)?.clamp(1, 5),
+            "cone_cascades.lamp_radius" => self.cone.lamp_radius = num_f32(value)?.clamp(0.02, 1.0),
+            "cone_cascades.finest_probe" => self.cone.finest_probe = probe_metres(num_f32(value)?),
+            "cone_cascades.shade_scale" => self.cone.shade_scale = shade_scale(num_u32(value)?),
+            "cone_cascades.lamp_map_tiles" => self.cone.lamp_map_tiles = num_u32(value)?.min(4096),
+            "cone_cascades.specular" => self.cone.specular = on(value)?,
+            "cone_cascades.view" => {
+                self.cone.view = ConeView::parse(value).ok_or_else(|| format!("cone_cascades.view: light, coverage, dark or specular, not {value}"))?;
+            }
             "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
             "surface_cache.mover_texels" => self.surface_cache.mover_texels = num_u32(value)?,
             "surface_cache.blend" => {
@@ -1974,8 +2126,12 @@ impl LightingSettings {
 
     fn apply_launch(&mut self, launch: &LightingLaunch) {
         let clock = self.time_of_day;
+        // The cone-traced cascades are a pipeline switch, not a quality tier: a
+        // preset lock keeps them as the menu or a command set them.
+        let cone = self.cone;
         if let Some(preset) = launch.preset {
             *self = Self::preset(preset);
+            self.cone = cone;
         }
         if let Some(count) = launch.bounces {
             self.bounce.count = count;
@@ -2710,6 +2866,19 @@ mod launch_tests {
         assert!(settings.apply_env_from(&["--bounces", "2"], &good).is_ok());
         assert_eq!(settings.bounce.count, 2);
         assert!(!settings.gi.enabled);
+    }
+
+    #[test]
+    fn a_preset_lock_keeps_the_cone_cascades_switch() {
+        let none = |_: &str| None;
+        let mut settings = LightingSettings::default();
+        settings.set_key("cone_cascades", "on").unwrap();
+        settings.set_key("cone_cascades.probe_px", "20").unwrap();
+        settings.set_key("gi", "off").unwrap();
+        settings.apply_env_from(&["--preset", "high"], &none).unwrap();
+        assert!(settings.cone.enabled);
+        assert_eq!(settings.cone.probe_px, 20);
+        assert!(settings.gi.enabled, "the preset still sets its own keys");
     }
 
     fn hours_near(value: f32, hours: f32) {

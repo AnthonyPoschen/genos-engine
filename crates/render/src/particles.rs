@@ -992,8 +992,8 @@ fn scatter_light(p: [f32; 3], lamps: &[FogLamp], fire: FireLight, field: [f32; 3
         let dz = lamp.position[2] - p[2];
         let dist2 = dx * dx + dy * dy + dz * dz;
         let fall = 1.0 / (1.0 + dist2 * LAMP_FALLOFF);
-        for axis in 0..3 {
-            sum[axis] += lamp.color[axis] * fall;
+        for (s, c) in sum.iter_mut().zip(lamp.color) {
+            *s += c * fall;
         }
     }
     if fire.strength > 0.0 {
@@ -1002,8 +1002,8 @@ fn scatter_light(p: [f32; 3], lamps: &[FogLamp], fire: FireLight, field: [f32; 3
         let dz = fire.position[2] - p[2];
         let dist2 = dx * dx + dy * dy + dz * dz;
         let fall = fire.strength / (1.0 + dist2 * FIRE_XZ_FALLOFF);
-        for axis in 0..3 {
-            sum[axis] += fire.color[axis] * fall;
+        for (s, c) in sum.iter_mut().zip(fire.color) {
+            *s += c * fall;
         }
     }
     for axis in 0..3 {

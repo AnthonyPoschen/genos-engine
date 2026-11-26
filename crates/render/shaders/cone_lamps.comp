@@ -1,0 +1,72 @@
+#version 450
+// Cone-traced cascades, pass 0: every point lamp is written into the lamp
+// hash this frame, so a moving lamp costs what a still one does and its light
+// follows in the frame it moves. A lamp is a glowing sphere of
+// cone_cascades.lamp_radius (lamp.z) shared over CONE_LAMP_POINTS points on it;
+// each point adds its share of the disc's area and its light to the voxel that
+// holds it at every field level, as the field build did (cone_field.rs
+// add_lamp). One thread per lamp and point.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint lamp_i = index / CONE_LAMP_POINTS;
+    uint point = index % CONE_LAMP_POINTS;
+    if (lamp_i >= scene.lamp_count) {
+        return;
+    }
+    Lamp lamp = scene_lamp(lamp_i);
+    // A sun has no range (pack.rs lamp_range); it is not a sphere in the field.
+    if (lamp.color.w <= 0.0) {
+        return;
+    }
+    float radius = uintBitsToFloat(pc.lamp.z);
+    float share = CONE_PI * radius * radius / float(CONE_LAMP_POINTS);
+    vec3 light = lamp.color.rgb * (CONE_LAMP_UNIT / float(CONE_LAMP_POINTS));
+    vec3 at = lamp.pos.xyz + cone_lamp_dir(point) * radius;
+    uint area_q = uint(round(share / CONE_LAMP_AREA_Q));
+    uvec3 light_q = uvec3(round(max(light, vec3(0.0)) / CONE_LAMP_LIGHT_Q));
+    for (int level = CONE_FINEST; level <= CONE_COARSEST; level++) {
+        uint key = cone_lamp_key(level, ivec3(floor(at / cone_size(level))));
+        if (key == CONE_EMPTY) {
+            continue;
+        }
+        uint slot = cone_lamp_slot(key, true);
+        if (slot == CONE_NO_BRICK) {
+            atomicAdd(cwork.w[CONE_LAMP_DROPPED], 1u);
+            continue;
+        }
+        atomicAdd(cwork.w[slot + 1u], area_q);
+        atomicAdd(cwork.w[slot + 2u], light_q.x);
+        atomicAdd(cwork.w[slot + 3u], light_q.y);
+        atomicAdd(cwork.w[slot + 4u], light_q.z);
+        // Whose light it is, for steering (cone_common.glsl CONE_LAMP_ID):
+        // the first lamps to write the voxel, and whether more did too.
+        bool held = false;
+        for (uint k = 0u; k < CONE_LAMP_IDS && !held; k++) {
+            uint seen = cwork.w[slot + CONE_LAMP_ID + k];
+            if (seen == 0u) {
+                seen = atomicCompSwap(cwork.w[slot + CONE_LAMP_ID + k], 0u, lamp_i + 1u);
+            }
+            held = seen == 0u || seen == lamp_i + 1u;
+        }
+        if (!held) {
+            cwork.w[slot + CONE_LAMP_MORE] = 1u;
+        }
+        if (level <= CONE_REFINE) {
+            continue;
+        }
+        // Presence for the coarse levels' trilinear reads (cone_lamp_about):
+        // the seven voxels before this one on each axis, with no area.
+        ivec3 cell = ivec3(floor(at / cone_size(level)));
+        for (int k = 1; k < 8; k++) {
+            uint before = cone_lamp_key(level, cell - ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1));
+            if (before != CONE_EMPTY && cone_lamp_slot(before, true) == CONE_NO_BRICK) {
+                atomicAdd(cwork.w[CONE_LAMP_DROPPED], 1u);
+            }
+        }
+    }
+}

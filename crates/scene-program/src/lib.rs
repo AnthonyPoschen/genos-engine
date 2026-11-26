@@ -115,6 +115,17 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --mesh-workspace DIR   mesh-workbench workspace a mesh scene opens, in place
                          of the one its scene file names. GENOS_MESH_WORKSPACE
                          applies only when this is omitted
+  --session on|off       keep the session: the scene shown, the camera's place
+                         and the scene's settings are written to
+                         <out>/session/<program>.txt while the program runs
+                         and put back when it next opens. An argument wins:
+                         --scene names the scene (its settings come back only
+                         when it is the saved scene), --eye, --look and
+                         --checkpoint place the camera, --preset and
+                         --full-effort keep the lighting settings. On for
+                         genos-editor with a window; off for genos-lighting,
+                         --headless, --frames, --script and --check.
+                         GENOS_SESSION applies only when this is omitted
   --checkpoint NAME      jump here at launch
   --eye X,Y,Z            camera position, metres. --eye=X,Y,Z is the same flag.
                          Keeps the checkpoint aim unless --look is set
@@ -134,6 +145,34 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
                          only when this is omitted
   --adapt-up F           seconds for exposure to rise. GENOS_HDR_ADAPT_UP applies
                          only when this is omitted
+  --adapt-strength F     0..1, how far auto exposure follows the metered mean away
+                         from its anchor (1 fully).
+                         GENOS_HDR_ADAPT_STRENGTH applies only when this is omitted
+  --adapt-anchor-seconds F
+                         seconds auto exposure's anchor takes to settle where the
+                         eye stays (0 follows the meter at once).
+                         GENOS_HDR_ADAPT_ANCHOR_SECONDS applies only when this is omitted
+  --adapt-knee-stops F   stops from the anchor at which exposure follows half of
+                         the strength: under it little, past it most (0: flat).
+                         GENOS_HDR_ADAPT_KNEE_STOPS applies only when this is omitted
+  --adapt-neutral-ev100 F
+                         the EV100 at which dark places look dark and bright
+                         ones bright; auto exposure moves from it.
+                         GENOS_HDR_ADAPT_NEUTRAL_EV100 applies only when this is omitted
+  --adapt-dark-stops F
+                         the most stops auto exposure opens under the neutral
+                         point in a dark place (0: no limit).
+                         GENOS_HDR_ADAPT_DARK_STOPS applies only when this is omitted
+  --adapt-bright-stops F
+                         the most stops auto exposure closes over the neutral
+                         point in a bright place (0: no limit).
+                         GENOS_HDR_ADAPT_BRIGHT_STOPS applies only when this is omitted
+  --highlight-percentile F
+                         0.5..1, the luminance share that sets the highlight key.
+                         GENOS_HDR_HIGHLIGHT_PERCENTILE applies only when this is omitted
+  --highlight-stops F    0.5..10, stops above mid-grey the highlight key places that
+                         luminance. GENOS_HDR_HIGHLIGHT_STOPS applies only when this
+                         is omitted
   --hdr-display agx|aces|legacy
                          display transform. GENOS_HDR_DISPLAY applies only when this
                          is omitted. --display is the Wayland name; a value of
@@ -279,6 +318,8 @@ saves NAME.csv (p50 and p99 per pass and counter) and NAME-frames.csv.
 The binary does not write under $HOME.
 ";
 
+/// The session file is written at most this often.
+const SESSION_SECONDS: f32 = 1.0;
 const FLY_SPEED: f32 = 5.0;
 const STICK_LOOK: f32 = 2.0;
 const MAX_FRAME_SECONDS: f32 = 0.25;
@@ -289,6 +330,7 @@ const ID_VIEW: u32 = 2400;
 const ID_DROP: u32 = 2600;
 const ID_FPS: u32 = 2800;
 const ID_FPS_HZ: u32 = 2801;
+const ID_LIGHT_GIZMOS: u32 = 2802;
 const ID_REFL_ENABLED: u32 = 2900;
 const ID_REFL_WATER: u32 = 2901;
 const ID_REFL_ROUGH: u32 = 2902;
@@ -323,11 +365,20 @@ const ID_HDR_BLOOM_I: u32 = 5106;
 const ID_HDR_ADAPT_DOWN: u32 = 5107;
 const ID_HDR_ADAPT_UP: u32 = 5108;
 const ID_HDR_TRANSITION: u32 = 5109;
+const ID_HDR_ADAPT_STRENGTH: u32 = 5110;
+const ID_HDR_HIGHLIGHT_PERCENTILE: u32 = 5111;
+const ID_HDR_HIGHLIGHT_STOPS: u32 = 5112;
+const ID_HDR_ADAPT_ANCHOR: u32 = 5113;
+const ID_HDR_ADAPT_KNEE: u32 = 5114;
+const ID_HDR_ADAPT_NEUTRAL: u32 = 5115;
+const ID_HDR_ADAPT_DARK: u32 = 5116;
+const ID_HDR_ADAPT_BRIGHT: u32 = 5117;
 const ID_HDR_BLOOM: u32 = 5200;
 /// The "Save look to scene" button of the Output page.
 const ID_HDR_SAVE: u32 = 5300;
 
 mod menu_layout;
+mod session;
 #[cfg(feature = "mesh")]
 mod mesh_view;
 #[cfg(feature = "mesh")]
@@ -415,6 +466,10 @@ struct Options {
     ui: bool,
     out: PathBuf,
     out_set: bool,
+    /// `--scene` or `GENOS_SCENE` named the scene.
+    scene_set: bool,
+    /// `--session`, else `GENOS_SESSION`. Empty: the program's own rule.
+    session: Option<bool>,
     size: (u32, u32),
     check: bool,
     /// Set by `--mcp-port`. Empty means `GENOS_MCP_PORT`, then [`MCP_PORT`].
@@ -458,6 +513,9 @@ pub struct Program {
     /// mesh commands that edit. The binary supplies it, so this library does
     /// not link mesh-workbench: `genos-editor` does, `genos-lighting` does not.
     pub mesh_session: Option<OpenMeshSession>,
+    /// Whether the program keeps its session (`--session`) when the launch
+    /// does not say.
+    pub session: bool,
 }
 
 /// A mesh-workbench session on one workspace: it runs a command, or a list
@@ -483,6 +541,7 @@ impl Program {
         meshes: false,
         top_bar: false,
         mesh_session: None,
+        session: false,
     };
     /// The editor: opens on the mesh scene and lists every scene. It takes
     /// the engine's first MCP port, as `genos-camera` and `genos-stress` do.
@@ -495,6 +554,7 @@ impl Program {
         meshes: true,
         top_bar: true,
         mesh_session: None,
+        session: true,
     };
 }
 
@@ -646,8 +706,21 @@ fn run() -> Result<i32, String> {
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let mut camera = Camera::opening();
-    if app.entry().name != opts.scene {
-        app.start_load(&opts.scene)?;
+    // The session: on by the program's rule for a run a person drives.
+    let keep_session = opts.session.unwrap_or(program().session && !opts.headless && opts.frames.is_none() && opts.script.is_none() && !opts.check);
+    let mut saved_session = if keep_session { session::load(&opts.out, program().name) } else { None };
+    let mut session_text = String::new();
+    let mut session_at = Instant::now();
+    let opening = match &saved_session {
+        Some(saved) if !opts.scene_set => saved.scene.clone(),
+        _ => opts.scene.clone(),
+    };
+    if app.entry().name != opening {
+        // A saved scene that is no longer listed: the launch's own.
+        if app.start_load(&opening).is_err() && opening != opts.scene {
+            saved_session = None;
+            app.start_load(&opts.scene)?;
+        }
     }
     jump_camera(&mut app, opts.checkpoint.as_deref(), &mut camera)?;
     place_camera(&opts, &mut camera)?;
@@ -740,6 +813,36 @@ fn run() -> Result<i32, String> {
             app.take_load()?;
             if !app.loading() {
                 renderer.reset_lighting_cache();
+            }
+        }
+        if keep_session && !app.loading() {
+            // The opening scene is read: put the saved settings and camera
+            // back, once, when it is the scene they were saved for.
+            if let Some(saved) = saved_session.take() {
+                if saved.scene == app.entry().name {
+                    saved.restore(app.scene(), opts.preset.is_none() && !opts.full_effort);
+                    if opts.eye.is_none() && opts.look.is_none() && opts.checkpoint.is_none() {
+                        saved.place(&mut camera);
+                    }
+                    if let Some(speed) = saved.sun_speed {
+                        let _ = app.set_knob("sun_speed", speed);
+                    }
+                    menu_open = app.scene().menu.effective().visible;
+                }
+            }
+            // Written when it has changed, at most once a second, and on
+            // the way out.
+            if frame.closing || now.saturating_duration_since(session_at).as_secs_f32() >= SESSION_SECONDS {
+                session_at = now;
+                let name = app.entry().name.clone();
+                let speed = app.still_sun_speed;
+                let text = session::Session::of(&name, app.scene(), &camera, speed).to_text();
+                if text != session_text {
+                    match session::save(&opts.out, program().name, &text) {
+                        Ok(()) => session_text = text,
+                        Err(err) => eprintln!("{}: the session was not saved: {err}", program().name),
+                    }
+                }
             }
         }
         app.overlay_fog();
@@ -1133,12 +1236,20 @@ fn run() -> Result<i32, String> {
                 color: mesh_view::OVERLAY_COLOR,
             })
             .collect();
+        // The light gizmos (`DebugSettings::light_gizmos`), with the mesh
+        // viewer's lines when it is open.
+        #[cfg_attr(not(feature = "mesh"), expect(unused_mut, reason = "only the mesh viewer adds to it"))]
+        let mut lines = if app.scene_ref().debug.light_gizmos && !loading {
+            light_gizmo_lines(app.scene_ref(), &camera, [size.0 as f32, size.1 as f32])
+        } else {
+            Vec::new()
+        };
         #[cfg(feature = "mesh")]
         if app.mesh.is_some() {
-            let mut lines = gizmo_lines;
+            lines.extend(gizmo_lines);
             lines.extend(dragged);
-            renderer.set_overlay_lines(&lines);
         }
+        renderer.set_overlay_lines(&lines);
         if want_read && !tools.show_capture_overlay(capture_ui) {
             overlay.clear();
             renderer.set_overlay_lines(&[]);
@@ -1367,6 +1478,9 @@ struct App {
     load: Option<LoadJob>,
     /// What the last "Save look to scene" did. The Output page shows it.
     look_note: String,
+    /// How fast a still scene's suns turn (knob `sun_speed`): 0 keeps them
+    /// where the scene put them; 1 is a full turn in [`STILL_DAY_SECONDS`].
+    still_sun_speed: f64,
     /// Set while a mesh scene is open: the workspace file being followed.
     #[cfg(feature = "mesh")]
     mesh: Option<mesh_view::MeshView>,
@@ -1569,6 +1683,7 @@ impl App {
             log,
             load: None,
             look_note: String::new(),
+            still_sun_speed: 0.0,
             #[cfg(feature = "mesh")]
             mesh: None,
             #[cfg(feature = "mesh")]
@@ -1616,8 +1731,9 @@ impl App {
     }
 
     fn advance(&mut self, dt: f32) {
-        if let Show::Stress(stage) = &mut self.show {
-            stage.advance(dt);
+        match &mut self.show {
+            Show::Stress(stage) => stage.advance(dt),
+            Show::Still(world) => turn_still_suns(&mut world.scene, self.still_sun_speed * f64::from(dt)),
         }
         self.follow_mesh();
     }
@@ -2296,6 +2412,17 @@ impl Host for App {
                         text: view.pick_mode.clone(),
                     });
                 }
+                // A still scene's suns stand where the scene put them until
+                // this is raised (the stress scene has its own day clock).
+                let has_sun = (0..world.scene.light_len()).any(|i| {
+                    let d = world.scene.light(i).direction;
+                    d.x != 0.0 || d.y != 0.0 || d.z != 0.0
+                });
+                if has_sun {
+                    let mut speed = Knob::number("sun_speed", "Sun speed", self.still_sun_speed, (0.0, 64.0), 0.5, "");
+                    speed.text = format!("x{}", self.still_sun_speed);
+                    knobs.push(speed);
+                }
                 knobs
             }
         }
@@ -2440,6 +2567,10 @@ impl Host for App {
         match &mut self.show {
             Show::Stress(stage) => Host::set_knob(stage, name, value),
             Show::Still(world) => {
+                if name == "sun_speed" {
+                    self.still_sun_speed = value.clamp(0.0, 64.0);
+                    return Ok(());
+                }
                 if apply_particle_knob(&mut world.scene.particles, name, value)?
                     || apply_fog_knob(&mut world.scene.fog, name, value)?
                     || apply_lighting_knob(&mut world.scene.lighting, name, value)?
@@ -3347,7 +3478,7 @@ fn setting_piece(
             VIEWS.iter().map(|name| (*name).to_string()).collect(),
         )
         .map(Piece::Row),
-        "fps" => Some(Piece::Row(fps_row(fps))),
+        "fps" => Some(Piece::Row(fps_row(fps, app.scene_ref().debug.light_gizmos))),
         "enabled" => Some(Piece::Row(reflection_check(
             "enabled",
             ID_REFL_ENABLED,
@@ -3579,6 +3710,94 @@ fn setting_piece(
                 0.05,
                 5.0,
                 0.05,
+            )))
+        }
+        "hdr_adapt_strength" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt strength",
+                ID_HDR_ADAPT_STRENGTH,
+                hdr.adapt_strength,
+                0.0,
+                1.0,
+                0.05,
+            )))
+        }
+        "hdr_adapt_anchor_seconds" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt anchor seconds",
+                ID_HDR_ADAPT_ANCHOR,
+                hdr.adapt_anchor_seconds,
+                0.0,
+                60.0,
+                1.0,
+            )))
+        }
+        "hdr_adapt_knee_stops" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt knee stops",
+                ID_HDR_ADAPT_KNEE,
+                hdr.adapt_knee_stops,
+                0.0,
+                10.0,
+                0.25,
+            )))
+        }
+        "hdr_adapt_neutral_ev100" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt neutral EV100",
+                ID_HDR_ADAPT_NEUTRAL,
+                hdr.adapt_neutral_ev100,
+                -2e+01,
+                2e+01,
+                0.25,
+            )))
+        }
+        "hdr_adapt_dark_stops" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt dark stops",
+                ID_HDR_ADAPT_DARK,
+                hdr.adapt_dark_stops,
+                0e+00,
+                1e+01,
+                0.25,
+            )))
+        }
+        "hdr_adapt_bright_stops" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt bright stops",
+                ID_HDR_ADAPT_BRIGHT,
+                hdr.adapt_bright_stops,
+                0e+00,
+                1e+01,
+                0.25,
+            )))
+        }
+        "hdr_highlight_percentile" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Highlight percentile",
+                ID_HDR_HIGHLIGHT_PERCENTILE,
+                hdr.highlight_percentile,
+                0.5,
+                1.0,
+                0.01,
+            )))
+        }
+        "hdr_highlight_stops" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Highlight stops",
+                ID_HDR_HIGHLIGHT_STOPS,
+                hdr.highlight_stops,
+                0.5,
+                10.0,
+                0.25,
             )))
         }
         "hdr_transition" => {
@@ -3877,6 +4096,8 @@ fn menu_label(name: &str, fallback: &str) -> String {
         "lighting_shadow_filter" => "Shadow cell cache",
         "lighting_gi" => "GI",
         "lighting_emissive" => "Emissive",
+        "lighting_cone_cascades" => "Cone-traced cascades",
+        "lighting_cone_specular" => "Cone specular",
         "lighting_compose_reuse" => "Compose reuse",
         "lighting_full_effort" => "Full effort",
         _ => fallback,
@@ -3919,7 +4140,7 @@ fn reflection_slider(label: &str, id: u32, value: f64, min: f64, max: f64, step:
     }
 }
 
-fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
+fn fps_row(fps: &FpsCounterSettings, light_gizmos: bool) -> PanelRow {
     PanelRow {
         label: "FPS".into(),
         buttons: Vec::new(),
@@ -3932,12 +4153,103 @@ fn fps_row(fps: &FpsCounterSettings) -> PanelRow {
             format!("{:.0} Hz", fps.rate_hz),
         )),
         dropdown: None,
-        checks: vec![PanelCheck {
-            id: ID_FPS,
-            text: "Show".into(),
-            on: fps.enabled,
-        }],
+        checks: vec![
+            PanelCheck {
+                id: ID_FPS,
+                text: "Show".into(),
+                on: fps.enabled,
+            },
+            // The light gizmos (`DebugSettings::light_gizmos`).
+            PanelCheck {
+                id: ID_LIGHT_GIZMOS,
+                text: "Lights".into(),
+                on: light_gizmos,
+            },
+        ],
     }
+}
+
+/// Seconds a still scene's sun takes to go once round at `sun_speed` 1: the
+/// stress scene's default day.
+const STILL_DAY_SECONDS: f64 = 120.0;
+
+/// Turn each sun of a still scene by `seconds` of its day: about the level
+/// axis square to the way its rays travel, so it rises and sets along the
+/// line it already points down. A sun that points straight down turns about
+/// the x axis.
+fn turn_still_suns(scene: &mut genos_scene::Scene, seconds: f64) {
+    if seconds == 0.0 {
+        return;
+    }
+    let angle = seconds / STILL_DAY_SECONDS * std::f64::consts::TAU;
+    // The turn of one frame, as the lights' own f32.
+    let (sin, cos) = (format!("{}", angle.sin()).parse::<f32>().unwrap_or(0.0), format!("{}", angle.cos()).parse::<f32>().unwrap_or(1.0));
+    for i in 0..scene.light_len() {
+        let rays = scene.light(i).direction;
+        if rays.x == 0.0 && rays.y == 0.0 && rays.z == 0.0 {
+            continue;
+        }
+        let level = (rays.x * rays.x + rays.z * rays.z).sqrt();
+        // The level axis square to the rays: (z, 0, -x) over its length.
+        let axis = if level > 1.0e-4 { [rays.z / level, 0.0, -rays.x / level] } else { [1.0, 0.0, 0.0] };
+        // Rodrigues: v cos + (k x v) sin + k (k.v)(1 - cos).
+        let way = [rays.x, rays.y, rays.z];
+        let cross = [axis[1] * way[2] - axis[2] * way[1], axis[2] * way[0] - axis[0] * way[2], axis[0] * way[1] - axis[1] * way[0]];
+        let along = axis[0] * way[0] + axis[1] * way[1] + axis[2] * way[2];
+        let turned: [f32; 3] = std::array::from_fn(|at| way[at] * cos + cross[at] * sin + axis[at] * along * (1.0 - cos));
+        scene.light_mut(i).direction = Vec3::new(turned[0], turned[1], turned[2]);
+    }
+}
+
+/// Segments of a light gizmo's ring, its radius in metres, and the least it
+/// is drawn at in pixels.
+const LIGHT_RING_SEGMENTS: f32 = 24.0;
+const LIGHT_RING_METRES: f32 = 0.25;
+const LIGHT_RING_LEAST_PX: f32 = 6.0;
+/// How far a sun's gizmo line runs the way its rays travel (metres).
+const SUN_LINE_METRES: f32 = 1.5;
+
+/// A wire ring at every light of `scene` that is before the camera, in the
+/// light's colour (its brightest channel at full), with a cross at its
+/// middle; a sun also gets a line the way its rays travel. In window pixels.
+fn light_gizmo_lines(scene: &genos_scene::Scene, camera: &Camera, size: [f32; 2]) -> Vec<genos_render::ScreenLine> {
+    let matrix = genos_scene::view_proj(camera, size[0] / size[1].max(1.0));
+    // Window x, y and the clip w (the distance along the view) of a point.
+    let project = |point: [f32; 3]| -> Option<[f32; 3]> {
+        let row = |r: usize| matrix[r] * point[0] + matrix[4 + r] * point[1] + matrix[8 + r] * point[2] + matrix[12 + r];
+        let depth = row(3);
+        (depth > 1.0e-3).then(|| [f32::midpoint(row(0) / depth, 1.0) * size[0], f32::midpoint(row(1) / depth, 1.0) * size[1], depth])
+    };
+    let turn = std::f32::consts::TAU / LIGHT_RING_SEGMENTS;
+    let mut lines = Vec::new();
+    for i in 0..scene.light_len() {
+        let light = scene.light(i);
+        let at = [light.position.x, light.position.y, light.position.z];
+        let Some([mid_x, mid_y, depth]) = project(at) else { continue };
+        let peak = light.color.iter().copied().fold(0.0_f32, f32::max);
+        let color = if peak > 0.0 { light.color.map(|c| c / peak) } else { [0.5; 3] };
+        // A ring of LIGHT_RING_METRES at the light's distance (m[5] is the
+        // projection's vertical scale).
+        let radius = (LIGHT_RING_METRES * matrix[5].abs() / depth * size[1] * 0.5).max(LIGHT_RING_LEAST_PX);
+        let on_ring = |angle: f32| [mid_x + radius * angle.cos(), mid_y + radius * angle.sin()];
+        let mut angle = 0.0;
+        while angle < std::f32::consts::TAU - 0.5 * turn {
+            lines.push(genos_render::ScreenLine { a: on_ring(angle), b: on_ring(angle + turn), width: 2.0, color });
+            angle += turn;
+        }
+        let arm = radius * 0.35;
+        lines.push(genos_render::ScreenLine { a: [mid_x - arm, mid_y], b: [mid_x + arm, mid_y], width: 1.5, color });
+        lines.push(genos_render::ScreenLine { a: [mid_x, mid_y - arm], b: [mid_x, mid_y + arm], width: 1.5, color });
+        let rays = light.direction;
+        let long = (rays.x * rays.x + rays.y * rays.y + rays.z * rays.z).sqrt();
+        if long > 0.0 {
+            let scale = SUN_LINE_METRES / long;
+            if let Some([end_x, end_y, _]) = project([at[0] + rays.x * scale, at[1] + rays.y * scale, at[2] + rays.z * scale]) {
+                lines.push(genos_render::ScreenLine { a: [mid_x, mid_y], b: [end_x, end_y], width: 2.0, color });
+            }
+        }
+    }
+    lines
 }
 
 /// The words on the Output page's save button.
@@ -4020,6 +4332,38 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
         app.scene().hdr.set_key("adapt_down", &format!("{value}"))?;
     } else if id == ID_HDR_ADAPT_UP {
         app.scene().hdr.set_key("adapt_up", &format!("{value}"))?;
+    } else if id == ID_HDR_ADAPT_STRENGTH {
+        app.scene()
+            .hdr
+            .set_key("adapt_strength", &format!("{}", value.clamp(0.0, 1.0)))?;
+    } else if id == ID_HDR_ADAPT_KNEE {
+        app.scene()
+            .hdr
+            .set_key("adapt_knee_stops", &format!("{}", value.clamp(0.0, 10.0)))?;
+    } else if id == ID_HDR_ADAPT_NEUTRAL {
+        app.scene()
+            .hdr
+            .set_key("adapt_neutral_ev100", &format!("{}", value.clamp(-2e+01, 2e+01)))?;
+    } else if id == ID_HDR_ADAPT_DARK {
+        app.scene()
+            .hdr
+            .set_key("adapt_dark_stops", &format!("{}", value.clamp(0e+00, 1e+01)))?;
+    } else if id == ID_HDR_ADAPT_BRIGHT {
+        app.scene()
+            .hdr
+            .set_key("adapt_bright_stops", &format!("{}", value.clamp(0e+00, 1e+01)))?;
+    } else if id == ID_HDR_ADAPT_ANCHOR {
+        app.scene()
+            .hdr
+            .set_key("adapt_anchor_seconds", &format!("{}", value.clamp(0.0, 60.0)))?;
+    } else if id == ID_HDR_HIGHLIGHT_PERCENTILE {
+        app.scene()
+            .hdr
+            .set_key("highlight_percentile", &format!("{}", value.clamp(0.5, 1.0)))?;
+    } else if id == ID_HDR_HIGHLIGHT_STOPS {
+        app.scene()
+            .hdr
+            .set_key("highlight_stops", &format!("{}", value.clamp(0.5, 10.0)))?;
     } else if id == ID_HDR_TRANSITION {
         app.scene()
             .hdr
@@ -4145,6 +4489,10 @@ fn toggle(app: &mut App, id: u32, on: bool) -> Result<(), String> {
         app.scene()
             .fps_counter
             .set_key("enabled", if on { "1" } else { "0" })?;
+        return Ok(());
+    }
+    if id == ID_LIGHT_GIZMOS {
+        app.scene().debug.light_gizmos = on;
         return Ok(());
     }
     if id == ID_REFL_ENABLED || id == ID_REFL_WATER {
@@ -4306,6 +4654,7 @@ fn need_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Strin
 fn options() -> Result<Options, String> {
     let mut args = std::env::args().skip(1).peekable();
     let mut scene = std::env::var("GENOS_SCENE").ok();
+    let mut session = None;
     let mut checkpoint = None;
     let mut eye = None;
     let mut look = None;
@@ -4390,6 +4739,13 @@ fn options() -> Result<Options, String> {
                 );
             }
             "--check" => check = true,
+            "--session" => {
+                session = Some(match need_arg(&mut args, "--session")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => return Err(format!("--session takes on or off, not {other}")),
+                });
+            }
             "--fps-counter" => {
                 if args.peek().is_some_and(|next| !next.starts_with('-')) {
                     let value = args.next().unwrap();
@@ -4497,7 +4853,7 @@ fn options() -> Result<Options, String> {
         }
     });
     Ok(Options {
-        scene: scene.map_or_else(
+        scene: scene.clone().map_or_else(
             || program().default_scene.to_string(),
             |name| genos_scene_lib::canonical(&name).to_string(),
         ),
@@ -4518,6 +4874,12 @@ fn options() -> Result<Options, String> {
         ui,
         out,
         out_set: out_cli.is_some(),
+        scene_set: scene.is_some(),
+        session: session.or_else(|| match std::env::var("GENOS_SESSION").ok().as_deref() {
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            _ => None,
+        }),
         size,
         check,
         mcp_port,
@@ -4720,6 +5082,8 @@ mod tests {
             ui: false,
             out: std::path::PathBuf::from("genos-debug"),
             out_set: false,
+            scene_set: false,
+            session: None,
             size: (320, 180),
             check: false,
             mcp_port: None,

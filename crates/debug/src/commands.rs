@@ -33,7 +33,7 @@ pub fn section_of(name: &str) -> &'static str {
         "mesh"
     } else if has(&["reflection", "hdr", "fog", "particle", "material"]) || name.starts_with("fx") {
         "render"
-    } else if has(&["lighting", "preset", "gi_metrics", "level0"]) || name == "lights" || name == "light" {
+    } else if has(&["lighting", "preset", "gi_metrics", "level0", "cone"]) || name == "lights" || name == "light" {
         "lighting"
     } else if has(&["capture", "luminance", "flicker", "reference", "compare"]) || ["view", "diff", "timing"].contains(&name) {
         "capture"
@@ -180,11 +180,11 @@ fn plain_specs() -> Vec<CommandSpec> {
         ),
         spec(
             "get_debug_settings",
-            "The debug output directory in force (text form) and whether captures keep the UI. --out wins over GENOS_UNFILLED_DIR, which wins over the scene value. The default directory is genos-debug/unfilled under the working directory. ui defaults to false: a capture leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
+            "The debug output directory in force (text form) whether captures keep the UI, and light_gizmos (wire circles at the lights). --out wins over GENOS_UNFILLED_DIR, which wins over the scene value. The default directory is genos-debug/unfilled under the working directory. ui defaults to false: a capture leaves out the debug menu, the menu tab, the frame-rate plate, and tool overlays.",
         ),
         spec(
             "set_debug_settings",
-            "Partial debug-output update. Key out is the unfilled directory. Key ui is on or off (default off) and is the capture default. A capture command's ui argument overrides it for that shot. A text field overlays key=value lines. Writes the scene. --out and GENOS_UNFILLED_DIR still overlay the directory used for the next save. --ui forces ui on.",
+            "Partial debug-output update. Key out is the unfilled directory. Key ui is on or off (default off) and is the capture default. Key light_gizmos is on or off (default off): a wire circle at every light, in its colour, and a line the way a sun's rays travel; the debug menu's FPS row has the same switch (Lights). A capture command's ui argument overrides it for that shot. A text field overlays key=value lines. Writes the scene. --out and GENOS_UNFILLED_DIR still overlay the directory used for the next save. --ui forces ui on.",
         ),
         spec(
             "get_fps_counter",
@@ -204,6 +204,7 @@ fn plain_specs() -> Vec<CommandSpec> {
         ),
     ]
     .into_iter()
+    .chain(cone_specs())
     .chain(under_trusted_specs())
     .chain(reflection_specs())
     .chain(hdr_specs())
@@ -213,6 +214,15 @@ fn plain_specs() -> Vec<CommandSpec> {
     .chain(host_specs())
     .chain(material_specs())
     .collect()
+}
+
+/// The cone-traced cascades' probes (`debug-standard.md`, "Cone-traced cascades probes").
+fn cone_specs() -> Vec<CommandSpec> {
+    vec![
+        spec("cone_stats", "The cone-traced cascades' counts from the last frame, one entry per cascade: probes the hash held, cap (the probe table size), dropped_compact (probes past the cap, never traced), dropped_insert (pixels whose probe found no hash slot), cones_traced, cones_closed, seat_fallbacks (probes whose voxel the field had no surface for, seated at the cell centre); lamp_dropped, the lamp points the per-frame lamp hash had no slot for; specular_pixels, the pixels with metal that were marched a specular cone (cone_cascades.specular; 0 when it is off); and field, the resident voxel field (points, voxels, bricks, MiB, build seconds; its fine levels are clip volumes about the eye, built again when it moves 2 m). Empty when cone mode has not run. Waits for that frame."),
+        spec("cone_pick", "What the pixel at x, y read in the cone shade: lo and hi (its probe levels), hi_weight, position, normal, face (the axis way it faces), field_sun (the sun share of the voxels about it), irradiance, and for each level the eight probes about it: in_hash, seated (on its face's surface, not the cell centre), own (the pixel's own cell), surface (the field has a surface that way there), weight (trilinear), passed (the share that passes from the pixel to the seat; -1 when not tested), dark_dirs and lit_dirs (its directions without and with light), mean_luma, outward_luma (the mean luma of the directions that leave its surface), mean_open (the mean share its own cones passed on to the next cascade; 0 when every cone met a surface inside cascade 0's reach), seat. kept is the probes the pixel read. The first call for a pixel replies pending: true; call again after a frame. Reply only; writes no file. The views cone_cascades.view=coverage and =dark show the same over the whole picture."),
+        spec("cone_probes", "One cascade's probes from the last frame (cascade, default 0): key, lod, cell, pixels, seat. around [x,y,z] and radius (default 2 m) keep the probes whose seat is that near. Waits for that frame. Reply only; writes no file."),
+    ]
 }
 
 fn under_trusted_specs() -> Vec<CommandSpec> {
@@ -253,11 +263,11 @@ fn hdr_specs() -> Vec<CommandSpec> {
     vec![
         spec(
             "get_hdr_settings",
-            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --adapt-down, --adapt-up, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, --output, and --hdr-transition win over GENOS_HDR_*. --out wins over GENOS_HDR_OUT. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
+            "The HDR settings in force (text form). --exposure-mode, --ev100, --compensation, --iso, --aperture, --shutter, --adapt-down, --adapt-up, --adapt-strength, --highlight-percentile, --highlight-stops, --hdr-display, --bloom, --bloom-intensity, --bloom-levels, --output, and --hdr-transition win over GENOS_HDR_*. --out wins over GENOS_HDR_OUT. A GENOS_HDR_* mirror applies only when that argument was omitted. --display selects the transform only when its value is agx, aces, or legacy; otherwise it is the Wayland display name.",
         ),
         spec(
             "set_hdr_settings",
-            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, transition, legacy_bytes). transition is the seconds a change of ev100, compensation, or the bloom intensity takes to reach the picture; 0 applies it on the next frame. A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
+            "Partial HDR update. Keys match the settings text (exposure_mode, ev100, compensation, iso, aperture, shutter, adapt_down, adapt_up, adapt_strength, adapt_anchor_seconds, adapt_knee_stops, adapt_neutral_ev100, adapt_dark_stops, adapt_bright_stops, highlight_percentile, highlight_stops, histogram_bins, display, bloom, bloom_intensity, bloom_levels, output, transition, legacy_bytes). transition is the seconds a change of ev100, compensation, or the bloom intensity takes to reach the picture; 0 applies it on the next frame. A text field overlays key=value lines. Writes the scene. The arguments and GENOS_HDR_* mirrors still overlay the value the next draw uses.",
         ),
         spec(
             "save_hdr_to_scene",

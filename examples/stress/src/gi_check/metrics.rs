@@ -422,6 +422,7 @@ pub fn score_view(
     let mut dist = vec![99u32; w * h];
     let mut cur = contact.clone();
     for r in 0..33 {
+        #[allow(clippy::needless_range_loop, reason = "the index reads parallel arrays; clippy 1.99 flags it and 1.100 does not")]
         for i in 0..w * h {
             if cur.v[i] && dist[i] == 99 {
                 dist[i] = r;
@@ -434,6 +435,7 @@ pub fn score_view(
     let grf = blur(&reference, 1.0);
     let ring = |a: u32, b: u32| {
         let (mut e, mut t, mut n) = (0.0, 0.0, 0usize);
+        #[allow(clippy::needless_range_loop, reason = "the index reads parallel arrays; clippy 1.99 flags it and 1.100 does not")]
         for i in 0..w * h {
             if clean.v[i] && dist[i] >= a && dist[i] <= b {
                 e += (gl.v[i] - grf.v[i]).abs();
@@ -523,6 +525,7 @@ pub fn rel_error(a: &Plane, b: &Plane) -> Plane {
         }
     }
     let mut e = Plane::new(w, h);
+    #[allow(clippy::needless_range_loop, reason = "the index reads parallel arrays; clippy 1.99 flags it and 1.100 does not")]
     for i in 0..w * h {
         e.v[i] = if off[i] { 0.0 } else { a.v[i] - b.v[i] };
     }
@@ -627,6 +630,7 @@ pub fn vacated(now: &Plane, before: &[&Plane], grow: usize) -> Vec<bool> {
 /// Relative error of `a` against `b` inside `mask`.
 pub fn masked_err(a: &Plane, b: &Plane, mask: &[bool]) -> f64 {
     let (mut e, mut t) = (0.0, 0.0);
+    #[allow(clippy::needless_range_loop, reason = "the index reads parallel arrays; clippy 1.99 flags it and 1.100 does not")]
     for i in 0..a.v.len() {
         if mask[i] {
             e += (a.v[i] - b.v[i]).abs();
@@ -711,6 +715,7 @@ pub fn world_swim(a: &Plane, b: &Plane, yaw_a: f64, yaw_b: f64, pitch: f64, s: f
     let (wa, ok) = warp_yaw(a, yaw_a, yaw_b, pitch);
     let mut e = Plane::new(b.w, b.h);
     let mut m = Plane::new(b.w, b.h);
+    #[allow(clippy::needless_range_loop, reason = "the index reads parallel arrays; clippy 1.99 flags it and 1.100 does not")]
     for i in 0..b.v.len() {
         if ok[i] {
             m.v[i] = 1.0;

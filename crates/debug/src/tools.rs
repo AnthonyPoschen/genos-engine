@@ -175,6 +175,10 @@ impl Path {
 #[derive(Clone, Debug, Default)]
 struct LightEdit {
     off: bool,
+    /// The colour the light had when it was turned off. A scene that keeps
+    /// its lights from frame to frame (a still scene) has no other record of
+    /// it: turned on again, the lamp stayed black.
+    was: Option<[f32; 3]>,
     color: Option<[f32; 3]>,
     intensity: Option<f32>,
     position: Option<Vec3>,
@@ -182,7 +186,14 @@ struct LightEdit {
 }
 
 impl LightEdit {
-    fn apply(&self, light: &mut Light, frame: u64) {
+    fn apply(&mut self, light: &mut Light, frame: u64) {
+        if !self.off {
+            if let Some(was) = self.was.take() {
+                if light.color.iter().all(|c| *c == 0.0) {
+                    light.color = was;
+                }
+            }
+        }
         if let Some(path) = &self.path {
             light.position = path.at(frame);
         } else if let Some(p) = self.position {
@@ -195,6 +206,9 @@ impl LightEdit {
             light.color = light.color.map(|c| c * k);
         }
         if self.off {
+            if light.color.iter().any(|c| *c != 0.0) {
+                self.was = Some(light.color);
+            }
             light.color = [0.0; 3];
         }
     }
@@ -921,14 +935,15 @@ impl Tools {
 
     fn apply_edits(&mut self, scene: &mut Scene) {
         self.base_lights = scene.light_len();
-        for (index, edit) in &self.lights {
+        let frame = self.frame;
+        for (index, edit) in &mut self.lights {
             if let Some(light) = scene.light_at_mut(*index) {
-                edit.apply(light, self.frame);
+                edit.apply(light, frame);
             }
         }
-        for (light, edit) in &self.added {
+        for (light, edit) in &mut self.added {
             let mut light = light.clone();
-            edit.apply(&mut light, self.frame);
+            edit.apply(&mut light, frame);
             scene.push_light(light);
         }
         if let Some(keep) = self.solo {
@@ -1612,6 +1627,119 @@ impl Tools {
                 }))
             }
             "timing" => reply(self.timing_value(args.u32("frames")?.unwrap_or(60) as usize)),
+            "cone_stats" => {
+                let stats = ctx.renderer.cone_stats()?;
+                let items = stats
+                    .iter()
+                    .enumerate()
+                    .map(|(c, s)| {
+                        obj(vec![
+                            ("cascade", num(c as f64)),
+                            ("probes", num(f64::from(s.probes))),
+                            ("cap", num(f64::from(s.cap))),
+                            ("dropped_compact", num(f64::from(s.dropped_compact))),
+                            ("dropped_insert", num(f64::from(s.dropped_insert))),
+                            ("cones_traced", num(f64::from(s.cones_traced))),
+                            ("cones_closed", num(f64::from(s.cones_closed))),
+                            ("cones_kept", num(f64::from(s.cones_kept))),
+                            ("seat_fallbacks", num(f64::from(s.seat_fallbacks))),
+                        ])
+                    })
+                    .collect();
+                let lamp_dropped = ctx.renderer.cone_lamp_drops()?;
+                let map_tiles = ctx.renderer.cone_map_tiles()?;
+                let specular_pixels = ctx.renderer.cone_specular_pixels()?;
+                let passes = ctx.renderer.cone_pass_ms();
+                let total: f64 = passes.iter().map(|(_, ms)| ms).sum();
+                let mut pass_ms: Vec<(&str, Value)> = passes.iter().map(|(name, ms)| (*name, num(*ms))).collect();
+                pass_ms.push(("total", num(total)));
+                reply(obj(vec![
+                    ("cascades", list(items)),
+                    ("pass_ms", obj(pass_ms)),
+                    ("lamp_dropped", num(f64::from(lamp_dropped))),
+                    ("map_tiles_asked", list(map_tiles[0].iter().map(|n| num(f64::from(*n))).collect())),
+                    ("map_tiles_traced", list(map_tiles[1].iter().map(|n| num(f64::from(*n))).collect())),
+                    ("specular_pixels", num(f64::from(specular_pixels))),
+                    ("field", text(ctx.renderer.cone_field_report())),
+                ]))
+            }
+            "cone_pick" => {
+                let x = args.u32("x")?.ok_or("cone_pick needs x")?;
+                let y = args.u32("y")?.ok_or("cone_pick needs y")?;
+                let Some(pick) = ctx.renderer.cone_pick(x, y)? else {
+                    return reply(obj(vec![("pending", Value::Bool(true))]));
+                };
+                let f3 = |v: [f32; 3]| list(v.iter().map(|c| num(f64::from(*c))).collect());
+                let levels = pick
+                    .levels
+                    .iter()
+                    .map(|l| {
+                        let probes = l
+                            .probes
+                            .iter()
+                            .map(|p| {
+                                obj(vec![
+                                    ("in_hash", Value::Bool(p.state != genos_render::ConePickState::Absent)),
+                                    ("seated", Value::Bool(p.state == genos_render::ConePickState::Seated)),
+                                    ("own", Value::Bool(p.own)),
+                                    ("surface", Value::Bool(p.surface)),
+                                    ("weight", num(f64::from(p.weight))),
+                                    ("passed", num(f64::from(p.passed))),
+                                    ("dark_dirs", num(f64::from(p.dark_dirs))),
+                                    ("lit_dirs", num(f64::from(p.lit_dirs))),
+                                    ("mean_luma", num(f64::from(p.mean_luma))),
+                                    ("mean_open", num(f64::from(p.mean_open))),
+                                    ("outward_luma", num(f64::from(p.outward_luma))),
+                                    ("seat", f3(p.seat)),
+                                ])
+                            })
+                            .collect();
+                        obj(vec![
+                            ("lod", num(f64::from(l.lod))),
+                            ("kept", num(f64::from(l.kept))),
+                            ("own", list(l.own.iter().map(|v| num(f64::from(*v))).collect())),
+                            ("probes", list(probes)),
+                        ])
+                    })
+                    .collect();
+                reply(obj(vec![
+                    ("lo", num(f64::from(pick.lo))),
+                    ("hi", num(f64::from(pick.hi))),
+                    ("hi_weight", num(f64::from(pick.hi_weight))),
+                    ("position", f3(pick.position)),
+                    ("normal", f3(pick.normal)),
+                    ("face", num(f64::from(pick.face))),
+                    ("field_sun", num(f64::from(pick.field_sun))),
+                    ("irradiance", f3(pick.irradiance)),
+                    ("levels", list(levels)),
+                ]))
+            }
+            "cone_probes" => {
+                let cascade = args.u32("cascade")?.unwrap_or(0);
+                let around = args.vec3("around")?;
+                let radius = args.f32("radius")?.unwrap_or(2.0);
+                let probes = ctx.renderer.cone_probes(cascade)?;
+                let items = probes
+                    .iter()
+                    .filter(|p| {
+                        around.is_none_or(|a| {
+                            let d = [p.seat[0] - a.x, p.seat[1] - a.y, p.seat[2] - a.z];
+                            d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= radius * radius
+                        })
+                    })
+                    .map(|p| {
+                        obj(vec![
+                            ("key", num(f64::from(p.key))),
+                            ("lod", num(f64::from(p.lod))),
+                            ("face", num(f64::from(p.face))),
+                            ("cell", list(p.cell.iter().map(|v| num(f64::from(*v))).collect())),
+                            ("pixels", num(f64::from(p.pixels))),
+                            ("seat", list(p.seat.iter().map(|v| num(f64::from(*v))).collect())),
+                        ])
+                    })
+                    .collect();
+                reply(obj(vec![("cascade", num(f64::from(cascade))), ("probes", list(items))]))
+            }
             "level0_voxels" => {
                 let around = args.vec3("around")?.ok_or("level0_voxels needs around [x,y,z]")?;
                 let radius = args.f32("radius")?.unwrap_or(0.75);

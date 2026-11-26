@@ -5,11 +5,11 @@ use std::process::Command;
 
 fn main() {
     let out = std::env::var("OUT_DIR").expect("OUT_DIR");
-    let src = "shaders/cone.comp";
+    let src = "shaders/cascade.comp";
     println!("cargo:rerun-if-changed={src}");
     let status = Command::new("glslc")
         .args(["--target-env=vulkan1.2", "-O", src, "-o"])
-        .arg(format!("{out}/cone.spv"))
+        .arg(format!("{out}/cascade.spv"))
         .status()
         .expect("glslc");
     assert!(status.success(), "glslc failed for {src}");

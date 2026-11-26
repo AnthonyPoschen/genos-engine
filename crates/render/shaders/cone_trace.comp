@@ -1,0 +1,112 @@
+#version 450
+// Cone-traced cascades, pass 4: one cone for each probe and direction of
+// cascade params.x, over that cascade's own interval, from the probe's start
+// on the voxel layer. A cone the chain closed before its interval (the finer
+// probes on its chain passed under 2% in the bins that hold it) is not
+// traced; its record is written dark and closed.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+void main() {
+    int c = int(pc.params.x);
+    int count = int(pc.params.z);
+    uint dirs = cone_dirs(c);
+    uint index = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint probe = index / dirs;
+    uint bin = index % dirs;
+    if (probe >= min(cwork.w[CONE_COUNTS + uint(c)], cone_cap(c))) {
+        return;
+    }
+    uint r = cone_probe(c, probe);
+    vec3 dir = cone_bin_dir(bin, cone_theta(c));
+    uint at = cone_record_at(c, probe, bin);
+    // A probe that stood here last frame keeps its cones until its turn: one
+    // frame in `period` (push lamp.w, from the frame's time: the cones carry
+    // the bounce, which has a short history, and the sky; the lamps are
+    // steered every frame). What is kept is the cone's own record; the merge
+    // is done again every frame. The probe's lamp targets are kept with it
+    // (its cones are what find them).
+    if (cone_keeps(r)) {
+        uint before = cone_prev_find(c, int(cwork.w[r + 1u]), ivec3(int(cwork.w[r + 4u]), int(cwork.w[r + 5u]), int(cwork.w[r + 6u])), cone_key_face(cwork.w[r]));
+        if (before != CONE_NO_BRICK) {
+            uint from_ = cone_prev_cones_at(c) + (before * dirs + bin) * CONE_CONE_WORDS;
+            if (unpackHalf2x16(cwork.w[from_ + 3u]).y > CONE_HALF) {
+                cwork.w[at] = cwork.w[from_];
+                cwork.w[at + 1u] = cwork.w[from_ + 1u];
+                cwork.w[at + 2u] = cwork.w[from_ + 2u];
+                cwork.w[at + 3u] = cwork.w[from_ + 3u];
+                if (bin == 0u) {
+                    uint theirs = cone_prev_targets_of(c, before);
+                    uint own = cone_targets_of(c, probe);
+                    for (uint k = 0u; k < CONE_TARGETS; k++) {
+                        uint id = cwork.w[theirs + k];
+                        if (id == 0u) {
+                            break;
+                        }
+                        cone_target_add(own, id);
+                    }
+                }
+                atomicAdd(cwork.w[CONE_KEPT + uint(c)], 1u);
+                return;
+            }
+        }
+    }
+    float open = 1.0;
+    uint t = cwork.w[r + 2u];
+    int k = c;
+    while (k > 0 && t != CONE_NO_BRICK && open >= CONE_OPEN_MIN) {
+        k--;
+        vec3 l;
+        float through;
+        vec3 m;
+        if (cone_get(cone_record_at(k, t, cone_dir_bin(dir, cone_theta(k))), l, through, m)) {
+            open *= through;
+        } else {
+            open = 0.0;
+        }
+        t = cwork.w[cone_probe(k, t) + 2u];
+    }
+    if (open < CONE_OPEN_MIN) {
+        // Closed: no light, nothing passes. Written, not left out, so the
+        // merge reads the same whether the chain's child was on screen to
+        // close it or the cone was traced into the wall.
+        cone_put(at, vec3(0.0), 0.0, vec3(0.0));
+        atomicAdd(cwork.w[CONE_CLOSED + uint(c)], 1u);
+        return;
+    }
+    float finest = cone_size(CONE_FINEST);
+    vec3 start = cone_word3(r + 12u) + cone_word3(r + 16u) * CONE_LIFT * finest;
+    float t0 = uintBitsToFloat(pc.lamp.y) * cone_spacing(int(cwork.w[r + 3u]), 0);
+    float from = c == 0 ? CONE_START_GAP * finest : t0 * pow(CONE_GROWTH, float(c - 1));
+    // A world probe's last cascade is CONE_WORLD_CASCADES - 1: past its
+    // interval it takes the sky, as the last cascade does.
+    bool world = (cwork.w[r + CONE_PROBE_SEATED] & CONE_FLAG_WORLD) != 0u;
+    int probe_lod = int(cwork.w[r + 1u]);
+    bool last = c + 1 == count || (world && c + 1 == CONE_WORLD_CASCADES) || probe_lod + c >= CONE_COARSEST;
+    // The last cascade marches to the reach (the world probes' stop at their
+    // interval and take the sky past it).
+    float end = c + 1 == count || (!world && last) ? CONE_REACH : t0 * pow(CONE_GROWTH, float(c));
+    float theta0 = float(pc.params.y);
+    float width = sqrt(CONE_SPHERE / (CONE_HALVES * theta0 * theta0)) / float(1 << c);
+    float covered = 0.0;
+    vec3 light = vec3(0.0);
+    // A cone that leaves its probe's surface is not covered by what lies
+    // behind that surface (cone_common.glsl cone_horizon_on).
+    vec3 way = cone_word3(r + 16u);
+    cone_horizon_on = dot(dir, way) > 0.0;
+    cone_horizon_at = cone_word3(r + 12u);
+    cone_horizon_n = way;
+    // No voxel coarser than CONE_MOST_OVER levels over this cascade's probe
+    // spacing (cone_common.glsl cone_most_level).
+    cone_most_level = clamp(probe_lod + c + CONE_MOST_OVER, CONE_FINEST, CONE_COARSEST);
+    cone_march(start, dir, width, from, end, covered, light);
+    float through = 1.0 - covered;
+    if (last) {
+        light += scene.sky.rgb * through;
+        through = 0.0;
+    }
+    cone_put(at, light, through, dir * dot(light, CONE_LUMA));
+    atomicAdd(cwork.w[CONE_TRACED + uint(c)], 1u);
+}

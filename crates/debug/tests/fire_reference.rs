@@ -46,8 +46,8 @@ fn the_fire_floor_reference() {
     for py in y - 1..=y + 1 {
         for px in x - 1..=x + 1 {
             let i = ((py * width + px) * 3) as usize;
-            for c in 0..3 {
-                sum[c] += f32::from(reference.image.rgb[i + c]) / 9.0;
+            for (s, v) in sum.iter_mut().zip(&reference.image.rgb[i..i + 3]) {
+                *s += f32::from(*v) / 9.0;
             }
         }
     }

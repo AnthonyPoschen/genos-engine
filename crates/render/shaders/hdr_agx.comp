@@ -100,21 +100,26 @@ vec3 rec2020_from_rec709(vec3 c) {
     );
 }
 
+// A display colour's nits: the whole colour scaled by the factor its
+// brightest channel takes (nits_of), so the stretch above graphics white
+// keeps its hue. Per channel, a warm white's red stretched toward the peak
+// while its blue stayed under white, and a lamp's highlight went orange-red
+// on an HDR display (Anthony, 25 Nov 2026).
+vec3 nits_of_colour(vec3 linear, float white) {
+    float top = max(max(linear.r, linear.g), linear.b);
+    if (!(top > 0.0)) {
+        return vec3(0.0);
+    }
+    return max(linear, vec3(0.0)) * (nits_of(top, white) / top);
+}
+
 vec3 hdr10_of(vec3 linear, float white) {
-    vec3 rec2020 = rec2020_from_rec709(linear);
-    return vec3(
-        pq_st2084(nits_of(rec2020.r, white)),
-        pq_st2084(nits_of(rec2020.g, white)),
-        pq_st2084(nits_of(rec2020.b, white))
-    );
+    vec3 rec2020 = rec2020_from_rec709(nits_of_colour(linear, white));
+    return vec3(pq_st2084(rec2020.r), pq_st2084(rec2020.g), pq_st2084(rec2020.b));
 }
 
 vec3 scrgb_of(vec3 linear, float white) {
-    return vec3(
-        nits_of(linear.r, white),
-        nits_of(linear.g, white),
-        nits_of(linear.b, white)
-    ) / SCRGB_NITS;
+    return nits_of_colour(linear, white) / SCRGB_NITS;
 }
 
 uint pack_a2b10(vec3 code) {

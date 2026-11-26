@@ -1,0 +1,69 @@
+#version 450
+// Cone-traced cascades, pass 1b: each probe of cascade params.x - 1 puts in
+// cascade params.x's hash the probes it reads in the merge (pass 5): its
+// parent, and below CONE_PARENT_ONLY the eight cells trilinear about its
+// cell's centre that have a surface in the field. So a probe's merge reads
+// the same probes whatever is on screen. Runs after that cascade's compact.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+void main() {
+    int c = int(pc.params.x);
+    uint i = gl_GlobalInvocationID.x;
+    if (c < 1 || i >= min(cwork.w[CONE_COUNTS + uint(c - 1)], cone_cap(c - 1))) {
+        return;
+    }
+    uint r = cone_probe(c - 1, i);
+    int lod = int(cwork.w[r + 1u]);
+    ivec3 cell = ivec3(int(cwork.w[r + 4u]), int(cwork.w[r + 5u]), int(cwork.w[r + 6u]));
+    vec3 centre = (vec3(cell) + CONE_HALF) * cone_spacing(lod, c - 1);
+    float s = cone_spacing(lod, c);
+    ivec3 own = ivec3(floor(centre / s));
+    // A probe the field had no seat for (a mover, left out of the field)
+    // puts in its parent alone, whether or not the field has a surface there:
+    // without one it had no coarser cascade, its light ended at cascade 0's
+    // reach, and a moving box went black (Anthony, 25 Nov 2026). It spreads
+    // to no neighbour: whether it is there follows what is on screen.
+    uint flags = cwork.w[r + CONE_PROBE_SEATED];
+    if ((flags & CONE_FLAG_SEATED) == 0u) {
+        if (lod + c <= CONE_COARSEST) {
+            uint slot = cone_insert_probe(c, lod, own, cone_key_face(cwork.w[r]));
+            if (slot != CONE_NO_BRICK) {
+                atomicAdd(cwork.w[slot + 1u], cwork.w[r + 7u]);
+                cone_mark_screen(slot);
+            }
+        }
+        return;
+    }
+    // A world probe is traced on CONE_WORLD_CASCADES cascades only, and no
+    // probe has a cascade coarser than the field's coarsest voxel: past it a
+    // cone reads 8 m voxels whatever its spacing (cone_trace.comp makes the
+    // last one there the probe's last).
+    bool world = (flags & CONE_FLAG_WORLD) != 0u;
+    if ((world && c >= CONE_WORLD_CASCADES) || lod + c > CONE_COARSEST) {
+        return;
+    }
+    uint screen = world ? 0u : 1u;
+    int face = cone_key_face(cwork.w[r]);
+    if (cone_probe_wanted(lod, c, own, face)) {
+        uint slot = cone_insert_probe(c, lod, own, face);
+        if (slot != CONE_NO_BRICK) {
+            atomicAdd(cwork.w[slot + 1u], cwork.w[r + 7u]);
+            if (screen != 0u) {
+                cone_mark_screen(slot);
+            }
+        }
+    }
+    ivec3 base = cone_trilinear_base(centre, s);
+    for (int k = 0; k < 8 && c < CONE_PARENT_ONLY; k++) {
+        ivec3 near = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        if (near != own && cone_probe_wanted(lod, c, near, face)) {
+            uint slot_near = cone_insert_probe(c, lod, near, face);
+            if (slot_near != CONE_NO_BRICK && screen != 0u) {
+                cone_mark_screen(slot_near);
+            }
+        }
+    }
+}

@@ -1,0 +1,39 @@
+#version 450
+// Cone-traced cascades, pass 7: the gather. One pixel of each square of
+// `scale` by `scale` pixels (push lamp.w: cone_cascades.shade_scale; the
+// square's middle pixel) gathers its probe light (cone_gather.glsl): the
+// cosine-weighted sum of the merged cascade-0 cones of the voxel-layer
+// probes around it, each weighted by the share that passes from the pixel
+// to its seat. It goes to the gather grid in the work buffer, which the
+// resolve pass (cone_resolve.comp) spreads to every pixel. The probes are
+// `probe_px` pixels apart, so their light changes slowly over a few pixels;
+// gathered at every pixel it was a third of the frame at 3406x1376.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+#include "cone_gather.glsl"
+
+void main() {
+    uint scale = max(pc.lamp.w, 1u);
+    uvec2 cells = cone_gather_cells(scale);
+    uvec2 cell = gl_GlobalInvocationID.xy;
+    if (any(greaterThanEqual(cell, cells))) {
+        return;
+    }
+    uvec2 p = cone_gather_pixel(cell, scale);
+    uint slot = cone_gather_at() + (cell.y * cells.x + cell.x) * CONE_GATHER_WORDS;
+    vec3 pos;
+    vec3 n;
+    vec3 albedo;
+    bool two_sided;
+    if (!lighting_surface(p, pos, n, albedo, two_sided)) {
+        cwork.w[slot] = CONE_GATHER_NONE;
+        return;
+    }
+    uint word = lighting_pack_rgb9e5(cone_pixel_gather(p.y * pc.dims.x + p.x, pos, n, true));
+    cwork.w[slot] = word == CONE_GATHER_NONE ? word - 1u : word;
+    for (uint k = 0u; k < CONE_PIXEL_LAMPS; k++) {
+        cwork.w[slot + 1u + k] = cone_lamp_word(gather_lamp[k], gather_seen[k]);
+    }
+}

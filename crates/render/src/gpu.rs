@@ -1244,6 +1244,7 @@ impl Renderer {
         self.gpu.wire_on = wireframe;
         self.gpu.copy_picture = readback || self.keep_pictures;
         self.gpu.sync_lighting_settings(&world.scene)?;
+        self.gpu.sync_cone(world, [camera.position.x, camera.position.y, camera.position.z])?;
         self.gpu.set_froxel_frame(&world.scene, camera, aspect);
         if !self.gpu.record_and_submit(&matrix)? {
             return Ok(None);
@@ -1610,6 +1611,69 @@ impl Renderer {
     /// Live level-0 voxels from the last finished frame. Waits for that frame.
     pub fn lighting_level0_voxels(&mut self) -> Result<Vec<crate::Level0Voxel>, String> {
         self.gpu.lighting_level0_voxels()
+    }
+
+    /// The cone-traced cascades' probe counts, per cascade, from the last
+    /// frame. Waits for that frame. Empty when cone mode has not run.
+    pub fn cone_stats(&mut self) -> Result<Vec<crate::ConeCascadeStats>, String> {
+        self.gpu.cone_stats()
+    }
+
+    /// Milliseconds each stage of the last frame's cone passes took on the
+    /// GPU (light, lamps, insert, world, compact, chain, trace0..trace4,
+    /// weights, merge, shade, resolve, fill, sun). Waits for that frame. Empty when cone mode has
+    /// not run or the device has no timestamps.
+    pub fn cone_pass_ms(&mut self) -> Vec<(&'static str, f64)> {
+        self.gpu.cone_pass_ms()
+    }
+
+    /// What the pixel at `x`, `y` read in the cone shade: its probe levels
+    /// and the eight probes about it at each (in the hash, seated, the share
+    /// that passed, dark directions). The first call sets the pixel; the
+    /// record is `None` until a frame has drawn with it.
+    pub fn cone_pick(&mut self, x: u32, y: u32) -> Result<Option<crate::ConePick>, String> {
+        self.gpu.cone_pick(x, y)
+    }
+
+    /// Lamp points the cone cascades' lamp hash had no slot for last frame.
+    pub fn cone_lamp_drops(&mut self) -> Result<u32, String> {
+        self.gpu.cone_lamp_drops()
+    }
+
+    /// The cone cascades' lamp-map tiles last frame, a level (coarsest
+    /// first): asked for with a moved lamp, and listed for tracing.
+    pub fn cone_map_tiles(&mut self) -> Result<[[u32; 5]; 2], String> {
+        self.gpu.cone_map_tiles()
+    }
+
+    /// Pixels with metal the cone cascades marched a specular cone for last
+    /// frame (`cone_cascades.specular`).
+    pub fn cone_specular_pixels(&mut self) -> Result<u32, String> {
+        self.gpu.cone_specular_pixels()
+    }
+
+    /// The resident cone field: its points, voxels, bricks, bytes and build
+    /// seconds. Empty before the first one is built.
+    #[must_use]
+    pub fn cone_field_report(&self) -> String {
+        let movers = &self.gpu.cone.field_movers;
+        if movers.is_empty() {
+            return self.gpu.cone.report.clone();
+        }
+        format!("{}; moving solids left out: {movers:?}", self.gpu.cone.report)
+    }
+
+    /// Whether the cone field in use has its fine levels (the clip volumes
+    /// about the eye), not the coarse levels alone of a world's first build,
+    /// and no newer field is filling.
+    #[must_use]
+    pub fn cone_field_fine(&self) -> bool {
+        self.gpu.cone.ready && self.gpu.cone.has_fine && self.gpu.cone.next.is_empty() && self.gpu.cone.building.is_none()
+    }
+
+    /// Cascade `c`'s probes (key, level, cell, pixels, seat) from the last frame.
+    pub fn cone_probes(&mut self, c: u32) -> Result<Vec<crate::ConeProbe>, String> {
+        self.gpu.cone_probes(c)
     }
 
     /// Level-0 voxels inserted and traced last frame. Waits for that frame.
@@ -2006,6 +2070,8 @@ struct Gpu {
     mesh_field_dirty: Vec<(usize, usize)>,
     /// GI frame path (lighting_gpu.rs).
     lighting: Lighting,
+    /// The cone-traced cascades (experimental, `cone_gpu.rs`).
+    cone: ConeGpu,
     /// Fragment shader for the next raster pipeline built, instead of overlay.frag.
     frag_override: Option<&'static [u8]>,
     /// The vertex shader the next raster pipeline uses instead of scene.vert.
@@ -2958,6 +3024,7 @@ impl Gpu {
                 mesh_field_shadow: Vec::new(),
                 mesh_field_dirty: Vec::new(),
                 lighting: Lighting::default(),
+                cone: ConeGpu::new(),
                 frag_override: None,
                 vert_override: None,
                 layout_override: std::ptr::null_mut(),
@@ -4440,6 +4507,7 @@ impl Gpu {
             self.init_fresh_atlas();
             self.update_resident_scene()?;
             self.update_resident_fields()?;
+            self.cone_upload()?;
             let swap = self.swap_images[index as usize];
             // The acquire semaphore is waited in color output. The layout
             // transition has to happen in that stage, or it races the
@@ -10620,6 +10688,7 @@ fn tick_delta(start: u64, end: u64, bits: u32) -> u64 {
 
 include!("aa_gpu.rs");
 include!("lighting_gpu.rs");
+include!("cone_gpu.rs");
 include!("reflections_frame.rs");
 include!("vk_platform.rs");
 

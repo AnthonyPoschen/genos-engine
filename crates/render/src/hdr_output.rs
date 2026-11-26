@@ -527,6 +527,92 @@ pub fn histogram_ev100_from_counts(counts: &[u32]) -> f64 {
     acc / f64::from(seen) + 8.0_f64.log2()
 }
 
+/// log2 luminance under which `share` of the counted pixels fall (a bin
+/// centre). `None` when nothing was counted.
+#[must_use]
+pub fn histogram_percentile_log2(counts: &[u32], share: f64) -> Option<f64> {
+    let bins = counts.len().min(4096);
+    let counts = &counts[..bins];
+    // Counted in f64: whole counts up to 2^53 add exactly.
+    let total: f64 = counts.iter().map(|c| f64::from(*c)).sum();
+    if total <= 0.0 {
+        return None;
+    }
+    let want = (share.clamp(0.0, 1.0) * total).ceil().max(1.0);
+    let mut seen = 0.0_f64;
+    for (index, count) in counts.iter().enumerate() {
+        seen += f64::from(*count);
+        if seen >= want {
+            return Some(bin_center(index, bins));
+        }
+    }
+    Some(bin_center(bins - 1, bins))
+}
+
+/// Auto exposure about a slow anchor: the target moves `adapt_share` of the
+/// way from `anchor` (the metered EV averaged over seconds, the caller's) to
+/// this frame's metered EV, in either direction, and never opens past the
+/// highlight key (the EV that puts the `percentile` luminance `stops` above
+/// mid-grey). So a step into shade or a look into the light changes exposure
+/// by a share of the difference, and the bright areas do not clip.
+#[must_use]
+pub fn auto_ev100_anchored(counts: &[u32], strength: f64, knee: f64, percentile: f64, stops: f64, anchor: f64) -> f64 {
+    let metered = histogram_ev100_from_counts(counts);
+    let target = anchor + adapt_share(metered - anchor, strength, knee) * (metered - anchor);
+    match histogram_percentile_log2(counts, percentile) {
+        Some(high) => target.max(high + 8.0_f64.log2() - stops),
+        None => target,
+    }
+}
+
+/// The share of a difference of `delta` stops from the anchor that exposure
+/// follows: `strength` times delta² / (delta² + knee²). A small difference
+/// (shade beside sun) moves exposure little, a large one (a black room
+/// looking out) most of `strength` (Anthony, 25 Nov 2026). A knee of 0 is a
+/// flat `strength`.
+#[must_use]
+pub fn adapt_share(delta: f64, strength: f64, knee: f64) -> f64 {
+    let d2 = delta * delta;
+    let k2 = knee * knee;
+    let curve = if d2 + k2 > 0.0 { d2 / (d2 + k2) } else { 1.0 };
+    strength.clamp(0.0, 1.0) * curve
+}
+
+/// Auto exposure about a fixed neutral point: [`auto_ev100_anchored`] from
+/// `neutral`, then held within `dark` stops under it and `bright` stops over
+/// it (0: no limit on that side). The limits come last, past the highlight
+/// key: a dark place stays darker than the neutral point's picture of it by
+/// what the limit leaves, however long the eye stays (Anthony, 26 Nov 2026).
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn auto_ev100_neutral(counts: &[u32], strength: f64, knee: f64, percentile: f64, stops: f64, neutral: f64, dark: f64, bright: f64) -> f64 {
+    let ev = auto_ev100_anchored(counts, strength, knee, percentile, stops, neutral);
+    let low = if dark > 0.0 { neutral - dark } else { f64::NEG_INFINITY };
+    let high = if bright > 0.0 { neutral + bright } else { f64::INFINITY };
+    ev.clamp(low, high)
+}
+
+/// Auto exposure's EV100 for one histogram. The meter's EV places the mean
+/// at mid-grey ([`histogram_ev100_from_counts`]). The highlight key is the EV
+/// that places the `percentile` luminance `stops` above where the mean goes.
+/// When the frame meters darker than that key (standing in shadow with sun
+/// in view), exposure follows the meter only `strength` of the way from the
+/// key, so the lit areas keep their shape. A frame whose highlights sit
+/// within `stops` of the mean (a dark room, an even view) adapts fully.
+#[must_use]
+pub fn auto_ev100(counts: &[u32], strength: f64, percentile: f64, stops: f64) -> f64 {
+    let metered = histogram_ev100_from_counts(counts);
+    let Some(high) = histogram_percentile_log2(counts, percentile) else {
+        return metered;
+    };
+    let key = high + 8.0_f64.log2() - stops;
+    if metered >= key {
+        metered
+    } else {
+        key + strength.clamp(0.0, 1.0) * (metered - key)
+    }
+}
+
 /// Max relative change over 8 identical frames, starting on the target.
 #[must_use]
 pub fn exposure_still_change() -> f64 {
@@ -2263,6 +2349,66 @@ mod tests {
         assert_eq!(pack_f32(1.0 / 60.0).to_bits(), 0x3c88_8889);
         assert!(pack_f32(f64::NAN).is_nan());
         assert_eq!(pack_f32(f64::INFINITY).to_bits(), 0x7f80_0000);
+    }
+
+    /// A frame of `dark` pixels at luminance `low` and `bright` at `high`.
+    fn split_counts(dark: usize, low: f64, bright: usize, high: f64) -> Vec<u32> {
+        let mut samples = vec![low; dark];
+        samples.extend(std::iter::repeat_n(high, bright));
+        histogram_counts(&samples, 256)
+    }
+
+    #[test]
+    fn auto_exposure_in_shadow_with_sun_in_view_holds_back_from_the_mean() {
+        // Most of the view in shadow, a fifth of it sunlit 6 stops brighter.
+        let counts = split_counts(800, 0.02, 200, 0.02 * 64.0);
+        let metered = histogram_ev100_from_counts(&counts);
+        let partial = auto_ev100(&counts, 0.7, 0.98, 3.0);
+        let full = auto_ev100(&counts, 1.0, 0.98, 3.0);
+        let held = auto_ev100(&counts, 0.0, 0.98, 3.0);
+        assert!((full - metered).abs() < 1.0e-12, "strength 1 is the plain meter");
+        assert!(partial > metered + 0.5, "exposure opens less: {partial} vs {metered}");
+        assert!(held > partial, "strength 0 holds the highlight key");
+        // At strength 0 the sunlit pixels sit 3 stops above where the mean goes.
+        let sun_log2 = (0.02_f64 * 64.0).log2();
+        assert!((held - (sun_log2 + 3.0 - 3.0)).abs() < 0.2, "{held}");
+    }
+
+    #[test]
+    fn auto_exposure_in_an_evenly_dark_room_adapts_fully() {
+        let counts = split_counts(900, 0.002, 100, 0.004);
+        let metered = histogram_ev100_from_counts(&counts);
+        assert!((auto_ev100(&counts, 0.7, 0.98, 3.0) - metered).abs() < 1.0e-12);
+        assert_eq!(auto_ev100(&[], 0.7, 0.98, 3.0), 0.0);
+    }
+
+    /// Stepping from the neutral point's light into shade a few stops darker
+    /// moves exposure only `strength` of the way; the limits hold it within
+    /// their stops of the neutral point; and the highlight key still caps how
+    /// far exposure opens.
+    #[test]
+    fn auto_exposure_moves_a_share_of_the_way_from_its_neutral_point_and_no_further_than_its_limits() {
+        let shade = split_counts(900, 0.002, 100, 0.004);
+        let metered = histogram_ev100_from_counts(&shade);
+        let anchor = metered + 3.0;
+        let ev = auto_ev100_anchored(&shade, 0.15, 0.0, 0.98, 100.0, anchor);
+        assert!((ev - (anchor - 0.15 * 3.0)).abs() < 1.0e-9, "ev {ev}, anchor {anchor}, metered {metered}");
+        // With a knee, a small difference moves exposure far less than a large one.
+        assert!(adapt_share(1.0, 0.7, 4.0) < 0.05 && adapt_share(7.0, 0.7, 4.0) > 0.5);
+        // From a neutral point 6 stops over the meter, a limit of 2 stops
+        // holds exposure 2 under it; with no limit it follows the share.
+        let neutral = metered + 6.0;
+        let held = auto_ev100_neutral(&shade, 1.0, 0.0, 0.98, 100.0, neutral, 2.0, 2.0);
+        assert!((held - (neutral - 2.0)).abs() < 1.0e-9, "held {held}, neutral {neutral}");
+        let free = auto_ev100_neutral(&shade, 1.0, 0.0, 0.98, 100.0, neutral, 0.0, 0.0);
+        assert!((free - metered).abs() < 1.0e-9, "free {free}, metered {metered}");
+        // A bright view closes no more than the limit over the neutral point.
+        let closed = auto_ev100_neutral(&shade, 1.0, 0.0, 0.98, 100.0, metered - 6.0, 2.0, 1.5);
+        assert!((closed - (metered - 6.0 + 1.5)).abs() < 1.0e-9, "closed {closed}");
+        // With the key 2 stops above mid-grey, exposure opens no further than it.
+        let key_capped = auto_ev100_anchored(&shade, 1.0, 0.0, 0.98, 2.0, metered - 10.0);
+        let high = histogram_percentile_log2(&shade, 0.98).unwrap_or(f64::NAN);
+        assert!((key_capped - metered.max(high + 1.0)).abs() < 1.0e-9, "{key_capped} {metered} {high}");
     }
 
     #[test]
