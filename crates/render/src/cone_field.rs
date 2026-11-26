@@ -412,6 +412,12 @@ fn pack_half2(a: f32, b: f32) -> u32 {
     u32::from(f32_to_half(a)) | (u32::from(f32_to_half(b)) << 16)
 }
 
+/// A word's two halves, low first (the shaders' unpackHalf2x16).
+#[must_use]
+pub fn unpack_half2_pub(w: u32) -> (f32, f32) {
+    unpack_half2(w)
+}
+
 fn unpack_half2(w: u32) -> (f32, f32) {
     (half_to_f32(u16::try_from(w & 0xffff).unwrap_or(0)), half_to_f32(u16::try_from(w >> 16).unwrap_or(0)))
 }
@@ -1604,6 +1610,19 @@ pub struct ConePickLevel {
     pub own: [i32; 3],
     /// The eight cells about the pixel, in trilinear order.
     pub probes: Vec<ConePickProbe>,
+    /// The own probe's first cones: their way, light (luma; -1 for none) and
+    /// the share of each that passes.
+    pub own_dirs: Vec<ConePickCone>,
+    /// The own probe's next-cascade probes the merge reads: seat and weight.
+    pub own_up: Vec<([f32; 3], f32)>,
+}
+
+/// One cone of a picked pixel's own probe.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConePickCone {
+    pub way: [f32; 3],
+    pub luma: f32,
+    pub open: f32,
 }
 
 /// A candidate probe of a picked pixel: none in the hash at that cell and

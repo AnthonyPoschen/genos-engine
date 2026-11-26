@@ -1699,6 +1699,25 @@ impl Tools {
                             ("kept", num(f64::from(l.kept))),
                             ("own", list(l.own.iter().map(|v| num(f64::from(*v))).collect())),
                             ("probes", list(probes)),
+                            (
+                                "own_up",
+                                list(l.own_up.iter().map(|(s, wt)| obj(vec![("seat", list(s.iter().map(|v| num(f64::from(*v))).collect())), ("weight", num(f64::from(*wt)))])).collect()),
+                            ),
+                            (
+                                "own_dirs",
+                                list(
+                                    l.own_dirs
+                                        .iter()
+                                        .map(|c| {
+                                            obj(vec![
+                                                ("way", list(c.way.iter().map(|v| num(f64::from(*v))).collect())),
+                                                ("luma", num(f64::from(c.luma))),
+                                                ("open", num(f64::from(c.open))),
+                                            ])
+                                        })
+                                        .collect(),
+                                ),
+                            ),
                         ])
                     })
                     .collect();
