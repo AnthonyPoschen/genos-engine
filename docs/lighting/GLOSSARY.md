@@ -17,7 +17,7 @@ Literature columns: GIBS (EA SEED 2021 surfels), DDGI (Majercik 2019 probes), Lu
 Role: OUT · Literature: GIBS direct + shadow rays; Lumen direct lighting; DDGI —
 More detail: [`crates/render/shaders/lighting_direct.comp`](../../crates/render/shaders/lighting_direct.comp), `DirectSettings` in [`crates/scene/src/lighting.rs`](../../crates/scene/src/lighting.rs)
 
-**Direct specular**: pixel direct light shaded with Appendix B `fresnel_mix` (diffuse `base × (1 − metallic) / π` scaled by `1 − F`, plus GGX `D · V · F`). `direct_specular` defaults off (Lambert on irradiance) until the 4070 cost check. Indirect light stays Lambert.
+**Direct specular**: pixel direct light shaded with Appendix B `fresnel_mix` (diffuse `base × (1 − metallic) / π` scaled by `1 − F`, plus GGX `D · V · F`). `direct_specular` defaults off (Lambert on irradiance) until the 4070 cost check. Indirect light stays Lambert. The old path's key: cone mode has no direct pass, and draws a metal's lobe with the specular cone.
 Role: OUT · Literature: glTF 2.0 Appendix B; Filament `V_SmithGGXCorrelated` · More detail: [ADR 0025](../adr/0025-pbr-brdf-cpu-reference.md), [`pbr_brdf.glsl`](../../crates/render/shaders/pbr_brdf.glsl)
 
 **GI (indirect light)**: light that arrives after one or more bounces. `gi.enabled=false` skips every GI pass.
@@ -200,6 +200,9 @@ Role: TEMPORAL · Literature: amortised probe updates (DDGI's round-robin probe 
 
 **Voxel cap** (cone-traced cascades, `CONE_MOST_OVER`): the coarsest field level a cone reads: one level over its cascade's probe spacing. A cone's level otherwise follows its width, and a wide cone of a coarse probe read voxels several probe spacings across, each holding lit and unlit surface as one light, so the same wall was brighter the coarser its probe. A cone wider than the voxels it reads samples its middle.
 Role: RAYS · Literature: the maximum mip level of a voxel cone trace · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md) section 19
+
+**Specular cone** (cone-traced cascades, `cone_cascades.specular`, `cone_specular.comp`): one cone a pixel with metal marches through the voxel field along its mirror direction, as wide as its GGX lobe, taking the sky past what covers it. It gives a metal the light of its surroundings; the resolve adds the sun's and the lamps' highlights (the Appendix B metal lobe on the light the pixel already takes), and at roughness 0.6 and over the probes' gathered light stands in for the cone. Nothing is kept over frames. Only the metal share is drawn: a dielectric keeps its Lambert picture. `cone_cascades.view=specular` draws it alone.
+Role: OUT · Literature: the specular cone of voxel cone tracing (Crassin et al. 2011); the split-sum environment term (Karis, SIGGRAPH 2013) in its analytic fit (Karis 2014); ADR 0019's cone read of finished stored light · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md) section 22
 
 **Sun pass** (cone-traced cascades, `cone_sun.comp`): the pass after the shade that marches the sun ray of each pixel on a shadow edge. The shade lists those pixels (the sun list) and leaves their sun out; the sun pass adds it. The marching pixels are a few in a hundred, so they run side by side in their own pass.
 Role: SHADOW · Literature: deferred shadow rays; wavefront ray tracing's compacted ray lists (Laine, Karras and Aila 2013) · More detail: [cone-traced cascades plan](../systems/lighting/cone-traced-cascades-plan.md) section 19
@@ -453,7 +456,7 @@ Role: TEMPORAL · Literature: Hillaire 2015 temporal integration; [ADR 0012](../
 Role: TOOL · Literature: — (the seat ping is `xdg_wm_base.ping`) · More detail: [window.md](../systems/window.md)
 
 ### Specular, mirrors, portals, water
-Accepted in [ADR 0019](../adr/0019-reflections.md) (Engine bot, 2026-10-26; Anthony Poschen delegated design approval). The CPU picture grades planar mirrors, portals, and flat water. Glossy screen marches, the world cache, ray queries, and the reflection denoiser are not built. One term, one meaning.
+Accepted in [ADR 0019](../adr/0019-reflections.md) (Engine bot, 2026-10-26; Anthony Poschen delegated design approval). The CPU picture grades planar mirrors, portals, and flat water. Glossy screen marches, the world cache, ray queries, and the reflection denoiser are not built. In cone mode the cone read of stored light is built for metals (the specular cone). One term, one meaning.
 
 **Specular lobe**: the view-dependent glossy term, kept separate from diffuse GI.
 Role: OUT · Literature: Cook and Torrance, TOG 1982; Lumen reflections · More detail: [../systems/reflections-design.md](../systems/reflections-design.md)

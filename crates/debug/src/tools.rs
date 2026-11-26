@@ -1647,6 +1647,7 @@ impl Tools {
                     })
                     .collect();
                 let lamp_dropped = ctx.renderer.cone_lamp_drops()?;
+                let specular_pixels = ctx.renderer.cone_specular_pixels()?;
                 let passes = ctx.renderer.cone_pass_ms();
                 let total: f64 = passes.iter().map(|(_, ms)| ms).sum();
                 let mut pass_ms: Vec<(&str, Value)> = passes.iter().map(|(name, ms)| (*name, num(*ms))).collect();
@@ -1655,6 +1656,7 @@ impl Tools {
                     ("cascades", list(items)),
                     ("pass_ms", obj(pass_ms)),
                     ("lamp_dropped", num(f64::from(lamp_dropped))),
+                    ("specular_pixels", num(f64::from(specular_pixels))),
                     ("field", text(ctx.renderer.cone_field_report())),
                 ]))
             }

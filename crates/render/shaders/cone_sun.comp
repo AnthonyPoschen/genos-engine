@@ -10,6 +10,7 @@
 layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 #include "cone_common.glsl"
+#include "cone_specular.glsl"
 
 void main() {
     uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
@@ -27,6 +28,13 @@ void main() {
     }
     bool edge;
     vec3 sun = cone_sun(pos, n, two_sided, true, edge);
+    // Its metal's highlight of that sun, as the resolve adds it.
+    ConeMetal metal;
+    vec3 specular = vec3(0.0);
+    vec3 toward;
+    if (cone_metal(p, n, two_sided, metal) && cone_sun_toward(pos + n * CONE_SURFACE_LIFT, toward)) {
+        specular = cone_metal_direct(metal, toward, sun);
+    }
     vec3 lit = lighting_unpack_rgb9e5(gbuf_word(pixel, 3u));
-    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(lit + albedo * (1.0 / CONE_PI) * sun);
+    gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(lit + (cone_specular_view() ? specular : albedo * (1.0 / CONE_PI) * sun + specular));
 }

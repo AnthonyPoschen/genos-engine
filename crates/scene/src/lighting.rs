@@ -404,6 +404,10 @@ pub enum ConeView {
     /// The share of the directions a pixel reads that hold no light, as red
     /// over grey.
     Dark,
+    /// The specular light alone (key `cone_cascades.specular`): what a
+    /// metal reflects, with no diffuse light and no emission. Black where a
+    /// surface has no metal.
+    Specular,
 }
 
 impl ConeView {
@@ -413,6 +417,7 @@ impl ConeView {
             Self::Light => "light",
             Self::Coverage => "coverage",
             Self::Dark => "dark",
+            Self::Specular => "specular",
         }
     }
 
@@ -422,6 +427,7 @@ impl ConeView {
             "light" | "off" | "0" => Some(Self::Light),
             "coverage" => Some(Self::Coverage),
             "dark" => Some(Self::Dark),
+            "specular" => Some(Self::Specular),
             _ => None,
         }
     }
@@ -449,6 +455,11 @@ pub struct ConeCascadeSettings {
     /// pixels of the square take it from the gathered pixels about them
     /// that lie on their surface; a pixel with none gathers for itself.
     pub shade_scale: u32,
+    /// A metal's specular light (key `cone_cascades.specular`): the sun's
+    /// and the lamps' highlights, and a specular cone through the field
+    /// along the mirror direction. Off leaves a metal its diffuse albedo
+    /// alone, which is black for a full metal.
+    pub specular: bool,
 }
 
 impl ConeCascadeSettings {
@@ -485,7 +496,7 @@ fn probe_metres(value: f32) -> f32 {
 
 impl Default for ConeCascadeSettings {
     fn default() -> Self {
-        Self { enabled: false, probe_px: 12, theta: 2, count: 5, lamp_radius: 0.1, finest_probe: 0.0625, view: ConeView::Light, shade_scale: 2 }
+        Self { enabled: false, probe_px: 12, theta: 2, count: 5, lamp_radius: 0.1, finest_probe: 0.0625, view: ConeView::Light, shade_scale: 2, specular: true }
     }
 }
 
@@ -1445,6 +1456,7 @@ impl LightingSettings {
         let _ = writeln!(out, "cone_cascades.finest_probe={}", num_text(self.cone.finest_probe));
         let _ = writeln!(out, "cone_cascades.view={}", self.cone.view.name());
         let _ = writeln!(out, "cone_cascades.shade_scale={}", self.cone.shade_scale);
+        let _ = writeln!(out, "cone_cascades.specular={}", bit(self.cone.specular));
         let _ = writeln!(
             out,
             "surface_cache.attach_movers={}",
@@ -1706,8 +1718,9 @@ impl LightingSettings {
             "cone_cascades.lamp_radius" => self.cone.lamp_radius = num_f32(value)?.clamp(0.02, 1.0),
             "cone_cascades.finest_probe" => self.cone.finest_probe = probe_metres(num_f32(value)?),
             "cone_cascades.shade_scale" => self.cone.shade_scale = shade_scale(num_u32(value)?),
+            "cone_cascades.specular" => self.cone.specular = on(value)?,
             "cone_cascades.view" => {
-                self.cone.view = ConeView::parse(value).ok_or_else(|| format!("cone_cascades.view: light, coverage or dark, not {value}"))?;
+                self.cone.view = ConeView::parse(value).ok_or_else(|| format!("cone_cascades.view: light, coverage, dark or specular, not {value}"))?;
             }
             "surface_cache.attach_movers" => self.surface_cache.attach_movers = on(value)?,
             "surface_cache.mover_texels" => self.surface_cache.mover_texels = num_u32(value)?,

@@ -503,8 +503,11 @@ def main():
             handle.write(
                 "Engine-ready Sponza in metres. Rebuild with `scripts/fetch-sponza.py`.\n"
                 "Positions are the Crytek OBJ centimetres times 0.01.\n"
-                "The renderer has no specular lobe: it treats base colour times (1 - metallic)\n"
-                "as the diffuse albedo and keeps roughness on the material.\n"
+                "The renderer's old path has no specular lobe: it treats base colour times\n"
+                "(1 - metallic) as the diffuse albedo and keeps roughness on the material, so\n"
+                "the metal (flagpoles, hanging vases, chains, the curtains' gold thread) is\n"
+                "black there. Cone mode draws the metal's specular light\n"
+                "(`cone_cascades.specular`).\n"
             )
     source_bytes = directory_bytes(SOURCE)
     built_bytes = directory_bytes(BUILT)

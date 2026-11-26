@@ -182,10 +182,12 @@ const uint CONE_PICK_HEAD = 16u;
 const uint CONE_PICK_LEVEL = 104u;
 const uint CONE_PICK_PROBE = 12u;
 // Push lamp.x bits 4 and 5: the debug view (cone_cascades.view): 1 the
-// probe coverage, 2 the dark directions.
+// probe coverage, 2 the dark directions, 3 the specular light alone
+// (cone_specular.glsl).
 const uint CONE_VIEW_SHIFT = 4u;
 const uint CONE_VIEW_COVERAGE = 1u;
 const uint CONE_VIEW_DARK = 2u;
+const uint CONE_VIEW_SPECULAR = 3u;
 const uint CONE_PREV_EYE = 92u;   // last frame's eye (float bits xyz), then 1 when its probes are in the buffer
 const uint CONE_HASH_WORDS = 10u;  // key, count, sum xyz, normal sum xyz, probe, screen references
 const uint CONE_PROBE_WORDS = 32u; // see cone_probe_* below
@@ -449,6 +451,12 @@ const float CONE_SUN_MARK = 0.5;
 
 uint cone_lamp_size() {
     return cwork.w[CONE_LAMP_LAYOUT];
+}
+// Whether the view draws a probe colour in place of the light (coverage,
+// dark); the specular view draws light.
+bool cone_probe_view() {
+    uint view = (pc.lamp.x >> CONE_VIEW_SHIFT) & 3u;
+    return view == CONE_VIEW_COVERAGE || view == CONE_VIEW_DARK;
 }
 uint cone_gather_at() {
     return cwork.w[CONE_GATHER_LAYOUT];

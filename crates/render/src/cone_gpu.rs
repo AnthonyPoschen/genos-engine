@@ -21,6 +21,14 @@ const CONE_SEE_SHADE: u32 = 2;
 /// Push flag, knockout only: seat probes on their pixels' mean
 /// ([`crate::gate::CONE_FIELD_SEAT`]).
 const CONE_PIXEL_SEAT: u32 = 4;
+/// Push flag: a metal's specular light is on (`cone_specular.glsl`
+/// CONE_SPECULAR_FLAG; key `cone_cascades.specular`).
+const CONE_SPECULAR_FLAG: u32 = 64;
+/// Header word of the specular list's offset (`cone_specular.glsl`
+/// CONE_SPECULAR_LAYOUT), and of its count, cleared each frame
+/// (CONE_SPECULAR_COUNT).
+const CONE_SPECULAR_LAYOUT_AT: u64 = 104;
+const CONE_SPECULAR_COUNT_AT: u64 = 53;
 /// Knockout only: the share of the screen's probes the tables are sized for
 /// ([`crate::gate::CONE_TABLE_CAP`]).
 const CONE_KNOCKOUT_SHARE: u64 = 16;
@@ -52,7 +60,7 @@ const CONE_WORLD_CAP: u64 = 16_384;
 /// Header words cleared each frame; the layout follows them.
 const CONE_CLEARED: u64 = 64;
 const CONE_LAYOUT_AT: u64 = 64;
-const CONE_PIPES: usize = 16;
+const CONE_PIPES: usize = 17;
 const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-insert",
     "cone-compact",
@@ -70,18 +78,20 @@ const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-fill",
     "cone-targets",
     "cone-lamp",
+    "cone-specular",
 ];
 /// GPU timestamps a frame's cone passes write: one before the first pass and
 /// one after each stage in [`CONE_STAGE_NAMES`].
-const CONE_STAGES: usize = 18;
-const CONE_STAMPS: u32 = 19;
+const CONE_STAGES: usize = 19;
+const CONE_STAMPS: u32 = 20;
 /// The stages `cone_pass_ms` times, in frame order. `trace0`..`trace4` are
 /// the cascades' traces; `lamp_rays` is each cascade-0 probe's rays at its
 /// lamp targets; `shade` gathers the probes' light at one pixel of
 /// each square, `resolve` spreads it to every pixel, `fill` gathers for the
-/// pixels with no match; `sun` is the shadow-edge pixels' own sun rays.
+/// pixels with no match; `sun` is the shadow-edge pixels' own sun rays;
+/// `specular` is the metal pixels' specular cones.
 pub(crate) const CONE_STAGE_NAMES: [&str; CONE_STAGES] =
-    ["light", "lamps", "insert", "world", "compact", "chain", "trace0", "trace1", "trace2", "trace3", "trace4", "weights", "merge", "lamp_rays", "shade", "resolve", "fill", "sun"];
+    ["light", "lamps", "insert", "world", "compact", "chain", "trace0", "trace1", "trace2", "trace3", "trace4", "weights", "merge", "lamp_rays", "shade", "resolve", "fill", "sun", "specular"];
 /// Header words of last frame's tables (`cone_common.glsl` CONE_PREV_LAYOUT).
 const CONE_PREV_LAYOUT_AT: u64 = 112;
 /// Header words of the merged cones' offsets, one a cascade
@@ -143,6 +153,8 @@ struct ConeLayout {
     /// (`cone_fill.comp`): a word a screen pixel each.
     gather_at: u64,
     fill_at: u64,
+    /// The specular list (`cone_specular.comp`): a word a screen pixel.
+    specular_at: u64,
     /// Each cascade's lamp target lists ([`CONE_TARGETS`] words a probe).
     targets_at: [u64; 5],
     /// What cascade 0's probes' rays saw of their targets.
@@ -181,6 +193,8 @@ fn cone_layout(theta: u32, count: u32, pixels: u64, probe_px: u32, lamps: u64, s
     at += screen * CONE_GATHER_WORDS;
     l.fill_at = at;
     at += screen;
+    l.specular_at = at;
+    at += screen;
     for c in 0..count as usize {
         l.targets_at[c] = at;
         at += l.cap[c] * CONE_TARGETS;
@@ -199,7 +213,7 @@ impl ConeLayout {
         for at in l.hash_at.iter_mut().chain(&mut l.probes_at).chain(&mut l.cones_at).chain(&mut l.targets_at) {
             *at += by;
         }
-        for at in [&mut l.lamp_at, &mut l.sun_at, &mut l.gather_at, &mut l.fill_at, &mut l.seen_at] {
+        for at in [&mut l.lamp_at, &mut l.sun_at, &mut l.gather_at, &mut l.fill_at, &mut l.specular_at, &mut l.seen_at] {
             *at += by;
         }
         l
@@ -674,7 +688,7 @@ impl Gpu {
             self.cone.time_pool = self.make_query_pool_n(2 * CONE_STAMPS)?;
         }
         if self.cone.pipes[0].is_null() && self.lighting.ready {
-            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV, CONE_LIGHT_SPV, CONE_WORLD_SPV, CONE_SUN_SPV, CONE_RESOLVE_SPV, CONE_FILL_SPV, CONE_TARGETS_SPV, CONE_LAMP_SPV];
+            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV, CONE_LIGHT_SPV, CONE_WORLD_SPV, CONE_SUN_SPV, CONE_RESOLVE_SPV, CONE_FILL_SPV, CONE_TARGETS_SPV, CONE_LAMP_SPV, CONE_SPECULAR_SPV];
             for (k, code) in codes.iter().enumerate() {
                 self.cone.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, CONE_PIPE_NAMES[k])?;
             }
@@ -883,8 +897,12 @@ impl Gpu {
             genos_scene::ConeView::Light => 0,
             genos_scene::ConeView::Coverage => 1,
             genos_scene::ConeView::Dark => 2,
+            genos_scene::ConeView::Specular => 3,
         };
-        let flags = flags | (view << CONE_VIEW_SHIFT);
+        // Knockout only ([`crate::gate::CONE_SPECULAR`]): no specular light,
+        // as before a metal had any.
+        let specular = cone.specular && crate::gate::guard(crate::gate::CONE_SPECULAR);
+        let flags = flags | (view << CONE_VIEW_SHIFT) | if specular { CONE_SPECULAR_FLAG } else { 0 };
         let push = |c: u32| [w, h, finest, 0, c, theta, count, cone.probe_px, flags, CONE_T0.to_bits(), radius, 0];
         // Knockout only: the lamps written once and kept, as when the field held them.
         let write_lamps = crate::gate::guard(crate::gate::CONE_LAMP_FOLLOW) || !self.cone.lamps_frozen;
@@ -968,6 +986,8 @@ impl Gpu {
             (self.fns.cmd_update_buffer)(self.cmd, self.cone.work.buffer, CONE_MERGED_LAYOUT_AT * 4, 20, merged.as_ptr().cast::<c_void>());
             let gather = [u32::try_from(layout.gather_at).unwrap_or(u32::MAX), u32::try_from(layout.fill_at).unwrap_or(u32::MAX)];
             (self.fns.cmd_update_buffer)(self.cmd, self.cone.work.buffer, CONE_GATHER_LAYOUT_AT * 4, 8, gather.as_ptr().cast::<c_void>());
+            let specular_at = [u32::try_from(layout.specular_at).unwrap_or(u32::MAX)];
+            (self.fns.cmd_update_buffer)(self.cmd, self.cone.work.buffer, CONE_SPECULAR_LAYOUT_AT * 4, 4, specular_at.as_ptr().cast::<c_void>());
             let mut targets = [0u32; 6];
             for (word, at) in targets.iter_mut().zip(layout.targets_at.iter().chain(std::iter::once(&layout.seen_at))) {
                 *word = u32::try_from(*at).unwrap_or(u32::MAX);
@@ -1074,6 +1094,13 @@ impl Gpu {
         self.cone_dispatch(11, push(0), line(u64::from(w) * u64::from(h)));
         compute(self);
         self.cone_stamp(18);
+        // The metal pixels the resolve listed: one specular cone each. With
+        // the specular light off none is listed and the pass is not run.
+        if specular {
+            self.cone_dispatch(16, push(0), line(u64::from(w) * u64::from(h)));
+            compute(self);
+        }
+        self.cone_stamp(19);
         self.cone.prev_eye = Some(self.cone.eye);
     }
 
@@ -1178,6 +1205,17 @@ impl Gpu {
         }
         self.idle_device();
         let raw = self.copy_device_range(self.cone.work.buffer, 48 * 4, 4)?;
+        Ok(u32_words(&raw).first().copied().unwrap_or(0))
+    }
+
+    /// Pixels the resolve listed for the specular pass last frame (pixels
+    /// with metal under the rough band). Waits for that frame.
+    pub(crate) fn cone_specular_pixels(&mut self) -> Result<u32, String> {
+        if self.cone.work.buffer.is_null() {
+            return Ok(0);
+        }
+        self.idle_device();
+        let raw = self.copy_device_range(self.cone.work.buffer, CONE_SPECULAR_COUNT_AT * 4, 4)?;
         Ok(u32_words(&raw).first().copied().unwrap_or(0))
     }
 
