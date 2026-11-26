@@ -2074,6 +2074,16 @@ float cone_lamp_lit(uint lamp, vec3 from, vec3 pos, bool back, int wanted, float
         int side = int(CONE_MAP_SIDE << uint(k));
         uint tile = cone_map_tile(lamp, k, min(ivec2(uv * float(side)), ivec2(side - 1)) / int(CONE_MAP_TILE));
         if (version == 0u || cwork.w[tile] != version) {
+            // The level the pixel wants, not traced: asked for here, for the
+            // next frame's list (cone_map_list.comp). Asked only by the
+            // probes about their own places, a tile between them that a
+            // pixel wanted waited for a probe of another view to ask for
+            // it, and the picture after turning away and back was sharper
+            // than before (gate D).
+            if (k == wanted && version != 0u) {
+                // For the next frame: this frame's list has run.
+                cwork.w[tile + 2u] = cwork.w[CONE_MAP_HEAD + 3u] + 1u;
+            }
             continue;
         }
         float w = k == 0 ? 1.0 : clamp(float(now - cwork.w[tile + 1u]) / CONE_MAP_FADE_MS, 0.0, 1.0);
