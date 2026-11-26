@@ -820,7 +820,7 @@ impl Voxels {
                 voxel.light[d] = add(voxel.light[d], scale(radiance, facing));
                 voxel.at[d] = add(voxel.at[d], scale(point, facing));
                 if facing > 0.0 {
-                    #[expect(clippy::needless_range_loop, reason = "the index reads parallel arrays")]
+                    #[allow(clippy::needless_range_loop, reason = "the index reads parallel arrays; clippy 1.99 flags it and 1.100 does not")]
                     for a in 0..3 {
                         voxel.lo[d][a] = voxel.lo[d][a].min(point[a]);
                         voxel.hi[d][a] = voxel.hi[d][a].max(point[a]);
@@ -1811,7 +1811,7 @@ fn run_frame(setup: &Setup, jitter: (f32, f32)) -> Frame {
                 scope.spawn(move || {
                     let mut out = Vec::new();
                     let end = (start + chunk).min(setup.pixels.len());
-                    #[expect(clippy::needless_range_loop, reason = "the index reads parallel arrays")]
+                    #[allow(clippy::needless_range_loop, reason = "the index reads parallel arrays; clippy 1.99 flags it and 1.100 does not")]
                     for p in start..end {
                         let Some(pixel) = &setup.pixels[p] else { continue };
                         let origin = add(pixel.point, scale(pixel.normal, LIFT));
@@ -2898,7 +2898,7 @@ fn gpu_bench(
         }
         inside += 1;
         let at = volume_texel(local, k, side);
-        #[expect(clippy::needless_range_loop, reason = "the index reads parallel arrays")]
+        #[allow(clippy::needless_range_loop, reason = "the index reads parallel arrays; clippy 1.99 flags it and 1.100 does not")]
         for d in 0..6 {
             for c in 0..3 {
                 volumes[d][at + c] = half(voxel.light[d][c]);
@@ -3397,10 +3397,16 @@ fn run(o: &Options) -> Result<(), String> {
     let cascade_seconds = started.elapsed().as_secs_f32() - gather_seconds;
 
     if o.mode == Mode::Full && o.patch_check {
-        let e = LAST_E.lock().map(|v| v.clone()).unwrap_or_default();
+        let e = match LAST_E.lock() {
+            Ok(v) => v.clone(),
+            Err(_) => Vec::new(),
+        };
         let in_view = |p: V3| dot(sub(p, eye), forward) > 1.0 && dot(sub(p, eye), sub(p, eye)) < 400.0;
         let chosen: Vec<usize> = (0..patches.len()).filter(|&i| patches[i].is_some_and(|p| in_view(p.0))).step_by(97).take(40).collect();
-        let dd = LAST_D.lock().map(|v| v.clone()).unwrap_or_default();
+        let dd = match LAST_D.lock() {
+            Ok(v) => v.clone(),
+            Err(_) => Vec::new(),
+        };
         let (mut got, mut want, mut dgot, mut dwant) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
         for &i in &chosen {
             let r = full_reference(walls, paint, &glow, o.lamp_radius, full_sky, patches[i].map_or([0.0; 3], |p| p.0), patches[i].map_or([0.0; 3], |p| p.1), 8192, i as u64);
