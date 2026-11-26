@@ -375,6 +375,8 @@ impl ConeField {
                     let area = half_to_f32(self.faces[d][i * 4 + 3]);
                     (area, low[ax] + half_to_f32(self.coarse_planes[i * 6 + d]) * size, None)
                 };
+                // A back (a negative area) stops the ray as its surface does.
+                let area = area.abs();
                 if area <= 0.0 {
                     continue;
                 }
@@ -1162,10 +1164,35 @@ fn fill_blocks(field: &mut ConeField, placed: &[(u8, [i32; 3], u32)]) {
 }
 
 /// A coarse voxel's texels in the face atlases at flat texel `i`.
+/// The area way `d` of a voxel is written with: its own; or, where it has
+/// none and the way opposite has, that way's area negated: the surface's
+/// back. A back sends no light, seats no probe and takes none (every reader
+/// that asks whether a way has a surface asks for an area over 0), and it
+/// stops a cone or a ray that meets it from behind (`cone_common.glsl`
+/// `cone_crossed`, `cone_coarse`, `coarse_crossed`). Without it a surface of
+/// one side let everything through from behind: under Sponza's floor the
+/// ground a metre below was lit by the lamps and the stone above it, 60
+/// times the old path's light there (Anthony, 26 Nov 2026).
+fn written_area(voxel: &Voxel, d: usize) -> f32 {
+    if voxel.area[d] > 0.0 { voxel.area[d] } else { -voxel.area[d ^ 1].max(0.0) }
+}
+
+/// The way whose plane and box way `d` is written with: its own, or the way
+/// opposite's where `d` is that way's back ([`written_area`]).
+fn plane_way(voxel: &Voxel, d: usize) -> Option<usize> {
+    if voxel.area[d] > 0.0 {
+        Some(d)
+    } else if voxel.area[d ^ 1] > 0.0 {
+        Some(d ^ 1)
+    } else {
+        None
+    }
+}
+
 fn coarse_texel(field: &mut ConeField, i: usize, voxel: &Voxel) {
     for d in 0..6 {
         let light = voxel.light[d];
-        field.faces[d][i * 4..i * 4 + 4].copy_from_slice(&[f32_to_half(light[0]), f32_to_half(light[1]), f32_to_half(light[2]), f32_to_half(voxel.area[d])]);
+        field.faces[d][i * 4..i * 4 + 4].copy_from_slice(&[f32_to_half(light[0]), f32_to_half(light[1]), f32_to_half(light[2]), f32_to_half(written_area(voxel, d))]);
     }
     field.faces[6][i * 4..i * 4 + 4].copy_from_slice(&[
         f32_to_half(voxel.lamp_light[0]),
@@ -1181,19 +1208,21 @@ fn fine_record(out: &mut Vec<u32>, voxel: &Voxel, cell: [i32; 3], size: f32) {
     for d in 0..6 {
         let l = voxel.light[d];
         out.push(pack_half2(l[0], l[1]));
-        out.push(pack_half2(l[2], voxel.area[d]));
+        out.push(pack_half2(l[2], written_area(voxel, d)));
     }
     for d in 0..6 {
-        if voxel.area[d] <= 0.0 {
+        // A back takes the plane and the box of the surface it is the back of.
+        let Some(of) = plane_way(voxel, d) else {
             out.extend([0, 0, 0]);
             continue;
-        }
+        };
         let (ax, u, v) = (d / 2, (d / 2 + 1) % 3, (d / 2 + 2) % 3);
         let rel = |x: f32, a: usize| (x - low[a]) / size;
-        let centroid = voxel.at[d][ax] / voxel.area[d];
-        out.push(pack_half2(rel(centroid, ax), rel(voxel.lo[d][u], u)));
-        out.push(pack_half2(rel(voxel.hi[d][u], u), rel(voxel.lo[d][v], v)));
-        out.push(pack_half2(rel(voxel.hi[d][v], v), rel(front_along(voxel, d), ax)));
+        let centroid = voxel.at[of][ax] / voxel.area[of];
+        let front = if of == d { front_along(voxel, d) } else { centroid };
+        out.push(pack_half2(rel(centroid, ax), rel(voxel.lo[of][u], u)));
+        out.push(pack_half2(rel(voxel.hi[of][u], u), rel(voxel.lo[of][v], v)));
+        out.push(pack_half2(rel(voxel.hi[of][v], v), rel(front, ax)));
     }
     out.push(pack_half2(voxel.lamp_light[0], voxel.lamp_light[1]));
     out.push(pack_half2(voxel.lamp_light[2], voxel.lamp_area));
@@ -1208,12 +1237,12 @@ fn fine_record(out: &mut Vec<u32>, voxel: &Voxel, cell: [i32; 3], size: f32) {
 /// from the voxel's low side, as halves (0 where it has none).
 fn face_planes(voxel: &Voxel, cell: [i32; 3], size: f32) -> [u16; 6] {
     std::array::from_fn(|d| {
-        if voxel.area[d] <= 0.0 {
+        let Some(of) = plane_way(voxel, d) else {
             return 0;
-        }
+        };
         let ax = d / 2;
         let low = cell_low(cell[ax], size);
-        f32_to_half((voxel.at[d][ax] / voxel.area[d] - low) / size)
+        f32_to_half((voxel.at[of][ax] / voxel.area[of] - low) / size)
     })
 }
 
@@ -1398,8 +1427,11 @@ mod tests {
             assert!((0.8..=1.2).contains(&fill), "level {level}: fill {fill}");
             let radiance = light[0] / area;
             assert!((radiance - 0.5).abs() < 0.01, "level {level}: radiance {radiance}");
-            // Nothing faces -x.
-            assert_eq!(field.face(level, cell, 1).map(|f| f.0), Some(0.0));
+            // Nothing faces -x: that way holds the wall's back, its area
+            // negated and no light.
+            let (back, dark) = field.face(level, cell, 1).expect("the same brick");
+            assert!((back + area).abs() < 1.0e-6, "level {level}: back {back}, area {area}");
+            assert_eq!(dark, [0.0; 3]);
         }
         // Far from the wall there is no brick.
         assert!(field.face(FIELD_FINEST, cell_of([40.0, 1.0, 1.0], voxel_size(FIELD_FINEST)), 0).is_none());

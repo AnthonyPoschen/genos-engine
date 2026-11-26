@@ -123,8 +123,7 @@ void main() {
             if (lamps[e] == 0u) {
                 break;
             }
-            vec3 target;
-            irradiance += lamp_light(scene_lamp(lamps[e] - 1u), from, n, two_sided, target) * cone_lamp_share(seen[e] / weight);
+            irradiance += cone_lamp_on(lamps[e] - 1u, from, n, two_sided, cone_lamp_share(seen[e] / weight));
         }
     } else {
         // No gathered pixel is on this surface: the fill pass gathers here.

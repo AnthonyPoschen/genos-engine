@@ -1,0 +1,102 @@
+#version 450
+// Cone-traced cascades: the lamp maps' tiles to trace this frame
+// (cone_common.glsl, Lamp maps). Four runs, by push dims.w:
+//  0  a thread a mapped lamp: its version goes up when it has moved.
+//  1  a thread a tile: a tile asked for this frame asks for the tiles over
+//     it at every coarser level, so a coarser one is there to fall back on.
+//  2  counts, a level, the tiles asked for of lamps on the move.
+//  3  lists the tiles to trace. The coarsest level's always: every lamp's
+//     shadow is in place the frame it moves. A finer level's of a lamp on
+//     the move when the tiles asked for through that level fit the frame's
+//     budget (the head's word 5) and none when they do not: all moving
+//     lamps' shadows soften together, not some tiles of one. Then, while
+//     room is left, a still lamp's tiles not yet traced, tiles traced in
+//     an older field and tiles traced with a moving lamp's few rays (their
+//     old depths are in use until then).
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 64) in;
+#include "lighting_common.glsl"
+#include "cone_common.glsl"
+
+const uint CONE_MAP_LIST_LAMP = 16u;
+// A still lamp's tile takes several times a moving lamp's rays, and waits
+// for nothing: such tiles take this share of the budget a frame, counted
+// one by one (by the list's length alone, every thread saw room before any
+// had taken it, and one frame traced 1,400 tiles in 5 ms).
+const uint CONE_MAP_STILL_SHARE = 8u;
+const uint CONE_MAP_STILL = 171u;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint mapped = cone_map_lamps();
+    uint mode = pc.dims.w;
+    if (mode == 0u) {
+        if (i >= mapped || i >= scene.lamp_count) {
+            return;
+        }
+        uint at = cone_map_lamp(i);
+        vec3 pos = scene_lamp(i).pos.xyz;
+        if (cwork.w[at] == 0u || cone_word3(at + 1u) != pos) {
+            cwork.w[at] = cwork.w[at] + 1u == 0u ? 1u : cwork.w[at] + 1u;
+            cwork.w[at + 1u] = floatBitsToUint(pos.x);
+            cwork.w[at + 2u] = floatBitsToUint(pos.y);
+            cwork.w[at + 3u] = floatBitsToUint(pos.z);
+            cwork.w[at + CONE_MAP_LAMP_MOVED] = cwork.w[CONE_MAP_HEAD + 3u];
+        }
+        return;
+    }
+    uint lamp = i / CONE_MAP_TILES;
+    uint t = i % CONE_MAP_TILES;
+    if (lamp >= mapped) {
+        return;
+    }
+    int level = 0;
+    while (level + 1 < CONE_MAP_LEVELS && t >= cone_map_before(level + 1, CONE_MAP_TILES_FIRST)) {
+        level++;
+    }
+    uint within = t - cone_map_before(level, CONE_MAP_TILES_FIRST);
+    uint side = CONE_MAP_TILES_SIDE << uint(level);
+    ivec2 tile = ivec2(within % side, within / side);
+    uint at = cone_map_tile(lamp, level, tile);
+    uint frame = cwork.w[CONE_MAP_HEAD + 3u];
+    if (cwork.w[at + 2u] != frame) {
+        return;
+    }
+    if (mode == 1u) {
+        for (int k = level - 1; k >= 0; k--) {
+            cwork.w[cone_map_tile(lamp, k, tile >> (level - k)) + 2u] = frame;
+        }
+        return;
+    }
+    bool current = cwork.w[at] == cwork.w[cone_map_lamp(lamp)];
+    // A lamp on the move: it moved this frame or the last.
+    bool moving = cwork.w[cone_map_lamp(lamp) + CONE_MAP_LAMP_MOVED] + 1u >= frame;
+    if (mode == 2u) {
+        if (!current && moving) {
+            atomicAdd(cwork.w[CONE_MAP_ASKED + uint(level)], 1u);
+        }
+        return;
+    }
+    uint budget = cwork.w[CONE_MAP_HEAD + 5u];
+    if (!current && moving) {
+        uint through = 0u;
+        for (int k = 1; k <= level; k++) {
+            through += cwork.w[CONE_MAP_ASKED + uint(k)];
+        }
+        if (level > 0 && through > budget) {
+            return;
+        }
+    } else if (!current) {
+        // A still lamp's tile not yet traced where it now is: as room allows.
+        if (level > 0 && atomicAdd(cwork.w[CONE_MAP_STILL], 1u) >= budget / CONE_MAP_STILL_SHARE) {
+            return;
+        }
+    } else if (cwork.w[at + 3u] == cwork.w[CONE_MAP_HEAD + 4u] || atomicAdd(cwork.w[CONE_MAP_STILL], 1u) >= budget / CONE_MAP_STILL_SHARE) {
+        return;
+    }
+    uint slot = atomicAdd(cwork.w[CONE_MAP_COUNT], 1u);
+    if (slot < cwork.w[CONE_MAP_HEAD + 7u]) {
+        cwork.w[cwork.w[CONE_MAP_HEAD + 6u] + slot] = (lamp << CONE_MAP_LIST_LAMP) | t;
+        atomicAdd(cwork.w[CONE_MAP_LISTED + uint(level)], 1u);
+    }
+}

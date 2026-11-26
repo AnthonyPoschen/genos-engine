@@ -198,6 +198,8 @@ fn compile_lighting_modules(out: &std::path::Path) -> Vec<(&'static str, PathBuf
         ("CONE_FILL_SPV", "cone_fill.comp"),
         ("CONE_TARGETS_SPV", "cone_targets.comp"),
         ("CONE_LAMP_SPV", "cone_lamp.comp"),
+        ("CONE_MAP_LIST_SPV", "cone_map_list.comp"),
+        ("CONE_MAP_TRACE_SPV", "cone_map_trace.comp"),
     ]
     .iter()
     .map(|(name, file)| {

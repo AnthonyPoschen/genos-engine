@@ -131,6 +131,7 @@ try:
           + "  closed " + " ".join(str(s["cones_closed"]) for s in stats["cascades"])
           + "  kept " + " ".join(str(s.get("cones_kept", 0)) for s in stats["cascades"])
           + "  seat fallbacks " + " ".join(str(s["seat_fallbacks"]) for s in stats["cascades"]))
+    print(f"  map tiles asked {stats.get('map_tiles_asked')} traced {stats.get('map_tiles_traced')}")
     print(f"  field: {stats.get('field', '')}")
     print(f"  ev100: {call('get_hdr').get('ev100')}")
     for mode in CAPTURES:

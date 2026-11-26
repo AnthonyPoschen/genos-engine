@@ -115,6 +115,17 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --mesh-workspace DIR   mesh-workbench workspace a mesh scene opens, in place
                          of the one its scene file names. GENOS_MESH_WORKSPACE
                          applies only when this is omitted
+  --session on|off       keep the session: the scene shown, the camera's place
+                         and the scene's settings are written to
+                         <out>/session/<program>.txt while the program runs
+                         and put back when it next opens. An argument wins:
+                         --scene names the scene (its settings come back only
+                         when it is the saved scene), --eye, --look and
+                         --checkpoint place the camera, --preset and
+                         --full-effort keep the lighting settings. On for
+                         genos-editor with a window; off for genos-lighting,
+                         --headless, --frames, --script and --check.
+                         GENOS_SESSION applies only when this is omitted
   --checkpoint NAME      jump here at launch
   --eye X,Y,Z            camera position, metres. --eye=X,Y,Z is the same flag.
                          Keeps the checkpoint aim unless --look is set
@@ -144,6 +155,18 @@ genos-lighting — lighting scenes, checkpoints, and the debug picture
   --adapt-knee-stops F   stops from the anchor at which exposure follows half of
                          the strength: under it little, past it most (0: flat).
                          GENOS_HDR_ADAPT_KNEE_STOPS applies only when this is omitted
+  --adapt-neutral-ev100 F
+                         the EV100 at which dark places look dark and bright
+                         ones bright; auto exposure moves from it.
+                         GENOS_HDR_ADAPT_NEUTRAL_EV100 applies only when this is omitted
+  --adapt-dark-stops F
+                         the most stops auto exposure opens under the neutral
+                         point in a dark place (0: no limit).
+                         GENOS_HDR_ADAPT_DARK_STOPS applies only when this is omitted
+  --adapt-bright-stops F
+                         the most stops auto exposure closes over the neutral
+                         point in a bright place (0: no limit).
+                         GENOS_HDR_ADAPT_BRIGHT_STOPS applies only when this is omitted
   --highlight-percentile F
                          0.5..1, the luminance share that sets the highlight key.
                          GENOS_HDR_HIGHLIGHT_PERCENTILE applies only when this is omitted
@@ -295,6 +318,8 @@ saves NAME.csv (p50 and p99 per pass and counter) and NAME-frames.csv.
 The binary does not write under $HOME.
 ";
 
+/// The session file is written at most this often.
+const SESSION_SECONDS: f32 = 1.0;
 const FLY_SPEED: f32 = 5.0;
 const STICK_LOOK: f32 = 2.0;
 const MAX_FRAME_SECONDS: f32 = 0.25;
@@ -345,11 +370,15 @@ const ID_HDR_HIGHLIGHT_PERCENTILE: u32 = 5111;
 const ID_HDR_HIGHLIGHT_STOPS: u32 = 5112;
 const ID_HDR_ADAPT_ANCHOR: u32 = 5113;
 const ID_HDR_ADAPT_KNEE: u32 = 5114;
+const ID_HDR_ADAPT_NEUTRAL: u32 = 5115;
+const ID_HDR_ADAPT_DARK: u32 = 5116;
+const ID_HDR_ADAPT_BRIGHT: u32 = 5117;
 const ID_HDR_BLOOM: u32 = 5200;
 /// The "Save look to scene" button of the Output page.
 const ID_HDR_SAVE: u32 = 5300;
 
 mod menu_layout;
+mod session;
 #[cfg(feature = "mesh")]
 mod mesh_view;
 #[cfg(feature = "mesh")]
@@ -437,6 +466,10 @@ struct Options {
     ui: bool,
     out: PathBuf,
     out_set: bool,
+    /// `--scene` or `GENOS_SCENE` named the scene.
+    scene_set: bool,
+    /// `--session`, else `GENOS_SESSION`. Empty: the program's own rule.
+    session: Option<bool>,
     size: (u32, u32),
     check: bool,
     /// Set by `--mcp-port`. Empty means `GENOS_MCP_PORT`, then [`MCP_PORT`].
@@ -480,6 +513,9 @@ pub struct Program {
     /// mesh commands that edit. The binary supplies it, so this library does
     /// not link mesh-workbench: `genos-editor` does, `genos-lighting` does not.
     pub mesh_session: Option<OpenMeshSession>,
+    /// Whether the program keeps its session (`--session`) when the launch
+    /// does not say.
+    pub session: bool,
 }
 
 /// A mesh-workbench session on one workspace: it runs a command, or a list
@@ -505,6 +541,7 @@ impl Program {
         meshes: false,
         top_bar: false,
         mesh_session: None,
+        session: false,
     };
     /// The editor: opens on the mesh scene and lists every scene. It takes
     /// the engine's first MCP port, as `genos-camera` and `genos-stress` do.
@@ -517,6 +554,7 @@ impl Program {
         meshes: true,
         top_bar: true,
         mesh_session: None,
+        session: true,
     };
 }
 
@@ -668,8 +706,21 @@ fn run() -> Result<i32, String> {
     let window = &mut *owner.window;
     let renderer = &mut *owner.device;
     let mut camera = Camera::opening();
-    if app.entry().name != opts.scene {
-        app.start_load(&opts.scene)?;
+    // The session: on by the program's rule for a run a person drives.
+    let keep_session = opts.session.unwrap_or(program().session && !opts.headless && opts.frames.is_none() && opts.script.is_none() && !opts.check);
+    let mut saved_session = if keep_session { session::load(&opts.out, program().name) } else { None };
+    let mut session_text = String::new();
+    let mut session_at = Instant::now();
+    let opening = match &saved_session {
+        Some(saved) if !opts.scene_set => saved.scene.clone(),
+        _ => opts.scene.clone(),
+    };
+    if app.entry().name != opening {
+        // A saved scene that is no longer listed: the launch's own.
+        if app.start_load(&opening).is_err() && opening != opts.scene {
+            saved_session = None;
+            app.start_load(&opts.scene)?;
+        }
     }
     jump_camera(&mut app, opts.checkpoint.as_deref(), &mut camera)?;
     place_camera(&opts, &mut camera)?;
@@ -762,6 +813,36 @@ fn run() -> Result<i32, String> {
             app.take_load()?;
             if !app.loading() {
                 renderer.reset_lighting_cache();
+            }
+        }
+        if keep_session && !app.loading() {
+            // The opening scene is read: put the saved settings and camera
+            // back, once, when it is the scene they were saved for.
+            if let Some(saved) = saved_session.take() {
+                if saved.scene == app.entry().name {
+                    saved.restore(app.scene(), opts.preset.is_none() && !opts.full_effort);
+                    if opts.eye.is_none() && opts.look.is_none() && opts.checkpoint.is_none() {
+                        saved.place(&mut camera);
+                    }
+                    if let Some(speed) = saved.sun_speed {
+                        let _ = app.set_knob("sun_speed", speed);
+                    }
+                    menu_open = app.scene().menu.effective().visible;
+                }
+            }
+            // Written when it has changed, at most once a second, and on
+            // the way out.
+            if frame.closing || now.saturating_duration_since(session_at).as_secs_f32() >= SESSION_SECONDS {
+                session_at = now;
+                let name = app.entry().name.clone();
+                let speed = app.still_sun_speed;
+                let text = session::Session::of(&name, app.scene(), &camera, speed).to_text();
+                if text != session_text {
+                    match session::save(&opts.out, program().name, &text) {
+                        Ok(()) => session_text = text,
+                        Err(err) => eprintln!("{}: the session was not saved: {err}", program().name),
+                    }
+                }
             }
         }
         app.overlay_fog();
@@ -3664,6 +3745,39 @@ fn setting_piece(
                 0.25,
             )))
         }
+        "hdr_adapt_neutral_ev100" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt neutral EV100",
+                ID_HDR_ADAPT_NEUTRAL,
+                hdr.adapt_neutral_ev100,
+                -2e+01,
+                2e+01,
+                0.25,
+            )))
+        }
+        "hdr_adapt_dark_stops" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt dark stops",
+                ID_HDR_ADAPT_DARK,
+                hdr.adapt_dark_stops,
+                0e+00,
+                1e+01,
+                0.25,
+            )))
+        }
+        "hdr_adapt_bright_stops" => {
+            let hdr = hdr_of(app);
+            Some(Piece::Row(number_row(
+                "Adapt bright stops",
+                ID_HDR_ADAPT_BRIGHT,
+                hdr.adapt_bright_stops,
+                0e+00,
+                1e+01,
+                0.25,
+            )))
+        }
         "hdr_highlight_percentile" => {
             let hdr = hdr_of(app);
             Some(Piece::Row(number_row(
@@ -4225,6 +4339,18 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
         app.scene()
             .hdr
             .set_key("adapt_knee_stops", &format!("{}", value.clamp(0.0, 10.0)))?;
+    } else if id == ID_HDR_ADAPT_NEUTRAL {
+        app.scene()
+            .hdr
+            .set_key("adapt_neutral_ev100", &format!("{}", value.clamp(-2e+01, 2e+01)))?;
+    } else if id == ID_HDR_ADAPT_DARK {
+        app.scene()
+            .hdr
+            .set_key("adapt_dark_stops", &format!("{}", value.clamp(0e+00, 1e+01)))?;
+    } else if id == ID_HDR_ADAPT_BRIGHT {
+        app.scene()
+            .hdr
+            .set_key("adapt_bright_stops", &format!("{}", value.clamp(0e+00, 1e+01)))?;
     } else if id == ID_HDR_ADAPT_ANCHOR {
         app.scene()
             .hdr
@@ -4527,6 +4653,7 @@ fn need_arg(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<Strin
 fn options() -> Result<Options, String> {
     let mut args = std::env::args().skip(1).peekable();
     let mut scene = std::env::var("GENOS_SCENE").ok();
+    let mut session = None;
     let mut checkpoint = None;
     let mut eye = None;
     let mut look = None;
@@ -4611,6 +4738,13 @@ fn options() -> Result<Options, String> {
                 );
             }
             "--check" => check = true,
+            "--session" => {
+                session = Some(match need_arg(&mut args, "--session")?.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    other => return Err(format!("--session takes on or off, not {other}")),
+                });
+            }
             "--fps-counter" => {
                 if args.peek().is_some_and(|next| !next.starts_with('-')) {
                     let value = args.next().unwrap();
@@ -4718,7 +4852,7 @@ fn options() -> Result<Options, String> {
         }
     });
     Ok(Options {
-        scene: scene.map_or_else(
+        scene: scene.clone().map_or_else(
             || program().default_scene.to_string(),
             |name| genos_scene_lib::canonical(&name).to_string(),
         ),
@@ -4739,6 +4873,12 @@ fn options() -> Result<Options, String> {
         ui,
         out,
         out_set: out_cli.is_some(),
+        scene_set: scene.is_some(),
+        session: session.or_else(|| match std::env::var("GENOS_SESSION").ok().as_deref() {
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            _ => None,
+        }),
         size,
         check,
         mcp_port,
@@ -4941,6 +5081,8 @@ mod tests {
             ui: false,
             out: std::path::PathBuf::from("genos-debug"),
             out_set: false,
+            scene_set: false,
+            session: None,
             size: (320, 180),
             check: false,
             mcp_port: None,

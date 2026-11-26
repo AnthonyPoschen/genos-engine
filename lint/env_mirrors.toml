@@ -1351,6 +1351,21 @@ kind = "mirror"
 detail = "--adapt-knee-stops"
 
 [[var]]
+name = "GENOS_HDR_ADAPT_NEUTRAL_EV100"
+kind = "mirror"
+detail = "--adapt-neutral-ev100"
+
+[[var]]
+name = "GENOS_HDR_ADAPT_DARK_STOPS"
+kind = "mirror"
+detail = "--adapt-dark-stops"
+
+[[var]]
+name = "GENOS_HDR_ADAPT_BRIGHT_STOPS"
+kind = "mirror"
+detail = "--adapt-bright-stops"
+
+[[var]]
 name = "GENOS_HDR_HIGHLIGHT_PERCENTILE"
 kind = "mirror"
 detail = "--highlight-percentile"
@@ -1741,3 +1756,8 @@ detail = "--mesh-workspace"
 name = "GENOS_LIGHTING_CASCADE_TIMES"
 kind = "todo"
 detail = "no CLI argument yet; prints the cascade stamps each frame"
+
+[[var]]
+name = "GENOS_SESSION"
+kind = "mirror"
+detail = "--session"

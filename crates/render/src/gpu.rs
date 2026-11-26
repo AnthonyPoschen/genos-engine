@@ -1640,6 +1640,12 @@ impl Renderer {
         self.gpu.cone_lamp_drops()
     }
 
+    /// The cone cascades' lamp-map tiles last frame, a level (coarsest
+    /// first): asked for with a moved lamp, and listed for tracing.
+    pub fn cone_map_tiles(&mut self) -> Result<[[u32; 5]; 2], String> {
+        self.gpu.cone_map_tiles()
+    }
+
     /// The resident cone field: its points, voxels, bricks, bytes and build
     /// seconds. Empty before the first one is built.
     #[must_use]

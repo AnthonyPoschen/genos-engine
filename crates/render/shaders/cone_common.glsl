@@ -785,7 +785,8 @@ bool cone_seat(int level, ivec3 cell, out vec3 mean, out vec3 normal, out float 
     float total = 0.0;
     for (int d = 0; d < 6; d++) {
         uint w = stride == 0u ? crec.fv[area_at + uint(2 * d + 1)] : ccoarse.cw[area_at + uint(2 * d + 1)];
-        float area = unpackHalf2x16(w).y;
+        // A back (a negative area, cone_field.rs written_area) is no surface.
+        float area = max(unpackHalf2x16(w).y, 0.0);
         sum += cone_axis(d) * area;
         total += area;
     }
@@ -982,10 +983,15 @@ int cone_crossed(int level, vec3 from, vec3 to, vec3 dir) {
                 if (-dot(dir, axis) <= CONE_TOWARD_MIN) {
                     continue;
                 }
+                // A negative area is a surface's back (cone_field.rs
+                // written_area): it covers as the surface does and sends
+                // no light.
                 vec2 b_area = unpackHalf2x16(crec.fv[r + uint(2 * d + 1)]);
-                if (b_area.y <= 0.0) {
+                if (b_area.y == 0.0) {
                     continue;
                 }
+                bool back = b_area.y < 0.0;
+                b_area.y = abs(b_area.y);
                 uint pw = r + 12u + uint(3 * d);
                 vec2 p0 = unpackHalf2x16(crec.fv[pw]);
                 int ax = d / 2;
@@ -1017,7 +1023,7 @@ int cone_crossed(int level, vec3 from, vec3 to, vec3 dir) {
                     float fill = b_area.y / (size * size);
                     cone_met[n].depth = dot(hit - from, dir);
                     cone_met[n].cover = fill >= CONE_CROSS_FULL ? 1.0 : fill;
-                    cone_met[n].radiance = vec3(rg, b_area.x) / b_area.y;
+                    cone_met[n].radiance = back ? vec3(0.0) : vec3(rg, b_area.x) / b_area.y;
                     n++;
                 }
             }
@@ -1062,12 +1068,24 @@ bool cone_past_horizon(uint t, ivec3 cell, float size) {
     return dot(away, cone_horizon_n) > 0.0 || dot(away, away) > CONE_HORIZON_NEAR * CONE_HORIZON_NEAR * size * size;
 }
 
+// A coarse face whose area fills this share of its voxel blocks a thin ray
+// fully; less, in proportion. A face's area is an estimate, and a solid roof
+// read 0.94 of a 25 cm voxel: 4% of the sun came through it, and the shade
+// under the hall's roof showed bands of sun 8 m and more from the eye.
+const float CONE_COARSE_SOLID = 0.75;
+const float CONE_BACK_SIDES = 2.0;
+// Set by cone_coarse: a back that faces the cone lies in the voxels about
+// the point, on either side of it. The march walks such a step finely: a
+// back before the step's middle gives the point no cover, and the step was
+// passed whole, floor and all.
+bool cone_back_near = false;
 // The filtered read of a coarse level at `at`: the cross-section's cover by
 // the areas that face the cone and by the lamps, and their light. Trilinear
 // over the eight voxels around the point, all in the padded brick that holds
 // the point's voxel. The lamps are read only when `lamps`: a caller that
 // takes the cover alone does not pay for their eight lookups.
 void cone_coarse(int level, vec3 at, vec3 dir, bool lamps, out float cover, out vec3 light, out float lamp_cover, out vec3 lamp_light) {
+    cone_back_near = false;
     cover = 0.0;
     light = vec3(0.0);
     lamp_cover = 0.0;
@@ -1122,7 +1140,26 @@ void cone_coarse(int level, vec3 at, vec3 dir, bool lamps, out float cover, out 
                 continue;
             }
             vec2 ba = unpackHalf2x16(ccoarse.cw[t + uint(2 * d + 1)]);
-            if (ba.y <= 0.0) {
+            if (ba.y == 0.0) {
+                continue;
+            }
+            if (ba.y < 0.0) {
+                // A surface's back (cone_field.rs written_area) covers a
+                // cone that comes at it from behind and sends no light. Only
+                // from behind: this read has no crossing, and a cone that
+                // leaves the surface's front goes the same way through the
+                // same voxel.
+                cone_back_near = true;
+                vec2 pair = unpackHalf2x16(ccoarse.cw[t + CONE_TEXEL_PLANES + uint(d / 2)]);
+                int ax = d / 2;
+                float plane = (float((base + o)[ax]) + ((d & 1) == 0 ? pair.x : pair.y)) * size;
+                if ((at[ax] - plane) * cone_axis(d)[ax] > 0.0) {
+                    // Twice over: a surface is counted by the points on
+                    // both sides of it (their weights add to one crossing),
+                    // a back by those behind it alone. Counted once, a floor
+                    // covered half of each cone that came up through it.
+                    facing += CONE_BACK_SIDES * wt * -ba.y * toward;
+                }
                 continue;
             }
             facing += wt * ba.y * toward;
@@ -1241,6 +1278,54 @@ float cone_steps = 0.0;
 // rebuild of a walk. A cone wider than the voxels it reads samples its
 // middle, as it does at the fine levels.
 const int CONE_MOST_OVER = 1;
+// The cover of the surfaces' backs (cone_field.rs written_area) the axis
+// crosses from behind between `a` and `b` at a coarse level: each back's
+// plane, crossed inside the voxel that holds it, by the share of the
+// voxel's side its area fills (as coarse_crossed counts a thin ray). The
+// filtered read (cone_coarse) counts a back by the points behind it alone,
+// and how many of its eight weights those are turns on where the plane lies
+// in its voxel: a floor near its voxel's low side covered a cone from below
+// by a seventh, and light came through floors and walls in bands by
+// distance, where one level or another did the reading (Anthony, 26 Nov
+// 2026). A surface's front needs none of this: the points on both sides of
+// it count it, and their weights add to one crossing wherever it lies.
+float cone_back_crossed(int level, vec3 a, vec3 b, vec3 dir) {
+    float size = cone_size(level);
+    float cover = 0.0;
+    ivec3 first = ivec3(floor(a / size));
+    ivec3 last = ivec3(floor(b / size));
+    for (int e = 0; e < 2; e++) {
+        ivec3 cell = e == 0 ? first : last;
+        if (e == 1 && last == first) {
+            break;
+        }
+        uint slot = cone_entry(level, cell);
+        if (slot == CONE_NO_BRICK) {
+            continue;
+        }
+        uint t = cone_coarse_texel(slot, (cell & ivec3(CONE_BRICK - 1)) + ivec3(1));
+        for (int d = 0; d < 6; d++) {
+            vec3 axis = cone_axis(d);
+            if (-dot(dir, axis) <= CONE_TOWARD_MIN) {
+                continue;
+            }
+            float area = unpackHalf2x16(ccoarse.cw[t + uint(2 * d + 1)]).y;
+            if (area >= 0.0) {
+                continue;
+            }
+            vec2 pair = unpackHalf2x16(ccoarse.cw[t + CONE_TEXEL_PLANES + uint(d / 2)]);
+            int ax = d / 2;
+            float plane = (float(cell[ax]) + ((d & 1) == 0 ? pair.x : pair.y)) * size;
+            float sa = (a[ax] - plane) * axis[ax];
+            float sb = (b[ax] - plane) * axis[ax];
+            if (!(sa > 0.0 && sb <= 0.0)) {
+                continue;
+            }
+            cover += min(-area / (size * size) / CONE_COARSE_SOLID, 1.0);
+        }
+    }
+    return min(cover, 1.0);
+}
 int cone_most_level = CONE_COARSEST;
 void cone_march_least(vec3 start, vec3 dir, float width, float least, float done, float end, inout float covered, inout vec3 light);
 void cone_march(vec3 start, vec3 dir, float width, float done, float end, inout float covered, inout vec3 light) {
@@ -1277,7 +1362,7 @@ void cone_march_least(vec3 start, vec3 dir, float width, float least, float done
         if (lc > 0.0) {
             light += ll * min(lc, 1.0 - covered);
         }
-        if (cov > 0.0) {
+        if (cov > 0.0 || cone_back_near) {
             float u = from;
             while (u < to && covered < CONE_FULL) {
                 // The finest level the field holds here: the refine level
@@ -1309,6 +1394,8 @@ void cone_march_least(vec3 start, vec3 dir, float width, float least, float done
                         light += fl * seen;
                         covered += seen;
                     }
+                    // What lies past a back the axis went through is not seen.
+                    covered += min(cone_back_crossed(l, start + dir * u, start + dir * next, dir), 1.0 - covered);
                 }
                 u = next;
                 cone_steps += 1.0;
@@ -1351,7 +1438,8 @@ float cone_passing(vec3 from, vec3 to) {
             float lc;
             vec3 ll;
             cone_coarse(level, from + dir * (CONE_HALF * (u + next)), dir, false, cov, li, lc, ll);
-            blocked += cov;
+            // And the backs the line goes through (cone_back_crossed).
+            blocked += cov + cone_back_crossed(level, from + dir * u, from + dir * next, dir);
         }
         u = next;
     }
@@ -1527,10 +1615,16 @@ float cone_ray_blocked(vec3 from, vec3 to, int level) {
     }
     return ray_blocked(from, way / length_, level, most);
 }
-// As sun_blocked, for at most `most` metres.
+// As sun_blocked, for at most `most` metres. cone_ray_hit is then how far
+// along the ray the field had blocked CONE_RAY_HIT of it (CONE_FAR: never),
+// a lamp map's depth (cone_map_trace.comp).
+const float CONE_RAY_HIT = 0.49;
+float cone_ray_hit;
+float coarse_near;
 float ray_blocked(vec3 from, vec3 dir, int level, float most) {
     float covered = 0.0;
     float done = 0.0;
+    cone_ray_hit = CONE_FAR;
     float least = cone_size(level);
     // Past the scene's box there is nothing to cross.
     float reach = min(most, cone_field_exit(from, dir));
@@ -1561,9 +1655,15 @@ float ray_blocked(vec3 from, vec3 dir, int level, float most) {
             int n = cone_crossed(l, a, b, dir);
             for (int i = 0; i < n; i++) {
                 covered += min(cone_met[i].cover, 1.0 - covered);
+                if (covered >= CONE_RAY_HIT && cone_ray_hit == CONE_FAR) {
+                    cone_ray_hit = done + cone_met[i].depth;
+                }
             }
         } else {
             covered += min(coarse_crossed(l, a, b, dir), 1.0 - covered);
+            if (covered >= CONE_RAY_HIT && cone_ray_hit == CONE_FAR) {
+                cone_ray_hit = done + coarse_near;
+            }
         }
         done += step_;
     }
@@ -1576,15 +1676,11 @@ float ray_blocked(vec3 from, vec3 dir, int level, float most) {
 // only the voxels holding `a` and `b`: a step across a corner crosses a wall
 // in the voxel beside both, and at 25 cm the sun leaked through Sponza's
 // outer walls onto the arcade floor there.
-// A coarse face whose area fills this share of its voxel blocks a thin ray
-// fully; less, in proportion. A face's area is an estimate, and a solid roof
-// read 0.94 of a 25 cm voxel: 4% of the sun came through it, and the shade
-// under the hall's roof showed bands of sun 8 m and more from the eye.
-const float CONE_COARSE_SOLID = 0.75;
 
 float coarse_crossed(int level, vec3 a, vec3 b, vec3 dir) {
     float size = cone_size(level);
     float cover = 0.0;
+    coarse_near = length(b - a);
     ivec3 lo = min(ivec3(floor(a / size)), ivec3(floor(b / size)));
     ivec3 hi = max(ivec3(floor(a / size)), ivec3(floor(b / size)));
     for (int e = 0; e < 8; e++) {
@@ -1605,7 +1701,8 @@ float coarse_crossed(int level, vec3 a, vec3 b, vec3 dir) {
             if (-dot(dir, axis) <= CONE_TOWARD_MIN) {
                 continue;
             }
-            float area = unpackHalf2x16(ccoarse.cw[t + uint(2 * d + 1)]).y;
+            // A back (a negative area) stops the ray as its surface does.
+            float area = abs(unpackHalf2x16(ccoarse.cw[t + uint(2 * d + 1)]).y);
             if (area <= 0.0) {
                 continue;
             }
@@ -1624,11 +1721,382 @@ float coarse_crossed(int level, vec3 a, vec3 b, vec3 dir) {
                 continue;
             }
             cover += min(area / (size * size) / CONE_COARSE_SOLID, 1.0);
+            coarse_near = min(coarse_near, dot(hit - a, dir));
         }
     }
     return cover;
 }
 
+// Lamp maps. Each point lamp (the first CONE_MAP_HEAD + 1 of the scene's
+// lights) keeps a map of how far its light goes in each direction before
+// the field blocks it: an octahedral square at CONE_MAP_LEVELS sizes (32 to
+// 512 texels a side), in tiles of CONE_MAP_TILE by CONE_MAP_TILE texels. A
+// pixel is lit by a lamp where the map's depth toward it is not short of
+// the pixel (cone_lamp_lit): a shadow's edge is where the lamp sees it, at
+// the map's texel, not at the probes' spacing, and no ray is cast from a
+// pixel. A tile is traced (cone_map_trace.comp) when a probe on screen asks
+// for it (cone_lamp.comp) and it is not current: the lamp moved since, or
+// the field changed. A still lamp's tiles are traced once.
+//
+// The header's map words. CONE_MAP_COUNT on are cleared each frame.
+const uint CONE_MAP_COUNT = 160u;  // tiles listed for the trace this frame
+const uint CONE_MAP_ASKED = 161u;  // a level: tiles asked for whose lamp moved
+const uint CONE_MAP_LISTED = 166u; // a level: tiles listed
+// The maps' word offset (0: none), the lamps mapped, the time in ms, the
+// frame's number (from 1), the field's number, the most tiles a frame
+// traces past the coarsest level's, the list's word offset and its room.
+const uint CONE_MAP_HEAD = 176u;
+const int CONE_MAP_LEVELS = 5;
+const uint CONE_MAP_SIDE = 32u;
+const uint CONE_MAP_TILE = 8u;
+// A lamp's words: its version (raised when it moves; 0: never seen), its
+// place and the frame it last moved; then its tiles, then its texels.
+const uint CONE_MAP_LAMP_HEAD = 8u;
+const uint CONE_MAP_LAMP_MOVED = 4u;
+// A tile's words: the lamp's version it was traced at, the time (ms) since
+// which it has been kept current, the frame a probe last asked for it, the
+// field's number it was traced in, the frame it was traced.
+const uint CONE_MAP_TILE_WORDS = 5u;
+const uint CONE_MAP_TILES = 5456u;
+// A texel is two words. The first's low half is a distance from the lamp;
+// CONE_MAP_MODE says what the texel holds.
+// One surface: the furthest its rays went (the low half) and the nearest as
+// a share of that. A pixel no further than the furthest is lit.
+// A plane: one surface. The low half is its distance at the texel's
+// middle, the second word how its inverse distance changes across the
+// texel (two halves; a plane's inverse distance runs straight across), and
+// the high bits how far the texel's rays lie from that plane at most. A
+// pixel is lit where it is no further than the plane there and that. (With one
+// furthest distance for the texel, a column's side that runs back to the
+// wall it stands on left the wall beside it lit: the wall is no further
+// than where the column meets it. The column's short shadow on the wall
+// was drawn in teeth a texel long, Anthony 26 Nov 2026.)
+// An edge: two surfaces. The low half is the near one's furthest distance;
+// a pixel within the slack of it is on the near surface, lit. A pixel past
+// it is lit by which side it stands of the line where the near surface's
+// silhouette runs in the texel (its normal's angle, toward the far side,
+// and its distance from the texel's middle), found with rays
+// (cone_map_trace.comp): a shadow's edge is as straight as the silhouette
+// at any size on screen. A pixel past the far surface's furthest distance
+// (the second word, with its nearest) is dark.
+// Covered: as an edge, with the share of its rays the near surface stopped
+// in place of a line, where no one line parts them (a corner, something
+// thinner than the texel).
+// All distances are straight from the lamp. (Brought to the texel's middle
+// along each surface's plane, so one surface gave one depth, a wall the
+// lamp lights at a low angle read as two surfaces or as none, and its
+// shadows were drawn with streaks and teeth, Sponza 26 Nov 2026. Before
+// that: one depth a texel moved an edge a whole texel at a time; a covered
+// share a texel, read with its neighbours, still drew the texels.)
+// Two words a texel: the first as below; the second, where the texel holds
+// two surfaces, the far one's nearest and furthest distances (two halves). (That distance was once a
+// step of four past the first word's: by the step, light fell on what
+// stood behind the far surface.)
+const uint CONE_MAP_WORDS = 2u;
+const uint CONE_MAP_TEXEL_WORDS = 698368u;
+const uint CONE_MAP_HALF_BITS = 0xffffu;
+const uint CONE_MAP_MODE_SHIFT = 16u;
+const uint CONE_MAP_MODE = 3u;
+const uint CONE_MAP_ONE = 0u;
+const uint CONE_MAP_EDGE = 1u;
+const uint CONE_MAP_COVERED = 2u;
+const uint CONE_MAP_PLANE = 3u;
+// The rays of a plane texel lie within so many of these metres of its plane.
+const float CONE_MAP_OFF_STEP = 0.001;
+// One surface: its nearest, as the share of the furthest it falls short.
+const uint CONE_MAP_SPAN_SHIFT = 18u;
+const uint CONE_MAP_SPANS = 16383u;
+// Two surfaces: the near one's furthest distance, the line's angle, and
+// its distance or the cover.
+const uint CONE_MAP_ANGLE_SHIFT = 20u;
+const uint CONE_MAP_ANGLES = 64u;
+const uint CONE_MAP_OFFSET_SHIFT = 26u;
+const uint CONE_MAP_OFFSETS = 63u;
+const float CONE_MAP_TURN = 6.2831853;
+// Two surfaces in a texel are this far apart at least, and this share of
+// their distance; a pixel half that before the far one is on the near one.
+const float CONE_MAP_APART = 0.02;
+const float CONE_MAP_APART_SHARE = 0.004;
+float cone_map_apart(float depth) {
+    return CONE_MAP_APART + CONE_MAP_APART_SHARE * depth;
+}
+vec2 cone_map_angle(uint index) {
+    float a = float(index) * CONE_MAP_TURN / float(CONE_MAP_ANGLES);
+    return vec2(cos(a), sin(a));
+}
+uint cone_map_half(float depth) {
+    return packHalf2x16(vec2(depth, 0.0)) & CONE_MAP_HALF_BITS;
+}
+uint cone_map_pack_one(float nearest, float furthest) {
+    uint span = uint(ceil(clamp(1.0 - nearest / max(furthest, CONE_TINY), 0.0, 1.0) * float(CONE_MAP_SPANS)));
+    return cone_map_half(furthest) | (min(span, CONE_MAP_SPANS) << CONE_MAP_SPAN_SHIFT);
+}
+uint cone_map_pack_plane(float middle, float off) {
+    uint steps = uint(ceil(max(off, 0.0) / CONE_MAP_OFF_STEP));
+    return cone_map_half(middle) | (CONE_MAP_PLANE << CONE_MAP_MODE_SHIFT) | (min(steps, CONE_MAP_SPANS) << CONE_MAP_SPAN_SHIFT);
+}
+uint cone_map_pack_edge(float near, vec2 normal, vec2 through) {
+    uint index = uint(round(atan(normal.y, normal.x) / CONE_MAP_TURN * float(CONE_MAP_ANGLES) + float(CONE_MAP_ANGLES))) % CONE_MAP_ANGLES;
+    float offset = clamp(dot(cone_map_angle(index), through - CONE_HALF), -1.0, 1.0);
+    uint steps = uint(round((offset * CONE_HALF + CONE_HALF) * float(CONE_MAP_OFFSETS)));
+    return cone_map_half(near) | (CONE_MAP_EDGE << CONE_MAP_MODE_SHIFT) | (index << CONE_MAP_ANGLE_SHIFT) | (steps << CONE_MAP_OFFSET_SHIFT);
+}
+uint cone_map_pack_covered(float near, float cover) {
+    uint steps = uint(round(clamp(cover, 0.0, 1.0) * float(CONE_MAP_OFFSETS)));
+    return cone_map_half(near) | (CONE_MAP_COVERED << CONE_MAP_MODE_SHIFT) | (steps << CONE_MAP_OFFSET_SHIFT);
+}
+const uint CONE_MAP_LAMP_WORDS = CONE_MAP_LAMP_HEAD + CONE_MAP_TILES * CONE_MAP_TILE_WORDS + CONE_MAP_TEXEL_WORDS;
+// The first tiles a side and texel words of the coarsest level.
+const uint CONE_MAP_TILES_SIDE = 4u;
+const uint CONE_MAP_TILES_FIRST = 16u;
+const uint CONE_MAP_WORDS_FIRST = 2048u;
+// A shadow's edge is blended over this many metres, or a screen pixel.
+const float CONE_MAP_EDGE_WIDE = 0.02;
+// A depth past this is open air (a half float's reach).
+const float CONE_MAP_OPEN = 60000.0;
+// A finer level's tile is blended in over this long once it is kept
+// current, so a shadow sharpens and never jumps.
+const float CONE_MAP_FADE_MS = 150.0;
+// The sphere's square root of area over a side's texels: a texel's angle.
+const float CONE_MAP_SPAN = 3.5449;
+// A map texel this many screen pixels wide at the pixel is fine enough, and
+// one CONE_MAP_SOFT metres wide: nine texels are read, so a shadow's edge
+// is blended over twice that, the 12.5 cm the old path's shadow filter
+// has. Finer, the edge showed the mesh distance field's own steps as teeth
+// a texel long. (While the maps were traced through the cone field the
+// least width was the field's voxel at the pixel; far from the eye that
+// was 25 cm and more, and the edges there were drawn in steps.)
+const float CONE_MAP_PIXELS = 1.0;
+const float CONE_MAP_SOFT = 0.0625;
+// The map's depth may fall this far short of a pixel turned to the lamp,
+// past the shell a thin mesh has in the tracer (mf_skin): the tracer's
+// surface is not the pixel's. A pixel turned from the lamp (the back of a
+// two-sided surface, a curtain) is lit only where the map's depth is this
+// far past it: where the tracer holds its surface, the surface shades its
+// own back. (By one slack scaled with the field's voxel, a curtain's back
+// was lit from 10 m away, where the voxel is larger than the shell.)
+const float CONE_MAP_SLACK = 0.03;
+const float CONE_MAP_DONE = 0.004;
+
+uint cone_map_lamps() {
+    return cwork.w[CONE_MAP_HEAD] == 0u ? 0u : cwork.w[CONE_MAP_HEAD + 1u];
+}
+uint cone_map_lamp(uint lamp) {
+    return cwork.w[CONE_MAP_HEAD] + lamp * CONE_MAP_LAMP_WORDS;
+}
+// The words of level `level`'s first tile and first texel: the levels
+// before it hold 16, 64, 256 .. tiles and four times the texels each.
+uint cone_map_before(int level, uint first) {
+    return first * ((1u << uint(2 * level)) - 1u) / 3u;
+}
+uint cone_map_tile(uint lamp, int level, ivec2 tile) {
+    uint side = CONE_MAP_TILES_SIDE << uint(level);
+    return cone_map_lamp(lamp) + CONE_MAP_LAMP_HEAD + (cone_map_before(level, CONE_MAP_TILES_FIRST) + uint(tile.y) * side + uint(tile.x)) * CONE_MAP_TILE_WORDS;
+}
+uint cone_map_texels(uint lamp, int level) {
+    return cone_map_lamp(lamp) + CONE_MAP_LAMP_HEAD + CONE_MAP_TILES * CONE_MAP_TILE_WORDS + cone_map_before(level, CONE_MAP_WORDS_FIRST);
+}
+// A direction's place on the octahedral square (0 to 1), and back.
+vec2 cone_oct(vec3 d) {
+    vec3 n = d / (abs(d.x) + abs(d.y) + abs(d.z));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return n.xy * CONE_HALF + CONE_HALF;
+}
+vec3 cone_oct_dir(vec2 uv) {
+    vec2 f = (uv - CONE_HALF) / CONE_HALF;
+    vec3 n = vec3(f, 1.0 - abs(f.x) - abs(f.y));
+    float t = max(-n.z, 0.0);
+    n.xy -= vec2(n.x >= 0.0 ? t : -t, n.y >= 0.0 ? t : -t);
+    return normalize(n);
+}
+// A texel past the square's edge is the one mirrored along that edge.
+ivec2 cone_map_wrap(ivec2 t, int side) {
+    if (t.x < 0 || t.x >= side) {
+        t = ivec2(clamp(t.x, 0, side - 1), side - 1 - t.y);
+    }
+    if (t.y < 0 || t.y >= side) {
+        t = ivec2(side - 1 - t.x, clamp(t.y, 0, side - 1));
+    }
+    return clamp(t, ivec2(0), ivec2(side - 1));
+}
+// The level whose texel at `far` from the lamp is CONE_MAP_PIXELS pixels
+// wide where the eye sees `pos`.
+int cone_map_level(float far, vec3 pos) {
+    float per_pixel = CONE_HALVES * scene.view_right.w / float(pc.dims.y);
+    float want = max(CONE_MAP_PIXELS * per_pixel * length(pos - scene.eye.xyz), CONE_MAP_SOFT);
+    return clamp(int(ceil(log2(far * CONE_MAP_SPAN / (float(CONE_MAP_SIDE) * want)))), 0, CONE_MAP_LEVELS - 1);
+}
+// The share of the lamp a texel shows a pixel `there` metres from the lamp
+// that stands at `at` in the texel (0 to 1 across it; outside it, the
+// texel's line is carried on). `slack` is how far short of the pixel the
+// map may fall; `back` a pixel turned from the lamp, lit only where the
+// lamp's rays go past it (a surface the tracer holds shades its own back);
+// `soft` the edge's width in texels.
+// The tracer's surface stands its skin (mf_skin) off the pixel's, and along
+// the lamp's ray that is the skin over the cosine of the ray's angle to the
+// pixel's normal, the cosine no less than CONE_MAP_LEAN_LEAST. cone_map_lean
+// is that factor for the pixel being lit; 0 where the asker has no normal (a
+// probe), and then a plane texel shows what its furthest corner shows.
+const float CONE_MAP_LEAN_LEAST = 0.1;
+float cone_map_lean = 0.0;
+float cone_map_shows(uint word, uint more, vec2 at, float there, float slack, bool back, float soft) {
+    float held = unpackHalf2x16(word & CONE_MAP_HALF_BITS).x;
+    uint mode = (word >> CONE_MAP_MODE_SHIFT) & CONE_MAP_MODE;
+    if (mode == CONE_MAP_PLANE) {
+        vec2 slope = unpackHalf2x16(more);
+        float middle = 1.0 / held;
+        float off = float(word >> CONE_MAP_SPAN_SHIFT) * CONE_MAP_OFF_STEP;
+        if (cone_map_lean <= 0.0) {
+            float turn = CONE_HALF * (abs(slope.x) + abs(slope.y));
+            return (back ? there <= 1.0 / (middle + turn) - off - slack : there <= 1.0 / max(middle - turn, 1.0 / CONE_MAP_OPEN) + off + slack) ? 1.0 : 0.0;
+        }
+        float plane = 1.0 / max(middle + dot(slope, at - CONE_HALF), 1.0 / CONE_MAP_OPEN);
+        return (back ? there <= plane - off - slack : there <= plane + off + mf_skin() * cone_map_lean + CONE_MAP_SLACK) ? 1.0 : 0.0;
+    }
+    if (mode == CONE_MAP_ONE) {
+        float nearest = held * (1.0 - float(word >> CONE_MAP_SPAN_SHIFT) / float(CONE_MAP_SPANS));
+        return (back ? there <= nearest - slack : there <= held + slack) ? 1.0 : 0.0;
+    }
+    // Two surfaces: the texel holds the near one's furthest distance
+    // (cone_map_trace.comp). Within the slack of it is the near surface,
+    // lit; further is the far one, lit on its side of the line.
+    // Where the far surface is nearer than twice the slack, half way to it
+    // parts the two: something that stands a few centimetres off a wall
+    // still shades it.
+    vec2 fars = unpackHalf2x16(more);
+    if (there <= held + min(slack, CONE_HALF * (fars.x - held))) {
+        return back ? 0.0 : 1.0;
+    }
+    if (back || there > fars.y + slack) {
+        return 0.0;
+    }
+    float share = float(word >> CONE_MAP_OFFSET_SHIFT) / float(CONE_MAP_OFFSETS);
+    if (mode == CONE_MAP_COVERED) {
+        return 1.0 - share;
+    }
+    float side = dot(cone_map_angle((word >> CONE_MAP_ANGLE_SHIFT) & (CONE_MAP_ANGLES - 1u)), at - CONE_HALF) - (share - CONE_HALF) / CONE_HALF;
+    return smoothstep(-soft, soft, side);
+}
+// The share of the lamp at `from` that level `level` of its map shows
+// reaching `pos`: what the texel it stands in shows at its distance. Where
+// that texel is all one surface and the pixel is within the edge's width of
+// a texel beside it that holds an edge, that texel's line carried on: the
+// edge's blend does not stop at the texel's side. (Carried further, a line
+// that ends at a corner cut dark shapes out of the lit floor past it.)
+// A lamp has a width (cone_cascades.lamp_radius, the map head's ninth word),
+// so a shadow's edge has a penumbra: half as wide, at the pixel, as the
+// lamp's radius by how far the pixel is past the near surface over how far
+// that is from the lamp. An edge is blended over that, or a pixel if wider.
+// A level reads its own texels and those beside them, so it blends no wider
+// than CONE_MAP_WIDE_MOST of a texel. (Read from a coarser level, a wider
+// penumbra was drawn in that level's texels: they see too much to hold one
+// clean line.) (With every edge a pixel wide, the steps of the tracer's
+// distance field along an arch showed in its shadow on a wall metres past
+// it, Anthony 26 Nov 2026.)
+const float CONE_MAP_WIDE_MOST = 0.5;
+float cone_map_wide = 0.0;
+float cone_map_penumbra(uint word, float far, int side) {
+    float near = unpackHalf2x16(word & CONE_MAP_HALF_BITS).x;
+    float radius = uintBitsToFloat(cwork.w[CONE_MAP_HEAD + 8u]);
+    return radius * max(far - near, 0.0) / max(near, CONE_TINY) * float(side) / (far * CONE_MAP_SPAN);
+}
+float cone_map_taps(uint lamp, int level, vec3 from, vec3 pos, bool back, float slack) {
+    vec3 toward = pos - from;
+    float far = length(toward);
+    int side = int(CONE_MAP_SIDE << uint(level));
+    vec2 at = cone_oct(toward / far) * float(side);
+    ivec2 base = min(ivec2(floor(at)), ivec2(side - 1));
+    vec2 f = at - vec2(base);
+    // The edge's least half width in texels: a pixel's, or CONE_MAP_EDGE_WIDE.
+    float per_pixel = CONE_HALVES * scene.view_right.w / float(pc.dims.y);
+    float wide = max(per_pixel * length(pos - scene.eye.xyz), CONE_MAP_EDGE_WIDE);
+    float soft = CONE_HALF * wide * float(side) / (far * CONE_MAP_SPAN);
+    uint texels = cone_map_texels(lamp, level);
+    uint first = texels + CONE_MAP_WORDS * uint(base.y * side + base.x);
+    uint word = cwork.w[first];
+    uint kind = (word >> CONE_MAP_MODE_SHIFT) & CONE_MAP_MODE;
+    cone_map_wide = 0.0;
+    if (kind == CONE_MAP_ONE || kind == CONE_MAP_PLANE) {
+        // The texel is one surface: an edge in a texel beside it, where the
+        // pixel is within that edge's width of the side between them.
+        vec2 to_side = min(f, vec2(1.0) - f);
+        ivec2 step_ = ivec2(f.x < CONE_MAP_WIDE_MOST ? -1 : 1, f.y < CONE_MAP_WIDE_MOST ? -1 : 1);
+        for (int e = 0; e < 3; e++) {
+            ivec2 o = e == 0 ? ivec2(step_.x, 0) : (e == 1 ? ivec2(0, step_.y) : step_);
+            float away = e == 0 ? to_side.x : (e == 1 ? to_side.y : max(to_side.x, to_side.y));
+            ivec2 t = base + o;
+            if (away >= CONE_MAP_WIDE_MOST || any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(side)))) {
+                continue;
+            }
+            uint other = texels + CONE_MAP_WORDS * uint(t.y * side + t.x);
+            uint beside = cwork.w[other];
+            if (((beside >> CONE_MAP_MODE_SHIFT) & CONE_MAP_MODE) == CONE_MAP_EDGE) {
+                float penumbra = cone_map_penumbra(beside, far, side);
+                float reach = max(soft, min(penumbra, CONE_MAP_WIDE_MOST));
+                if (away < reach) {
+                    cone_map_wide = penumbra;
+                    return cone_map_shows(beside, cwork.w[other + 1u], f - vec2(o), far, slack, back, reach);
+                }
+            }
+        }
+    } else if (kind == CONE_MAP_EDGE) {
+        cone_map_wide = cone_map_penumbra(word, far, side);
+        soft = max(soft, min(cone_map_wide, CONE_MAP_WIDE_MOST));
+    }
+    return cone_map_shows(word, cwork.w[first + 1u], f, far, slack, back, soft);
+}
+// The share of lamp `lamp` (at `from`) that reaches `pos`: the finest level
+// of its map, from `wanted` down, whose tile there is current, blended with
+// the next coarser one while it is new; `other` where no level is.
+float cone_lamp_lit(uint lamp, vec3 from, vec3 pos, bool back, int wanted, float other) {
+    vec3 toward = pos - from;
+    float far = length(toward);
+    if (far <= CONE_TINY) {
+        return 1.0;
+    }
+    vec2 uv = cone_oct(toward / far);
+    uint version = cwork.w[cone_map_lamp(lamp)];
+    uint now = cwork.w[CONE_MAP_HEAD + 2u];
+    float bias = back ? CONE_MAP_SLACK : mf_skin() + CONE_MAP_SLACK;
+    float got = 0.0;
+    float left = 1.0;
+    for (int k = wanted; k >= 0 && left > CONE_MAP_DONE; k--) {
+        int side = int(CONE_MAP_SIDE << uint(k));
+        uint tile = cone_map_tile(lamp, k, min(ivec2(uv * float(side)), ivec2(side - 1)) / int(CONE_MAP_TILE));
+        if (version == 0u || cwork.w[tile] != version) {
+            continue;
+        }
+        float w = k == 0 ? 1.0 : clamp(float(now - cwork.w[tile + 1u]) / CONE_MAP_FADE_MS, 0.0, 1.0);
+        if (w <= 0.0) {
+            continue;
+        }
+        got += left * w * cone_map_taps(lamp, k, from, pos, back, bias);
+        left *= 1.0 - w;
+    }
+    return got + left * other;
+}
+
+// Lamp `lamp`'s light on a pixel at `from` (lifted off its surface) of
+// normal `n`: the pixel's own distance and angle to the lamp, by the share
+// its map shows reaching the pixel; `blended` (the probes' shares) for a
+// lamp with no map.
+vec3 cone_lamp_on(uint lamp, vec3 from, vec3 n, bool two_sided, float blended) {
+    Lamp light = scene_lamp(lamp);
+    vec3 target;
+    vec3 arrives = lamp_light(light, from, n, two_sided, target);
+    if (arrives.r + arrives.g + arrives.b <= 0.0) {
+        return vec3(0.0);
+    }
+    if (lamp >= cone_map_lamps()) {
+        return arrives * blended;
+    }
+    vec3 toward = light.pos.xyz - from;
+    bool back = dot(n, toward) < 0.0;
+    cone_map_lean = 1.0 / max(dot(n, normalize(toward)), CONE_MAP_LEAN_LEAST);
+    return arrives * cone_lamp_lit(lamp, light.pos.xyz, from, back, cone_map_level(length(toward), from), blended);
+}
 // The share of the sun the field holds for the pixel's side at `pos`:
 // the sun shares the light pass marched for the voxel faces around it
 // (cone_light.comp), trilinear over the finest level the field holds there,

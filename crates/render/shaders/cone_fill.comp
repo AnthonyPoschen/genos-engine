@@ -31,8 +31,7 @@ void main() {
         if (gather_lamp[k] == 0u) {
             break;
         }
-        vec3 target;
-        irradiance += lamp_light(scene_lamp(gather_lamp[k] - 1u), from, n, two_sided, target) * cone_lamp_share(gather_seen[k]);
+        irradiance += cone_lamp_on(gather_lamp[k] - 1u, from, n, two_sided, cone_lamp_share(gather_seen[k]));
     }
     vec3 lit = lighting_unpack_rgb9e5(gbuf_word(pixel, 3u));
     gbuf.words[pixel * GBUF_STRIDE + 3u] = lighting_pack_rgb9e5(lit + albedo * SCENE_LAMBERT * irradiance);

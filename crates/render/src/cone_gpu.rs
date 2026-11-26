@@ -52,7 +52,7 @@ const CONE_WORLD_CAP: u64 = 16_384;
 /// Header words cleared each frame; the layout follows them.
 const CONE_CLEARED: u64 = 64;
 const CONE_LAYOUT_AT: u64 = 64;
-const CONE_PIPES: usize = 16;
+const CONE_PIPES: usize = 18;
 const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-insert",
     "cone-compact",
@@ -70,6 +70,8 @@ const CONE_PIPE_NAMES: [&str; CONE_PIPES] = [
     "cone-fill",
     "cone-targets",
     "cone-lamp",
+    "cone-map-list",
+    "cone-map-trace",
 ];
 /// GPU timestamps a frame's cone passes write: one before the first pass and
 /// one after each stage in [`CONE_STAGE_NAMES`].
@@ -92,6 +94,19 @@ const CONE_MERGED_LAYOUT_AT: u64 = 137;
 /// the bounce by about what it already lags: four frames when three fit in
 /// the history, three when two do, and two otherwise.
 const CONE_KEEP_FRAMES: u32 = 4;
+/// Lamp maps (`cone_common.glsl`, Lamp maps): the header's counters (cleared
+/// each frame) and head words, the most lamps mapped, a lamp's words (its
+/// head, 5456 tiles of 5 words, 349,184 texels of 2 words), a lamp's tiles,
+/// the tile list's room, and a tile's texels.
+const CONE_MAP_COUNT_AT: u64 = 160;
+const CONE_MAP_COUNTERS: u64 = 16;
+const CONE_MAP_HEAD_AT: u64 = 176;
+const CONE_MAP_LAMPS: u64 = 64;
+const CONE_MAP_TILES: u64 = 5456;
+const CONE_MAP_LAMP_WORDS: u64 = 8 + CONE_MAP_TILES * 5 + 698_368;
+const CONE_MAP_LIST: u64 = 8192;
+const CONE_MAP_TILE_TEXELS: u64 = 64;
+const CONE_MAP_LEVELS: usize = 5;
 /// Header words of the gather grid's and the fill list's offsets
 /// (`cone_common.glsl` CONE_GATHER_LAYOUT).
 const CONE_GATHER_LAYOUT_AT: u64 = 96;
@@ -270,7 +285,15 @@ struct ConeGpu {
     half: u64,
     last_layout: ConeLayout,
     /// The work buffer's shape (theta, cascades, pixels, probe_px, lamps) and layout.
-    work_shape: (u32, u32, u64, u32, u64),
+    work_shape: (u32, u32, u64, u32, u64, u64),
+    /// The lamp maps' word offset in the work buffer, the lamps mapped, and
+    /// whether the maps are still to be cleared (a new buffer).
+    maps_at: u64,
+    maps_lamps: u64,
+    maps_new: bool,
+    /// The field's number: up one with each new field.
+    map_field: u32,
+    map_started: Option<std::time::Instant>,
     /// Knockout only ([`crate::gate::CONE_LAMP_FOLLOW`]): the lamps were
     /// written once and are kept.
     lamps_frozen: bool,
@@ -332,7 +355,12 @@ impl ConeGpu {
             ready: false,
             half: 0,
             last_layout: ConeLayout::default(),
-            work_shape: (0, 0, 0, 0, 0),
+            work_shape: (0, 0, 0, 0, 0, 0),
+            maps_at: 0,
+            maps_lamps: 0,
+            maps_new: false,
+            map_field: 1,
+            map_started: None,
             lamps_frozen: false,
             scene_lights: 0,
             layout: ConeLayout::default(),
@@ -648,7 +676,9 @@ impl Gpu {
             self.cone.sun_key = sun_key;
             self.cone.sun_turns = CONE_SUN_SHARE;
         }
-        let shape = (cone.theta, cone.count, pixels, cone.probe_px, lamps);
+        // A map for each of the scene's lights (a sun's is never asked for).
+        let mapped = if cone.lamp_map_tiles == 0 { 0 } else { (world.scene.light_len() as u64).max(16).next_power_of_two().min(CONE_MAP_LAMPS) };
+        let shape = (cone.theta, cone.count, pixels, cone.probe_px, lamps, mapped);
         if pixels > 0 && (self.cone.work_shape != shape || self.cone.work.buffer.is_null()) {
             // Knockout only: tables for a share of the screen and no room for
             // the world layer (its room alone held a small scene's probes,
@@ -657,13 +687,17 @@ impl Gpu {
             let sized = if guarded { pixels } else { pixels / CONE_KNOCKOUT_SHARE };
             let layout = cone_layout(cone.theta, cone.count, sized, cone.probe_px, lamps, pixels, if guarded { CONE_WORLD_CAP } else { 0 });
             // Two halves: this frame's cascades and last frame's.
-            let words = CONE_HEADER_WORDS + 2 * layout.half_words();
+            let maps_at = CONE_HEADER_WORDS + 2 * layout.half_words();
+            let words = maps_at + CONE_MAP_LIST + mapped * CONE_MAP_LAMP_WORDS;
             self.idle_device();
             let mut old = std::mem::replace(&mut self.cone.work, Buffer::empty());
             self.destroy_buffer(&mut old);
             let share = self.light_families();
             self.cone.work = self.make_buffer_queues(words * 4, 0x20 | 0x2, Memory::Device, &share)?;
             self.cone.work_shape = shape;
+            self.cone.maps_at = maps_at;
+            self.cone.maps_lamps = mapped;
+            self.cone.maps_new = true;
             self.cone.layout = layout;
             self.cone.prev_eye = None;
             if self.lighting.ready {
@@ -674,7 +708,7 @@ impl Gpu {
             self.cone.time_pool = self.make_query_pool_n(2 * CONE_STAMPS)?;
         }
         if self.cone.pipes[0].is_null() && self.lighting.ready {
-            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV, CONE_LIGHT_SPV, CONE_WORLD_SPV, CONE_SUN_SPV, CONE_RESOLVE_SPV, CONE_FILL_SPV, CONE_TARGETS_SPV, CONE_LAMP_SPV];
+            let codes: [&[u8]; CONE_PIPES] = [CONE_INSERT_SPV, CONE_COMPACT_SPV, CONE_CHAIN_SPV, CONE_TRACE_SPV, CONE_WEIGHTS_SPV, CONE_MERGE_SPV, CONE_SHADE_SPV, CONE_LAMPS_SPV, CONE_SPREAD_SPV, CONE_LIGHT_SPV, CONE_WORLD_SPV, CONE_SUN_SPV, CONE_RESOLVE_SPV, CONE_FILL_SPV, CONE_TARGETS_SPV, CONE_LAMP_SPV, CONE_MAP_LIST_SPV, CONE_MAP_TRACE_SPV];
             for (k, code) in codes.iter().enumerate() {
                 self.cone.pipes[k] = self.make_compute_pipe(code, self.lighting.layout, CONE_PIPE_NAMES[k])?;
             }
@@ -912,6 +946,26 @@ impl Gpu {
         self.memory_barrier(0x1000, 0x800, 0x1000, 0x20 | 0x40);
         let (fine_bricks, coarse_bricks) = self.cone.bricks;
         let now = std::time::Instant::now();
+        // The lamp maps' head: where they are, the time, the frame's and
+        // the field's numbers, the frame's budget of tiles.
+        let maps_at = self.cone.maps_at;
+        let maps_lamps = self.cone.maps_lamps;
+        if self.cone.fresh {
+            self.cone.map_field = self.cone.map_field.wrapping_add(1).max(1);
+        }
+        let map_ms = now.duration_since(*self.cone.map_started.get_or_insert(now)).as_millis();
+        let map_tiles = cone.lamp_map_tiles;
+        let map_head = [
+            u32::try_from(maps_at + CONE_MAP_LIST).unwrap_or(0),
+            u32::try_from(maps_lamps).unwrap_or(0),
+            u32::try_from(map_ms & 0x7fff_ffff).unwrap_or(0),
+            self.cone.frames.wrapping_add(1).max(1),
+            self.cone.map_field,
+            map_tiles,
+            u32::try_from(maps_at).unwrap_or(0),
+            u32::try_from(CONE_MAP_LIST).unwrap_or(0),
+            cone.lamp_radius.to_bits(),
+        ];
         let dt = self.cone.lit_at.map_or(1.0, |t| now.duration_since(t).as_secs_f32().min(1.0));
         let fresh = self.cone.fresh;
         // A probe traces its cones one frame in `period` and keeps them the
@@ -950,6 +1004,11 @@ impl Gpu {
         self.memory_barrier(0x800, 0x1000 | 0x800, 0x20 | 0x40, 0x1000 | 0x20);
         unsafe {
             (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, 0, CONE_CLEARED * 4, 0);
+            (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, CONE_MAP_COUNT_AT * 4, CONE_MAP_COUNTERS * 4, 0);
+            if maps_lamps > 0 && self.cone.maps_new {
+                (self.fns.cmd_fill_buffer)(self.cmd, self.cone.work.buffer, maps_at * 4, (CONE_MAP_LIST + maps_lamps * CONE_MAP_LAMP_WORDS) * 4, 0);
+            }
+            (self.fns.cmd_update_buffer)(self.cmd, self.cone.work.buffer, CONE_MAP_HEAD_AT * 4, 36, map_head.as_ptr().cast::<c_void>());
             (self.fns.cmd_update_buffer)(
                 self.cmd,
                 self.cone.work.buffer,
@@ -1046,6 +1105,26 @@ impl Gpu {
         if write_lamps {
             self.cone_dispatch(15, push(0), line(layout.cap[0]));
             compute(self);
+            if maps_lamps > 0 {
+                // The lamps that moved, the tiles asked for, the tiles to
+                // trace, their rays, then each probe's own share.
+                let mut map_push = push(0);
+                self.cone_dispatch(16, map_push, line(maps_lamps));
+                compute(self);
+                for mode in 1..4 {
+                    map_push[3] = mode;
+                    self.cone_dispatch(16, map_push, line(maps_lamps * CONE_MAP_TILES));
+                    compute(self);
+                }
+                let most = (u64::from(map_tiles) * 2 + maps_lamps * 16).min(CONE_MAP_LIST);
+                self.cone_dispatch(17, push(0), line(most * CONE_MAP_TILE_TEXELS));
+                compute(self);
+                let mut seen_push = push(0);
+                seen_push[3] = 1;
+                self.cone_dispatch(15, seen_push, line(layout.cap[0]));
+                compute(self);
+                self.cone.maps_new = false;
+            }
             self.cone.lamps_frozen = true;
         }
         self.cone_stamp(14);
@@ -1179,6 +1258,22 @@ impl Gpu {
         self.idle_device();
         let raw = self.copy_device_range(self.cone.work.buffer, 48 * 4, 4)?;
         Ok(u32_words(&raw).first().copied().unwrap_or(0))
+    }
+
+    /// The lamp maps' tiles last frame, a level (coarsest first): those
+    /// asked for whose lamp had moved, and those listed for tracing. Waits
+    /// for that frame.
+    pub(crate) fn cone_map_tiles(&mut self) -> Result<[[u32; CONE_MAP_LEVELS]; 2], String> {
+        let mut out = [[0u32; CONE_MAP_LEVELS]; 2];
+        if self.cone.work.buffer.is_null() {
+            return Ok(out);
+        }
+        self.idle_device();
+        let raw = self.copy_device_range(self.cone.work.buffer, (CONE_MAP_COUNT_AT + 1) * 4, 2 * CONE_MAP_LEVELS as u64 * 4)?;
+        for (i, word) in u32_words(&raw).iter().enumerate().take(2 * CONE_MAP_LEVELS) {
+            out[i / CONE_MAP_LEVELS][i % CONE_MAP_LEVELS] = *word;
+        }
+        Ok(out)
     }
 
     /// Cascade `c`'s probes as last frame wrote them. Waits for that frame.

@@ -578,14 +578,18 @@ pub fn adapt_share(delta: f64, strength: f64, knee: f64) -> f64 {
     strength.clamp(0.0, 1.0) * curve
 }
 
-/// The anchor moved toward `metered` over `dt` seconds with time constant
-/// `seconds` (0: at once).
+/// Auto exposure about a fixed neutral point: [`auto_ev100_anchored`] from
+/// `neutral`, then held within `dark` stops under it and `bright` stops over
+/// it (0: no limit on that side). The limits come last, past the highlight
+/// key: a dark place stays darker than the neutral point's picture of it by
+/// what the limit leaves, however long the eye stays (Anthony, 26 Nov 2026).
 #[must_use]
-pub fn step_anchor(anchor: f64, metered: f64, dt: f64, seconds: f64) -> f64 {
-    if seconds <= 0.0 {
-        return metered;
-    }
-    anchor + (metered - anchor) * (1.0 - (-dt.max(0.0) / seconds).exp())
+#[allow(clippy::too_many_arguments)]
+pub fn auto_ev100_neutral(counts: &[u32], strength: f64, knee: f64, percentile: f64, stops: f64, neutral: f64, dark: f64, bright: f64) -> f64 {
+    let ev = auto_ev100_anchored(counts, strength, knee, percentile, stops, neutral);
+    let low = if dark > 0.0 { neutral - dark } else { f64::NEG_INFINITY };
+    let high = if bright > 0.0 { neutral + bright } else { f64::INFINITY };
+    ev.clamp(low, high)
 }
 
 /// Auto exposure's EV100 for one histogram. The meter's EV places the mean
@@ -2378,11 +2382,12 @@ mod tests {
         assert_eq!(auto_ev100(&[], 0.7, 0.98, 3.0), 0.0);
     }
 
-    /// Stepping from the anchor's light into shade a few stops darker moves
-    /// exposure only `strength` of the way; the anchor follows by time, not
-    /// at once; and the highlight key still caps how far exposure opens.
+    /// Stepping from the neutral point's light into shade a few stops darker
+    /// moves exposure only `strength` of the way; the limits hold it within
+    /// their stops of the neutral point; and the highlight key still caps how
+    /// far exposure opens.
     #[test]
-    fn auto_exposure_moves_a_share_of_the_way_from_its_slow_anchor() {
+    fn auto_exposure_moves_a_share_of_the_way_from_its_neutral_point_and_no_further_than_its_limits() {
         let shade = split_counts(900, 0.002, 100, 0.004);
         let metered = histogram_ev100_from_counts(&shade);
         let anchor = metered + 3.0;
@@ -2390,10 +2395,16 @@ mod tests {
         assert!((ev - (anchor - 0.15 * 3.0)).abs() < 1.0e-9, "ev {ev}, anchor {anchor}, metered {metered}");
         // With a knee, a small difference moves exposure far less than a large one.
         assert!(adapt_share(1.0, 0.7, 4.0) < 0.05 && adapt_share(7.0, 0.7, 4.0) > 0.5);
-        // A tenth of the time constant moves the anchor about a tenth of the way.
-        let moved = step_anchor(anchor, metered, 2.0, 20.0);
-        assert!((anchor - moved - 3.0 * (1.0 - (-0.1_f64).exp())).abs() < 1.0e-9);
-        assert_eq!(step_anchor(anchor, metered, 2.0, 0.0), metered);
+        // From a neutral point 6 stops over the meter, a limit of 2 stops
+        // holds exposure 2 under it; with no limit it follows the share.
+        let neutral = metered + 6.0;
+        let held = auto_ev100_neutral(&shade, 1.0, 0.0, 0.98, 100.0, neutral, 2.0, 2.0);
+        assert!((held - (neutral - 2.0)).abs() < 1.0e-9, "held {held}, neutral {neutral}");
+        let free = auto_ev100_neutral(&shade, 1.0, 0.0, 0.98, 100.0, neutral, 0.0, 0.0);
+        assert!((free - metered).abs() < 1.0e-9, "free {free}, metered {metered}");
+        // A bright view closes no more than the limit over the neutral point.
+        let closed = auto_ev100_neutral(&shade, 1.0, 0.0, 0.98, 100.0, metered - 6.0, 2.0, 1.5);
+        assert!((closed - (metered - 6.0 + 1.5)).abs() < 1.0e-9, "closed {closed}");
         // With the key 2 stops above mid-grey, exposure opens no further than it.
         let key_capped = auto_ev100_anchored(&shade, 1.0, 0.0, 0.98, 2.0, metered - 10.0);
         let high = histogram_percentile_log2(&shade, 0.98).unwrap_or(f64::NAN);

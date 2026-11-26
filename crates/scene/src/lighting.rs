@@ -449,6 +449,11 @@ pub struct ConeCascadeSettings {
     /// pixels of the square take it from the gathered pixels about them
     /// that lie on their surface; a pixel with none gathers for itself.
     pub shade_scale: u32,
+    /// The most tiles of the lamp maps a frame traces past each lamp's
+    /// coarsest level (key `cone_cascades.lamp_map_tiles`; a tile is 64
+    /// rays). 0: no lamp maps, each probe casts a ray at each lamp and the
+    /// pixels blend the probes' shares.
+    pub lamp_map_tiles: u32,
 }
 
 impl ConeCascadeSettings {
@@ -485,7 +490,7 @@ fn probe_metres(value: f32) -> f32 {
 
 impl Default for ConeCascadeSettings {
     fn default() -> Self {
-        Self { enabled: false, probe_px: 12, theta: 2, count: 5, lamp_radius: 0.1, finest_probe: 0.0625, view: ConeView::Light, shade_scale: 2 }
+        Self { enabled: false, probe_px: 12, theta: 2, count: 5, lamp_radius: 0.1, finest_probe: 0.0625, view: ConeView::Light, shade_scale: 2, lamp_map_tiles: 1024 }
     }
 }
 
@@ -1445,6 +1450,7 @@ impl LightingSettings {
         let _ = writeln!(out, "cone_cascades.finest_probe={}", num_text(self.cone.finest_probe));
         let _ = writeln!(out, "cone_cascades.view={}", self.cone.view.name());
         let _ = writeln!(out, "cone_cascades.shade_scale={}", self.cone.shade_scale);
+        let _ = writeln!(out, "cone_cascades.lamp_map_tiles={}", self.cone.lamp_map_tiles);
         let _ = writeln!(
             out,
             "surface_cache.attach_movers={}",
@@ -1706,6 +1712,7 @@ impl LightingSettings {
             "cone_cascades.lamp_radius" => self.cone.lamp_radius = num_f32(value)?.clamp(0.02, 1.0),
             "cone_cascades.finest_probe" => self.cone.finest_probe = probe_metres(num_f32(value)?),
             "cone_cascades.shade_scale" => self.cone.shade_scale = shade_scale(num_u32(value)?),
+            "cone_cascades.lamp_map_tiles" => self.cone.lamp_map_tiles = num_u32(value)?.min(4096),
             "cone_cascades.view" => {
                 self.cone.view = ConeView::parse(value).ok_or_else(|| format!("cone_cascades.view: light, coverage or dark, not {value}"))?;
             }
