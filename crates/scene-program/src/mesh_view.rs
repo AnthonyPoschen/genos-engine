@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
 use genos_input::InputCode;
+use genos_math::f32_from_f64;
 use genos_mcp::json::{self, Value};
 use genos_scene::Camera;
 use genos_workbench::{Part, Workspace};
@@ -45,8 +46,7 @@ pub fn id_color(index: usize) -> [f32; 3] {
     let p = value * (1.0 - 0.78);
     let q = value * (1.0 - 0.78 * fraction);
     let t = value * (1.0 - 0.78 * (1.0 - fraction));
-    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0..6")]
-    let rgb = match hue.floor() as u32 {
+    let rgb = match crate::round_index(hue.floor()) {
         0 => [value, t, p],
         1 => [q, value, p],
         2 => [p, value, t],
@@ -55,8 +55,7 @@ pub fn id_color(index: usize) -> [f32; 3] {
         _ => [value, p, q],
     };
     // The picture takes linear colour.
-    #[expect(clippy::cast_possible_truncation, reason = "a colour channel")]
-    rgb.map(|channel| ((channel * 255.0).round() / 255.0).powf(2.2) as f32)
+    rgb.map(|channel| f32_from_f64(((channel * 255.0).round() / 255.0).powf(2.2)))
 }
 
 /// Radians of orbit per pixel of drag.
@@ -429,13 +428,12 @@ pub const GRID_GLOW: [f32; 3] = [0.03, 0.034, 0.042];
 const BONE_WIDTH: f32 = 0.006;
 pub const BONE_COLOR: [f32; 3] = [0.1, 0.85, 0.35];
 
-#[expect(clippy::cast_possible_truncation, reason = "the renderer draws f32 positions")]
 fn point(value: &Value) -> Option<[f32; 3]> {
     let items = value.as_array()?;
     if items.len() != 3 {
         return None;
     }
-    Some([items[0].as_f64()? as f32, items[1].as_f64()? as f32, items[2].as_f64()? as f32])
+    Some([f32_from_f64(items[0].as_f64()?), f32_from_f64(items[1].as_f64()?), f32_from_f64(items[2].as_f64()?)])
 }
 
 /// Two crossed strips from `from` to `to`, `half` wide each side, seen from
@@ -1200,8 +1198,8 @@ pub fn atlas(textures: &[genos_workbench::TextureImage]) -> Atlas {
                 for texel in rgba[at..at + line].chunks_exact_mut(4) {
                     let alpha = u32::from(texel[3]);
                     for channel in &mut texel[..3] {
-                        #[expect(clippy::cast_possible_truncation, reason = "a blend of two bytes is a byte")]
-                        let blended = ((u32::from(*channel) * alpha + 128 * (255 - alpha)) / 255) as u8;
+                        // A blend of two bytes is a byte: the clamp does not fire.
+                        let blended = u8::try_from((u32::from(*channel) * alpha + 128 * (255 - alpha)) / 255).unwrap_or(u8::MAX);
                         *channel = blended;
                     }
                     texel[3] = 255;
@@ -1687,8 +1685,7 @@ impl MeshView {
             .find(|c| c.name == clip)
             .map(|c| c.duration)
             .ok_or_else(|| format!("unknown clip {clip}"))?;
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small frame count")]
-        let count = ((length * PLAY_RATE).ceil() as usize).clamp(1, PLAY_SAMPLES_MAX);
+        let count = crate::round_index(f64::from((length * PLAY_RATE).ceil())).clamp(1, PLAY_SAMPLES_MAX);
         let mut samples = Vec::with_capacity(count + 1);
         for index in 0..=count {
             #[expect(clippy::cast_precision_loss, reason = "a small frame count")]
@@ -3103,8 +3100,7 @@ impl MeshView {
                     Some(value @ Value::Object(_)) => {
                         self.playing = None;
                         let clip = value.get("clip").and_then(Value::as_str).ok_or("pose needs clip: a clip name")?.to_string();
-                        #[expect(clippy::cast_possible_truncation, reason = "a time in seconds")]
-                        let time = value.get("time").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                        let time = f32_from_f64(value.get("time").and_then(Value::as_f64).unwrap_or(0.0));
                         self.set_pose(Some((clip, time)))?;
                     }
                     Some(_) => return Err("pose is \"rest\", \"stop\", {clip, time}, or {clip, play: true}".into()),
@@ -3239,8 +3235,7 @@ impl MeshView {
                         points
                             .iter()
                             .map(|point| match point.as_array() {
-                                #[expect(clippy::cast_possible_truncation, reason = "a screen coordinate")]
-                                Some([x, y]) => x.as_f64().zip(y.as_f64()).map(|(x, y)| [x as f32, y as f32]),
+                                Some([x, y]) => x.as_f64().zip(y.as_f64()).map(|(x, y)| [f32_from_f64(x), f32_from_f64(y)]),
                                 _ => None,
                             })
                             .collect::<Option<Vec<_>>>()
@@ -3324,8 +3319,7 @@ impl MeshView {
             "mesh_context" => {
                 args.only("mesh_context", &CONTEXT_ARGS)?;
                 let edits = args.0.get("edits").and_then(Value::as_u64).map_or(8, |n| n.min(EDITS_KEPT as u64));
-                #[expect(clippy::cast_possible_truncation, reason = "at most EDITS_KEPT")]
-                Ok(self.context_value(camera, edits as usize))
+                Ok(self.context_value(camera, usize::try_from(edits).unwrap_or(EDITS_KEPT)))
             }
             "mesh_help" => {
                 args.only("mesh_help", &HELP_ARGS)?;
@@ -3877,7 +3871,6 @@ impl Args<'_> {
         }
     }
 
-    #[expect(clippy::cast_possible_truncation, reason = "a screen coordinate")]
     fn floats(&self, key: &str, count: usize) -> Result<Option<Vec<f32>>, String> {
         let Some(value) = self.0.get(key) else {
             return Ok(None);
@@ -3885,7 +3878,7 @@ impl Args<'_> {
         let items = value.as_array().filter(|items| items.len() == count).ok_or_else(|| format!("{key} is {count} numbers"))?;
         items
             .iter()
-            .map(|item| item.as_f64().map(|n| n as f32).ok_or_else(|| format!("{key} is {count} numbers")))
+            .map(|item| item.as_f64().map(f32_from_f64).ok_or_else(|| format!("{key} is {count} numbers")))
             .collect::<Result<Vec<f32>, String>>()
             .map(Some)
     }
@@ -3901,8 +3894,8 @@ struct Hit {
 }
 
 fn id(value: u64) -> Value {
-    #[expect(clippy::cast_possible_wrap, reason = "mesh-workbench IDs are small counters")]
-    json::int(value as i64)
+    // mesh-workbench IDs are small counters; a larger one wraps, as before.
+    json::int(value.cast_signed())
 }
 
 fn ids(values: Vec<u64>) -> Value {

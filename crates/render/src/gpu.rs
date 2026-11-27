@@ -187,6 +187,10 @@ mod pass_sync;
 mod stage;
 mod texel_detail;
 mod texel_ray_cut;
+mod traffic;
+
+pub use texel_detail::TexelDetailPlant;
+pub use traffic::VkTraffic;
 
 /// Return lavapipe's compiler scratch to the OS. The software fixture calls
 /// this after it drops the device that planted the read-only scene, and before
@@ -194,11 +198,6 @@ mod texel_ray_cut;
 pub fn release_software_compiler_heap() {
     texel_detail::release_compiler_heap();
 }
-
-pub use texel_detail::TexelDetailPlant;
-mod traffic;
-
-pub use traffic::VkTraffic;
 
 #[path = "debug_view.rs"]
 mod debug_view;

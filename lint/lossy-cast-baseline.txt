@@ -9,9 +9,8 @@ crates/audio/src/mix.rs 2
 crates/audio/tests/mix_scene.rs 5
 crates/audio/tests/play.rs 3
 crates/bake/src/cards.rs 4
-crates/bake/src/format.rs 4
 crates/bake/src/mesh.rs 2
-crates/bake/src/sdf.rs 8
+crates/bake/src/sdf.rs 3
 crates/debug/src/image.rs 20
 crates/debug/src/noise_gate.rs 1
 crates/debug/src/png.rs 3
@@ -85,9 +84,8 @@ crates/ui/src/slider.rs 5
 crates/ui/tests/aa_camera.rs 8
 crates/ui/tests/profile.rs 3
 crates/window/src/lib.rs 6
-crates/scene-program/src/lib.rs 27
-crates/scene-program/src/mesh_view.rs 12
-crates/workbench/src/lib.rs 4
+crates/scene-program/src/lib.rs 2
+crates/scene-program/src/mesh_view.rs 2
 debug/scene-lib/src/lib.rs 2
 # owner: Anthony — offline prototype; float to voxel and pixel index math has no TryFrom
 debug/single-frame-cascade/src/main.rs 23

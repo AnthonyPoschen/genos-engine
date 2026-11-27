@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 genos-json = { path = "../json" }
+genos-math = { path = "../math" }

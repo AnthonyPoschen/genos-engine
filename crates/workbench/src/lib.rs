@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use genos_json::Value;
+use genos_math::f32_from_f64;
 
 /// The newest `project.json` version this crate reads.
 pub const NEWEST_VERSION: u64 = 8;
@@ -413,9 +414,8 @@ fn read_face_uvs(mesh: &Value) -> BTreeMap<u64, BTreeMap<u64, [f64; 2]>> {
 }
 
 /// A corner's UV with V turned to the image's top row. No UV is the origin.
-#[expect(clippy::as_conversions, clippy::cast_possible_truncation, reason = "a texture coordinate")]
 fn corner_uv(uv: Option<&[f64; 2]>) -> [f32; 2] {
-    uv.map_or([0.0, 0.0], |uv| [uv[0] as f32, (1.0 - uv[1]) as f32])
+    uv.map_or([0.0, 0.0], |uv| [f32_from_f64(uv[0]), f32_from_f64(1.0 - uv[1])])
 }
 
 fn read_textures(mesh: &Value) -> Vec<TextureImage> {
@@ -429,8 +429,7 @@ fn read_textures(mesh: &Value) -> Vec<TextureImage> {
             let height = u32::try_from(texture.get("height")?.as_u64()?).ok()?;
             let pixels = decode_base64(texture.get("rgba_base64")?.as_str()?)?;
             let want = usize::try_from(u64::from(width) * u64::from(height) * 4).ok()?;
-            #[expect(clippy::as_conversions, clippy::cast_possible_truncation, reason = "an alpha threshold in 0..1")]
-            let alpha_cutoff = texture.get("alpha_cutoff").and_then(Value::as_f64).map(|cutoff| cutoff as f32);
+            let alpha_cutoff = texture.get("alpha_cutoff").and_then(Value::as_f64).map(f32_from_f64);
             (pixels.len() == want).then(|| TextureImage { name: name.clone(), width, height, pixels, alpha_cutoff })
         })
         .collect()
@@ -510,7 +509,6 @@ fn rig_bones(mesh: &Value) -> Vec<Bone> {
         .collect()
 }
 
-#[expect(clippy::as_conversions, clippy::cast_possible_truncation, reason = "a clip length in seconds")]
 fn rig_clips(mesh: &Value) -> Vec<Clip> {
     let Some(Value::Object(clips)) = mesh.get("rig").and_then(|rig| rig.get("clips")) else {
         return Vec::new();
@@ -519,7 +517,7 @@ fn rig_clips(mesh: &Value) -> Vec<Clip> {
         .iter()
         .map(|(name, clip)| Clip {
             name: name.clone(),
-            duration: clip.get("duration").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+            duration: f32_from_f64(clip.get("duration").and_then(Value::as_f64).unwrap_or(0.0)),
         })
         .collect()
 }
@@ -731,9 +729,8 @@ fn unit(v: [f64; 3]) -> [f64; 3] {
     }
 }
 
-#[expect(clippy::as_conversions, clippy::cast_possible_truncation, reason = "the renderer draws f32 positions")]
 fn narrow(v: [f64; 3]) -> [f32; 3] {
-    [v[0] as f32, v[1] as f32, v[2] as f32]
+    v.map(f32_from_f64)
 }
 
 #[cfg(test)]

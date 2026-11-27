@@ -2471,10 +2471,10 @@ impl Host for App {
                 view.overlay_stale = true;
             } else if name == "mesh_clip" {
                 let clips: Vec<String> = view.workspace.iter().flat_map(|w| w.clips.iter().map(|c| c.name.clone())).collect();
-                let pick = (value.round().max(0.0) as usize).checked_sub(1).and_then(|i| clips.get(i).cloned());
+                let pick = round_index(value).checked_sub(1).and_then(|i| clips.get(i).cloned());
                 view.set_pose(pick.map(|clip| (clip, 0.0)))?;
             } else if let Some((clip, _)) = view.pose.clone() {
-                view.set_pose(Some((clip, value.max(0.0) as f32)))?;
+                view.set_pose(Some((clip, genos_math::f32_from_f64(value.max(0.0)))))?;
             }
             self.refresh_mesh_overlay();
             return Ok(());
@@ -2510,7 +2510,7 @@ impl Host for App {
         #[cfg(feature = "mesh")]
         if name == "mesh_replay" {
             let view = self.mesh.as_mut().ok_or("mesh_replay needs a mesh scene")?;
-            view.scrub(value.round().max(0.0) as u64)?;
+            view.scrub(u64::try_from(round_index(value)).unwrap_or(u64::MAX))?;
             self.follow_mesh();
             self.refresh_mesh_overlay();
             return Ok(());
@@ -2518,7 +2518,7 @@ impl Host for App {
         #[cfg(feature = "mesh")]
         if name == "mesh_shade" {
             let view = self.mesh.as_mut().ok_or("mesh_shade needs a mesh scene")?;
-            let at = (value.round().max(0.0) as usize).min(mesh_view::SHADES.len() - 1);
+            let at = round_index(value).min(mesh_view::SHADES.len() - 1);
             view.shade = mesh_view::SHADES[at].to_string();
             view.display_stale = true;
             return Ok(());
@@ -2530,7 +2530,7 @@ impl Host for App {
         #[cfg(feature = "mesh")]
         if name == "mesh_workspace" {
             let view = self.mesh.as_mut().ok_or("mesh_workspace needs a mesh scene")?;
-            let dir = view.found.get(value.round().max(0.0) as usize).ok_or("no such workspace")?.clone();
+            let dir = view.found.get(round_index(value)).ok_or("no such workspace")?.clone();
             mesh_view::set_workspace(Some(dir));
             // Look now, not at the next poll.
             view.rebuild = true;
@@ -2543,13 +2543,13 @@ impl Host for App {
         #[cfg(feature = "mesh")]
         if name == "mesh_session" {
             let view = self.mesh.as_mut().ok_or("mesh_session needs a mesh scene")?;
-            return view.pick_session(value.round().max(0.0) as usize);
+            return view.pick_session(round_index(value));
         }
         #[cfg(feature = "mesh")]
         if name == "mesh_solo" {
             let view = self.mesh.as_mut().ok_or("mesh_solo needs a mesh scene")?;
             let objects: Vec<u64> = view.workspace.iter().flat_map(|w| w.parts.iter().map(|p| p.object)).collect();
-            let at = value.round().max(0.0) as usize;
+            let at = round_index(value);
             view.hidden = match at.checked_sub(1).and_then(|i| objects.get(i)) {
                 Some(keep) => objects.iter().copied().filter(|id| id != keep).collect(),
                 None => std::collections::BTreeSet::new(),
@@ -2560,7 +2560,7 @@ impl Host for App {
         #[cfg(feature = "mesh")]
         if name == "mesh_pick" {
             let view = self.mesh.as_mut().ok_or("mesh_pick needs a mesh scene")?;
-            let at = (value.round().max(0.0) as usize).min(mesh_view::PICK_MODES.len() - 1);
+            let at = round_index(value).min(mesh_view::PICK_MODES.len() - 1);
             view.pick_mode = mesh_view::PICK_MODES[at].to_string();
             return Ok(());
         }
@@ -3072,6 +3072,23 @@ fn panel_title(app: &App) -> String {
     app.entry().name.clone()
 }
 
+/// The index a knob, a dropdown or a whole number names: rounded, and 0 below
+/// 0. `as` saturates, so a value past `usize::MAX` is `usize::MAX` and NaN is 0.
+pub(crate) fn round_index(value: f64) -> usize {
+    value.round().max(0.0) as usize
+}
+
+/// The panel id of row `at` in a list whose first id is `base`. The lists are
+/// short; an index past `u32::MAX` would saturate, not wrap.
+fn row_id(base: u32, at: usize) -> u32 {
+    base.saturating_add(u32::try_from(at).unwrap_or(u32::MAX))
+}
+
+/// The item of `list` whose panel id is `id`, when `id` is one of the list's ids.
+fn list_at<T>(list: &[T], base: u32, id: u32) -> Option<&T> {
+    list.get(usize::try_from(id.checked_sub(base)?).ok()?)
+}
+
 fn index_steps(names: impl IntoIterator<Item = impl Into<String>>) -> Vec<SliderStep> {
     names
         .into_iter()
@@ -3128,7 +3145,7 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
     }
     let slider = if knob.choices.is_empty() {
         PanelSlider::range(
-            ID_KNOB + index as u32,
+            row_id(ID_KNOB, index),
             knob.value,
             knob.min,
             knob.max,
@@ -3136,7 +3153,7 @@ fn knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
             knob.text,
         )
     } else {
-        named_slider(ID_KNOB + index as u32, knob.value, knob.choices)
+        named_slider(row_id(ID_KNOB, index), knob.value, knob.choices)
     };
     Some(PanelRow {
         label,
@@ -3325,9 +3342,9 @@ fn mesh_panel_rows(app: &App, setting: &str) -> Option<Vec<PanelRow>> {
         .into_iter()
         .enumerate()
         .map(|(at, line)| {
-            let mut checks = vec![PanelCheck { id: first + at as u32, text: line.check.into(), on: line.on }];
+            let mut checks = vec![PanelCheck { id: row_id(first, at), text: line.check.into(), on: line.on }];
             // A collection's row folds its objects away.
-            checks.extend(line.open.map(|open| PanelCheck { id: ID_MESH_FOLD + at as u32, text: "open".into(), on: open }));
+            checks.extend(line.open.map(|open| PanelCheck { id: row_id(ID_MESH_FOLD, at), text: "open".into(), on: open }));
             PanelRow { label: line.label, buttons: Vec::new(), slider: None, dropdown: None, checks }
         })
         .collect();
@@ -3849,7 +3866,7 @@ fn setting_piece(
                     .iter()
                     .position(|item| item.name == name)?;
                 Some(Piece::Check(PanelCheck {
-                    id: ID_SWITCH + index as u32,
+                    id: row_id(ID_SWITCH, index),
                     text: menu_label(name, &knob.label),
                     on: knob.value >= 0.5,
                 }))
@@ -4032,7 +4049,7 @@ fn drop_knob_row(app: &App, index: usize, name: &str) -> Option<PanelRow> {
     }
     drop_row(
         &menu_label(name, &knob.label),
-        ID_DROP + index as u32,
+        row_id(ID_DROP, index),
         knob.value,
         knob.choices,
     )
@@ -4373,8 +4390,7 @@ fn slide(app: &mut App, id: u32, value: f64) -> Result<(), String> {
         app.scene()
             .hdr
             .set_key("bloom_levels", &format!("{levels:.0}"))?;
-    } else if (ID_KNOB..ID_KNOB + SLIDER_KNOBS.len() as u32).contains(&id) {
-        let name = SLIDER_KNOBS[(id - ID_KNOB) as usize];
+    } else if let Some(&name) = list_at(SLIDER_KNOBS, ID_KNOB, id) {
         app.set_knob(name, value)?;
     }
     Ok(())
@@ -4388,7 +4404,7 @@ fn select(
     id: u32,
     value: f64,
 ) -> Result<(), String> {
-    let index = value.round().max(0.0) as usize;
+    let index = round_index(value);
     if id == ID_SCENE {
         if index != app.index && index < app.entries.len() {
             switch_to(app, index, None, camera, tools, renderer)?;
@@ -4449,8 +4465,7 @@ fn select(
             .copied()
             .unwrap_or("sdr");
         app.scene().hdr.set_key("output", mode)?;
-    } else if (ID_DROP..ID_DROP + DROP_KNOBS.len() as u32).contains(&id) {
-        let name = DROP_KNOBS[(id - ID_DROP) as usize];
+    } else if let Some(&name) = list_at(DROP_KNOBS, ID_DROP, id) {
         app.set_knob(name, value)?;
     }
     Ok(())
@@ -4585,7 +4600,7 @@ fn picture_stats(bgra: &[u8]) -> (f32, f32) {
     }
     let mean = sum / n;
     let var = (sum2 / n - mean * mean).max(0.0);
-    (mean as f32, var.sqrt() as f32)
+    (genos_math::f32_from_f64(mean), genos_math::f32_from_f64(var.sqrt()))
 }
 
 /// Perf labels for the last recorded GI sample. Empty until a sample lands.
@@ -5374,6 +5389,11 @@ mod tests {
         std::fs::write(path, genos_debug::png::encode_rgb(width, height, &rgb)).expect("png");
     }
 
+    /// A pixel coordinate: `as` saturates, so a negative or NaN value is 0.
+    fn px(value: f32) -> u32 {
+        value as u32
+    }
+
     fn raster_menu(paints: &[Paint]) -> (u32, u32, Vec<u8>) {
         let mut max_x = 8.0f32;
         let mut max_y = 8.0f32;
@@ -5382,19 +5402,19 @@ mod tests {
             max_y = max_y.max(paint.y + paint.h);
         }
         let margin = 12.0;
-        let width = (max_x + margin).ceil() as u32;
-        let height = (max_y + margin).ceil() as u32;
+        let width = px((max_x + margin).ceil());
+        let height = px((max_y + margin).ceil());
         let mut rgb = vec![8u8; (width * height * 3) as usize];
         for paint in paints {
             let color = [
-                (paint.color[0].clamp(0.0, 1.0) * 255.0) as u8,
-                (paint.color[1].clamp(0.0, 1.0) * 255.0) as u8,
-                (paint.color[2].clamp(0.0, 1.0) * 255.0) as u8,
+                u8::try_from(px(paint.color[0].clamp(0.0, 1.0) * 255.0)).unwrap_or(u8::MAX),
+                u8::try_from(px(paint.color[1].clamp(0.0, 1.0) * 255.0)).unwrap_or(u8::MAX),
+                u8::try_from(px(paint.color[2].clamp(0.0, 1.0) * 255.0)).unwrap_or(u8::MAX),
             ];
-            let x0 = paint.x.floor().max(0.0) as u32;
-            let y0 = paint.y.floor().max(0.0) as u32;
-            let x1 = ((paint.x + paint.w).ceil() as u32).min(width);
-            let y1 = ((paint.y + paint.h).ceil() as u32).min(height);
+            let x0 = px(paint.x.floor().max(0.0));
+            let y0 = px(paint.y.floor().max(0.0));
+            let x1 = px((paint.x + paint.w).ceil()).min(width);
+            let y1 = px((paint.y + paint.h).ceil()).min(height);
             for y in y0..y1 {
                 for x in x0..x1 {
                     let i = ((y * width + x) * 3) as usize;

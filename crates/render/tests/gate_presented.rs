@@ -44,6 +44,16 @@ fn shipped_hall() -> World {
     World::from_scene(scene)
 }
 
+/// Frames drawn after a cache reset before a capture is graded.
+///
+/// Level 0 traces one of four direction sets per frame (`lighting_frame() % 4`)
+/// and upper cells refresh on `(key + frame) % 4`. After three frames one set
+/// was still empty, and which one depended on the frame the reset landed on:
+/// two bounce-only captures differed by up to 0.71% on lavapipe, against the
+/// 1% the knocked-out direct gate must stay under. Sixteen frames, four turns
+/// of both schedules, kept four captures at any start phase within 0.10%.
+const SETTLE_FRAMES: usize = 16;
+
 fn settled(
     window: &mut Window,
     renderer: &mut Renderer,
@@ -54,7 +64,7 @@ fn settled(
     renderer.set_debug_view(view);
     renderer.reset_lighting_cache();
     let mut frame = None;
-    for _ in 0..3 {
+    for _ in 0..SETTLE_FRAMES {
         frame = Some(PresentedFrame::from_draw(window, renderer, world, camera));
     }
     frame.expect("settled frame")
