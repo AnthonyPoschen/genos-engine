@@ -56,6 +56,31 @@ void pick_probes(uint at, int lod, ivec3 own, int count) {
                 dark++;
             }
         }
+        // The pixel's own probe: each of its first CONE_PICK_DIRS cones'
+        // way, light and share that passes (cone_pick's own_dirs).
+        if ((cwork.w[r] & 4u) != 0u) {
+            uint up = CONE_PICK_UP_AT + (at == CONE_PICK + CONE_PICK_HEAD ? 0u : 32u);
+            uint pr = cone_probe(0, probe);
+            for (uint j = 0u; j < 8u; j++) {
+                uint q = cwork.w[pr + 20u + j];
+                bool real = q != CONE_NO_BRICK && q < cone_cap(1);
+                vec2 pair = unpackHalf2x16(cwork.w[pr + 28u + j / 2u]);
+                vec3 s = real ? cone_word3(cone_probe(1, q) + 8u) : vec3(0.0);
+                cwork.w[up + 4u * j] = floatBitsToUint(s.x);
+                cwork.w[up + 4u * j + 1u] = floatBitsToUint(s.y);
+                cwork.w[up + 4u * j + 2u] = floatBitsToUint(s.z);
+                cwork.w[up + 4u * j + 3u] = floatBitsToUint(real ? ((j % 2u) == 0u ? pair.x : pair.y) : -1.0);
+            }
+            uint block = CONE_PICK_DIRS_AT + (at == CONE_PICK + CONE_PICK_HEAD ? 0u : 2u * CONE_PICK_DIRS);
+            for (uint bin = 0u; bin < min(dirs, CONE_PICK_DIRS); bin++) {
+                vec3 l;
+                float th;
+                vec3 m;
+                bool filled = cone_get(cone_merged_at(0, probe, bin), l, th, m);
+                cwork.w[block + 2u * bin] = packHalf2x16(vec2(filled ? dot(l, CONE_LUMA) : -1.0, th));
+                cwork.w[block + 2u * bin + 1u] = packSnorm4x8(vec4(cone_bin_dir(bin, cone_theta(0)), 0.0));
+            }
+        }
         cwork.w[r + 4u] = dark;
         cwork.w[r + 5u] = floatBitsToUint(luma / float(dirs));
         cwork.w[r + 9u] = lit;

@@ -26,8 +26,10 @@ paused so nothing moves but the camera, and grades cone mode
   F  moving camera: step the camera sideways 1 cm a frame for --steps steps,
      exposure held fixed and the suns off (a sun's hard pixel-ray shadow edge
      aliases as it slides; that is the picture's edge, not the light popping); count pixels whose second difference over three
-     steps, |f(i+1) - 2 f(i) + f(i-1)|, is over 6 codes where neither depth
-     nor albedo changed (a slide over a gradient is near 0, a pop is not).
+     steps, |f(i+1) - 2 f(i) + f(i-1)|, is over 6 codes where neither depth,
+     albedo nor normal changed (a slide over a gradient is near 0, a pop is
+     not; the normal view sees a metal's edges, which its black diffuse
+     albedo does not).
      The mean over the walk is at most --pop-ratio times the old path's on
      the same walk. Before section 18 step 4b: 5 to 7 times in the hall
   G  a clip rebuild does not blink: walk 4 m forward in 10 cm steps, a frame
@@ -186,16 +188,21 @@ def moving_pops(label):
     for i in range(int(ARGS["steps"])):
         pose(pos=[POS[k] + right[k] * 0.01 * i for k in range(3)], frames=3)
         views = []
-        for mode in ("full", "depth", "albedo"):
+        for mode in ("full", "depth", "albedo", "normal"):
             r = call("capture", {"path": f"f-{label}-{i:03}-{mode}.png", "mode": mode})["path"]
             path = r if os.path.isabs(r) else os.path.join(OUT, r)
             views.append(np.asarray(Image.open(path).convert("L"), dtype=np.int16))
         frames.append(views)
     counts = []
     for i in range(1, len(frames) - 1):
-        (a, da, aa), (b, db, ab), (c, dc, ac) = frames[i - 1], frames[i], frames[i + 1]
+        (a, da, aa, na), (b, db, ab, nb), (c, dc, ac, nc) = frames[i - 1], frames[i], frames[i + 1]
         second = np.abs(c - 2 * b + a)
-        moved = (np.abs(db - da) > 2) | (np.abs(dc - db) > 2) | (np.abs(ab - aa) > 2) | (np.abs(ac - ab) > 2)
+        # The normal view too: a metal's albedo view is black (its diffuse
+        # albedo is base colour times one less its metallic), so a thin metal
+        # rod's highlight sliding over a wall of like depth was not seen to
+        # move, and counted as popping light (Sponza, a curtain rod: 5,500
+        # pixels a step of 11,300).
+        moved = (np.abs(db - da) > 2) | (np.abs(dc - db) > 2) | (np.abs(ab - aa) > 2) | (np.abs(ac - ab) > 2) | (np.abs(nb - na) > 2) | (np.abs(nc - nb) > 2)
         counts.append(int(((second > 6) & ~moved).sum()))
     for i in suns:
         call("light", {"index": i, "on": True})

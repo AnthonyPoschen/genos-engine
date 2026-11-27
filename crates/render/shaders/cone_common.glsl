@@ -172,7 +172,7 @@ const uint CONE_GATHER_NONE = 0xffffffffu; // a gathered pixel with no surface
 const uint CONE_LAYOUT = 64u;   // per cascade 5 words: hash size, cap, hash, probes, cones (cone_gpu.rs)
 const uint CONE_CLEARED = 64u;  // header words cleared every frame
 const uint CONE_INSERT_DROPPED = 32u; // pixels whose probe found no hash slot, per cascade
-const uint CONE_HEADER_WORDS = 512u;
+const uint CONE_HEADER_WORDS = 640u;
 // The pixel pick's record (cone_shade.comp writes it for the pixel in push
 // dims.w; cone_gpu.rs cone_pick reads it): 16 words of the pixel, then a
 // CONE_PICK_LEVEL block for each level it reads (8 words, then
@@ -181,6 +181,13 @@ const uint CONE_PICK = 256u;
 const uint CONE_PICK_HEAD = 16u;
 const uint CONE_PICK_LEVEL = 104u;
 const uint CONE_PICK_PROBE = 12u;
+// The pixel's own probe's first cones at each level: two words a cone
+// (half2 luma and the share that passes, -1 luma for none; snorm8 way).
+const uint CONE_PICK_DIRS_AT = 480u;
+const uint CONE_PICK_DIRS = 8u;
+// The pixel's own probe's next-cascade probes the merge reads, at each
+// level: four words each (seat, weight).
+const uint CONE_PICK_UP_AT = 512u;
 // Push lamp.x bits 4 and 5: the debug view (cone_cascades.view): 1 the
 // probe coverage, 2 the dark directions, 3 the specular light alone
 // (cone_specular.glsl).
@@ -2044,8 +2051,20 @@ float cone_map_taps(uint lamp, int level, vec3 from, vec3 pos, bool back, float 
                 float penumbra = cone_map_penumbra(beside, far, side);
                 float reach = max(soft, min(penumbra, CONE_MAP_WIDE_MOST));
                 if (away < reach) {
+                    // The edge's line where it meets the side between the
+                    // two texels (the pixel's nearest point on that side),
+                    // fading into this texel's own answer over the width.
+                    // (The line carried on into this texel drew a dark
+                    // triangle in it wherever the line was not along the
+                    // side: this texel's rays all met one lit surface. With
+                    // the penumbra's width, half a texel, the triangles
+                    // stood along a lamp's shadow on a wall, Anthony
+                    // 27 Nov 2026.)
                     cone_map_wide = penumbra;
-                    return cone_map_shows(beside, cwork.w[other + 1u], f - vec2(o), far, slack, back, reach);
+                    vec2 edge_at = vec2(o.x < 0 ? 0.0 : (o.x > 0 ? 1.0 : f.x), o.y < 0 ? 0.0 : (o.y > 0 ? 1.0 : f.y));
+                    float there = cone_map_shows(beside, cwork.w[other + 1u], edge_at - vec2(o), far, slack, back, reach);
+                    float own = cone_map_shows(word, cwork.w[first + 1u], f, far, slack, back, soft);
+                    return mix(there, own, away / reach);
                 }
             }
         }
@@ -2074,6 +2093,16 @@ float cone_lamp_lit(uint lamp, vec3 from, vec3 pos, bool back, int wanted, float
         int side = int(CONE_MAP_SIDE << uint(k));
         uint tile = cone_map_tile(lamp, k, min(ivec2(uv * float(side)), ivec2(side - 1)) / int(CONE_MAP_TILE));
         if (version == 0u || cwork.w[tile] != version) {
+            // The level the pixel wants, not traced: asked for here, for the
+            // next frame's list (cone_map_list.comp). Asked only by the
+            // probes about their own places, a tile between them that a
+            // pixel wanted waited for a probe of another view to ask for
+            // it, and the picture after turning away and back was sharper
+            // than before (gate D).
+            if (k == wanted && version != 0u) {
+                // For the next frame: this frame's list has run.
+                cwork.w[tile + 2u] = cwork.w[CONE_MAP_HEAD + 3u] + 1u;
+            }
             continue;
         }
         float w = k == 0 ? 1.0 : clamp(float(now - cwork.w[tile + 1u]) / CONE_MAP_FADE_MS, 0.0, 1.0);

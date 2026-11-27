@@ -42,13 +42,58 @@ const uint CONE_PADDED_TEXELS = 1000u;
 // bounce went, the floor's faces under a ledge among them.
 const float CONE_CARRIED_BEHIND = 0.5;
 const float CONE_CARRIED_BEFORE = 2.0;
+const uint CONE_CARRIED_FRAME = 0x3fffffffu;
 // Last frame's irradiance at a voxel of `level` whose seat is `seat`,
 // facing `n`: from the cascade-0 probe whose cell holds the seat at the
 // level nearest the voxel's that has one (pixels put probes at one level a
 // surface, by distance; the field holds the surface at every level, and the
 // cones read the coarse ones far off). False when no level has one.
+// Set by carried: last frame was the turn of the world layer's block that
+// holds the face (cone_world.comp), so every probe the face may take from
+// the world layer was there.
+bool carried_turn = false;
+// A world-layer probe on the face's own surface among the others of the 2
+// by 2 by 2 block of world voxels that holds the face (they have one turn,
+// cone_world.comp), the one nearest the face's plane; CONE_NO_BRICK if
+// none. A world voxel holds several surfaces that face one way, and its
+// probe sits on the front one: a floor under a ledge found its world probe
+// on the ledge's top, out of its sight, and took no light while it was off
+// the screen; turned away and back, it came back lit over seconds (gate D),
+// and it popped lit as the camera came near (Anthony, 26 Nov 2026: take a
+// probe from a nearby voxel with a healthy assignment).
+uint carried_beside(int lod, vec3 seat, int face, vec3 n, vec3 eye, int level) {
+    ivec3 own = ivec3(floor(seat / cone_size(lod)));
+    ivec3 base = (own >> 1) << 1;
+    uint best = CONE_NO_BRICK;
+    float nearest = max(CONE_CARRIED_BEFORE * cone_size(CONE_FINEST), CONE_HALF * cone_size(level));
+    for (int k = 0; k < 8; k++) {
+        ivec3 cell = base + ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        if (cell == own) {
+            continue;
+        }
+        uint key = cone_key_from(lod, cell, 0, face, eye);
+        if (key == CONE_EMPTY) {
+            continue;
+        }
+        uint at = cone_slot(0, key, false);
+        if (at == CONE_NO_BRICK) {
+            continue;
+        }
+        uint found = cwork.w[at + 8u];
+        if (found == CONE_NO_BRICK || found >= cone_cap(0) || (cwork.w[cone_probe(0, found) + CONE_PROBE_SEATED] & CONE_FLAG_SEATED) == 0u) {
+            continue;
+        }
+        float off = dot(cone_word3(cone_probe(0, found) + 8u) - seat, n);
+        if (off >= -CONE_CARRIED_BEHIND * cone_size(CONE_FINEST) && abs(off) <= nearest) {
+            nearest = abs(off);
+            best = found;
+        }
+    }
+    return best;
+}
 bool carried(int level, vec3 seat, int face, vec3 n, out vec3 irradiance) {
     irradiance = vec3(0.0);
+    carried_turn = false;
     if (cwork.w[CONE_PREV_EYE + 3u] == 0u) {
         return false;
     }
@@ -112,6 +157,16 @@ bool carried(int level, vec3 seat, int face, vec3 n, out vec3 irradiance) {
                 }
             }
         }
+    }
+    // The world layer's turn last frame (cone_world.comp: the light pass
+    // runs before it, on the probes it put in the frame before). On its
+    // turn a face with none of its own takes one on its surface from its
+    // block (carried_beside).
+    ivec3 block = ivec3(floor(seat / cone_size(world))) >> 1;
+    uint last = (pc.params.x & CONE_CARRIED_FRAME) - 1u;
+    carried_turn = cone_hash_of(cone_key_from(world, block, 0, face, eye) + 1u) % CONE_WORLD_SHARE == last % CONE_WORLD_SHARE;
+    if (probe == CONE_NO_BRICK && carried_turn) {
+        probe = carried_beside(world, seat, face, n, eye, level);
     }
     if (probe == CONE_NO_BRICK) {
         return false;
@@ -219,7 +274,13 @@ vec3 target_light(int level, ivec3 cell, int face, vec3 albedo, float share, boo
     // lie just past the voxel's side, so the lookup's point is kept inside.
     float size = cone_size(level);
     vec3 inside = clamp(seat, (vec3(cell) + CONE_KEY_INSET) * size, (vec3(cell) + 1.0 - CONE_KEY_INSET) * size);
-    if (!carried(level, inside, face, normal, probe) && lit) {
+    // A face holds only between its world block's turns. On a turn with no
+    // probe it may take (its world probe refused, as off its surface and out
+    // of its sight, and none on its surface beside it: carried_beside) it
+    // takes no probe's light: held, it kept for ever what it had when last
+    // on screen, and the picture after turning away and back was another
+    // (gate D).
+    if (!carried(level, inside, face, normal, probe) && lit && !carried_turn) {
         // Within the world layer's reach its probes come a share of the
         // frames at a time: hold this face's bounce until its turn. Only a
         // face that has light to hold: one never lit (a new field) takes the

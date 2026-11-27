@@ -37,7 +37,7 @@ pub use aa::Antialias;
 pub use budget::{FrameMemory, ImageAdmit};
 pub use cache_probe::{offer_origin, CacheQuery, StoredCell};
 pub use cascade::{CascadeTimes, Level0Voxel};
-pub use cone_field::{ConeCascadeStats, ConePick, ConePickLevel, ConePickProbe, ConePickState, ConeProbe};
+pub use cone_field::{ConeCascadeStats, ConePick, ConePickCone, ConePickLevel, ConePickProbe, ConePickState, ConeProbe};
 pub use cooked_load::{CookedReport, RenderSettings};
 pub use fog::{
     apply_fog, compose_camera_medium, compose_pixel_medium, default_frame_sun, dispatched_grid,

@@ -8,6 +8,12 @@ layout(local_size_x = 64) in;
 #include "lighting_common.glsl"
 #include "cone_common.glsl"
 
+// A coarser probe's seat this many of the probe's own cell sides off its
+// surface weighs nothing; on it, its full weight. None weighs less than
+// CONE_MERGE_PLANE_FLOOR of its own.
+const float CONE_MERGE_PLANE = 1.0;
+const float CONE_MERGE_PLANE_FLOOR = 0.001;
+
 void main() {
     int c = int(pc.params.x);
     uint i = gl_GlobalInvocationID.x;
@@ -41,6 +47,22 @@ void main() {
         return;
     }
     cone_weights(c + 1, lod, face, centre, (pc.lamp.x & 1u) != 0u, cone_word3(r + 8u), CONE_NO_CELL, probes, weights);
+    // Each by how near its seat lies to this probe's surface, along the
+    // face's way: a coarser probe sits on the front surface of its cell,
+    // and a floor's coarser probe beside a balustrade sat on a hanging
+    // cloth's hem 34 cm up, in the cloth's shade; its cones were read as
+    // the floor's, and the floor at the foot of each cloth had half the
+    // bounce of the floor beside it (the path-traced reference has them
+    // equal). The weights of all may fall: the merge divides by their sum.
+    vec3 own = cone_word3(r + 8u);
+    vec3 way = cone_axis(face);
+    float reach = CONE_MERGE_PLANE * cone_spacing(lod, c);
+    for (int k = 0; k < 8; k++) {
+        if (probes[k] != CONE_NO_BRICK && probes[k] < cone_cap(c + 1)) {
+            float off = abs(dot(cone_word3(cone_probe(c + 1, probes[k]) + 8u) - own, way));
+            weights[k] *= max(1.0 - clamp(off / reach, 0.0, 1.0), CONE_MERGE_PLANE_FLOOR);
+        }
+    }
     for (int k = 0; k < 8; k++) {
         cwork.w[r + 20u + uint(k)] = probes[k];
     }

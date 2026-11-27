@@ -33,11 +33,17 @@ const CONE_SPECULAR_COUNT_AT: u64 = 53;
 /// ([`crate::gate::CONE_TABLE_CAP`]).
 const CONE_KNOCKOUT_SHARE: u64 = 16;
 /// Work-buffer layout, as `cone_common.glsl` has it.
-const CONE_HEADER_WORDS: u64 = 512;
+const CONE_HEADER_WORDS: u64 = 640;
 /// The pixel pick's record in the header (`cone_common.glsl` CONE_PICK).
 const CONE_PICK_AT: u64 = 256;
 const CONE_PICK_HEAD: usize = 16;
 const CONE_PICK_LEVEL: usize = 104;
+/// The own probe's first cones at each level (`cone_gather.glsl`), two words
+/// a cone, after the pick's levels.
+const CONE_PICK_DIRS_AT: usize = 480;
+const CONE_PICK_DIRS: usize = 8;
+/// The own probe's next-cascade probes at each level, four words each.
+const CONE_PICK_UP_AT: usize = 512;
 const CONE_PICK_PROBE: usize = 12;
 /// Push flag bits of the debug view (`cone_common.glsl` CONE_VIEW_SHIFT).
 const CONE_VIEW_SHIFT: u32 = 4;
@@ -1224,7 +1230,10 @@ impl Gpu {
         }
         self.idle_device();
         let words = CONE_PICK_HEAD + 2 * CONE_PICK_LEVEL;
-        let w = u32_words(&self.copy_device_range(self.cone.work.buffer, CONE_PICK_AT * 4, u64::try_from(words * 4).unwrap_or(0))?);
+        let all = CONE_PICK_UP_AT - usize::try_from(CONE_PICK_AT).unwrap_or(0) + 64;
+        let up_at = CONE_PICK_UP_AT - usize::try_from(CONE_PICK_AT).unwrap_or(0);
+        let w = u32_words(&self.copy_device_range(self.cone.work.buffer, CONE_PICK_AT * 4, u64::try_from(all * 4).unwrap_or(0))?);
+        let dirs_at = CONE_PICK_DIRS_AT - usize::try_from(CONE_PICK_AT).unwrap_or(0);
         // The pick is of the pixel that gathers for this one's square.
         let dims = [self.lighting.dims[0], self.lighting.dims[1]];
         let [x, y] = cone_gather_pixel([x, y], self.lighting.settings.cone.shade_scale.clamp(1, 4), dims);
@@ -1238,6 +1247,19 @@ impl Gpu {
             .map(|l| CONE_PICK_HEAD + l * CONE_PICK_LEVEL)
             .filter(|&at| w[at + 6] != 0)
             .map(|at| crate::ConePickLevel {
+                own_up: (0..8)
+                    .map(|j| up_at + (at - CONE_PICK_HEAD) / CONE_PICK_LEVEL * 32 + 4 * j)
+                    .filter(|&i| f32::from_bits(w[i + 3]) >= 0.0)
+                    .map(|i| ([f32::from_bits(w[i]), f32::from_bits(w[i + 1]), f32::from_bits(w[i + 2])], f32::from_bits(w[i + 3])))
+                    .collect(),
+                own_dirs: (0..CONE_PICK_DIRS)
+                    .map(|k| dirs_at + (at - CONE_PICK_HEAD) / CONE_PICK_LEVEL * 2 * CONE_PICK_DIRS + 2 * k)
+                    .map(|i| {
+                        let (luma, open) = crate::cone_field::unpack_half2_pub(w[i]);
+                        let way = w[i + 1].to_le_bytes().map(|b| f32::from(i8::from_le_bytes([b])) / 127.0);
+                        crate::ConePickCone { way: [way[0], way[1], way[2]], luma, open }
+                    })
+                    .collect(),
                 lod: w[at],
                 kept: w[at + 1],
                 own: [w[at + 2].cast_signed(), w[at + 3].cast_signed(), w[at + 4].cast_signed()],
